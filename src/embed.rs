@@ -408,6 +408,160 @@ const RUNTIME_FILE: &str = if cfg!(target_os = "macos") {
     "libonnxruntime.so"
 };
 
+/// How long a model download may receive nothing before it is given up on.
+///
+/// A stalled connection used to leave `semlith setup` at 0 % CPU for as long
+/// as anyone waited, with an empty `.part` file and no message (#155): the
+/// Hugging Face client sets no read timeout. A minute is far past any pause a
+/// working connection makes, and short enough that a person is still there.
+/// `SEMLITH_DOWNLOAD_STALL` (seconds) overrides it.
+const DOWNLOAD_STALL: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn download_stall() -> std::time::Duration {
+    std::env::var("SEMLITH_DOWNLOAD_STALL")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(DOWNLOAD_STALL)
+}
+
+/// A pinned model repository, read from the cache or fetched file by file
+/// under a watchdog that fails a download which stops receiving bytes.
+pub(crate) struct Pinned {
+    api: hf_hub::api::sync::Api,
+    cache: hf_hub::Cache,
+    repo: hf_hub::Repo,
+    quiet: bool,
+    stall: std::time::Duration,
+}
+
+impl Pinned {
+    pub(crate) fn new(cache_dir: &Path, repo: &str, revision: &str, quiet: bool) -> Result<Self> {
+        Self::at("https://huggingface.co", cache_dir, repo, revision, quiet)
+    }
+
+    fn at(
+        endpoint: &str,
+        cache_dir: &Path,
+        repo: &str,
+        revision: &str,
+        quiet: bool,
+    ) -> Result<Self> {
+        let cache = hf_hub::Cache::new(cache_dir.to_path_buf());
+        let api = hf_hub::api::sync::ApiBuilder::from_cache(cache.clone())
+            .with_endpoint(endpoint.to_string())
+            .with_progress(false)
+            .build()
+            .context("building the Hugging Face client")?;
+        Ok(Self {
+            api,
+            cache,
+            repo: hf_hub::Repo::with_revision(
+                repo.to_string(),
+                hf_hub::RepoType::Model,
+                revision.to_string(),
+            ),
+            quiet,
+            stall: download_stall(),
+        })
+    }
+
+    /// The file's path in the cache, fetching it first if it is not there.
+    pub(crate) fn get(&self, file: &str) -> Result<PathBuf> {
+        if let Some(path) = self.cache.repo(self.repo.clone()).get(file) {
+            return Ok(path);
+        }
+        let url = self.api.repo(self.repo.clone()).url(file);
+        let watch = Watch::default();
+        let (done, answer) = std::sync::mpsc::channel();
+        let (api, repo, name, seen) = (
+            self.api.clone(),
+            self.repo.clone(),
+            file.to_string(),
+            watch.clone(),
+        );
+        // ponytail: a download that stalls is abandoned, not cancelled -- its
+        // thread stays blocked in the client's read until the process exits,
+        // which for `setup` is the next line. A cancellable read needs a
+        // client with a read timeout.
+        std::thread::spawn(move || {
+            let _ = done.send(api.repo(repo).download_with_progress(&name, seen));
+        });
+        let mut said = std::time::Instant::now();
+        loop {
+            match answer.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(fetched) => return fetched.with_context(|| format!("fetching {url}")),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    bail!("fetching {url}: the download ended without an answer")
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            let (received, total, quiet_for) = watch.read();
+            if quiet_for >= self.stall {
+                bail!(
+                    "the model download stalled: no bytes for {} s while fetching {url} \
+                     ({} of {} received). Check this machine can reach huggingface.co, then \
+                     run `semlith setup` again; it resumes into the same cache ({})",
+                    self.stall.as_secs(),
+                    crate::human_bytes(received as i64),
+                    if total > 0 {
+                        crate::human_bytes(total as i64)
+                    } else {
+                        "an unknown size".to_string()
+                    },
+                    self.cache.path().display(),
+                );
+            }
+            if !self.quiet && total > 0 && said.elapsed() >= std::time::Duration::from_secs(2) {
+                said = std::time::Instant::now();
+                eprintln!(
+                    "  {file}: {} of {}",
+                    crate::human_bytes(received as i64),
+                    crate::human_bytes(total as i64)
+                );
+            }
+        }
+    }
+}
+
+/// What a download has received and when it last received anything, shared
+/// between the client's thread and the watchdog.
+#[derive(Clone)]
+struct Watch(std::sync::Arc<std::sync::Mutex<(u64, u64, std::time::Instant)>>);
+
+impl Default for Watch {
+    fn default() -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new((
+            0,
+            0,
+            std::time::Instant::now(),
+        ))))
+    }
+}
+
+impl Watch {
+    /// `(received, total, time since the last byte)`.
+    fn read(&self) -> (u64, u64, std::time::Duration) {
+        let g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        (g.0, g.1, g.2.elapsed())
+    }
+}
+
+impl hf_hub::api::Progress for Watch {
+    fn init(&mut self, size: usize, _filename: &str) {
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        g.1 = size as u64;
+        g.2 = std::time::Instant::now();
+    }
+    fn update(&mut self, size: usize) {
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        g.0 += size as u64;
+        g.2 = std::time::Instant::now();
+    }
+    fn finish(&mut self) {}
+}
+
 fn load_granite(
     cache_dir: PathBuf,
     max_length: usize,
@@ -439,16 +593,7 @@ fn load_granite(
 
     // A revision rather than a branch. `main` is a name somebody else controls;
     // a commit is the bytes this release was built against.
-    let repo = hf_hub::api::sync::ApiBuilder::new()
-        .with_cache_dir(cache_dir)
-        .with_progress(!quiet)
-        .build()
-        .context("building the Hugging Face client")?
-        .repo(hf_hub::Repo::with_revision(
-            GRANITE_REPO.to_string(),
-            hf_hub::RepoType::Model,
-            GRANITE_REVISION.to_string(),
-        ));
+    let repo = Pinned::new(&cache_dir, GRANITE_REPO, GRANITE_REVISION, quiet)?;
 
     let fetch = |name: &str| -> Result<Vec<u8>> {
         let path = repo
@@ -1218,5 +1363,43 @@ mod tests {
             64,
             "sixty-four hex characters, never a shorter form"
         );
+    }
+
+    /// #155: a server that accepts and never answers fails the fetch once the
+    /// stall interval passes, naming the URL, the bytes received and the
+    /// command that repairs it -- where it used to wait for ever.
+    #[test]
+    fn a_stalled_download_fails_with_a_reason_instead_of_waiting() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Accept and hold every connection open without a byte of answer.
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+            }
+        });
+        let cache = std::env::temp_dir().join(format!("semlith-stall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        let mut pinned = Pinned::at(
+            &format!("http://127.0.0.1:{port}"),
+            &cache,
+            "someone/some-model",
+            "main",
+            true,
+        )
+        .unwrap();
+        pinned.stall = std::time::Duration::from_secs(1);
+        let started = std::time::Instant::now();
+        let error = format!("{:#}", pinned.get("model.onnx").unwrap_err());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{error}"
+        );
+        assert!(error.contains("stalled"), "{error}");
+        assert!(error.contains("someone/some-model"), "{error}");
+        assert!(error.contains("0 B of an unknown size received"), "{error}");
+        assert!(error.contains("semlith setup"), "{error}");
+        let _ = std::fs::remove_dir_all(&cache);
     }
 }
