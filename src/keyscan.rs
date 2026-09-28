@@ -806,6 +806,20 @@ fn now() -> i64 {
 /// alphabet, with a valid checksum where the format has one.
 #[doc(hidden)]
 pub fn forge(index: usize) -> String {
+    // A value holding a run of eight like `12345678` is one this scanner
+    // rightly reads as a dummy, and random digits spell one now and then --
+    // a forged Slack token did, and failed the calibration test about once in
+    // a hundred runs. A forged value is meant to look live, so such a draw is
+    // drawn again.
+    loop {
+        let value = forge_once(index);
+        if !sequential(&value.chars().collect::<Vec<_>>()) {
+            return value;
+        }
+    }
+}
+
+fn forge_once(index: usize) -> String {
     let shape = &SHAPES[index];
     let alnum = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     let upper = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
