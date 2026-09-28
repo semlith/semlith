@@ -1831,6 +1831,22 @@ impl Semlith {
         Ok(out)
     }
 
+    /// Hold one read transaction open, so everything this connection reads
+    /// until [`Semlith::release_snapshot`] sees the store as it was now, however
+    /// a writer beside it moves on. What a plan read beside its own run needs.
+    pub fn pin_snapshot(&self) -> Result<()> {
+        self.db.execute_batch("BEGIN")?;
+        // The snapshot is taken at the first read, not at BEGIN.
+        let _: i64 = self
+            .db
+            .query_row("SELECT COUNT(*) FROM meta", [], |r| r.get(0))?;
+        Ok(())
+    }
+
+    pub fn release_snapshot(&self) {
+        let _ = self.db.execute_batch("COMMIT");
+    }
+
     /// The generated folders a person accepted, which the walk goes into.
     fn accepted_folders(&self) -> Vec<PathBuf> {
         store::acceptances(&self.db)
@@ -3521,6 +3537,9 @@ impl Semlith {
             credentials: hidden_credentials,
             excluded,
         } = walked;
+        // A large tree refuses thousands of paths: their rows go in one
+        // transaction, not a commit each.
+        self.tx_begin()?;
         let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, Refusal)>) = if each {
             // A continuation is handed the rest of the run in the order the
             // run chose on its first slice; sorting it again would undo that.
@@ -3637,7 +3656,7 @@ impl Semlith {
                 Some(why.clone()),
             );
         }
-
+        self.tx_commit()?;
         Ok((paths, total))
     }
 
@@ -4564,8 +4583,14 @@ impl Semlith {
 
         // `is_empty` is about the text index. A store holding only images has
         // no chunks and is still searchable, so it is asked about separately
-        // rather than dismissed with the same test.
-        if k == 0 || (self.is_empty() && store::image_count(&self.db)? == 0) {
+        // rather than dismissed with the same test. Nor is a store filling from
+        // cold, whose rows are readable before any vector is: its keyword and
+        // graph halves answer while the index is still empty.
+        if k == 0
+            || (self.is_empty()
+                && store::chunk_count(&self.db)? == 0
+                && store::image_count(&self.db)? == 0)
+        {
             return Ok(Vec::new());
         }
 
@@ -4656,9 +4681,15 @@ impl Semlith {
         // not reached. A few of the best of them are embedded here, on the
         // query path, and join the vector list by their own similarity, so a
         // semantic question asked while a store fills still gets a semantic
-        // answer from the part that is only rows so far.
-        let (dense_scores, dense_ids) =
-            self.with_pending(vector, &keyword_ids, dense_scores, dense_ids)?;
+        // answer from the part that is only rows so far. Not for a query
+        // shaped like an identifier: its own text says to trust the keyword
+        // half, which already holds them, and the embed is seconds on a cold
+        // model while the run has every core.
+        let (dense_scores, dense_ids) = if shape == Shape::Identifier {
+            (dense_scores, dense_ids)
+        } else {
+            self.with_pending(vector, &keyword_ids, dense_scores, dense_ids)?
+        };
 
         // The image list. Only when the store actually holds an image: the
         // query has to be embedded a second time, with CLIP's text encoder
@@ -5976,11 +6007,39 @@ fn recent_head(
     accepted: &[PathBuf],
 ) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
+    // A root that is a repository, or a folder of them: the repositories up
+    // to two levels down, which is how a projects folder is laid out.
+    let mut repos: Vec<PathBuf> = Vec::new();
     for root in roots {
         let root = canonical(root);
         if !root.is_dir() {
             continue;
         }
+        let mut level = vec![root];
+        for _ in 0..3 {
+            let mut next = Vec::new();
+            for dir in level {
+                if dir.join(".git").exists() {
+                    repos.push(dir);
+                    continue;
+                }
+                for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                    let path = entry.path();
+                    if entry.file_type().is_ok_and(|t| t.is_dir())
+                        && !entry.file_name().to_string_lossy().starts_with('.')
+                        && !is_generated_dir(&path)
+                    {
+                        next.push(path);
+                    }
+                }
+            }
+            level = next;
+        }
+    }
+    // A share of the head each, so one busy repository does not take it all.
+    let each = (HEAD_FILES / repos.len().max(1)).max(4);
+    for root in repos {
+        let mut taken = 0;
         let Ok(log) = std::process::Command::new("git")
             .arg("-C")
             .arg(&root)
@@ -5989,7 +6048,7 @@ fn recent_head(
                 "-n",
                 "60",
                 "--name-only",
-                "--format=",
+                "--format=%x00",
                 "--relative",
                 "--",
                 ".",
@@ -5999,9 +6058,23 @@ fn recent_head(
         else {
             continue;
         };
-        for line in String::from_utf8_lossy(&log.stdout).lines() {
+        // Within one commit every file is as recent as the next. A commit
+        // that touched hundreds, as a shallow clone's only commit does, would
+        // start the pass on its alphabetical first few, the licence and the
+        // changelog; code goes first, which is what an agent asks about.
+        let text = String::from_utf8_lossy(&log.stdout);
+        let mut lines: Vec<&str> = Vec::new();
+        for commit in text.split('\0') {
+            let mut names: Vec<&str> = commit.lines().collect();
+            names.sort_by_key(|name| !filter::is_code(name.trim()));
+            lines.extend(names);
+        }
+        for line in lines {
             if out.len() >= HEAD_FILES {
                 return out;
+            }
+            if taken >= each {
+                break;
             }
             let line = line.trim();
             if line.is_empty() {
@@ -6028,6 +6101,7 @@ fn recent_head(
                 continue;
             }
             out.push(path);
+            taken += 1;
         }
     }
     out
@@ -6318,6 +6392,56 @@ fn semlithignore_for(dir: &Path) -> Option<ignore::gitignore::Gitignore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The head finds repositories below a projects folder, and within one
+    /// commit takes the code before the licence and the changelog.
+    #[test]
+    fn the_head_takes_code_first_from_repositories_below_the_root() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("group").join("app");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        for (name, text) in [
+            ("CHANGELOG.md", "# Changes\n"),
+            ("LICENSE", "MIT\n"),
+            ("src/main.rs", "fn main() {}\n"),
+        ] {
+            std::fs::write(repo.join(name), text).unwrap();
+        }
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q"]).status.success() {
+            return; // no git on this machine: the head is empty by design
+        }
+        git(&["add", "."]);
+        assert!(git(&["commit", "-q", "-m", "one"]).status.success());
+        let head = recent_head(
+            &[root.path().to_path_buf()],
+            &Boundary::default().resolved(Some(Path::new("/nonexistent-home"))),
+            &[],
+        );
+        let names: Vec<String> = head
+            .iter()
+            .map(|p| {
+                p.strip_prefix(canonical(&repo))
+                    .unwrap()
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            names.first().map(String::as_str),
+            Some("src/main.rs"),
+            "{names:?}"
+        );
+        assert_eq!(names.len(), 3, "{names:?}");
+    }
 
     /// For a question that does not name tests, no test hit sits above the
     /// first product-code hit; prose keeps its place (1.15).

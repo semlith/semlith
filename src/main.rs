@@ -1318,19 +1318,24 @@ fn run() -> Result<()> {
 
                 // The scan phase (2.7): the whole plan before the model is
                 // even loaded, and a stop for review only when a person is at
-                // the terminal and something is theirs to decide.
-                let plan = store.plan(roots)?;
-                if !quiet || scan_only {
-                    print_plan(&plan);
-                }
-                if scan_only {
-                    continue;
-                }
+                // the terminal and something is theirs to decide. A run nobody
+                // can review — `--no-review`, or no terminal — starts at once:
+                // waiting for a scan of every file to print a plan is the
+                // seconds a store filling from cold spends answering nothing.
                 use std::io::IsTerminal;
                 let interactive =
                     !no_review && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-                if interactive && !plan.review.is_empty() {
-                    review_plan(&mut store, &plan)?;
+                if scan_only || interactive {
+                    let plan = store.plan(roots)?;
+                    if !quiet || scan_only {
+                        print_plan(&plan);
+                    }
+                    if scan_only {
+                        continue;
+                    }
+                    if !plan.review.is_empty() {
+                        review_plan(&mut store, &plan)?;
+                    }
                 }
 
                 let started = Instant::now();

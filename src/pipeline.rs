@@ -36,6 +36,13 @@ pub const LANE_DEPTH: usize = 2;
 /// more than this is memory with nothing to gain.
 const ACTIVE_WINDOWS: usize = 3;
 
+/// Windows the writer may hand over beyond those the stage is working on.
+/// Rows are readable once written, and a keyword or graph question answers
+/// from them, so a store filling from cold answers about thousands of chunks
+/// in its first seconds rather than the few hundred its lanes have embedded.
+/// Each window holds token ids, not vectors: at most about 400 KB.
+const WRITE_AHEAD: usize = 16;
+
 /// How far the prepare stage may run ahead of the writer, per thread. Bounds
 /// the memory the stage holds: at most this many files per thread are read
 /// and waiting.
@@ -1068,7 +1075,7 @@ impl Embedder {
         cpu_back: mpsc::Sender<CpuWork>,
         paused: Arc<AtomicBool>,
     ) -> Self {
-        let (windows_tx, windows_rx) = mpsc::sync_channel::<Window>(1);
+        let (windows_tx, windows_rx) = mpsc::sync_channel::<Window>(WRITE_AHEAD);
         let (done_tx, done_rx) = mpsc::channel();
         let (cpu_tx, cpu_rx) = mpsc::channel::<CpuJob>();
         let abort = Arc::new(AtomicBool::new(false));

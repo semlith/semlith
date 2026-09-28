@@ -2453,6 +2453,38 @@ impl State {
         hold: bool,
     ) -> Result<u64> {
         Self::writer_alive(store)?;
+        // A run nobody reviews starts at once. Its plan — the card's summary
+        // and first estimate — is read beside it, from a snapshot of the store
+        // taken before the run is queued, so it describes the store the run
+        // started from. Before 0.32.0 every run waited for a scan of every
+        // file just to put the plan on its card, which on the benchmark corpus
+        // was twenty seconds before the first row.
+        if !review && !hold {
+            let (ready, pinned) = mpsc::channel::<()>();
+            let (give_run, run_id) = mpsc::channel::<u64>();
+            let for_plan = Arc::clone(store);
+            let plan_paths = paths.clone();
+            std::thread::Builder::new()
+                .name("semlith-plan".to_string())
+                .spawn(move || {
+                    let reader = crate::Semlith::open_existing(&for_plan.dir).and_then(|reader| {
+                        reader.pin_snapshot()?;
+                        Ok(reader)
+                    });
+                    let _ = ready.send(());
+                    let Ok(mut reader) = reader else { return };
+                    let Ok(run) = run_id.recv() else { return };
+                    if let Ok(plan) = reader.plan(&plan_paths) {
+                        for_plan.set_plan(run, &plan, false);
+                    }
+                    reader.release_snapshot();
+                })
+                .context("starting the plan beside the run")?;
+            let _ = pinned.recv_timeout(Duration::from_secs(10));
+            let (run, _progress) = self.admission.submit(store, paths, RunKind::Run);
+            let _ = give_run.send(run);
+            return Ok(run);
+        }
         let plan = self.plan(store, &paths).ok();
         if (review || hold)
             && let Some(plan) = plan.as_ref().filter(|p| hold || !p.review.is_empty())
