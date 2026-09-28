@@ -386,7 +386,10 @@ mod tests {
 
     /// What a reader sees: ids and code scores for a few queries, and the
     /// full-precision cosine of each hit, which is what rescoring reorders by.
-    fn answers(s: &mut Semlith) -> Vec<(Vec<u64>, Vec<f32>, Vec<Option<f32>>)> {
+    /// One query's ids, code scores and full-precision cosines.
+    type Answer = (Vec<u64>, Vec<f32>, Vec<Option<f32>>);
+
+    fn answers(s: &mut Semlith) -> Vec<Answer> {
         (0..5u64)
             .map(|q| {
                 let query = vector(s.dim, 7000 + q);
