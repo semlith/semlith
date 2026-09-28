@@ -28,6 +28,10 @@ use std::time::Duration;
 /// at 45 seconds, and this leaves room around it.
 const CALL_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// How long a forwarded compaction may take to answer: it rewrites a store's
+/// vectors and vacuums its database, which on a large store is minutes.
+const LONG_CALL_TIMEOUT: Duration = Duration::from_secs(3600);
+
 /// How long the liveness probe waits. Short: a stale discovery file pointing at
 /// a dead port must not make every `semlith mcp` start slowly.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -120,6 +124,12 @@ impl Upstream {
     /// A write to one of the daemon's routes, as the owner.
     pub fn post(&self, path: &str, body: &serde_json::Value) -> Result<String> {
         self.request("POST", path, Some(&body.to_string()), CALL_TIMEOUT)
+    }
+
+    /// A write whose answer may take as long as a store's worth of disk work
+    /// -- a compaction -- rather than one call's worth.
+    pub fn post_long(&self, path: &str, body: &serde_json::Value) -> Result<String> {
+        self.request("POST", path, Some(&body.to_string()), LONG_CALL_TIMEOUT)
     }
 
     /// Ask the daemon to close and delete a store.

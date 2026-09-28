@@ -90,6 +90,8 @@ const VIEWS: &[(&str, &str)] = &[
     ("key", "/api/key"),
     // `semlith drop` is the Stores page's Delete, behind its second click.
     ("drop", "/api/store/delete"),
+    // `semlith compact` is the Stores page's Compact, which asks first.
+    ("compact", "/api/store/compact"),
     // `semlith scan` is the Privacy page's Scan section: the same
     // `Semlith::scan` behind both, with a Forget button per row that posts to
     // `/api/forget`, the daemon's one eviction path.
@@ -148,7 +150,8 @@ const TOOL_VIEWS: &[(&str, &str)] = &[
 fn method_for(route: &str) -> &'static str {
     match route {
         "/api/index" | "/api/add" | "/api/forget" | "/api/adopt" | "/api/trust"
-        | "/api/upgrade" | "/api/key" | "/api/endpoint" | "/api/store/delete" => "POST",
+        | "/api/upgrade" | "/api/key" | "/api/endpoint" | "/api/store/delete"
+        | "/api/store/compact" => "POST",
         _ => "GET",
     }
 }

@@ -312,6 +312,7 @@ enum Job {
         source: String,
     },
     Revoke(PathBuf),
+    Compact(crate::compact::CompactOptions),
 }
 
 /// A job and the channel its progress goes back on.
@@ -383,6 +384,11 @@ pub enum RunKind {
     CatchUp,
     /// A burst of filesystem events too large to run straight away.
     Batch,
+    /// Giving a store's dead bytes back (`semlith compact`, the portal's
+    /// Compact action, or the daemon on its own past the threshold). A card
+    /// like any run, so it can be seen and stopped; never admitted, because
+    /// it embeds nothing and holds only its own store's writer.
+    Compact,
 }
 
 /// How far back the rate a run card shows looks.
@@ -1353,6 +1359,14 @@ impl Store {
         progress
     }
 
+    /// Queue a job that is a run with a card of its own, minted by the caller.
+    fn submit_run(&self, run: u64, job: Job) -> mpsc::Receiver<serde_json::Value> {
+        let (report, progress) = mpsc::channel();
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.push_back(Queued { run, job, report });
+        progress
+    }
+
     /// [`Store::submit`], at the front of the queue.
     fn submit_front(&self, job: Job) -> mpsc::Receiver<serde_json::Value> {
         let (report, progress) = mpsc::channel();
@@ -1396,7 +1410,10 @@ impl Store {
                 // it is.
                 work: match kind {
                     RunKind::Batch => Work::Rest(paths),
-                    RunKind::Run | RunKind::CatchUp => Work::Roots(paths),
+                    // A compaction is never admitted, so never reaches here;
+                    // named rather than folded into a wildcard so a new kind
+                    // has to say where it goes.
+                    RunKind::Run | RunKind::CatchUp | RunKind::Compact => Work::Roots(paths),
                 },
                 first: true,
                 already: Vec::new(),
@@ -1442,7 +1459,7 @@ impl Store {
         let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         let mut dropped = Vec::new();
         queue.retain(|queued| {
-            if !matches!(queued.job, Job::Index(..)) {
+            if !matches!(queued.job, Job::Index(..) | Job::Compact(..)) {
                 return true;
             }
             let answer = serde_json::json!({
@@ -2453,6 +2470,19 @@ impl State {
         Ok(store.submit(Job::Forget(path), None))
     }
 
+    /// Queue a compaction of `store` as a run with its own card, behind
+    /// whatever its writer is already doing.
+    pub fn compact(
+        &self,
+        store: &Arc<Store>,
+        options: crate::compact::CompactOptions,
+    ) -> Result<(u64, mpsc::Receiver<serde_json::Value>)> {
+        Self::writer_alive(store)?;
+        let run = self.admission.next.fetch_add(1, Ordering::Relaxed);
+        store.begin_run(run, vec![store.dir.clone()], RunKind::Compact);
+        Ok((run, store.submit_run(run, Job::Compact(options))))
+    }
+
     /// Accept one refused file, at the front of the writer's queue: a person
     /// waiting on a confirm should not wait behind a long run's slices.
     pub fn accept(
@@ -3326,6 +3356,7 @@ fn tend(
 ) -> Result<()> {
     let mut writer = Semlith::open(&store.dir, None)?;
     writer.quiet = true;
+    let mut next_compact_check = std::time::Instant::now() + COMPACT_FIRST_CHECK;
 
     // Before the watcher reads a single event: a store that holds files
     // outside every root it is registered against is a store whose search
@@ -3442,6 +3473,10 @@ fn tend(
             // for a minute.
             writer.follow_budget();
             writer.release_if_idle(session_idle());
+            if std::time::Instant::now() >= next_compact_check {
+                next_compact_check = std::time::Instant::now() + COMPACT_CHECK;
+                auto_compact(store, writer, admission);
+            }
             // The writer is this thread, so a queued job runs here or nowhere.
             // The roots of any run that was stopped go back to the watcher,
             // which drops the events it queued for them meanwhile.
@@ -3463,7 +3498,58 @@ fn tend(
     )
 }
 
-/// Run one queued job, reporting progress back to whoever asked for it.
+/// How often the writer asks whether its idle store has passed the
+/// auto-compaction threshold. A footprint is file sizes and three small
+/// queries, so this is about not deciding every 250 ms, not about cost.
+const COMPACT_CHECK: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The first check, a minute after the writer starts: long enough that a
+/// daemon's opening catch-ups are queued first and the store is not idle.
+const COMPACT_FIRST_CHECK: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether a store should be compacted on the daemon's own initiative.
+///
+/// Only an idle store -- no run on its card, nothing in its writer's queue or
+/// the admission queue, not paused, no run about to arrive -- and only past
+/// both the threshold and the floor. A threshold of 0 is off.
+fn compaction_due(threshold: u64, idle: bool, disk: &crate::compact::Footprint) -> bool {
+    threshold > 0
+        && idle
+        && disk.dead_percent() > threshold
+        && disk.reclaimable >= crate::compact::AUTO_FLOOR_BYTES
+}
+
+/// Queue a compaction of `store` when [`compaction_due`] says so, as a run
+/// with its own card, so it is seen and can be stopped like any other.
+fn auto_compact(store: &Arc<Store>, writer: &Semlith, admission: &Arc<Admission>) {
+    let idle = !store.run_live()
+        && store.queue_depth() == 0
+        && !store.paused.load(Ordering::Relaxed)
+        && admission.position_of(&store.name).is_none()
+        && (now() as usize) >= store.expecting_run_until.load(Ordering::Relaxed);
+    let threshold = crate::compact::threshold_in_force();
+    let retention = crate::compact::retention_in_force();
+    let Ok(disk) = writer.footprint(retention) else {
+        return;
+    };
+    if !compaction_due(threshold, idle, &disk) {
+        return;
+    }
+    let run = admission.next.fetch_add(1, Ordering::Relaxed);
+    store.begin_run(run, vec![store.dir.clone()], RunKind::Compact);
+    store.note(format!(
+        "{} % of this store is reclaimable, past the {threshold} % threshold: compacting",
+        disk.dead_percent()
+    ));
+    let _ = store.submit_run(
+        run,
+        Job::Compact(crate::compact::CompactOptions {
+            retention_days: retention,
+            dry_run: false,
+        }),
+    );
+}
+
 /// Run one queued job. For a run that was stopped, the roots it covered.
 fn perform(
     store: &Arc<Store>,
@@ -3830,6 +3916,53 @@ fn perform(
                     say(serde_json::json!({ "event": "done", "revoked": revoked }))
                 }
                 Err(e) => say(serde_json::json!({ "event": "error", "error": format!("{e:#}") })),
+            }
+            None
+        }
+        Job::Compact(options) => {
+            store.cancelled.store(false, Ordering::Relaxed);
+            say(
+                serde_json::json!({ "event": "started", "paths": [store.dir.display().to_string()] }),
+            );
+            let stop = || store.cancelled.load(Ordering::Relaxed);
+            match writer.compact_held(&options, &stop) {
+                Ok(report) => {
+                    store.cancelled.store(false, Ordering::Relaxed);
+                    let text = if report.stopped {
+                        "a compaction was stopped before its swap; nothing changed".to_string()
+                    } else {
+                        store.last_write.store(now() as usize, Ordering::Relaxed);
+                        format!(
+                            "compacted: {} to {} on disk ({} vectors and {} retired definitions dropped)",
+                            crate::human_bytes(report.before.total() as i64),
+                            crate::human_bytes(report.after.total() as i64),
+                            report.vectors_dropped,
+                            report.history_dropped,
+                        )
+                    };
+                    // The daemon log's line, with every part's bytes, beside
+                    // the event the card shows.
+                    eprintln!(
+                        "semlith: {}: {text} [database {} -> {}, exact {} -> {}, vectors {} -> {}]",
+                        store.name,
+                        report.before.database,
+                        report.after.database,
+                        report.before.exact,
+                        report.after.exact,
+                        report.before.vectors,
+                        report.after.vectors,
+                    );
+                    store.note(text);
+                    say(serde_json::json!({
+                        "event": "done",
+                        "stopped": report.stopped,
+                        "compact": report,
+                    }));
+                }
+                Err(e) => {
+                    store.cancelled.store(false, Ordering::Relaxed);
+                    say(serde_json::json!({ "event": "error", "error": format!("{e:#}") }))
+                }
             }
             None
         }
@@ -4792,5 +4925,31 @@ mod tests {
             Some("cli".to_string())
         );
         assert!(state.writable(Some("nope")).is_err());
+    }
+
+    #[test]
+    fn a_store_is_compacted_only_when_idle_and_past_the_threshold_and_floor() {
+        use crate::compact::{AUTO_FLOOR_BYTES, Footprint};
+        let mb = 1024 * 1024;
+        let dead = |total: u64, reclaimable: u64| Footprint {
+            database: total,
+            exact: 0,
+            vectors: 0,
+            reclaimable,
+        };
+        // 40 % dead, 40 MB: due at 25 %, idle.
+        assert!(compaction_due(25, true, &dead(100 * mb, 40 * mb)));
+        // A run, a queued job, a pause or a run about to arrive: not idle.
+        assert!(!compaction_due(25, false, &dead(100 * mb, 40 * mb)));
+        // Threshold 0 is off.
+        assert!(!compaction_due(0, true, &dead(100 * mb, 40 * mb)));
+        // Under the threshold.
+        assert!(!compaction_due(25, true, &dead(100 * mb, 20 * mb)));
+        // Past the share and under the floor: a tiny store is left alone.
+        assert!(!compaction_due(
+            25,
+            true,
+            &dead(2 * mb, AUTO_FLOOR_BYTES - 1)
+        ));
     }
 }

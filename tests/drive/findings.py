@@ -1469,6 +1469,14 @@ def _(d):
         fail("no 'runs at once' field was found in the machine limits panel")
     if d.eval("document.querySelector(%s).disabled" % json.dumps(RUNS_AT_ONCE)):
         skip("this machine's runs-at-once is set by the environment, so the page cannot change it")
+    # A home with a saved 'threads each' (#153) holds that number whatever
+    # 'runs at once' says, so there is no derivation left to recompute: the
+    # note says what was saved, not how many threads a run would get.
+    if d.eval(
+        "/\\bsaved\\b/.test(document.querySelector(%s).closest('.setting').innerText)"
+        % json.dumps(THREADS_EACH)
+    ):
+        skip("'threads each' is saved on this home, so it does not follow 'runs at once'")
 
     # `settingField` saves on `change`, which `d.type` dispatches; the panel is
     # then repainted from the daemon's answer.
@@ -5601,3 +5609,33 @@ def _(d):
             fail("the discarded run is still %s" % now.get("status"))
     finally:
         release_held(d, run)
+
+
+@finding("10.11", "a store's size and what Compact gives back are on the Stores page, and Compact gives it back")
+def _(d):
+    """0.31.0: the Stores row states what the store takes on disk and what a
+    compaction would reclaim; the row menu's Compact asks, names the bytes, and
+    the figures move when it closes. Machine limits carries the two settings."""
+    root = clean_tree(d, "compact")
+    store = indexed_fixture(d, root)
+    d.open_view("stores", fresh=True)
+    time.sleep(1.5)
+    headers = d.eval("[...document.querySelectorAll('th')].map(t => t.textContent.trim())")
+    if "Disk" not in headers:
+        fail("the Stores table has no Disk column: %r" % headers)
+    row = next((s for s in d.api("/api/stores")["stores"] if s["name"] == store), None)
+    if not row or not row.get("disk") or not row["disk"].get("total"):
+        fail("/api/stores gives %s no disk figures: %r" % (store, row and row.get("disk")))
+    body = d.api("/api/store/compact", method="POST", body={"store": store, "wait": True})
+    compact = body.get("compact") or {}
+    if body.get("stopped") or not compact.get("after"):
+        fail("a compaction of %s did not report its result: %r" % (store, body))
+    after = next(s for s in d.api("/api/stores")["stores"] if s["name"] == store)["disk"]
+    if after["reclaimable"] != 0:
+        fail("%s still has %d reclaimable bytes straight after a compaction" % (store, after["reclaimable"]))
+    d.open_view("index")
+    d.open_index_panel("Machine limits")
+    for label in ("compact past %", "history days"):
+        if not exists(d, 'input[aria-label="%s"]' % label):
+            fail("Machine limits has no %r field" % label)
+    d.close_index_panel("Machine limits")

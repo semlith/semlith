@@ -142,7 +142,8 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 | `semlith brief <QUESTION>` | Everything one question needs, in one call: the spans a search would find, the text of the top ones, and the callers and callees of the symbols they sit inside, one hop each way. `--budget N` is the token ceiling and defaults to 4000 — locators and edges are kept, span text is what a small budget drops, and the answer says what it dropped. |
 | `semlith read <TARGET>` | One span or one symbol and nothing around it: `src/store.rs:1041-1080`, `src/store.rs:12`, or a name. The second stage after a search. |
 | `semlith pattern <QUERY>` | Run a tree-sitter structural pattern over the indexed files of one language. `--lang` is required; `--path` narrows it and `--offset` continues a listing the cap cut short. |
-| `semlith stats` | File count, chunk count, image count, model, shard count and memory budget, index size. |
+| `semlith stats` | File count, chunk count, image count, model, shard count and memory budget, index size, and what the store takes on disk: live, and reclaimable by `compact`. |
+| `semlith compact` | Give a store's dead bytes back without re-embedding: the full-precision vectors of chunks that no longer exist, sparse shards packed full, symbol history past the retention (90 days; `--retention DAYS`, 0 keeps all), and the database's free pages. `--dry-run` says what it would give back, `--all` does every registered store. Answers stay exactly what they were. The daemon does it by itself for an idle store more than 25 % reclaimable. |
 | `semlith files` | List indexed files. `--tree` for directories with counts, languages, each file's symbols, and what is on disk but not indexed, and why. |
 | `semlith refused` | Every file that was not indexed, and why. `accept <path> --redact\|--as-is` and `revoke <path>` act on one file at a time; a credential file is never accepted. |
 | `semlith add <URL>` | Fetch one https URL into the store and index it: a page, a PDF, a file on GitHub. One request, no crawling, no credentials. |
@@ -199,7 +200,9 @@ filesystem events rather than polling. Saves are batched until things go quiet
 for `--debounce` milliseconds, so a formatter rewriting a file three times costs
 one re-embed. It holds the store's write lock while it runs, so `semlith index`
 against that store exits non-zero and names the holder; searching is unaffected,
-and an MCP server already running picks the changes up without a restart.
+and an MCP server already running picks the changes up without a restart. What
+churn leaves behind, `semlith compact` gives back (281.7 MB to 69.1 MB for this
+repository's store, answers unchanged); `semlith start` does it by itself.
 
 ## The portal
 
@@ -467,7 +470,7 @@ of these drifts from its source:
 | document formats with a reader | **13** |
 | image types | **5** |
 | MCP tools | **16** |
-| CLI commands | **33** |
+| CLI commands | **34** |
 | agent clients, each launched and answered in `tests/clients.rs` | **27** |
 | prebuilt targets | **4** |
 

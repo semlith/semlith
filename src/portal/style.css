@@ -1937,6 +1937,12 @@ td.num {
   font-family: var(--mono);
 }
 
+/* A store's size and what Compact would give back, and its savings line,
+ * each on one line: broken inside a word they read as two figures. */
+.disk-cell {
+  white-space: nowrap;
+}
+
 td.path {
   font-family: var(--mono);
   font-size: var(--t-small);

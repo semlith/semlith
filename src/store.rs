@@ -295,6 +295,11 @@ fn open_once(path: &Path) -> Result<Connection> {
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
     db.pragma_update(None, "foreign_keys", "ON")?;
+    // A deleted row's bytes are overwritten when its page is freed, not left
+    // readable in the file until a vacuum. A store holds whatever a file said,
+    // and a file refused after it was indexed -- a secret appeared in it -- is
+    // exactly the one whose old text must not linger (#148).
+    db.pragma_update(None, "secure_delete", "ON")?;
     defensive(&db)?;
     db.execute_batch(SCHEMA)?;
     add_columns(&db)?;
@@ -789,6 +794,66 @@ pub fn symbols_past_named(db: &Connection, name: &str, limit: usize) -> Result<V
 /// How many definitions this store has retired, over all names.
 pub fn symbols_past_count(db: &Connection) -> Result<i64> {
     Ok(db.query_row("SELECT COUNT(*) FROM symbols_past", [], |r| r.get(0))?)
+}
+
+/// Drop the definitions retired before `before` (unix seconds). The retention
+/// is the caller's; see `compact`.
+pub fn prune_history(db: &Connection, before: i64) -> Result<usize> {
+    Ok(db.execute(
+        "DELETE FROM symbols_past WHERE retired_at < ?1",
+        params![before],
+    )?)
+}
+
+/// How many definitions were retired before `before`.
+pub fn history_count_before(db: &Connection, before: i64) -> Result<i64> {
+    Ok(db.query_row(
+        "SELECT COUNT(*) FROM symbols_past WHERE retired_at < ?1",
+        params![before],
+        |r| r.get(0),
+    )?)
+}
+
+/// Every chunk row, durable or not: what the sidecar can hold a record for.
+pub fn chunk_count(db: &Connection) -> Result<i64> {
+    Ok(db.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?)
+}
+
+/// Roughly what the definitions retired before `before` take: their text plus
+/// a row's fixed cost. An estimate for `stats`, not an accounting — SQLite
+/// packs rows into pages and the count cannot see that.
+pub fn history_bytes_before(db: &Connection, before: i64) -> Result<i64> {
+    Ok(db.query_row(
+        "SELECT COALESCE(SUM(LENGTH(path) + LENGTH(kind) + LENGTH(name) + LENGTH(qualified)
+                             + LENGTH(content_hash) + 32), 0)
+         FROM symbols_past WHERE retired_at < ?1",
+        params![before],
+        |r| r.get(0),
+    )?)
+}
+
+/// Pages SQLite holds free inside the file, in bytes: what a vacuum gives back
+/// before anything else is dropped.
+pub fn free_bytes(db: &Connection) -> Result<i64> {
+    let pages: i64 = db.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+    let size: i64 = db.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    Ok(pages * size)
+}
+
+/// Give the database's dead pages back to the filesystem.
+///
+/// FTS5 keeps a deleted chunk's terms in its segments until they are merged,
+/// so the keyword index is optimised first; then the file is rebuilt, and the
+/// write-ahead log, which still holds the pages as they were, is checkpointed
+/// and truncated. A reader still inside a snapshot keeps the log from being
+/// truncated, and that is not an error: the next checkpoint does it.
+///
+/// The connection must be writable and outside any transaction.
+pub fn reclaim(db: &Connection) -> Result<()> {
+    db.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')", [])?;
+    db.execute_batch("VACUUM")?;
+    db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    Ok(())
 }
 
 /// A definition a re-index replaced.
@@ -2114,6 +2179,26 @@ pub struct Retrieval {
 /// The chain is the point: a row cannot be quietly edited or removed without
 /// every hash after it failing to recompute.
 pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
+    // A key pasted as a search is text a person typed, and nothing else in the
+    // store keeps one in full: every file passes the scan before it is held.
+    // The same scan, the same marker, before the row is hashed, so the chain
+    // covers what is stored (#147). A declared dummy stays as typed.
+    let found: Vec<crate::keyscan::Match> = crate::keyscan::scan("", row.query)
+        .into_iter()
+        .filter(|m| m.dummy.is_none())
+        .collect();
+    let masked_text;
+    let masked_row;
+    let row = if found.is_empty() {
+        row
+    } else {
+        masked_text = crate::keyscan::redact(row.query, &found);
+        masked_row = NewRetrieval {
+            query: &masked_text,
+            ..row.clone()
+        };
+        &masked_row
+    };
     let (client, query) = (row.client, row.query);
     let (hits, micros) = (row.hits, row.micros);
     let (excerpt_tokens, whole_file_tokens) = (row.excerpt_tokens, row.whole_file_tokens);
@@ -4413,5 +4498,44 @@ mod tests {
             keyword_search(&db, "EMBED_BATCH", 10, &[]).unwrap(),
             vec![1]
         );
+    }
+
+    #[test]
+    fn a_key_searched_for_is_recorded_masked_and_the_chain_still_verifies() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        add_columns(&db).unwrap();
+        let key = crate::keyscan::forge(0);
+        let query = format!("where is {key} used");
+        for q in [query.as_str(), "an ordinary question"] {
+            record_retrieval(
+                &db,
+                &NewRetrieval {
+                    client: "cli",
+                    session: "s",
+                    tool: "search",
+                    query: q,
+                    hits: 1,
+                    micros: 1,
+                    excerpt_tokens: 1,
+                    whole_file_tokens: 1,
+                    stale_hits: 0,
+                    tokenizer: "estimate",
+                    query_id: "q",
+                },
+            )
+            .unwrap();
+        }
+        let rows = retrievals(&db, 10).unwrap();
+        assert!(
+            rows.iter().all(|r| !r.query.contains(&key)),
+            "the key was recorded in full"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.query.starts_with("where is [REDACTED:"))
+        );
+        assert!(rows.iter().any(|r| r.query == "an ordinary question"));
+        assert_eq!(ledger_break(&db).unwrap(), None);
     }
 }

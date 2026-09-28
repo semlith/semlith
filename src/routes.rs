@@ -135,6 +135,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/agents/register") => register_clients(state, request),
         (_, true, "/api/root") => root(state, request),
         (_, true, "/api/store/delete") => delete_store(state, request),
+        (_, true, "/api/store/compact") => compact_store(state, request),
         (_, true, "/api/index/control") => index_control(state, request),
         (_, true, "/api/index/settings") => index_settings(state, request),
         (true, _, "/api/accel") => accel_status(),
@@ -328,8 +329,29 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
         })
         .unwrap_or_default();
     let mut out = Vec::new();
+    let retention = crate::compact::retention_in_force();
 
     for handle in state.stores() {
+        // What the store takes on disk and what a compaction would give back.
+        // `bytes` below is the indexed source; this is the store itself.
+        let disk = fleet.as_mut().and_then(|f| {
+            f.each()
+                .find(|(_, s)| s.dir() == handle.dir)
+                .and_then(|(_, s)| {
+                    s.footprint(retention).ok().map(|d| {
+                        json!({
+                            "total": d.total(),
+                            "live": d.live(),
+                            "reclaimable": d.reclaimable,
+                            "dead_percent": d.dead_percent(),
+                            "database": d.database,
+                            "exact": d.exact,
+                            "vectors": d.vectors,
+                            "compacts_vectors": s.compacts_vectors(),
+                        })
+                    })
+                })
+        });
         let stats = fleet
             .as_mut()
             .and_then(|f| {
@@ -484,6 +506,7 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
             "dim": dim,
             "vectors": vectors,
             "shards": shards.map(|(n, max)| json!({ "count": n, "resident": max })),
+            "disk": disk,
             "coverage": coverage.iter().map(|row| json!({
                 "language": row.language,
                 "files": row.files,
@@ -2816,7 +2839,18 @@ fn index_runs(state: &Arc<State>) -> Response {
         "running": admission.running(),
         "held": admission.held(),
         "limits": limits,
+        "compaction": compaction_settings(),
     }))
+}
+
+/// The two compaction settings in force, as Machine limits draws them.
+fn compaction_settings() -> Value {
+    json!({
+        "threshold_percent": crate::compact::threshold_in_force(),
+        "retention_days": crate::compact::retention_in_force(),
+        "default_threshold_percent": crate::compact::AUTO_THRESHOLD_PERCENT,
+        "default_retention_days": crate::compact::RETENTION_DAYS,
+    })
 }
 
 /// One run's log lines after a cursor.
@@ -3028,6 +3062,17 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
         }
         saved.index_memory_mb = Some(n);
     }
+    // The two compaction settings take 0 -- off, and keep everything -- so
+    // they are clamped to their range rather than to at least one.
+    if let Some(n) = body
+        .get("compact_threshold_percent")
+        .and_then(Value::as_u64)
+    {
+        saved.compact_threshold_percent = Some(n.min(99));
+    }
+    if let Some(n) = body.get("history_retention_days").and_then(Value::as_u64) {
+        saved.history_retention_days = Some(n.min(36_500));
+    }
     if let Err(e) = saved.save() {
         return Response::error(500, &format!("{e:#}"));
     }
@@ -3050,7 +3095,11 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
         "now running with {} run(s) at once, {} thread(s) each, and {} MiB of vectors per store",
         limits.runs_at_once.value, limits.embed_threads.value, limits.index_memory_mb.value
     );
-    Response::json(&json!({ "limits": limits, "applied": applied }))
+    Response::json(&json!({
+        "limits": limits,
+        "applied": applied,
+        "compaction": compaction_settings(),
+    }))
 }
 
 /// The accelerator lanes: each one's switch, state, device and share of the
@@ -3612,6 +3661,77 @@ fn forget(state: &Arc<State>, request: &Request) -> Response {
 /// answers for each: a store that could not go is named with why, and the
 /// others still go. A bulk delete that stopped at its first refusal would leave
 /// the reader to work out which half had happened.
+/// `POST /api/store/compact {store, retention_days?, dry_run?, wait?}`.
+///
+/// A dry run reads the store beside the writer and answers at once. A real
+/// compaction is a run on the store's writer with a card of its own: without
+/// `wait` the answer names the run and the page follows its card; with it --
+/// the CLI's forwarded `semlith compact` -- the answer is the finished report.
+fn compact_store(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let store = match state.writable(body.get("store").and_then(Value::as_str)) {
+        Ok(s) => s,
+        Err(e) => return Response::error(409, &e.to_string()),
+    };
+    let options = crate::compact::CompactOptions {
+        retention_days: body
+            .get("retention_days")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(crate::compact::retention_in_force),
+        dry_run: body
+            .get("dry_run")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+    if options.dry_run {
+        return match crate::Semlith::open_existing(&store.dir).and_then(|mut s| s.compact(&options))
+        {
+            Ok(report) => Response::json(&json!({ "store": store.name, "compact": report })),
+            Err(e) => Response::error(500, &format!("{e:#}")),
+        };
+    }
+    let (run, progress) = match state.compact(&store, options) {
+        Ok(started) => started,
+        Err(e) => return Response::error(409, &e.to_string()),
+    };
+    if !body.get("wait").and_then(Value::as_bool).unwrap_or(false) {
+        return Response::json(&json!({
+            "store": store.name,
+            "run": run,
+            "message": format!("compacting {}", store.name),
+        }));
+    }
+    for event in progress {
+        match event.get("event").and_then(Value::as_str) {
+            Some("done") => {
+                return Response::json(&json!({
+                    "store": store.name,
+                    "run": run,
+                    "stopped": event.get("stopped"),
+                    "compact": event.get("compact"),
+                }));
+            }
+            Some("error") => {
+                return Response::error(
+                    500,
+                    event
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("compaction failed"),
+                );
+            }
+            _ => {}
+        }
+    }
+    Response::error(
+        500,
+        "the store's writer ended before the compaction answered",
+    )
+}
+
 fn delete_store(state: &Arc<State>, request: &Request) -> Response {
     let body = match request.json() {
         Ok(b) => b,

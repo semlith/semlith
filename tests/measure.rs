@@ -268,55 +268,50 @@ fn measure_multi_store_search() {
     }
 
     println!("\n--- resident memory of a reader");
-    // Real server processes, because the claim is about what an agent's MCP
-    // server costs, and one loaded model is most of it.
-    let mut one = McpServer::start(&stores[..1]);
-    let mut three = McpServer::start(&stores);
-    // Measured only after each server has answered a real query. A timer would
-    // read whatever the process happened to have allocated by then: the first
-    // version of this slept 15 seconds and reported 17 MB for both, because
-    // under load neither had finished loading its model.
-    // Several queries, and the largest reading of several, because one query
-    // and one `ps` is not a measurement. A single instantaneous RSS on a loaded
-    // machine swung between 142 MB and 219 MB for the same one-store server
-    // across consecutive runs, and twice reported three stores as *smaller*
-    // than one — a reading that cannot be true of two warm servers and was the
-    // fault of reading too early rather than of anything semlith did.
-    let one_rss = one.warm_peak_rss_kb();
-    let three_rss = three.warm_peak_rss_kb();
+    // One real server process holding all three stores, because the claim is
+    // about what an agent's MCP server costs and one loaded model is most of
+    // it. Measured first while it answers from one store, then while it
+    // answers from all three: the difference is what the two extra stores
+    // cost, in the same process.
+    //
+    // Two processes -- a one-store server beside a three-store one -- is how
+    // this used to be measured, and it compared two different things (#149).
+    // A server's footprint is settled at its first query and then flat, but
+    // where it settles varies between processes started the same way: across
+    // six identical one-store servers it settled at 103, 206, 208, 221, 221
+    // and 222 MB. The extra stores' few MB were inside that spread, so
+    // whichever process landed lower decided the test. Within one process the
+    // spread is not there to be measured.
+    let mut server = McpServer::start(&stores);
+    let first = stores[0]
+        .parent()
+        .and_then(Path::file_name)
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap();
+    // Several queries and the largest reading, because one query and one
+    // `ps` is not a measurement: the model loads on the first search and a
+    // store's vectors on the first that needs them.
+    let one_rss = server.warm_peak_rss_kb_on(Some(&first));
+    let three_rss = server.warm_peak_rss_kb_on(None).max(one_rss);
     println!(
-        "mcp on 1 store: {} MB; on 3 stores: {} MB (+{} MB)",
+        "mcp answering from 1 store: {} MB; from 3 stores: {} MB (+{} MB)",
         one_rss / 1024,
         three_rss / 1024,
-        three_rss.saturating_sub(one_rss) / 1024,
+        (three_rss - one_rss) / 1024,
     );
-    // What an extra store costs, which is the number the claim is about: two
-    // more SQLite connections and two more vector indexes, not two more copies
-    // of the weights.
+    // What an extra store costs, which is the number the claim is about: its
+    // vector index and connection, not another copy of the weights.
     //
     // Asserted against the model's own size rather than as a fraction of the
     // one-store total. A ratio measures the wrong thing here — it tightens
     // whenever the base case gets *lighter*, so making a one-store reader
     // cheaper would fail a test about model duplication. 0.16.0 did exactly
-    // that: one store fell from 152 MB to 142 MB while three stayed at 220,
-    // and `three < one * 1.5` went from passing by 8 MB to failing by 7 with
-    // nothing about model loading having changed.
+    // that.
     //
     // The embedding model is ~52 MB of weights before its runtime allocates
     // anything, so a store that loaded its own copy could not come in under
-    // this. An extra store measures ~39 MB.
+    // this.
     const MODEL_MB: u64 = 50;
-    // Two warm servers, one holding three of the same stores the other holds
-    // one of: three cannot be smaller. When it reads that way the sample is
-    // wrong, and a wrong sample must fail rather than sail through a
-    // `saturating_sub` as a comfortable zero.
-    assert!(
-        three_rss >= one_rss,
-        "three stores read {} MB against {} MB for one, which cannot be true of two warm \
-         servers — the measurement did not settle",
-        three_rss / 1024,
-        one_rss / 1024,
-    );
     let per_store_mb = ((three_rss - one_rss) / 2) / 1024;
     println!("each extra store: {per_store_mb} MB (a second model would be {MODEL_MB}+)");
     assert!(
@@ -324,8 +319,7 @@ fn measure_multi_store_search() {
         "each extra store cost {per_store_mb} MB, at or above the {MODEL_MB} MB a second copy \
          of the weights would take — that looks like a model per store",
     );
-    one.stop();
-    three.stop();
+    server.stop();
 }
 
 /// What the tool list costs an agent, and what a server holds while it idles.
@@ -736,9 +730,14 @@ fn measure_the_store_at_scale() {
         );
     }
     // Not a bound on RSS: a store past its budget reloads shards constantly and
-    // the allocator keeps what it frees. What must be true is that it settles.
+    // the allocator keeps what it frees. What must be true is that it settles:
+    // the last reading is no higher than the highest before it, give or take.
+    // Measured against that peak rather than the reading just before, because
+    // the allocator handing pages back between two samples is not growth —
+    // 920, 848, 920 MB is a plateau with a dip in it, and failed as though it
+    // were climbing (0.31.0's CI; 0.30.x read 897-919 MB flat).
     assert!(
-        churn[2] < churn[1] + 32 * 1024,
+        churn[2] < churn[0].max(churn[1]) + 32 * 1024,
         "RSS under continuous shard churn went {} MB then {} MB then {} MB — that is \
          not a plateau",
         churn[0] / 1024,
@@ -1137,32 +1136,35 @@ impl McpServer {
         ))
     }
 
-    /// Drive one real search to completion, so the process being measured is one
-    /// that has loaded its model and answered — not one that is still starting.
-    /// Query until the server has everything it will load, then report the
-    /// largest resident size seen.
+    /// Drive real searches to completion, scoped to one store or to all of
+    /// them for `None`, and report the largest memory reading seen.
     ///
     /// The model loads on the first search and the vector index on the first
     /// one that needs it, so a reading taken after a single query catches a
     /// process that has not finished growing. Taking the peak of several also
     /// steps around the allocator handing pages back between samples.
-    fn warm_peak_rss_kb(&mut self) -> u64 {
+    fn warm_peak_rss_kb_on(&mut self, store: Option<&str>) -> u64 {
         const SAMPLES: usize = 4;
-        let mut peak = 0;
-        for _ in 0..SAMPLES {
-            self.answer_one_query();
-            peak = peak.max(self.rss_kb());
-        }
-        peak
-    }
-
-    fn answer_one_query(&mut self) {
+        let scope = store
+            .map(|s| format!(r#","store":["{s}"]"#))
+            .unwrap_or_default();
         let _ = self.request(
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
         );
-        let _ = self.request(
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"semlith_search","arguments":{"query":"how is backoff described","k":3}}}"#,
-        );
+        let mut peak = 0;
+        for i in 0..SAMPLES {
+            let answer = self.request(&format!(
+                r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"semlith_search","arguments":{{"query":"how is backoff described {i}","k":3{scope}}}}}}}"#
+            ));
+            // A label the server does not know is answered, not refused, so
+            // `result` alone would pass a search that read no store at all.
+            assert!(
+                answer.contains("result") && !answer.contains("no store called"),
+                "a search failed: {answer}"
+            );
+            peak = peak.max(self.rss_kb());
+        }
+        peak
     }
 
     /// One request, one response line.
