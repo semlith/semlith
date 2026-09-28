@@ -120,6 +120,9 @@ pub fn writer_sessions() -> usize {
 /// always produces the same batches.
 const SORT_WINDOW: usize = 256;
 
+/// The longest an index pass holds written rows uncommitted.
+const ROW_COMMIT: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Keyword candidates with no vector yet that a search mid-run embeds on the
 /// query path. Sixteen chunks on the CPU is about half a second on the M1,
 /// which keeps a mid-run search inside two.
@@ -1235,7 +1238,7 @@ fn embeddable_bytes(meta: Option<std::fs::Metadata>) -> u64 {
 /// all — `chunk::extract` returning nothing — is why the portal's counter
 /// never reached its total.
 fn say_file(
-    on_file: &mut impl FnMut(&Path, IndexProgress),
+    on_file: &mut dyn FnMut(&Path, IndexProgress),
     report: &IndexReport,
     total: usize,
     path: &Path,
@@ -1828,15 +1831,20 @@ impl Semlith {
         Ok(out)
     }
 
-    /// The walk an index pass takes: [`walk`], plus the generated folders a
-    /// person accepted.
-    fn walk(&self, roots: &[PathBuf]) -> Walked {
-        let allowed: Vec<PathBuf> = store::acceptances(&self.db)
+    /// The generated folders a person accepted, which the walk goes into.
+    fn accepted_folders(&self) -> Vec<PathBuf> {
+        store::acceptances(&self.db)
             .unwrap_or_default()
             .into_iter()
             .filter(|a| a.class == store::class::POLICY)
             .map(|a| PathBuf::from(a.path))
-            .collect();
+            .collect()
+    }
+
+    /// The walk an index pass takes: [`walk`], plus the generated folders a
+    /// person accepted.
+    fn walk(&self, roots: &[PathBuf]) -> Walked {
+        let allowed = self.accepted_folders();
         let started = std::time::Instant::now();
         let mut walked = walk_allowing(roots, &allowed);
         walked.walk_ms = started.elapsed().as_millis() as u64;
@@ -2160,7 +2168,7 @@ impl Semlith {
     ) -> Result<IndexReport> {
         let deadline = std::time::Instant::now() + budget;
         self.index_set(
-            self.walk(roots),
+            Walk::Roots(roots.to_vec()),
             true,
             Handed::Walked(Some(deadline)),
             None,
@@ -2177,7 +2185,7 @@ impl Semlith {
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         self.index_set(
-            self.walk(roots),
+            Walk::Roots(roots.to_vec()),
             true,
             Handed::Walked(None),
             Some(control),
@@ -2200,7 +2208,7 @@ impl Semlith {
     ) -> Result<IndexReport> {
         let deadline = std::time::Instant::now() + budget;
         self.index_set(
-            self.walk(roots),
+            Walk::Roots(roots.to_vec()),
             true,
             Handed::Walked(Some(deadline)),
             Some(control),
@@ -2233,7 +2241,7 @@ impl Semlith {
             // Every one of these came out of the walk this run started with,
             // so they are walked paths and are held to the same boundary rule
             // they were held to then — each as the slice reaches it.
-            Walked {
+            Walk::Done(Walked {
                 walk_ms: 0,
                 files,
                 named: Vec::new(),
@@ -2241,7 +2249,7 @@ impl Semlith {
                 generated: Vec::new(),
                 credentials: Vec::new(),
                 excluded: Vec::new(),
-            },
+            }),
             true,
             Handed::Rest {
                 budget,
@@ -2259,7 +2267,13 @@ impl Semlith {
         roots: &[PathBuf],
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
-        self.index_set(self.walk(roots), true, Handed::Walked(None), None, on_file)
+        self.index_set(
+            Walk::Roots(roots.to_vec()),
+            true,
+            Handed::Walked(None),
+            None,
+            on_file,
+        )
     }
 
     /// Re-index exactly `paths`, evicting any that have gone from disk.
@@ -2276,7 +2290,7 @@ impl Semlith {
             // Every one of these came out of a filesystem event on a watched
             // tree and was filtered through the same walk, so they are walked
             // paths and not paths a caller named.
-            Walked {
+            Walk::Done(Walked {
                 walk_ms: 0,
                 files: paths,
                 named: Vec::new(),
@@ -2284,7 +2298,7 @@ impl Semlith {
                 generated: Vec::new(),
                 credentials: Vec::new(),
                 excluded: Vec::new(),
-            },
+            }),
             false,
             Handed::Walked(None),
             None,
@@ -2297,7 +2311,7 @@ impl Semlith {
     /// events, which only knows about the paths in it.
     fn index_set(
         &mut self,
-        walked: Walked,
+        walk: Walk,
         sweep: bool,
         handed: Handed,
         control: Option<&dyn Fn() -> Flow>,
@@ -2312,7 +2326,7 @@ impl Semlith {
         // Every path that writes to this store funnels through here, so this is
         // where the connection stops refusing writes — and, when this returns,
         // starts refusing them again. See `store::Writing` and `writing` below.
-        self.writing(move |me| me.index_set_writing(walked, sweep, handed, control, on_file))
+        self.writing(move |me| me.index_set_writing(walk, sweep, handed, control, on_file))
     }
 
     /// Do something that writes, with the connection's refusal lifted for
@@ -2342,7 +2356,7 @@ impl Semlith {
         total: usize,
         path: &Path,
         refusal: &Refusal,
-        on_file: &mut impl FnMut(&Path, IndexProgress),
+        on_file: &mut dyn FnMut(&Path, IndexProgress),
     ) -> Result<()> {
         // A file semlith has decided it will not hold is a file it does
         // not keep holding. A rule that widens — this release widened two
@@ -2397,7 +2411,7 @@ impl Semlith {
 
     fn index_set_writing(
         &mut self,
-        walked: Walked,
+        walk: Walk,
         sweep: bool,
         handed: Handed,
         control: Option<&dyn Fn() -> Flow>,
@@ -2439,20 +2453,6 @@ impl Semlith {
         let prehashed = std::mem::take(&mut self.prehashed);
         let run_started = std::time::Instant::now();
 
-        // Refused before anything is read. A path that names a credential or
-        // sits outside this caller's boundary is reported by name with the rule
-        // that refused it, rather than dropped from the walk — an agent that
-        // asked for a file and got silence cannot tell that from a file that
-        // was not there.
-        let Walked {
-            walk_ms,
-            files: walked_paths,
-            named,
-            unreadable: unwalkable,
-            generated,
-            credentials: hidden_credentials,
-            excluded,
-        } = walked;
         // Once for the run, not once for the file. The home directory and the
         // roots cannot move while a run is going, and resolving them per file
         // was an opened handle per file on Windows.
@@ -2470,137 +2470,44 @@ impl Semlith {
         // speed of a large run: ~66,000 paths re-proved admissible each slice
         // before anything was embedded. Its files are held to the same rule
         // one at a time, as the loop reaches them, so a slice costs the files
-        // it handles rather than the files left. A first slice keeps the pass
-        // up front, because its plan, its refused rows and its evictions are
-        // reported before any file is read.
+        // it handles rather than the files left.
         let each = budget.is_some().then_some(&boundary);
-        let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, Refusal)>) = if each.is_some() {
-            // A continuation is handed the rest of the run in the order the
-            // run chose on its first slice; sorting it again would undo that.
-            (walked_paths, Vec::new())
-        } else {
-            let mut allowed = Vec::with_capacity(walked_paths.len() + named.len());
-            let mut refused = Vec::new();
-            let all = named
-                .into_iter()
-                .map(|p| (p, false))
-                .chain(walked_paths.into_iter().map(|p| (p, true)));
-            for (path, walked) in all {
-                match boundary.refuses(&path, walked) {
-                    Some(why) => refused.push((path, why)),
-                    None => allowed.push(path),
-                }
+
+        // A pass over roots starts on the files changed most recently while
+        // the walk of the whole tree goes on beside it, so a store filling
+        // from cold answers about the code being worked on within a second or
+        // two rather than after a walk of every file. The library alone walks
+        // first and keeps path order, which is what its figures were measured on.
+        let (head, pending_walk, done_walk) = match walk {
+            Walk::Done(walked) => (Vec::new(), None, Some(walked)),
+            Walk::Roots(roots) => {
+                let accepted = self.accepted_folders();
+                let head = if accel::managed() {
+                    recent_head(&roots, &boundary, &accepted)
+                } else {
+                    Vec::new()
+                };
+                (head, Some((roots, accepted)), None)
             }
-            allowed.sort();
-            // Where the lanes are used, the files changed most recently go
-            // first, so a store filling from cold answers about the code being
-            // worked on before it answers about the rest. The library alone
-            // keeps path order, which is what its figures were measured on.
-            if accel::managed() {
-                recent_first(&mut allowed);
-            }
-            (allowed, refused)
         };
-        let total = paths.len() + refused.len() + unwalkable.len();
-        // One `stat` per file the run will open, which is microseconds against
-        // the read, hash and embed that follow it — once per run. A later
-        // slice is handed the figure the run settled on its first. A file over
-        // the cap is skipped without being read, so it counts for nothing here
-        // either.
-        report.bytes_total = bytes_known.unwrap_or_else(|| {
-            paths
-                .iter()
-                .map(|p| embeddable_bytes(p.metadata().ok()))
-                .sum()
-        });
-        for (path, refusal) in &refused {
-            self.refuse_file(&mut report, total, path, refusal, &mut on_file)?;
-        }
-        report.generated = generated.iter().map(|p| p.display().to_string()).collect();
-        for (path, rule) in &excluded {
-            let folder = path.is_dir();
-            // What `.semlithignore` left out is counted with the run's skips,
-            // so the Index page's card says so beside binary and empty (1.8).
-            if rule == IGNORE_FILE {
-                report.skipped += 1;
-                *report
-                    .skipped_reasons
-                    .entry(IGNORE_FILE.to_string())
-                    .or_insert(0) += 1;
+        let mut total;
+        let mut walk_ms = 0u64;
+        let first = match done_walk {
+            Some(walked) => {
+                walk_ms = walked.walk_ms;
+                let (paths, counted) =
+                    self.walk_setup(walked, &boundary, each.is_some(), &mut report, &mut on_file)?;
+                total = counted;
+                report.bytes_total = bytes_known.unwrap_or_else(|| bytes_of(&paths));
+                paths
             }
-            store::refuse(
-                &self.db,
-                &path.to_string_lossy(),
-                store::class::EXCLUDED,
-                &format!("left out by {rule}; change the rule rather than accept the file"),
-                &[],
-                if folder { 0 } else { 1 },
-                now(),
-            )?;
-        }
-        // What a rule now leaves out is not what the store keeps holding. A
-        // `.semlithignore` or `.gitignore` line added after a folder was
-        // indexed left its files searchable for ever, because only a file gone
-        // from disk was ever swept: this repository's own store still held the
-        // 134 files 0.30.0's `.semlithignore` excluded.
-        if !excluded.is_empty() {
-            let out: Vec<&Path> = excluded.iter().map(|(p, _)| p.as_path()).collect();
-            for key in store::all_paths(&self.db)? {
-                if out.iter().any(|o| Path::new(&key).starts_with(o)) {
-                    let (chunks, images) = self.evict(&key)?;
-                    report.removed += usize::from(chunks + images > 0);
-                }
+            None => {
+                total = head.len();
+                report.bytes_total = bytes_of(&head);
+                head.clone()
             }
-        }
-        for path in &hidden_credentials {
-            let why = filter::denied(path).map(|d| d.reason()).unwrap_or_default();
-            store::refuse(
-                &self.db,
-                &path.to_string_lossy(),
-                store::class::CREDENTIAL,
-                &why,
-                &[],
-                1,
-                now(),
-            )?;
-        }
-        for dir in &generated {
-            store::refuse(
-                &self.db,
-                &dir.to_string_lossy(),
-                store::class::POLICY,
-                "a generated or vendored folder the walk steps over",
-                &[],
-                0,
-                now(),
-            )?;
-        }
-        // Entries the walk could not read. They used to be a line on stderr,
-        // which the daemon and the portal never see, so an unreadable
-        // directory looked like a tree that simply had nothing in it.
-        for (path, why) in &unwalkable {
-            store::refuse(
-                &self.db,
-                &path.to_string_lossy(),
-                store::class::UNINDEXABLE,
-                why,
-                &[],
-                1,
-                now(),
-            )?;
-            report
-                .failed
-                .push((path.display().to_string(), why.clone()));
-            report.scanned += 1;
-            say_file(
-                &mut on_file,
-                &report,
-                total,
-                path,
-                FileOutcome::Failed,
-                Some(why.clone()),
-            );
-        }
+        };
+        let head_set: std::collections::HashSet<PathBuf> = head.iter().cloned().collect();
 
         // Taken here, after the setup above, so a slice's budget is spent on
         // its files rather than on getting ready to read them.
@@ -2610,7 +2517,7 @@ impl Semlith {
         // writer is the one thing that moves a file's hash, and it moves each
         // one at most once in a run.
         let granite = self.model == Model::Granite;
-        let tokenizer = if granite && !paths.is_empty() {
+        let tokenizer = if granite && (!first.is_empty() || pending_walk.is_some()) {
             let cache = model_cache_dir()?;
             // Fetched and checked before the tokenizer beside it is read; a
             // no-op after the first time.
@@ -2644,12 +2551,22 @@ impl Semlith {
         };
         let mut cached = CacheWrites::default();
         let mut clock = pipeline::WriterClock::start(walk_ms);
+        let sealed = pending_walk.is_none();
         let mut run_lanes: std::collections::BTreeMap<String, usize> = Default::default();
         let (cpu_back, cpu_returned) = std::sync::mpsc::channel();
         let prepare_threads = pipeline::prepare_threads();
 
         std::thread::scope(|scope| -> Result<()> {
-            let prefetch = pipeline::Prefetch::start(scope, &paths, &ctx, prepare_threads);
+            let prefetch = pipeline::Prefetch::start(scope, first, sealed, &ctx, prepare_threads);
+            // The walk of the whole tree, when the pass started on its head.
+            let mut walker = pending_walk.map(|(roots, accepted)| {
+                scope.spawn(move || {
+                    let started = std::time::Instant::now();
+                    let mut walked = walk_allowing(&roots, &accepted);
+                    walked.walk_ms = started.elapsed().as_millis() as u64;
+                    walked
+                })
+            });
             let mut stage: Option<pipeline::Embedder> = None;
             let mut window = pipeline::Window {
                 ids: Vec::new(),
@@ -2675,11 +2592,54 @@ impl Semlith {
                 }
             };
 
-            for (seen, path) in paths.iter().enumerate() {
-                // Cloned per file so `paths` outlives the loop and the remainder
-                // can be handed to the next slice. One `PathBuf` clone against
-                // opening and hashing the file it names.
-                let path = path.clone();
+            let mut committed = std::time::Instant::now();
+            // Finish the walk if it is still going, hold its files to the
+            // run's rules, and put what the head did not cover on the list.
+            // Asked when the head runs out, and before a slice hands its
+            // remainder on.
+            let finish_walk = |me: &mut Self,
+                               walker: &mut Option<std::thread::ScopedJoinHandle<'_, Walked>>,
+                               report: &mut IndexReport,
+                               total: &mut usize,
+                               clock: &mut pipeline::WriterClock,
+                               on_file: &mut dyn FnMut(&Path, IndexProgress)|
+             -> Result<()> {
+                let Some(handle) = walker.take() else {
+                    return Ok(());
+                };
+                let waiting = std::time::Instant::now();
+                let walked = handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("the walk of the tree panicked"))?;
+                clock.waited_on_walk(waiting);
+                let (rest, counted) = me.walk_setup(walked, &boundary, false, report, on_file)?;
+                let rest: Vec<PathBuf> =
+                    rest.into_iter().filter(|p| !head_set.contains(p)).collect();
+                *total = head_set.len() + counted.saturating_sub(head_set.len());
+                report.bytes_total += bytes_of(&rest);
+                prefetch.extend_and_seal(rest);
+                Ok(())
+            };
+            let mut next = 0usize;
+            loop {
+                let seen = next;
+                let (listed, complete) = prefetch.len();
+                if seen >= listed {
+                    if complete {
+                        break;
+                    }
+                    finish_walk(
+                        self,
+                        &mut walker,
+                        &mut report,
+                        &mut total,
+                        &mut clock,
+                        &mut on_file,
+                    )?;
+                    continue;
+                }
+                next += 1;
+                let path = prefetch.path(seen).expect("inside the list");
                 // Only ever after something was embedded: a budget too small for
                 // any work at all must still make progress, or calling again is
                 // the same call forever.
@@ -2687,8 +2647,16 @@ impl Semlith {
                     && report.indexed > 0
                     && std::time::Instant::now() >= deadline
                 {
-                    report.remaining = paths.len() - seen;
-                    report.pending = paths[seen..].to_vec();
+                    finish_walk(
+                        self,
+                        &mut walker,
+                        &mut report,
+                        &mut total,
+                        &mut clock,
+                        &mut on_file,
+                    )?;
+                    report.pending = prefetch.from(seen);
+                    report.remaining = report.pending.len();
                     break;
                 }
                 if let Some(ask) = control {
@@ -2716,12 +2684,20 @@ impl Semlith {
                     }
                     paused.store(false, std::sync::atomic::Ordering::Relaxed);
                     if yielded {
-                        report.remaining = paths.len() - seen;
-                        report.pending = paths[seen..].to_vec();
+                        finish_walk(
+                            self,
+                            &mut walker,
+                            &mut report,
+                            &mut total,
+                            &mut clock,
+                            &mut on_file,
+                        )?;
+                        report.pending = prefetch.from(seen);
+                        report.remaining = report.pending.len();
                         break;
                     }
                     if stop {
-                        report.remaining = paths.len() - seen;
+                        report.remaining = prefetch.len().0 - seen;
                         report.stopped = true;
                         break;
                     }
@@ -3260,7 +3236,7 @@ impl Semlith {
                     // Stopped inside this file. Its rows are in `written`, so the
                     // caller's undo takes it out with everything else; nothing of
                     // it is finished, so nothing of it is counted or committed.
-                    report.remaining = paths.len() - seen;
+                    report.remaining = prefetch.len().0 - seen;
                     report.stopped = true;
                     break;
                 }
@@ -3277,6 +3253,14 @@ impl Semlith {
                 completed.push((file_id, hash));
                 report.indexed += 1;
                 report.chunks += count;
+                // Rows reach readers when they are committed, and a window can
+                // take seconds to fill on a store of small files. Committed at
+                // least this often, so a store filling from cold answers
+                // keyword and graph questions about what it has read so far.
+                if committed.elapsed() >= ROW_COMMIT {
+                    self.tx_commit()?;
+                    committed = std::time::Instant::now();
+                }
 
                 // Between files, never inside one: a file half-written into the
                 // index is a file whose hash must not be committed, and this is
@@ -3327,7 +3311,7 @@ impl Semlith {
                         },
                     )?;
                     if !drained {
-                        report.remaining = paths.len() - seen - 1;
+                        report.remaining = prefetch.len().0 - seen - 1;
                         report.stopped = true;
                         break;
                     }
@@ -3343,10 +3327,12 @@ impl Semlith {
                     );
                 }
             }
+            let last = prefetch
+                .path(prefetch.len().0.saturating_sub(1))
+                .unwrap_or_default();
             drop(prefetch);
 
             if !report.stopped {
-                let last = paths.last().cloned().unwrap_or_default();
                 let drained = self.hand_over(
                     scope,
                     &mut stage,
@@ -3505,6 +3491,154 @@ impl Semlith {
         }
 
         Ok(report)
+    }
+
+    /// What a walk found, held to this run's rules: every refusal, exclusion,
+    /// credential, generated folder and unreadable entry recorded and reported,
+    /// and the paths that remain in the order the run will take them. Returns
+    /// them and the walk's file count for progress. A continuation (`each`)
+    /// is handed its paths already decided, and holds each file to the rules
+    /// as it reaches it instead.
+    fn walk_setup(
+        &mut self,
+        walked: Walked,
+        boundary: &ResolvedBoundary,
+        each: bool,
+        report: &mut IndexReport,
+        on_file: &mut dyn FnMut(&Path, IndexProgress),
+    ) -> Result<(Vec<PathBuf>, usize)> {
+        // Refused before anything is read. A path that names a credential or
+        // sits outside this caller's boundary is reported by name with the rule
+        // that refused it, rather than dropped from the walk — an agent that
+        // asked for a file and got silence cannot tell that from a file that
+        // was not there.
+        let Walked {
+            walk_ms: _,
+            files: walked_paths,
+            named,
+            unreadable: unwalkable,
+            generated,
+            credentials: hidden_credentials,
+            excluded,
+        } = walked;
+        let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, Refusal)>) = if each {
+            // A continuation is handed the rest of the run in the order the
+            // run chose on its first slice; sorting it again would undo that.
+            (walked_paths, Vec::new())
+        } else {
+            let mut allowed = Vec::with_capacity(walked_paths.len() + named.len());
+            let mut refused = Vec::new();
+            let all = named
+                .into_iter()
+                .map(|p| (p, false))
+                .chain(walked_paths.into_iter().map(|p| (p, true)));
+            for (path, walked) in all {
+                match boundary.refuses(&path, walked) {
+                    Some(why) => refused.push((path, why)),
+                    None => allowed.push(path),
+                }
+            }
+            allowed.sort();
+            // Where the lanes are used, the files changed most recently go
+            // first, so a store filling from cold answers about the code being
+            // worked on before it answers about the rest. The library alone
+            // keeps path order, which is what its figures were measured on.
+            if accel::managed() {
+                recent_first(&mut allowed);
+            }
+            (allowed, refused)
+        };
+        let total = paths.len() + refused.len() + unwalkable.len();
+        for (path, refusal) in &refused {
+            self.refuse_file(report, total, path, refusal, &mut *on_file)?;
+        }
+        report.generated = generated.iter().map(|p| p.display().to_string()).collect();
+        for (path, rule) in &excluded {
+            let folder = path.is_dir();
+            // What `.semlithignore` left out is counted with the run's skips,
+            // so the Index page's card says so beside binary and empty (1.8).
+            if rule == IGNORE_FILE {
+                report.skipped += 1;
+                *report
+                    .skipped_reasons
+                    .entry(IGNORE_FILE.to_string())
+                    .or_insert(0) += 1;
+            }
+            store::refuse(
+                &self.db,
+                &path.to_string_lossy(),
+                store::class::EXCLUDED,
+                &format!("left out by {rule}; change the rule rather than accept the file"),
+                &[],
+                if folder { 0 } else { 1 },
+                now(),
+            )?;
+        }
+        // What a rule now leaves out is not what the store keeps holding. A
+        // `.semlithignore` or `.gitignore` line added after a folder was
+        // indexed left its files searchable for ever, because only a file gone
+        // from disk was ever swept: this repository's own store still held the
+        // 134 files 0.30.0's `.semlithignore` excluded.
+        if !excluded.is_empty() {
+            let out: Vec<&Path> = excluded.iter().map(|(p, _)| p.as_path()).collect();
+            for key in store::all_paths(&self.db)? {
+                if out.iter().any(|o| Path::new(&key).starts_with(o)) {
+                    let (chunks, images) = self.evict(&key)?;
+                    report.removed += usize::from(chunks + images > 0);
+                }
+            }
+        }
+        for path in &hidden_credentials {
+            let why = filter::denied(path).map(|d| d.reason()).unwrap_or_default();
+            store::refuse(
+                &self.db,
+                &path.to_string_lossy(),
+                store::class::CREDENTIAL,
+                &why,
+                &[],
+                1,
+                now(),
+            )?;
+        }
+        for dir in &generated {
+            store::refuse(
+                &self.db,
+                &dir.to_string_lossy(),
+                store::class::POLICY,
+                "a generated or vendored folder the walk steps over",
+                &[],
+                0,
+                now(),
+            )?;
+        }
+        // Entries the walk could not read. They used to be a line on stderr,
+        // which the daemon and the portal never see, so an unreadable
+        // directory looked like a tree that simply had nothing in it.
+        for (path, why) in &unwalkable {
+            store::refuse(
+                &self.db,
+                &path.to_string_lossy(),
+                store::class::UNINDEXABLE,
+                why,
+                &[],
+                1,
+                now(),
+            )?;
+            report
+                .failed
+                .push((path.display().to_string(), why.clone()));
+            report.scanned += 1;
+            say_file(
+                &mut *on_file,
+                report,
+                total,
+                path,
+                FileOutcome::Failed,
+                Some(why.clone()),
+            );
+        }
+
+        Ok((paths, total))
     }
 
     /// Make everything embedded so far durable, then record the files it
@@ -5639,6 +5773,13 @@ pub(crate) enum Handed {
 /// A pair rather than a bare `Vec` since 0.19.0: the entries the walk gave up
 /// on are part of what the run has to report, and a function that returns only
 /// the successes gives its caller nothing to report them with.
+/// What an index pass is handed to index: a walk already done, or roots to
+/// walk, which a pass that uses the lanes walks beside its first files.
+pub(crate) enum Walk {
+    Done(Walked),
+    Roots(Vec<PathBuf>),
+}
+
 pub(crate) struct Walked {
     /// Milliseconds the walk took, for the run's stage timings. Zero where
     /// the caller handed over paths it already had.
@@ -5810,6 +5951,88 @@ fn walk(roots: &[PathBuf]) -> Walked {
     walk_allowing(roots, &[])
 }
 
+/// The bytes a run's files count for, one `stat` each: microseconds against
+/// the read, hash and embed that follow, and what the remaining-time estimate
+/// is taken from. A file over the cap is skipped unread and counts nothing.
+fn bytes_of(paths: &[PathBuf]) -> u64 {
+    paths
+        .iter()
+        .map(|p| embeddable_bytes(p.metadata().ok()))
+        .sum()
+}
+
+/// How many recently committed files a pass starts on before its walk is done.
+const HEAD_FILES: usize = 48;
+
+/// The files the last commits under `roots` touched, newest first, held to
+/// the rules the walk applies — not hidden, not in a generated folder a
+/// person has not accepted, not left out by `.semlithignore`, inside the
+/// boundary — so a pass can start on them before the walk of the whole tree is
+/// done. What `.gitignore` leaves out git does not commit. Empty outside a
+/// git repository or without git.
+fn recent_head(
+    roots: &[PathBuf],
+    boundary: &ResolvedBoundary,
+    accepted: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        let root = canonical(root);
+        if !root.is_dir() {
+            continue;
+        }
+        let Ok(log) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args([
+                "log",
+                "-n",
+                "60",
+                "--name-only",
+                "--format=",
+                "--relative",
+                "--",
+                ".",
+            ])
+            .stderr(std::process::Stdio::null())
+            .output()
+        else {
+            continue;
+        };
+        for line in String::from_utf8_lossy(&log.stdout).lines() {
+            if out.len() >= HEAD_FILES {
+                return out;
+            }
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let rel = Path::new(line);
+            let hidden = rel
+                .components()
+                .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+            let path = root.join(rel);
+            if hidden || out.contains(&path) || !path.is_file() {
+                continue;
+            }
+            let generated = path
+                .ancestors()
+                .skip(1)
+                .take_while(|a| a.starts_with(&root) && *a != root)
+                .any(|a| is_generated_dir(a) && !accepted.iter().any(|x| x.as_path() == a));
+            let ignored = path
+                .parent()
+                .and_then(semlithignore_for)
+                .is_some_and(|m| m.matched_path_or_any_parents(&path, false).is_ignore());
+            if generated || ignored || boundary.refuses(&path, true).is_some() {
+                continue;
+            }
+            out.push(path);
+        }
+    }
+    out
+}
+
 /// Put the most recently changed files first: by the later of a file's
 /// modification time and the time of the last git commit that touched it.
 ///
@@ -5906,6 +6129,13 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
             }
             continue;
         }
+        // Resolved once for the root rather than once per file: a
+        // `canonicalize` is a walk up every component, and 69 000 of them
+        // were most of a five-second walk of the benchmark corpus. A file
+        // under the root is the canonical root joined to its relative path,
+        // because the walk never follows a directory link; a file that is
+        // itself a link is still resolved, since that is where it points.
+        let canonical_root = canonical(root);
         let mut builder = ignore::WalkBuilder::new(root);
         builder
             .hidden(true)
@@ -5967,7 +6197,10 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
                 continue;
             }
             yielded.insert(entry.path().to_path_buf());
-            let path = canonical(entry.path());
+            let path = match entry.path().strip_prefix(root) {
+                Ok(rest) if !entry.path_is_symlink() => canonical_root.join(rest),
+                _ => canonical(entry.path()),
+            };
             if seen.insert(path.clone()) {
                 out.push(path);
             }

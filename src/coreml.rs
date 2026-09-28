@@ -34,6 +34,11 @@ pub struct Group {
     pub buckets: Vec<usize>,
     /// The file name pattern, with `{S}` for the bucket's length.
     pub file: String,
+    /// For a multifunction model — one file whose buckets share one copy of
+    /// the weights — the function name pattern, with `{S}` for the bucket's
+    /// length. Absent where each bucket is a file of its own.
+    #[serde(default)]
+    pub function: Option<String>,
 }
 
 /// Which family a session runs.
@@ -334,6 +339,22 @@ mod tests {
             Some(vec![(0, 192), (4, 256)])
         );
         assert_eq!(plan(&[600], 4, &buckets), None);
+    }
+
+    #[test]
+    fn a_manifest_reads_with_and_without_multifunction_models() {
+        let split: Manifest = serde_json::from_str(
+            r#"{"pack_version":"1","ane":{"batch":4,"buckets":[128,512],"file":"ane/ane_b4_s{S}.mlmodelc"},
+                "gpu":{"batch":8,"buckets":[128],"file":"gpu/std_b8_s{S}.mlmodelc"},"extra":true}"#,
+        )
+        .unwrap();
+        assert_eq!(split.ane.function, None);
+        let merged: Manifest = serde_json::from_str(
+            r#"{"pack_version":"1","ane":{"batch":4,"buckets":[128],"file":"ane/ane_b4.mlmodelc","function":"s{S}"},
+                "gpu":{"batch":8,"buckets":[128],"file":"gpu/std_b8.mlmodelc","function":"s{S}"}}"#,
+        )
+        .unwrap();
+        assert_eq!(merged.ane.function.as_deref(), Some("s{S}"));
     }
 
     #[test]

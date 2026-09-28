@@ -179,6 +179,12 @@ impl WriterClock {
         self.embed_wait += since.elapsed();
     }
 
+    /// The writer waited for a walk that ran beside its first files: that
+    /// wait is the walk's share of the run.
+    pub fn waited_on_walk(&mut self, since: Instant) {
+        self.walk_ms += since.elapsed().as_millis() as u64;
+    }
+
     /// Settle the split: `lanes` is the chunks each lane embedded this call.
     pub fn stages(&self, clocks: &Clocks, lanes: &BTreeMap<String, usize>) -> Stages {
         let wall = self.started.elapsed().as_millis() as u64 + self.walk_ms;
@@ -582,14 +588,21 @@ pub fn take_ready(
 
 /// The prepare stage: a pool that works ahead of the writer, and hands each
 /// file back in the order the writer asks for them.
-pub struct Prefetch<'a> {
-    paths: &'a [PathBuf],
+///
+/// It owns the list of paths, which can grow: a first slice starts on the
+/// files changed most recently while the walk of the whole tree is still
+/// going, and the rest is added when the walk is done. `seal` says nothing
+/// more is coming.
+pub struct Prefetch {
     shared: Arc<Shared>,
 }
 
 struct Shared {
     next: AtomicUsize,
-    /// Results not yet taken, by position.
+    /// The paths so far, and whether that is all of them.
+    list: Mutex<(Vec<PathBuf>, bool)>,
+    grown: Condvar,
+    /// Results not yet taken, by position, and the position the writer is at.
     done: Mutex<(BTreeMap<usize, Prepared>, usize)>,
     ready: Condvar,
     room: Condvar,
@@ -597,20 +610,21 @@ struct Shared {
     lookahead: usize,
 }
 
-impl<'a> Prefetch<'a> {
-    /// Start `threads` workers inside `scope`.
-    pub fn start<'scope>(
-        scope: &'scope std::thread::Scope<'scope, '_>,
-        paths: &'a [PathBuf],
-        ctx: &'a Context,
+impl Prefetch {
+    /// Start `threads` workers inside `scope` on `paths`, which is the whole
+    /// list when `sealed`.
+    pub fn start<'scope, 'env>(
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        paths: Vec<PathBuf>,
+        sealed: bool,
+        ctx: &'env Context,
         threads: usize,
-    ) -> Self
-    where
-        'a: 'scope,
-    {
+    ) -> Self {
         let threads = threads.clamp(1, 32);
         let shared = Arc::new(Shared {
             next: AtomicUsize::new(0),
+            list: Mutex::new((paths, sealed)),
+            grown: Condvar::new(),
             done: Mutex::new((BTreeMap::new(), 0)),
             ready: Condvar::new(),
             room: Condvar::new(),
@@ -627,9 +641,27 @@ impl<'a> Prefetch<'a> {
                     let cache = ctx.cache.as_ref().and_then(|_| crate::cache::Cache::open());
                     loop {
                         let i = shared.next.fetch_add(1, Ordering::Relaxed);
-                        if i >= paths.len() {
-                            return;
-                        }
+                        // The path at `i`, waiting for the list to grow to it,
+                        // or gone when it never will.
+                        let path = {
+                            let mut list = shared.list.lock().unwrap_or_else(|e| e.into_inner());
+                            loop {
+                                if shared.stop.load(Ordering::Relaxed) {
+                                    return;
+                                }
+                                if let Some(path) = list.0.get(i) {
+                                    break path.clone();
+                                }
+                                if list.1 {
+                                    return;
+                                }
+                                list = shared
+                                    .grown
+                                    .wait_timeout(list, Duration::from_millis(100))
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .0;
+                            }
+                        };
                         // Held back until the writer is close enough.
                         {
                             let mut done = shared.done.lock().unwrap_or_else(|e| e.into_inner());
@@ -643,7 +675,7 @@ impl<'a> Prefetch<'a> {
                             return;
                         }
                         let prepared =
-                            match crate::contained(|| prepare(&paths[i], ctx, cache.as_ref())) {
+                            match crate::contained(|| prepare(&path, ctx, cache.as_ref())) {
                                 Ok(prepared) => prepared,
                                 Err(error) => Prepared::Failed {
                                     error,
@@ -656,7 +688,32 @@ impl<'a> Prefetch<'a> {
                     }
                 });
         }
-        Self { paths, shared }
+        Self { shared }
+    }
+
+    /// Add paths to the end of the list, and say it is complete.
+    pub fn extend_and_seal(&self, more: Vec<PathBuf>) {
+        let mut list = self.shared.list.lock().unwrap_or_else(|e| e.into_inner());
+        list.0.extend(more);
+        list.1 = true;
+        self.shared.grown.notify_all();
+    }
+
+    /// Paths in the list now, and whether that is all of them.
+    pub fn len(&self) -> (usize, bool) {
+        let list = self.shared.list.lock().unwrap_or_else(|e| e.into_inner());
+        (list.0.len(), list.1)
+    }
+
+    pub fn path(&self, i: usize) -> Option<PathBuf> {
+        let list = self.shared.list.lock().unwrap_or_else(|e| e.into_inner());
+        list.0.get(i).cloned()
+    }
+
+    /// Every path from `i` on, for the slice that continues the run.
+    pub fn from(&self, i: usize) -> Vec<PathBuf> {
+        let list = self.shared.list.lock().unwrap_or_else(|e| e.into_inner());
+        list.0.get(i..).map(<[PathBuf]>::to_vec).unwrap_or_default()
     }
 
     /// The file at `i`, waiting for it if the pool has not got there yet.
@@ -686,14 +743,14 @@ impl<'a> Prefetch<'a> {
     }
 }
 
-impl Drop for Prefetch<'_> {
+impl Drop for Prefetch {
     /// The writer is done early — a stop, a yield, a deadline: the workers
     /// finish the file in hand and go.
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
-        self.shared
-            .next
-            .store(self.paths.len() + 1_000_000, Ordering::Relaxed);
+        let _list = self.shared.list.lock().unwrap_or_else(|e| e.into_inner());
+        self.shared.grown.notify_all();
+        drop(_list);
         let _guard = self.shared.done.lock().unwrap_or_else(|e| e.into_inner());
         self.shared.room.notify_all();
         self.shared.ready.notify_all();

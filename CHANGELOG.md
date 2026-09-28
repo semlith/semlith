@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Indexing, several times faster on the machine you already have
+
+**An index pass is three stages running at once.** A pool of threads sized from
+the performance cores reads, hashes, extracts, scans, parses, chunks and
+tokenises each file once; one writer commits rows and vectors and never runs a
+model; an embed stage hands token-budget batches to every device with two in
+flight on each and lands the vectors in id order. Before this release one thread
+did all of it and ran the CPU's model inline, which was 64 % of a run while the
+GPU lane waited for batches. Where the time went — walk, read and hash, extract
+and scan, parse and chunk, tokenize, the wait on each lane, and write — is in
+the run card, the daemon's log and `semlith index --verbose`, and the parts add
+up to the run's wall time.
+
+**The Neural Engine, on Apple silicon.** granite re-implemented in Apple's
+Neural Engine layout and converted to Core ML at fixed shapes places 3 375 of
+its 3 380 ops on the Neural Engine, and runs at 236.5 chunks/s on the M1 Air
+against the CPU's 30.7, with every vector at cosine ≥ 0.9999 against the fp32
+reference. `semlith setup` fetches the models (built in CI, pinned by digest);
+the first start compiles them for the Mac, about three minutes once, in the
+background with its progress on Machine limits. While the Neural Engine runs,
+nothing else embeds beside it: two CPU threads cut it to a third, and the GPU
+beside it adds 4 % sustained on a fanless Air (`semlith accel on gpu-beside-ane`
+turns that back on). Without the Neural Engine the GPU runs through Core ML
+(73.2 chunks/s on the M1, against WebGPU's 43.7). Every vector any lane returns
+is checked finite and non-zero, and one that is not is embedded again on the CPU.
+
+**A machine-wide vector cache.** The same chunk under the same model, variant,
+chunking rules and truncation gets its vector from the cache instead of a
+device: an edit re-embeds the functions it changed rather than its whole file,
+and a second worktree re-embeds almost nothing. One file under the semlith home,
+bounded by a least-recently-used cap (1 024 MB; Machine limits and
+`vector_cache_mb` set it, 0 turns it off). `stats`, `semlith_stats`, the run card
+and `index --verbose` show its size and hit rate. Compaction never touches it.
+
+**A store that answers while it fills.** Rows are committed as they are written
+and a pass starts on the files changed most recently — by modification time or
+by the last commit that touched them — while the walk of the rest goes on
+beside it. Keyword and graph questions answer about what has been read so far; a
+semantic question embeds up to sixteen of its best keyword matches that have no
+vector yet and says how much of the store is still pending.
+
+**Everywhere else.** `semlith index` and `semlith watch` in a terminal use the
+same lanes as the daemon. WebGPU prefers a discrete GPU over an integrated one
+(`gpu_adapter` names one; `doctor --gpu` says which and why). A bulk index runs
+at Utility QoS on macOS rather than background, below normal priority with
+EcoQoS off on Windows, and under `Nice=5`, `CPUWeight=50` and `IOWeight=50` from
+the systemd unit on Linux. The CPU lane runs granite on ONNX Runtime directly
+with thread spinning off.
+
+**Experimental lanes, built without their hardware.** NVIDIA's TensorRT for RTX
+and Intel's OpenVINO, loaded from the vendors' own plugin execution providers,
+and llama.cpp's server (Metal on macOS, Vulkan on Windows and Linux) on loopback
+with a key only its worker holds. Each is off until turned on, labelled
+experimental in `accel status`, `doctor --gpu` and the portal, says why it
+cannot run on a machine without its device, and falls back. No throughput is
+claimed for any of them. The CUDA lane becomes experimental too; a saved
+`cuda: true` stays on.
+
+### Fixed
+
+- A store built with one of fastembed's own models no longer has its batches
+  sent to a GPU lane, which runs granite and would have given it vectors from
+  the wrong model.
+- `semlith doctor --gpu` printed `n/a` for a lane that failed its check; it
+  prints `FAIL`.
+- A pack that fails its digest is deleted whole, not left half-unpacked.
+
 ## [0.31.0] - 2026-09-28
 
 ### A store takes the disk its live content needs
