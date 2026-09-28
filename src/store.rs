@@ -295,6 +295,11 @@ fn open_once(path: &Path) -> Result<Connection> {
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
     db.pragma_update(None, "foreign_keys", "ON")?;
+    // A deleted row's bytes are overwritten when its page is freed, not left
+    // readable in the file until a vacuum. A store holds whatever a file said,
+    // and a file refused after it was indexed -- a secret appeared in it -- is
+    // exactly the one whose old text must not linger (#148).
+    db.pragma_update(None, "secure_delete", "ON")?;
     defensive(&db)?;
     db.execute_batch(SCHEMA)?;
     add_columns(&db)?;
@@ -789,6 +794,66 @@ pub fn symbols_past_named(db: &Connection, name: &str, limit: usize) -> Result<V
 /// How many definitions this store has retired, over all names.
 pub fn symbols_past_count(db: &Connection) -> Result<i64> {
     Ok(db.query_row("SELECT COUNT(*) FROM symbols_past", [], |r| r.get(0))?)
+}
+
+/// Drop the definitions retired before `before` (unix seconds). The retention
+/// is the caller's; see `compact`.
+pub fn prune_history(db: &Connection, before: i64) -> Result<usize> {
+    Ok(db.execute(
+        "DELETE FROM symbols_past WHERE retired_at < ?1",
+        params![before],
+    )?)
+}
+
+/// How many definitions were retired before `before`.
+pub fn history_count_before(db: &Connection, before: i64) -> Result<i64> {
+    Ok(db.query_row(
+        "SELECT COUNT(*) FROM symbols_past WHERE retired_at < ?1",
+        params![before],
+        |r| r.get(0),
+    )?)
+}
+
+/// Every chunk row, durable or not: what the sidecar can hold a record for.
+pub fn chunk_count(db: &Connection) -> Result<i64> {
+    Ok(db.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?)
+}
+
+/// Roughly what the definitions retired before `before` take: their text plus
+/// a row's fixed cost. An estimate for `stats`, not an accounting — SQLite
+/// packs rows into pages and the count cannot see that.
+pub fn history_bytes_before(db: &Connection, before: i64) -> Result<i64> {
+    Ok(db.query_row(
+        "SELECT COALESCE(SUM(LENGTH(path) + LENGTH(kind) + LENGTH(name) + LENGTH(qualified)
+                             + LENGTH(content_hash) + 32), 0)
+         FROM symbols_past WHERE retired_at < ?1",
+        params![before],
+        |r| r.get(0),
+    )?)
+}
+
+/// Pages SQLite holds free inside the file, in bytes: what a vacuum gives back
+/// before anything else is dropped.
+pub fn free_bytes(db: &Connection) -> Result<i64> {
+    let pages: i64 = db.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+    let size: i64 = db.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    Ok(pages * size)
+}
+
+/// Give the database's dead pages back to the filesystem.
+///
+/// FTS5 keeps a deleted chunk's terms in its segments until they are merged,
+/// so the keyword index is optimised first; then the file is rebuilt, and the
+/// write-ahead log, which still holds the pages as they were, is checkpointed
+/// and truncated. A reader still inside a snapshot keeps the log from being
+/// truncated, and that is not an error: the next checkpoint does it.
+///
+/// The connection must be writable and outside any transaction.
+pub fn reclaim(db: &Connection) -> Result<()> {
+    db.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')", [])?;
+    db.execute_batch("VACUUM")?;
+    db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    Ok(())
 }
 
 /// A definition a re-index replaced.

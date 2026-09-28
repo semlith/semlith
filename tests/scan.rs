@@ -326,6 +326,17 @@ fn a_file_that_gains_a_token_is_evicted_on_the_next_run() {
             .is_empty(),
         "the old contents are still searchable after the file was refused"
     );
+    // #148: and not merely unsearchable. The evicted text is gone from the
+    // database file and its log, not left in freed pages or FTS5 segments.
+    for name in ["store.db", "store.db-wal"] {
+        let bytes = fs::read(store.path().join(name)).unwrap_or_default();
+        for needle in ["after the migration", "Tuesdays after"] {
+            assert!(
+                !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                "{name} still holds {needle:?} after the eviction"
+            );
+        }
+    }
 }
 
 /// The path for a store indexed before any of this existed.

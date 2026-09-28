@@ -23,6 +23,7 @@ pub mod chunk;
 pub mod clientfile;
 pub mod clients;
 pub mod clock;
+pub mod compact;
 pub mod cuda;
 pub mod daemon;
 pub mod doctor;
@@ -1404,6 +1405,10 @@ pub struct Semlith {
     /// Size, mtime and content hash of each file the scan phase read, so the
     /// embed pass that follows it does not read an unchanged file twice.
     prehashed: std::collections::HashMap<PathBuf, (u64, i64, String)>,
+    /// A refusal about a file's contents evicted what the store held of it
+    /// during this run, so the database's dead pages and the keyword index's
+    /// old terms are rewritten before the run ends (#148).
+    scrub: bool,
 }
 
 impl Semlith {
@@ -1494,6 +1499,7 @@ impl Semlith {
             quiet: false,
             boundary: Boundary::default(),
             prehashed: Default::default(),
+            scrub: false,
         })
     }
 
@@ -1526,15 +1532,17 @@ impl Semlith {
         if current == self.generation {
             return Ok(());
         }
-        if !self.index.exists() {
-            return Ok(());
-        }
 
         // Dropped rather than reloaded here: whatever asked for this refresh is
         // about to search, and the load it triggers is the same load this used
         // to do eagerly. A reader that only ever calls `stats` pays nothing.
+        //
+        // Re-opened rather than only evicted: the shard list is read from the
+        // directory when an index is opened, so evicting alone left a reader
+        // blind to every shard a writer created after it opened, and to a
+        // compaction's whole new set. The image index is the store's too.
         let was_resident = self.index.is_resident();
-        self.index.evict();
+        self.reopen_indexes()?;
         if was_resident {
             // Already warm before the writer moved underneath it, so warm again
             // rather than handing the repack cost to the next question.
@@ -1546,6 +1554,53 @@ impl Semlith {
         // higher number, so it is still noticed next time.
         self.generation = current;
         Ok(())
+    }
+
+    /// Name the store's two vector indexes again from what is on disk.
+    fn reopen_indexes(&mut self) -> Result<()> {
+        let sharded = store::format(&self.db)? >= store::SHARDED_FORMAT;
+        self.index = VectorIndex::open(&self.dir, self.dim, BIT_WIDTH, sharded)?;
+        self.images = VectorIndex::open(
+            &self.dir.join(image::INDEX_DIR),
+            image::DIM,
+            BIT_WIDTH,
+            true,
+        )?;
+        Ok(())
+    }
+
+    /// The vector half of a search, read consistently against a compaction
+    /// in another process.
+    ///
+    /// A compaction swaps the shard set with two renames, marking the store
+    /// while it does and moving the generation after. A search that began or
+    /// ended inside that window, or across a generation change, may have read
+    /// a shard that was no longer there -- which reads as empty, not as an
+    /// error -- so it is asked again against the set now on disk. Two meta
+    /// reads when nothing is happening, which is every search but a handful.
+    fn search_vectors(
+        &mut self,
+        vector: &[f32],
+        depth: usize,
+        allowlist: &Allowlist,
+    ) -> Result<(Vec<f32>, Vec<u64>)> {
+        // ponytail: about two seconds of retries, then the answer the index
+        // gives. A swap is two renames; one still marked after that is a
+        // compaction that died mid-swap, and the next writer's recovery clears
+        // the mark.
+        for _ in 0..40 {
+            if !compact::swapping(&self.db)? {
+                self.refresh()?;
+                let seen = self.generation;
+                let found = self.index.search(vector, depth, allowlist)?;
+                if generation(&self.db)? == seen && !compact::swapping(&self.db)? {
+                    return Ok(found);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        self.refresh()?;
+        self.index.search(vector, depth, allowlist)
     }
 
     pub fn model(&self) -> &Model {
@@ -2264,6 +2319,7 @@ impl Semlith {
         } else {
             0
         };
+        self.scrub |= evicted > 0;
         report.removed += usize::from(evicted > 0);
         let why = if evicted > 0 {
             format!(
@@ -3250,6 +3306,14 @@ impl Semlith {
             )?;
         }
 
+        // A file refused for what it now contains had its rows deleted, and
+        // `secure_delete` zeroed their pages; the keyword index still carries
+        // its terms until its segments merge, and the write-ahead log the
+        // pages as they were. Rare, so paid in full here.
+        if std::mem::take(&mut self.scrub) {
+            store::reclaim(&self.db)?;
+        }
+
         Ok(report)
     }
 
@@ -4182,7 +4246,7 @@ impl Semlith {
             Vec::new()
         };
 
-        let (dense_scores, dense_ids) = self.index.search(vector, depth, &allowlist)?;
+        let (dense_scores, dense_ids) = self.search_vectors(vector, depth, &allowlist)?;
         // The graph list seeds from what the *index* found, in the order the
         // index found it, which is not the order rescoring leaves behind.
         //

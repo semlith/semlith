@@ -324,6 +324,22 @@ impl VectorIndex {
         }
     }
 
+    /// Vectors per shard, or `None` for a single-file index.
+    pub fn capacity(&self) -> Option<usize> {
+        match self {
+            VectorIndex::Single(_) => None,
+            VectorIndex::Sharded(s) => Some(s.capacity),
+        }
+    }
+
+    /// A test's small shards, so a multi-shard store takes a dozen vectors.
+    #[cfg(test)]
+    pub(crate) fn set_capacity(&mut self, capacity: usize) {
+        if let VectorIndex::Sharded(s) = self {
+            s.capacity = capacity;
+        }
+    }
+
     /// How many shards the store holds. One, for a single-file index.
     pub fn shards(&self) -> usize {
         match self {
@@ -421,7 +437,13 @@ pub struct Sharded {
 
 impl Sharded {
     fn open(store_dir: &Path, dim: usize, bit_width: usize) -> Result<Self> {
-        let dir = store_dir.join(SHARD_DIR);
+        let mut dir = store_dir.join(SHARD_DIR);
+        // Between the two renames of a compaction's swap, or after a crash
+        // there, the complete new set is the only one on disk. A reader takes
+        // it; the next writer's `recover` gives it its proper name.
+        if !dir.is_dir() && store_dir.join(COMPACT_DIR).is_dir() {
+            dir = store_dir.join(COMPACT_DIR);
+        }
         let mut shards = Vec::new();
         if dir.is_dir() {
             for entry in std::fs::read_dir(&dir)
@@ -752,6 +774,224 @@ impl Sharded {
     }
 }
 
+/// Where a compaction builds a store's replacement shards, beside the live set.
+///
+/// Not a name [`Sharded::open`] lists, so a half-built set is never searched;
+/// it becomes `index/` by one rename once every shard in it is written.
+const COMPACT_DIR: &str = "index.compact";
+
+/// Where the shards a compaction replaced wait for removal, for the moment
+/// between the two renames of the swap.
+const REPLACED_DIR: &str = "index.old";
+
+/// The shard files a store holds on disk, ascending by first id, or its single
+/// `index.tv` for a store written before 0.7.0. Read nothing but the listing.
+pub fn vector_files(store_dir: &Path) -> Result<Vec<PathBuf>> {
+    let dir = store_dir.join(SHARD_DIR);
+    let mut named: Vec<(u64, PathBuf)> = Vec::new();
+    if dir.is_dir() {
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("reading {}", dir.display()))?
+            .flatten()
+        {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some(SHARD_EXT) {
+                continue;
+            }
+            if let Some(start) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                named.push((start, path));
+            }
+        }
+    }
+    named.sort_by_key(|(start, _)| *start);
+    let mut files: Vec<PathBuf> = named.into_iter().map(|(_, p)| p).collect();
+    let single = store_dir.join("index.tv");
+    if files.is_empty() && single.exists() {
+        files.push(single);
+    }
+    Ok(files)
+}
+
+/// What a store's vector files take on disk.
+pub fn vector_bytes(store_dir: &Path) -> u64 {
+    vector_files(store_dir)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// Every id a store's vectors hold, ascending, read one file at a time so a
+/// store larger than its budget is never resident whole.
+pub fn ids_on_disk(store_dir: &Path, dim: usize, bit_width: usize) -> Result<Vec<u64>> {
+    let mut ids = Vec::new();
+    for path in vector_files(store_dir)? {
+        ids.extend(load_or_new(&path, dim, bit_width)?.iter_ids());
+    }
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+/// Build a packed shard set from `exact`'s records into [`COMPACT_DIR`].
+///
+/// Every shard but the last is full, and each is named for its first id, so
+/// the set keeps the one rule the layout rests on: ranges ascend and new ids
+/// land in the last shard. The codes are turbovec's encoding of the same f32
+/// values the index was given when they were embedded, and semlith never
+/// calibrates, so every vector's codes are the bytes it had before.
+///
+/// Returns how many shards were written. Nothing is swapped in here.
+pub fn build_compacted(
+    store_dir: &Path,
+    exact: &Exact,
+    dim: usize,
+    bit_width: usize,
+    capacity: usize,
+) -> Result<usize> {
+    let dir = store_dir.join(COMPACT_DIR);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    crate::home::tighten_dir(&dir);
+    let mut written = 0;
+    let mut shard: Option<(u64, IdMapIndex)> = None;
+    let mut ids: Vec<u64> = Vec::new();
+    let mut values: Vec<f32> = Vec::new();
+
+    let write = |start: u64, index: &IdMapIndex| -> Result<()> {
+        let path = dir.join(format!("{start:016}.{SHARD_EXT}"));
+        index
+            .write(&path)
+            .with_context(|| format!("writing {}", path.display()))?;
+        crate::home::tighten_file(&path);
+        Ok(())
+    };
+    // Batched into the index rather than added a vector at a time: the codes
+    // are the same however the rows are batched, and the encoder is not.
+    let flush =
+        |shard: &mut Option<(u64, IdMapIndex)>, ids: &mut Vec<u64>, values: &mut Vec<f32>| {
+            if let Some((_, index)) = shard.as_mut()
+                && !ids.is_empty()
+            {
+                index
+                    .add_with_ids(values, ids)
+                    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            }
+            ids.clear();
+            values.clear();
+            anyhow::Ok(())
+        };
+
+    exact.for_each(|id, vector| {
+        if shard.is_none() {
+            shard = Some((
+                id,
+                IdMapIndex::new(dim, bit_width).map_err(|e| anyhow::anyhow!("{e:?}"))?,
+            ));
+        }
+        ids.push(id);
+        values.extend_from_slice(vector);
+        let held = shard.as_ref().map_or(0, |(_, i)| i.len()) + ids.len();
+        if held == capacity {
+            flush(&mut shard, &mut ids, &mut values)?;
+            let (start, index) = shard.take().unwrap();
+            write(start, &index)?;
+            written += 1;
+        } else if ids.len() >= 4096 {
+            flush(&mut shard, &mut ids, &mut values)?;
+        }
+        Ok(())
+    })?;
+    flush(&mut shard, &mut ids, &mut values)?;
+    if let Some((start, index)) = shard.take() {
+        write(start, &index)?;
+        written += 1;
+    }
+    Ok(written)
+}
+
+/// Put the shard set [`build_compacted`] wrote in place of the live one.
+///
+/// Two renames: the live set aside, the new set in. A reader that lists the
+/// directory between them sees no shards, which is why the caller brackets
+/// this with the store's swap marker and generation, and why [`recover`]
+/// finishes a swap a crash interrupted.
+pub fn swap_compacted(store_dir: &Path) -> Result<()> {
+    let live = store_dir.join(SHARD_DIR);
+    let built = store_dir.join(COMPACT_DIR);
+    let replaced = store_dir.join(REPLACED_DIR);
+    if replaced.exists() {
+        std::fs::remove_dir_all(&replaced)?;
+    }
+    if live.exists() {
+        rename_retrying(&live, &replaced)?;
+    }
+    if let Err(e) = rename_retrying(&built, &live) {
+        // Put the live set back rather than leave the store with none.
+        let _ = rename_retrying(&replaced, &live);
+        return Err(e);
+    }
+    let _ = std::fs::remove_dir_all(&replaced);
+    Ok(())
+}
+
+/// A directory rename, retried for a moment: on Windows a reader that has a
+/// shard file open for the length of one load makes the rename fail, and it
+/// lets go on its own.
+fn rename_retrying(from: &Path, to: &Path) -> Result<()> {
+    let mut tries = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(_) if tries < 20 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!(
+                    "moving {} to {}",
+                    from.display(),
+                    to.display()
+                )));
+            }
+        }
+    }
+}
+
+/// Finish or undo what a compaction killed part-way left behind. The caller
+/// holds the store lock, so no compaction is still running.
+///
+/// A built set with no live set beside it was killed between the two renames
+/// of the swap, after every shard in it was written, so it is the store's
+/// vectors and goes in. A built set beside a live one was never swapped and is
+/// thrown away. Returns whether the shard directory changed, so the caller
+/// knows to re-open its index.
+pub fn recover(store_dir: &Path) -> Result<bool> {
+    let live = store_dir.join(SHARD_DIR);
+    let built = store_dir.join(COMPACT_DIR);
+    let replaced = store_dir.join(REPLACED_DIR);
+    let mut changed = false;
+    if built.exists() {
+        if live.exists() {
+            std::fs::remove_dir_all(&built)?;
+        } else {
+            std::fs::rename(&built, &live)?;
+            changed = true;
+        }
+    }
+    if replaced.exists() {
+        std::fs::remove_dir_all(&replaced)?;
+    }
+    let _ = std::fs::remove_file(store_dir.join(EXACT_COMPACT));
+    Ok(changed)
+}
+
 /// Read an index file, or make an empty one when there is nothing there yet.
 fn load_or_new(path: &Path, dim: usize, bit_width: usize) -> Result<IdMapIndex> {
     if !path.exists() {
@@ -795,6 +1035,19 @@ pub struct Exact {
     dim: usize,
 }
 
+/// Where a compaction writes the rewritten sidecar before it is renamed in.
+const EXACT_COMPACT: &str = "exact.f32.compact";
+
+/// What [`Exact::build_compacted`] kept and dropped.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ExactRewrite {
+    pub kept: u64,
+    pub dropped: u64,
+    /// False when the file's ids did not ascend, which is the one layout a
+    /// packed shard set cannot be built from.
+    pub ascending: bool,
+}
+
 impl Exact {
     /// The sidecar beside a store's vectors, whether or not it exists yet.
     pub fn open(dir: &Path, dim: usize) -> Self {
@@ -816,6 +1069,11 @@ impl Exact {
 
     fn record_size(&self) -> usize {
         8 + self.dim * 4
+    }
+
+    /// What one vector costs in the sidecar, in bytes.
+    pub fn record_bytes(&self) -> u64 {
+        self.record_size() as u64
     }
 
     /// Append the vectors the index was just given, in the same order.
@@ -878,6 +1136,87 @@ impl Exact {
             }
         }
         None
+    }
+
+    /// Every record in file order, streamed: `f(id, vector)`.
+    pub fn for_each(&self, mut f: impl FnMut(u64, &[f32]) -> Result<()>) -> Result<()> {
+        use std::io::Read;
+        let Ok(file) = std::fs::File::open(&self.path) else {
+            return Ok(());
+        };
+        let mut reader = std::io::BufReader::with_capacity(1 << 20, file);
+        let mut buf = vec![0u8; self.record_size()];
+        let mut vector = vec![0f32; self.dim];
+        loop {
+            match reader.read_exact(&mut buf) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                Err(e) => return Err(e.into()),
+            }
+            let id = u64::from_le_bytes(buf[..8].try_into()?);
+            for (slot, b) in buf[8..].as_chunks::<4>().0.iter().enumerate() {
+                vector[slot] = f32::from_le_bytes(*b);
+            }
+            f(id, &vector)?;
+        }
+    }
+
+    /// Rewrite the sidecar to the records whose id is in `keep` (ascending),
+    /// beside the live file. Nothing replaces the live file here; see
+    /// [`Exact::swap_compacted`]. Each kept record is copied byte for byte.
+    pub fn build_compacted(&self, keep: &[u64]) -> Result<ExactRewrite> {
+        use std::io::{Read, Write};
+        let mut out = ExactRewrite {
+            ascending: true,
+            ..Default::default()
+        };
+        let Ok(file) = std::fs::File::open(&self.path) else {
+            return Ok(out);
+        };
+        let target = self.path.with_file_name(EXACT_COMPACT);
+        let mut writer = std::io::BufWriter::new(std::fs::File::create(&target)?);
+        let mut reader = std::io::BufReader::with_capacity(1 << 20, file);
+        let mut buf = vec![0u8; self.record_size()];
+        let mut last: Option<u64> = None;
+        loop {
+            match reader.read_exact(&mut buf) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+            let id = u64::from_le_bytes(buf[..8].try_into()?);
+            if last.is_some_and(|l| id <= l) {
+                out.ascending = false;
+            }
+            last = Some(id);
+            if keep.binary_search(&id).is_ok() {
+                writer.write_all(&buf)?;
+                out.kept += 1;
+            } else {
+                out.dropped += 1;
+            }
+        }
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        crate::home::tighten_file(&target);
+        Ok(out)
+    }
+
+    /// The sidecar [`Exact::build_compacted`] wrote, as a view to read before
+    /// it replaces the live one.
+    pub fn compacted(&self) -> Exact {
+        Exact {
+            path: self.path.with_file_name(EXACT_COMPACT),
+            dim: self.dim,
+        }
+    }
+
+    /// Put the rewritten sidecar in place of the live one: one rename, so a
+    /// reader opens either the old file or the new one, never half of each.
+    pub fn swap_compacted(&self) -> Result<()> {
+        std::fs::rename(self.path.with_file_name(EXACT_COMPACT), &self.path)?;
+        crate::home::tighten_file(&self.path);
+        Ok(())
     }
 
     fn read_at(&self, file: &mut std::fs::File, record: u64) -> Option<(u64, Vec<f32>)> {
