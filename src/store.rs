@@ -2179,6 +2179,26 @@ pub struct Retrieval {
 /// The chain is the point: a row cannot be quietly edited or removed without
 /// every hash after it failing to recompute.
 pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
+    // A key pasted as a search is text a person typed, and nothing else in the
+    // store keeps one in full: every file passes the scan before it is held.
+    // The same scan, the same marker, before the row is hashed, so the chain
+    // covers what is stored (#147). A declared dummy stays as typed.
+    let found: Vec<crate::keyscan::Match> = crate::keyscan::scan("", row.query)
+        .into_iter()
+        .filter(|m| m.dummy.is_none())
+        .collect();
+    let masked_text;
+    let masked_row;
+    let row = if found.is_empty() {
+        row
+    } else {
+        masked_text = crate::keyscan::redact(row.query, &found);
+        masked_row = NewRetrieval {
+            query: &masked_text,
+            ..row.clone()
+        };
+        &masked_row
+    };
     let (client, query) = (row.client, row.query);
     let (hits, micros) = (row.hits, row.micros);
     let (excerpt_tokens, whole_file_tokens) = (row.excerpt_tokens, row.whole_file_tokens);
@@ -4478,5 +4498,44 @@ mod tests {
             keyword_search(&db, "EMBED_BATCH", 10, &[]).unwrap(),
             vec![1]
         );
+    }
+
+    #[test]
+    fn a_key_searched_for_is_recorded_masked_and_the_chain_still_verifies() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        add_columns(&db).unwrap();
+        let key = crate::keyscan::forge(0);
+        let query = format!("where is {key} used");
+        for q in [query.as_str(), "an ordinary question"] {
+            record_retrieval(
+                &db,
+                &NewRetrieval {
+                    client: "cli",
+                    session: "s",
+                    tool: "search",
+                    query: q,
+                    hits: 1,
+                    micros: 1,
+                    excerpt_tokens: 1,
+                    whole_file_tokens: 1,
+                    stale_hits: 0,
+                    tokenizer: "estimate",
+                    query_id: "q",
+                },
+            )
+            .unwrap();
+        }
+        let rows = retrievals(&db, 10).unwrap();
+        assert!(
+            rows.iter().all(|r| !r.query.contains(&key)),
+            "the key was recorded in full"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.query.starts_with("where is [REDACTED:"))
+        );
+        assert!(rows.iter().any(|r| r.query == "an ordinary question"));
+        assert_eq!(ledger_break(&db).unwrap(), None);
     }
 }
