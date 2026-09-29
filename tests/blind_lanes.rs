@@ -28,12 +28,10 @@ fn every_pinned_asset_is_https_with_a_sha256() {
                 "{}",
                 asset.url
             );
-            // The GGUF alone is pinned by CI's pack job, and says so.
-            if asset.sha256 == llama::LLAMA_GGUF_SHA256 {
-                assert!(asset.url.contains("pack-llama-v"), "{}", asset.url);
-            } else {
-                assert!(asset.size > 1_000_000, "{}", asset.url);
-            }
+            // A placeholder left from before a pack was published would
+            // refuse every download.
+            assert!(asset.sha256.bytes().any(|b| b != b'0'), "{}", asset.url);
+            assert!(asset.size > 1_000_000, "{}", asset.url);
         }
     }
     // Where each is published, and nowhere else.

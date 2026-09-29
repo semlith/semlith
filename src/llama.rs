@@ -30,8 +30,8 @@ pub const BUILD: &str = "b11146";
 /// The GGUF's pin. CI's pack job (`packs.yml`) builds and publishes the
 /// file, and its digest and size are pinned here once it has.
 pub const LLAMA_GGUF_SHA256: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
-pub const LLAMA_GGUF_SIZE: u64 = 0;
+    "e9d55517cdadcf30eb18a65ea069778dd134914dee2554959bcedd5717d8faa8";
+pub const LLAMA_GGUF_SIZE: u64 = 97_119_616;
 const GGUF: &str = "granite-embedding-small-english-r2-f16.gguf";
 
 const GGUF_ASSET: crate::packs::Asset = crate::packs::Asset {
