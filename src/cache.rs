@@ -131,8 +131,31 @@ impl Cache {
              CREATE INDEX IF NOT EXISTS vectors_used ON vectors(used);
              CREATE TABLE IF NOT EXISTS counts (k TEXT PRIMARY KEY, v INTEGER NOT NULL);",
         )?;
+        // The row count is kept, not counted: a COUNT(*) reads every row of a
+        // cache that may be a gigabyte, and the portal asks every second.
+        // Counted once, for a cache written before the count was kept.
+        let kept: Option<i64> = db
+            .query_row("SELECT v FROM counts WHERE k = 'rows'", [], |r| r.get(0))
+            .optional()?;
+        if kept.is_none() {
+            db.execute(
+                "INSERT OR IGNORE INTO counts (k, v) SELECT 'rows', COUNT(*) FROM vectors",
+                [],
+            )?;
+        }
         crate::home::tighten_file(path);
         Ok(Self { db })
+    }
+
+    fn rows(&self) -> Result<u64> {
+        Ok(self
+            .db
+            .query_row("SELECT v FROM counts WHERE k = 'rows'", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .optional()?
+            .unwrap_or(0)
+            .max(0) as u64)
     }
 
     /// The vector for one key, if the cache holds it.
@@ -168,14 +191,19 @@ impl Cache {
         let tx = self.db.transaction()?;
         {
             let mut put = tx.prepare_cached(
-                "INSERT INTO vectors (key, variant, vector, used) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(key) DO UPDATE SET used = excluded.used",
+                "INSERT OR IGNORE INTO vectors (key, variant, vector, used) VALUES (?1, ?2, ?3, ?4)",
             )?;
+            let mut touch = tx.prepare_cached("UPDATE vectors SET used = ?2 WHERE key = ?1")?;
+            let mut added = 0i64;
             for (key, variant, vector) in fresh {
                 let bytes: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
-                put.execute(params![&key[..], variant, bytes, now])?;
+                // Already there when another process embedded it meanwhile.
+                if put.execute(params![&key[..], variant, bytes, now])? == 0 {
+                    touch.execute(params![&key[..], now])?;
+                } else {
+                    added += 1;
+                }
             }
-            let mut touch = tx.prepare_cached("UPDATE vectors SET used = ?2 WHERE key = ?1")?;
             for key in hits {
                 touch.execute(params![&key[..], now])?;
             }
@@ -185,6 +213,7 @@ impl Cache {
             )?;
             count.execute(params!["hits", hits.len() as i64])?;
             count.execute(params!["lookups", lookups as i64])?;
+            count.execute(params!["rows", added])?;
         }
         tx.commit()?;
         self.evict(cap_bytes())
@@ -193,29 +222,29 @@ impl Cache {
     /// Drop the least recently used rows until the cache is under 90 % of
     /// `cap`, so a run that just crossed it does not evict again on the next.
     pub fn evict(&mut self, cap: u64) -> Result<()> {
-        let rows: u64 = self
-            .db
-            .query_row("SELECT COUNT(*) FROM vectors", [], |r| r.get::<_, i64>(0))?
-            as u64;
+        let rows = self.rows()?;
         if cap == 0 || rows * ROW_BYTES <= cap {
             return Ok(());
         }
         let keep = cap * 9 / 10 / ROW_BYTES;
         let drop = rows.saturating_sub(keep);
-        self.db.execute(
+        let tx = self.db.transaction()?;
+        let gone = tx.execute(
             "DELETE FROM vectors WHERE key IN
                  (SELECT key FROM vectors ORDER BY used ASC, key ASC LIMIT ?1)",
             params![drop as i64],
         )?;
+        tx.execute(
+            "UPDATE counts SET v = v - ?1 WHERE k = 'rows'",
+            params![gone as i64],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
     /// Rows, bytes they are counted at, and the lifetime hit rate.
     pub fn stats(&self) -> Result<Stats> {
-        let rows = self
-            .db
-            .query_row("SELECT COUNT(*) FROM vectors", [], |r| r.get::<_, i64>(0))?
-            as u64;
+        let rows = self.rows()?;
         let count = |k: &str| -> u64 {
             self.db
                 .query_row("SELECT v FROM counts WHERE k = ?1", params![k], |r| {
@@ -324,6 +353,12 @@ mod tests {
         let fresh: Vec<([u8; 32], &'static str, &[f32])> =
             keys.iter().map(|k| (*k, "x", v.as_slice())).collect();
         cache.record(&fresh, &[], 10).unwrap();
+        cache.record(&fresh, &[], 0).unwrap();
+        assert_eq!(
+            cache.stats().unwrap().rows,
+            10,
+            "a key recorded twice is one row"
+        );
         let got = cache.get(&keys[3]).unwrap();
         assert_eq!(
             got.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),

@@ -901,6 +901,10 @@ rc_markdown() {
 # `rc_start <tag> [VAR=value ...]`: a daemon on its own home, up and holding a
 # token, or a non-zero status with its log beside it.
 #
+# The vector cache is off unless a caller turns it on: these checks watch runs
+# as they go, and a second check indexing the same generated text would have
+# every vector from the cache and finish before it could be watched.
+#
 # The port is whichever of these the daemon manages to bind, and never 7365:
 # that is the port a developer's own daemon holds. Asking the daemon rather
 # than probing first, because a probe that finds a port free says nothing
@@ -912,7 +916,7 @@ rc_start() {
   rc_home="$rc_dir/home"
   mkdir -p "$rc_home"
   for rc_port in 7481 7483 7487 7489 7491 7493 7497 7499; do
-    env "$@" SEMLITH_HOME="$rc_home" semlith start --port "$rc_port" > "$rc_dir/daemon.out" 2>&1 &
+    env SEMLITH_VECTOR_CACHE_MB=0 "$@" SEMLITH_HOME="$rc_home" semlith start --port "$rc_port" > "$rc_dir/daemon.out" 2>&1 &
     rc_pid=$!
     rc_token=""
     i=0

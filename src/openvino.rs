@@ -123,6 +123,15 @@ impl Session {
         let env = ort::environment::Environment::current().context("starting ONNX Runtime")?;
         let devices = crate::trt::plugin_devices(&env, "openvino", &pack.join(plugin_file()))?;
         let names: Vec<String> = devices.iter().map(ov_device).collect();
+        // The plugin offers a device only where the hardware's vendor is
+        // Intel: an AMD CPU with no Intel GPU gets nothing, not even the CPU.
+        if names.is_empty() {
+            bail!(
+                "unavailable — OpenVINO offers Intel devices only, and this machine has none \
+                 ({})",
+                crate::system::cpu_name()
+            );
+        }
         let forced = std::env::var(DEVICE_ENV)
             .ok()
             .filter(|v| !v.trim().is_empty());

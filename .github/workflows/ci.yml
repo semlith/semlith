@@ -277,9 +277,17 @@ jobs:
           mkdir -p "$SEMLITH_HOME"
           if [ "$RUNNER_OS" != macOS ]; then
             # OpenVINO's CPU device: the known answer, which proves the plugin
-            # loads into this build's ONNX Runtime and computes granite right.
+            # loads into this build's ONNX Runtime and computes granite right. The
+            # plugin offers Intel hardware only, and a hosted runner's CPU may be
+            # AMD: there the lane must say so, and the known answer waits for a
+            # run that lands on an Intel runner.
             SEMLITH_ACCEL=openvino SEMLITH_OPENVINO_DEVICE=CPU "$bin" doctor --gpu --json | tee ov.json
-            jq -e '.[] | select(.lane == "openvino") | .passed == true and .cosine >= 0.999' ov.json
+            if { grep -m1 vendor_id /proc/cpuinfo 2>/dev/null || echo "${PROCESSOR_IDENTIFIER:-}"; } | grep -q GenuineIntel; then
+              jq -e '.[] | select(.lane == "openvino") | .passed == true and .cosine >= 0.999' ov.json
+            else
+              jq -e '.[] | select(.lane == "openvino") | .reason | contains("Intel devices only")' ov.json
+              echo "::notice::OpenVINO known answer not run: this runner's CPU is not Intel"
+            fi
             # TensorRT for RTX: the pack fetches and verifies, and with no RTX
             # card the lane says so and names the fallback.
             "$bin" accel on trt

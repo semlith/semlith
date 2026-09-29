@@ -6438,11 +6438,8 @@ mod tests {
                     .to_string()
             })
             .collect();
-        assert_eq!(
-            names.first().map(String::as_str),
-            Some("src/main.rs"),
-            "{names:?}"
-        );
+        let main = Path::new("src").join("main.rs").display().to_string();
+        assert_eq!(names.first(), Some(&main), "{names:?}");
         assert_eq!(names.len(), 3, "{names:?}");
     }
 

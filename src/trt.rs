@@ -394,7 +394,14 @@ pub(crate) mod native {
             let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
             #[cfg(windows)]
             let handle = unsafe { LoadLibraryA(name.as_ptr()) };
-            (!handle.is_null()).then_some(Self(handle))
+            // Never `then_some(Self(handle))`: that builds the value first,
+            // and a `Library(null)` dropped unused is `dlclose(NULL)`, a
+            // segfault on every Linux machine without NVIDIA's driver.
+            if handle.is_null() {
+                None
+            } else {
+                Some(Self(handle))
+            }
         }
 
         /// # Safety

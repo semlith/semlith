@@ -3696,28 +3696,17 @@ const CLI_LEDGER: semlith::ledger::Who<'static> = semlith::ledger::Who {
 /// Exit quietly when whoever was reading our output goes away.
 ///
 /// `semlith files | head` is the most ordinary thing anyone types, and it
-/// printed a panic and a non-zero status (#75). Two halves, because the
-/// mechanism differs:
+/// printed a panic and a non-zero status (#75). The Rust runtime ignores
+/// `SIGPIPE` on unix, so the write returns `EPIPE`; on Windows it fails with
+/// `BrokenPipe`. Either way `println!` panics, and the hook turns that one
+/// panic — and only that one — into a silent exit 0, which is what the reader
+/// closing the pipe means.
 ///
-/// On unix the Rust runtime sets `SIGPIPE` to `SIG_IGN` before `main`, so the
-/// write returns `EPIPE` and `println!` panics on it. Restoring the default
-/// makes the process end the way `cat` and `grep` do, and a shell reports the
-/// pipeline's status, which is the reader's.
-///
-/// On Windows there is no `SIGPIPE`: the write fails with `BrokenPipe` and
-/// reaches the same panic. The hook turns that one panic — and only that one —
-/// into a silent exit 0, which is what the reader closing the pipe means.
+/// `SIGPIPE` stays ignored. 0.17.1 restored its default on unix, and that
+/// killed the daemon without a word the moment it wrote its next batch to a
+/// lane worker that had died: a pipe write the process must survive to fail
+/// that lane and carry on.
 fn quiet_on_a_closed_pipe() {
-    #[cfg(unix)]
-    {
-        // SAFETY: called once, at the top of `main`, before any thread is
-        // spawned and before anything has been printed. `SIG_DFL` is what the
-        // process would have had if the Rust runtime had not changed it.
-        unsafe {
-            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-        }
-    }
-
     let inherited = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let said = info
