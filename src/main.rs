@@ -593,7 +593,8 @@ enum Command {
         gpu: bool,
     },
 
-    /// Which devices embed: the CPU, a GPU through WebGPU, and NVIDIA's CUDA.
+    /// Which devices embed: the CPU, a GPU, and the experimental accelerator
+    /// lanes (the Neural Engine, TensorRT, OpenVINO, llama.cpp).
     ///
     /// `status` names each lane, its device and whether it is on. `on` and
     /// `off` take effect at the next batch of every run. `remove` deletes a
@@ -602,7 +603,7 @@ enum Command {
         /// status, on, off or remove.
         #[arg(default_value = "status")]
         action: String,
-        /// cpu, gpu or cuda.
+        /// cpu, gpu, cuda, ane, trt, openvino or llama.
         lane: Option<String>,
         /// Machine-readable output.
         #[arg(long)]

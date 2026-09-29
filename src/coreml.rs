@@ -237,6 +237,16 @@ mod mac {
             let (pack, shared) = (pack.to_path_buf(), std::sync::Arc::clone(&buckets));
             std::thread::spawn(move || {
                 let _held = lock;
+                // At the priority a request from the user gets: a spawned
+                // thread's default took a bucket 44 s to compile on the M1
+                // against 27 s.
+                // SAFETY: sets this thread's own QoS class; no pointers.
+                unsafe {
+                    libc::pthread_set_qos_class_self_np(
+                        libc::qos_class_t::QOS_CLASS_USER_INITIATED,
+                        0,
+                    );
+                }
                 for bucket in rest {
                     // A bucket that will not load is left out: the longer
                     // ones already loaded carry its chunks.

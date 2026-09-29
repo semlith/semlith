@@ -1306,8 +1306,9 @@ percentage, then the lane's state.
 - **Neural Engine** is Core ML on Apple silicon, through the `coreml` pack. It
   is on by default once the pack is installed, and while it runs no CPU lane
   runs beside it. Its first start on a Mac compiles its models for that
-  machine, which takes minutes once: the row reads `compiling` with a
-  percentage and the time left, and runs wait for it unless the CPU or another
+  machine, about 40 s before it takes batches on the M1: the row reads
+  `compiling` with a percentage and the time left, counted down from how long
+  the last compile took, and runs wait for it unless the CPU or another
   lane is on. A download shows its percentage and time left the same way.
 - **GPU beside the Neural Engine** is a chip under the Neural Engine's row,
   shown where there is a Neural Engine, and the `gpu-beside-ane` switch of

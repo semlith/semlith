@@ -207,7 +207,7 @@ fn owner_only(path: &Path) -> bool {
 /// belonging to somebody else is one this file should not have named, which
 /// `owner_only` has already decided.
 #[cfg(unix)]
-fn alive(pid: u32) -> bool {
+pub(crate) fn alive(pid: u32) -> bool {
     // SAFETY: signal 0 delivers nothing; this is the documented liveness probe.
     unsafe {
         libc::kill(pid as i32, 0) == 0
@@ -216,7 +216,7 @@ fn alive(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn alive(_pid: u32) -> bool {
+pub(crate) fn alive(_pid: u32) -> bool {
     true
 }
 

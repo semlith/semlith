@@ -1127,10 +1127,24 @@ row keeps one key unmasked so its softmax never divides by zero.
 The models are built by CI from that directory, published as a pack on this
 repository's own release and pinned by digest in `src/packs.rs`. macOS compiles
 a model for the machine's Neural Engine the first time a process loads it —
-about three minutes for all six on the M1 — and caches the result for the
-program that loaded it: a binary at a new path compiles again, and a new binary
-at the same path sometimes does. So the daemon starts that compilation when it
-starts, the lane shows it as compiling with a percentage and the time left,
+30 to 43 s a bucket on the M1, one bucket at a time in a single system
+compiler service — and caches the result under the loading program's name:
+a new binary compiled all six again. So the Core ML lanes run from a copy of
+semlith under `accel/coreml-worker-v<N>` in the model cache, made once per
+worker protocol and never replaced by an upgrade, and a session is ready once
+its longest bucket has loaded (39 s cold, about 2 s cached), loading the other
+five on a thread of its own at the priority of a user's request (27 s a bucket
+against 44 s at a spawned thread's default). The worker is not retired for
+idling while that thread holds the compile lock: retiring it abandoned the
+compile half written. The lock also keeps a second semlith from queueing
+the same compile behind the first: the compiler service works through a
+killed program's requests anyway, and a backlog of them once kept a lane
+compiling for over two hours. The daemon deletes the half-written compiles a
+killed worker leaves (about 94 MB each), and the time the last compile took is
+the next one's time left. macOS empties the cache when the disk runs low, so a
+start on a nearly full disk may compile again. The daemon starts that
+compilation when it starts, the lane shows it as compiling with a percentage
+and the time left,
 and a run with no other lane on and the CPU switched off waits for it: the
 run card reads what it is waiting for instead of a rate.
 

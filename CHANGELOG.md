@@ -25,8 +25,10 @@ Neural Engine layout and converted to Core ML at fixed shapes places 3 375 of
 its 3 380 ops on the Neural Engine, and runs at 236.5 chunks/s on the M1 Air
 against the CPU's 30.7, with every vector at cosine ≥ 0.9999 against the fp32
 reference. `semlith setup` fetches the models (built in CI, pinned by digest);
-the first start compiles them for the Mac, about three minutes once, with its
-progress and the time left on Machine limits. A run waits for a lane that is
+the first start compiles them for the Mac, with its progress and the time left
+on Machine limits: the lane takes batches 39 s after it starts on the M1, once
+its longest bucket has compiled, and a later start, an upgrade included, is
+ready in about 2 s. A run waits for a lane that is
 on and still downloading, starting or compiling, and its card says what it is
 waiting for; the CPU carries a run only when it is switched on or no lane is
 ready or on its way. While the Neural Engine runs,
@@ -89,6 +91,20 @@ claimed for any of them. The CUDA lane becomes experimental too; a saved
 - A daemon stopped while an accelerator lane was restarting no longer waits
   for the lane: batches queued on a lane that is not ready go to the CPU.
 - A killed lane worker no longer takes the daemon down with it.
+- The Neural Engine no longer compiles for minutes on every start or fails
+  its start. Three causes. A worker with no batch for a minute was retired
+  even while it was still compiling, so the compile was abandoned half
+  written, the system's compiler went on with it anyway, and the next start
+  compiled it again: a backlog of those once left a lane compiling for over
+  two hours. macOS caches a compile under the program's name, so every new
+  binary compiled all six buckets again. And each start waited for all six.
+  A Core ML worker is now kept until its last bucket has loaded, runs from a
+  copy of semlith kept beside the models, is ready after its longest bucket,
+  compiles the rest at the priority of a user's request, lets one compile run
+  at a time, and deletes the 94 MB a killed compile leaves behind. On the M1:
+  ready 39 s after a cold start with all six compiled 2.5 min later, and
+  ready in 2.1 s on every start after that, an upgrade included, where it had
+  taken 15 min.
 
 ## [0.31.0] - 2026-09-28
 

@@ -151,8 +151,13 @@ weights are stored once per layout.
 On the M1 Air, every Neural Engine function places 99.85 % of its operations on
 the Neural Engine, and its vectors agree with the fp32 reference at cosine
 0.99998 or better on the 512-chunk fixture in `tests/fixtures/coreml`. The
-first load on a Mac compiles the models for that machine, about three minutes,
-and macOS keeps the result; a new semlith binary compiles them once more.
+first load on a Mac compiles the models for that machine: the lane is ready
+once the longest bucket has compiled (39 s on the M1) and compiles the other
+five behind it, about three minutes in all. macOS keeps the result for the
+program that compiled it, which is a copy of semlith kept beside the models, so
+a later start is ready in about 2 s and an upgrade does not compile again.
+macOS empties that cache when the disk runs low: with 13 GB free on the M1 it
+had within ten minutes, and the next start compiled again.
 
 ### The llama.cpp pack
 

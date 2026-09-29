@@ -58,6 +58,10 @@ const DEADLINE_ENV: &str = "SEMLITH_ACCEL_DEADLINE_MS";
 /// a Mac compiles every model for this machine: 163 s for all six on the M1.
 const HELLO_DEADLINE: Duration = Duration::from_secs(20 * 60);
 
+/// The time left shown for a Neural Engine compile this machine has never
+/// timed: the longest bucket took 35 to 43 s on the M1.
+const FIRST_COMPILE: Duration = Duration::from_secs(40);
+
 /// The longest a lane may take to start however alive it says it is: a
 /// compile that never finishes fails the lane, and the CPU takes the run.
 const START_CAP: Duration = Duration::from_secs(60 * 60);
@@ -298,6 +302,10 @@ pub struct Lane {
     /// When the compile or download under way began, when its percentage
     /// last moved, and to what: its time left counts down from these.
     began: Mutex<Option<(Instant, Instant, u8)>>,
+    /// How long this lane's last compile took on this machine, for a time
+    /// left before the compile has moved: the Neural Engine's first bucket
+    /// is a single step of half a minute.
+    expected: Mutex<Option<Duration>>,
 }
 
 impl Lane {
@@ -312,6 +320,7 @@ impl Lane {
             chunks: AtomicU64::new(0),
             jobs: Mutex::new(None),
             began: Mutex::new(None),
+            expected: Mutex::new(None),
         }
     }
 
@@ -345,8 +354,18 @@ impl Lane {
         // A compile moves in steps (a sixth at a time on the Neural Engine),
         // and a guess from the total time so far climbed between steps.
         let began = *self.began.lock().unwrap_or_else(|e| e.into_inner());
+        let expected = *self.expected.lock().unwrap_or_else(|e| e.into_inner());
+        let compiling = matches!(status, Status::Compiling { .. });
         let left = || {
             let (start, step, at) = began?;
+            if at == 0 && compiling {
+                let whole = expected?.as_millis() as u64;
+                return Some(
+                    whole
+                        .saturating_sub(start.elapsed().as_millis() as u64)
+                        .max(1_000),
+                );
+            }
             if at == 0 || at >= 100 {
                 return None;
             }
@@ -1064,6 +1083,13 @@ fn dispatch(lane: Arc<Lane>, jobs: mpsc::Receiver<Job>) {
             match jobs.recv_timeout(WORKER_IDLE) {
                 Ok(job) => Some(job),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Not while a Core ML worker is still compiling the rest
+                    // of its buckets: killing it abandoned the compile half
+                    // written, the system's compiler went on with it anyway,
+                    // and the next start compiled it again.
+                    if worker.is_some() && matches!(lane.id, "ane" | "gpu") && coreml_compiling() {
+                        continue;
+                    }
                     // Idle: the worker goes, and its device memory with it.
                     if worker.take().is_some() && lane.status() == Status::Active {
                         lane.set(Status::Idle);
@@ -1399,6 +1425,40 @@ pub fn coreml_worker(cache: &Path) -> Result<PathBuf> {
     Ok(exe)
 }
 
+/// Where macOS keeps what it compiled for the Core ML worker, which is named
+/// `semlith`: under the program's name in the user's caches.
+const E5_CACHE: &str = "Library/Caches/semlith/com.apple.e5rt.e5bundlecache";
+
+/// Delete the compiles macOS was writing for a worker that was killed: each
+/// stays behind as a `<hash>.tmp.<pid>_<n>.bundle` of about 94 MB that nothing
+/// reads or removes. They matter beyond the space: macOS empties its compile
+/// cache when the disk runs low, and on a Mac with 13 GB free it had emptied
+/// all six buckets within ten minutes, so the next start compiled again.
+fn sweep_abandoned_compiles(root: &Path) {
+    let within = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>()
+    };
+    for build in within(root) {
+        for key in within(&build) {
+            for bundle in within(&key) {
+                let name = bundle.file_name().unwrap_or_default().to_string_lossy();
+                let pid = name
+                    .split_once(".tmp.")
+                    .and_then(|(_, rest)| rest.split('_').next())
+                    .and_then(|pid| pid.parse::<u32>().ok());
+                if pid.is_some_and(|pid| !crate::daemon::alive(pid)) {
+                    let _ = std::fs::remove_dir_all(&bundle);
+                }
+            }
+        }
+    }
+}
+
 /// Held by a Core ML worker while it loads its models: macOS compiles them one
 /// program at a time, and a second semlith asking for the same compile while
 /// the first is under way only queued another minutes-long compile behind it.
@@ -1416,6 +1476,18 @@ pub fn coreml_compile_lock() -> Option<std::fs::File> {
     Some(file)
 }
 
+/// Whether a Core ML worker holds the compile lock, which it does until the
+/// last of its buckets has loaded.
+fn coreml_compiling() -> bool {
+    cfg!(target_os = "macos")
+        && crate::model_cache_dir().is_ok_and(|cache| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(cache.join("accel").join("coreml-compile.lock"))
+                .is_ok_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+        })
+}
+
 /// Start a lane's worker: fetch what it needs, spawn it, and read its hello,
 /// which carries the known-answer check. A worker loading models for the
 /// first time says how far it has got before it says hello.
@@ -1424,6 +1496,9 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
     args.extend(worker_args(lane)?);
     lane.set(Status::Starting);
     let exe = if cfg!(target_os = "macos") && matches!(args[1].as_str(), "ane" | "gpu-coreml") {
+        if let Ok(home) = crate::home::user_home() {
+            sweep_abandoned_compiles(&home.join(E5_CACHE));
+        }
         coreml_worker(&crate::model_cache_dir()?)?
     } else {
         std::env::current_exe().context("locating this binary")?
@@ -1459,6 +1534,16 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
     // failed for taking its turn.
     let mut started = Instant::now();
     let began = Instant::now();
+    let timed = crate::model_cache_dir()
+        .ok()
+        .map(|cache| component_dir(&cache, &format!("{}.compile-ms", lane.id)));
+    *lane.expected.lock().unwrap_or_else(|e| e.into_inner()) = timed
+        .as_deref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|ms| ms.trim().parse().ok())
+        .map(Duration::from_millis)
+        .or((lane.id == "ane").then_some(FIRST_COMPILE));
+    let mut compiled = None;
     let hello = loop {
         if began.elapsed() > START_CAP {
             bail!(
@@ -1483,6 +1568,7 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
         }
         if let (Some(done), Some(of)) = (value["loaded"].as_u64(), value["of"].as_u64()) {
             started = Instant::now();
+            compiled.get_or_insert(started);
             lane.set(Status::Compiling {
                 percent: (done * 100 / of.max(1)).min(100) as u8,
                 eta_ms: None,
@@ -1491,6 +1577,13 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
         }
         break value;
     };
+    // A load that compiled is the next one's time left; one served from
+    // macOS's cache says nothing about the next compile.
+    if let (Some(since), Some(path)) = (compiled, timed)
+        && since.elapsed() >= Duration::from_secs(10)
+    {
+        let _ = std::fs::write(path, since.elapsed().as_millis().to_string());
+    }
     if hello["ok"].as_bool() != Some(true) {
         let reason = hello["reason"].as_str().unwrap_or("no reason given");
         if hello["unavailable"].as_bool() == Some(true) {
@@ -1932,15 +2025,19 @@ mod tests {
             eta_ms: None,
         });
         assert!(lane.coming() && !lane.ready());
-        std::thread::sleep(Duration::from_millis(1100));
-        lane.set(Status::Compiling {
-            percent: 50,
-            eta_ms: None,
-        });
+        // Before it has moved, the time the last compile took counts down.
+        *lane.expected.lock().unwrap() = Some(Duration::from_secs(40));
         let eta = |lane: &Lane| match lane.status() {
             Status::Compiling { eta_ms, .. } => eta_ms.unwrap(),
             other => panic!("{other:?}"),
         };
+        assert!((39_000..=40_000).contains(&eta(&lane)));
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(eta(&lane) <= 39_000);
+        lane.set(Status::Compiling {
+            percent: 50,
+            eta_ms: None,
+        });
         let first = eta(&lane);
         assert!((1_000..=1_200).contains(&first), "{first}");
         std::thread::sleep(Duration::from_millis(300));
@@ -1950,6 +2047,26 @@ mod tests {
         assert!(!lane.coming());
         lane.set(Status::Active);
         assert!(lane.ready() && !lane.coming());
+    }
+
+    /// A compile left by a killed worker is deleted; one still being written
+    /// and a finished one are not.
+    #[cfg(unix)]
+    #[test]
+    fn abandoned_compiles_are_swept_and_nothing_else() {
+        let root = tempfile::tempdir().unwrap();
+        let key = root.path().join("26A428").join("3BADE4");
+        let bundle = |name: &str| {
+            let path = key.join(name);
+            std::fs::create_dir_all(path.join("H13G.bundle")).unwrap();
+            path
+        };
+        let dead = bundle("E3A0.tmp.999999999_1.bundle");
+        let live = bundle(&format!("E3A0.tmp.{}_1.bundle", std::process::id()));
+        let done = bundle("E3A0.bundle");
+        sweep_abandoned_compiles(root.path());
+        assert!(!dead.exists());
+        assert!(live.exists() && done.exists());
     }
 
     #[test]
