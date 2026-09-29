@@ -4138,7 +4138,11 @@ impl Semlith {
                 stopped = true;
                 return false;
             }
-            if let Some(n) = progress.due(&batched) {
+            // Silent while paused: what lands meanwhile is counted, and said
+            // with the first line after the resume, so a paused run holds still.
+            if !paused.load(std::sync::atomic::Ordering::Relaxed)
+                && let Some(n) = progress.due(&batched)
+            {
                 tick(n);
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -4176,13 +4180,17 @@ impl Semlith {
             match got {
                 Some(done) => {
                     self.land(done.map_err(anyhow::Error::msg)?, report, run_lanes, cached)?;
-                    tick(report);
+                    if !paused.load(std::sync::atomic::Ordering::Relaxed) {
+                        tick(report);
+                    }
                 }
                 None => {
                     if !ask(paused) {
                         return Ok(false);
                     }
-                    if let Some(n) = progress.due(&running.batched) {
+                    if !paused.load(std::sync::atomic::Ordering::Relaxed)
+                        && let Some(n) = progress.due(&running.batched)
+                    {
                         report.batched = n;
                         tick(report);
                     }

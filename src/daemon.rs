@@ -768,8 +768,13 @@ impl RunState {
             }
             Some(kind @ ("file" | "progress")) => {
                 // A card asked to pause or stop keeps saying so until the
-                // engine answers; a file line is not that answer.
-                if !matches!(self.status, RunStatus::Pausing | RunStatus::Stopping) {
+                // engine answers; a file line is not that answer. Nor does one
+                // end a pause: only `resumed` does, and a batch that was in
+                // flight when the pause came may still report after it.
+                if !matches!(
+                    self.status,
+                    RunStatus::Pausing | RunStatus::Paused | RunStatus::Stopping
+                ) {
                     self.status = RunStatus::Running;
                 }
                 // A `writing` line is the run saying it has stopped reading
