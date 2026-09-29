@@ -1337,7 +1337,7 @@ c_daemon_rate() {
     powershell -NoProfile -Command "(Get-Process -Id $winpid).PriorityClass = 'BelowNormal'" ||
       { echo "could not lower the daemon's priority"; return 1; }
   fi
-  cli="" served="" ratios=""
+  cli="" served="" ratios="" runs_seen=""
   for i in 1 2 3; do
     t=$(now_ms)
     # The cache off here as in the daemon beside it: the three runs index the
@@ -1370,12 +1370,16 @@ c_daemon_rate() {
     [ "$got" = "$chunks" ] || { echo "the daemon made $got chunks and the CLI $chunks"; return 1; }
     d=$(( got * 1000000 / ms ))
     served="$served $d"
+    # Where the daemon's time went, for a failure to be read rather than
+    # guessed at: its own clock, its wait in the queue, and its stages.
+    runs_seen="$runs_seen
+  run $i: ${ms} ms by this clock; $(rc_run "$s" | jq -c '{elapsed_ms, queued_ms, stages}')"
     ratios="$ratios $(( d * 100 / c ))"
   done
   # Milli-chunks per second, so the integer arithmetic keeps three places.
   r=$(median3 $ratios)
   echo "CLI$cli, daemon$served (chunks/s x 1000); daemon as % of the CLI run beside it:$ratios"
-  [ "$r" -ge 85 ] || { echo "the daemon ran at a median $r % of the CLI, under 85 %"; return 1; }
+  [ "$r" -ge 85 ] || { echo "the daemon ran at a median $r % of the CLI, under 85 %:$runs_seen"; return 1; }
 }
 
 if rc_start rate SEMLITH_ACCEL=cpu; then
