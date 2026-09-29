@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["vector-search", "embeddings", "rag", "mcp", "semantic-search"]
 categories = ["command-line-utilities", "database", "text-processing"]
 # CI config and local credentials are not part of the crate.
-exclude = [".env", ".github"]
+exclude = [".env", ".github", "packs", "tests/fixtures/coreml"]
 
 [dependencies]
 anyhow = "1.0.104"

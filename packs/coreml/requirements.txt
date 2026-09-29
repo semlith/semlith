@@ -1,0 +1,13 @@
+# Exact versions the 2026-09-28 M1 bench converted and measured with (Python 3.11).
+# A different torch or coremltools changes the traced graph and so the pack's bytes;
+# bump them only together with PACK_VERSION.
+torch==2.7.0
+transformers==5.17.0
+coremltools==9.0
+numpy==2.2.6
+tokenizers==0.23.2
+huggingface-hub==1.33.0
+safetensors==0.8.0
+protobuf==4.25.9
+sympy==1.14.0
+pyobjc-framework-CoreML==12.2.2
