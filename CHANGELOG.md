@@ -83,6 +83,16 @@ claimed for any of them. The CUDA lane becomes experimental too; a saved
 - `semlith doctor --gpu` printed `n/a` for a lane that failed its check; it
   prints `FAIL`.
 - A pack that fails its digest is deleted whole, not left half-unpacked.
+- The GPU lane through Core ML was sent batches of one to three chunks on a
+  model that computes eight at a time, so three quarters of its work was
+  padding, and the lane's pace, read from those batches and charged for the
+  wait of a second batch queued behind the first, cut the next batch further.
+  A lane's batch is now a whole number of the model's calls, and its pace is
+  its own time on the device. With the Neural Engine off, the M1 indexes at
+  62.7 chunks/s p10 where it indexed at 16.0; the release's gate for that
+  case, 80, is not met (#164).
+- `semlith stats` names every lane that is on, the Neural Engine and the
+  experimental lanes included; it named only the CPU, the GPU and CUDA.
 - `semlith accel status` shows the running daemon's lanes, so a Neural Engine
   compiling in the daemon no longer reads as idle in the terminal.
 - A run's rate counts vectors that have landed, not rows written ahead of them.

@@ -132,6 +132,25 @@ pub struct Enabled {
 }
 
 impl Enabled {
+    /// The lanes switched on, as `stats` and `semlith_stats` name them:
+    /// experimental ones said so.
+    pub fn named(&self) -> Vec<String> {
+        let mut lanes = Vec::new();
+        if self.cpu {
+            lanes.push("cpu".to_string());
+        }
+        for spec in SPECS {
+            if spec.id != "worker" && self.lane(spec.id) {
+                lanes.push(if spec.experimental {
+                    format!("{} (experimental)", spec.id)
+                } else {
+                    spec.id.to_string()
+                });
+            }
+        }
+        lanes
+    }
+
     pub fn lane(&self, id: &str) -> bool {
         match id {
             "cpu" => self.cpu,
@@ -334,6 +353,17 @@ impl Lane {
             // Four rows a call, so several calls a batch keep it busy.
             "ane" => (1_024, 4_096, 12_288),
             _ => (512, 4_096, 16_384),
+        }
+    }
+
+    /// Rows the lane's model computes a call, whatever it is given: the Core
+    /// ML packs are converted at a fixed batch (the manifest's `batch`), and a
+    /// call with fewer rows computes the rest as padding.
+    pub fn rows_per_call(&self) -> usize {
+        match self.variant() {
+            "fp16-ane" => 4,
+            "fp16-coreml-gpu" => 8,
+            _ => 1,
         }
     }
 

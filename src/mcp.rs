@@ -1171,20 +1171,7 @@ fn call_tool(
             }
             // The lanes that embed, once for the whole answer, experimental
             // ones said so.
-            let on = crate::accel::enabled();
-            let mut lanes: Vec<String> = Vec::new();
-            if on.cpu {
-                lanes.push("cpu".to_string());
-            }
-            for spec in crate::accel::SPECS {
-                if spec.id != "worker" && on.lane(spec.id) {
-                    lanes.push(if spec.experimental {
-                        format!("{} (experimental)", spec.id)
-                    } else {
-                        spec.id.to_string()
-                    });
-                }
-            }
+            let lanes = crate::accel::enabled().named();
             lines.push(format!("embedding lanes on: {}", lanes.join(", ")));
             // The machine's vector cache, shared by every store.
             lines.push(format!("vector cache: {}", crate::cache::stats().line()));

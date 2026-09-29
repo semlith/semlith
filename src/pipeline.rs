@@ -1001,9 +1001,10 @@ impl Active {
     }
 
     /// Up to `budget` padded tokens: rows times the longest row, which is what
-    /// the device computes. The CPU (`from_back` false) takes what only it may
-    /// first.
-    fn take(&mut self, from_back: bool, budget: usize) -> Vec<usize> {
+    /// the device computes, in a whole number of `per_call` rows where there
+    /// are that many: a model converted at a fixed batch computes the rest as
+    /// padding. The CPU (`from_back` false) takes what only it may first.
+    fn take(&mut self, from_back: bool, budget: usize, per_call: usize) -> Vec<usize> {
         let mut out = Vec::new();
         let mut longest = 0;
         loop {
@@ -1026,7 +1027,7 @@ impl Active {
             let Some((at, taken)) = next else { break };
             let len = self.pieces[at].len().max(1);
             let cost = (out.len() + 1) * longest.max(len);
-            if !out.is_empty() && cost > budget {
+            if !out.is_empty() && cost > budget && out.len() % per_call.max(1) == 0 {
                 break;
             }
             longest = longest.max(len);
@@ -1192,6 +1193,9 @@ fn schedule(
     // Windows retire from the front; `base` is the sequence of `active[0]`.
     let mut base = 0usize;
     let mut pace: HashMap<&'static str, Pace> = HashMap::new();
+    // When each target last gave a batch back: a batch queued behind another
+    // is busy from then, not from when it was sent.
+    let mut last_back: HashMap<&'static str, Instant> = HashMap::new();
     loop {
         if abort.load(Ordering::Relaxed) {
             return;
@@ -1273,7 +1277,11 @@ fn schedule(
                         let n = window.cpu_only.len();
                         window.cpu_only.drain(..n).collect()
                     } else {
-                        window.take(from_back, want)
+                        let per_call = match target {
+                            Target::Lane(lane) => lane.rows_per_call(),
+                            Target::Cpu => 1,
+                        };
+                        window.take(from_back, want, per_call)
                     };
                     if group.is_empty() {
                         break;
@@ -1334,7 +1342,17 @@ fn schedule(
                         busy: Duration::ZERO,
                     });
                     entry.tokens += tokens as u64;
-                    entry.busy += sent.elapsed();
+                    // Its own time on the device. Counted from when it was
+                    // sent, a second batch in flight was charged the first's
+                    // time too, the pace read half what it was, the next batch
+                    // was cut to match, and the GPU lane settled at two rows a
+                    // batch on a model that computes eight.
+                    let now = Instant::now();
+                    let from = last_back
+                        .get(target.id())
+                        .map_or(sent, |&back| back.max(sent));
+                    entry.busy += now.saturating_duration_since(from);
+                    last_back.insert(target.id(), now);
                     let mut kept = 0;
                     for (at, vector) in group.iter().zip(vectors) {
                         // Checked on every lane, the CPU's included: a vector
@@ -1438,30 +1456,41 @@ mod tests {
             hashes: vec![Some([1; 32]), Some([2; 32])],
         });
         assert_eq!(w.left, 1);
-        assert_eq!(w.take(true, 100), vec![1]);
+        assert_eq!(w.take(true, 100, 1), vec![1]);
         assert!(!w.untaken(true));
         assert_eq!(w.rows[0], ("fp16-ane", true));
         assert_eq!(w.lanes["cache"], 1);
     }
 
     #[test]
+    fn a_fixed_batch_lane_takes_whole_calls_of_rows() {
+        let mut w = window(&[100; 20]);
+        // A budget of two rows still takes eight, the model's batch.
+        assert_eq!(w.take(true, 200, 8).len(), 8);
+        // Past the budget only as far as the end of that call.
+        assert_eq!(w.take(true, 300, 8).len(), 8);
+        // Fewer left than a call: whatever is left.
+        assert_eq!(w.take(true, 200, 8).len(), 4);
+    }
+
+    #[test]
     fn the_cpu_takes_the_shortest_and_a_lane_the_longest_within_a_budget() {
         let mut w = window(&[10, 300, 20, 200, 30]);
         // Front: 10, 20, 30 cost 3 x 30 = 90 padded tokens.
-        assert_eq!(w.take(false, 90), vec![0, 2, 4]);
+        assert_eq!(w.take(false, 90, 1), vec![0, 2, 4]);
         // Back: 300 alone, since 300 + 200 would be 2 x 300.
-        assert_eq!(w.take(true, 500), vec![1]);
-        assert_eq!(w.take(true, 500), vec![3]);
+        assert_eq!(w.take(true, 500, 1), vec![1]);
+        assert_eq!(w.take(true, 500, 1), vec![3]);
         assert!(!w.untaken(false));
     }
 
     #[test]
     fn a_batch_always_takes_one_even_over_budget_and_retries_come_first() {
         let mut w = window(&[1000, 5]);
-        assert_eq!(w.take(true, 10), vec![0]);
+        assert_eq!(w.take(true, 10, 1), vec![0]);
         w.retry.push_back(0);
-        assert_eq!(w.take(false, 10), vec![0]);
-        assert_eq!(w.take(false, 10), vec![1]);
+        assert_eq!(w.take(false, 10, 1), vec![0]);
+        assert_eq!(w.take(false, 10, 1), vec![1]);
     }
 
     #[test]
@@ -1475,13 +1504,13 @@ mod tests {
     #[test]
     fn only_the_cpu_takes_what_the_guard_handed_back() {
         let mut w = window(&[10, 20, 30]);
-        assert_eq!(w.take(true, 30), vec![2]);
+        assert_eq!(w.take(true, 30, 1), vec![2]);
         w.cpu_only.push_back(2);
         assert!(!w.untaken(false) || w.front < w.back);
         // An accelerator never sees position 2 again; the CPU takes it first.
-        assert_eq!(w.take(true, 1000), vec![1, 0]);
+        assert_eq!(w.take(true, 1000, 1), vec![1, 0]);
         assert!(w.untaken(true));
-        assert_eq!(w.take(false, 1000), vec![2]);
+        assert_eq!(w.take(false, 1000, 1), vec![2]);
     }
 
     #[test]
