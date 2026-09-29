@@ -79,6 +79,13 @@ claimed for any of them. The CUDA lane becomes experimental too; a saved
 - `semlith accel status` shows the running daemon's lanes, so a Neural Engine
   compiling in the daemon no longer reads as idle in the terminal.
 - A run's rate counts vectors that have landed, not rows written ahead of them.
+- The portal's pages no longer wait seconds on a large store: the Stores
+  figures read how many lines each file spans from a new index on the chunks
+  table instead of every chunk's text (14 s to 0.2 s on a 600 MB store). It is
+  built once when a store is first opened by 0.32.0.
+- A daemon stopped while an accelerator lane was restarting no longer waits
+  for the lane: batches queued on a lane that is not ready go to the CPU.
+- A killed lane worker no longer takes the daemon down with it.
 
 ## [0.31.0] - 2026-09-28
 

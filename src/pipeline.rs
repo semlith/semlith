@@ -31,6 +31,10 @@ use std::time::{Duration, Instant};
 /// scheduler to hand it the next batch while it finishes the one it has.
 pub const LANE_DEPTH: usize = 2;
 
+/// How long a batch waits on a lane that is no longer ready before it is
+/// handed to another target.
+const LANE_GONE: Duration = Duration::from_secs(2);
+
 /// Windows the embed stage works on at once. A lane that finishes the oldest
 /// window's work moves on to the next one rather than idling at the boundary;
 /// more than this is memory with nothing to gain.
@@ -1344,6 +1348,19 @@ fn schedule(
                     batched.fetch_add(kept, Ordering::Relaxed);
                     *window.variants.entry(variant).or_default() += kept;
                     *window.lanes.entry(target.id()).or_default() += kept;
+                }
+                // A lane that stopped being ready with a batch still queued on
+                // it — switched off, failed, or restarted and compiling again,
+                // which is minutes — gives the batch back to the window for
+                // whichever target can take it now. A run waited on it for as
+                // long as the lane took to start, and a daemon told to stop
+                // waited with it.
+                Err(true)
+                    if matches!(&target, Target::Lane(lane) if !lane.ready())
+                        && sent.elapsed() > LANE_GONE =>
+                {
+                    moved = true;
+                    window.retry.extend(group);
                 }
                 Err(true) => still.push((target, seq, group, answer, sent, tokens)),
                 // Failed, lost, or the wrong shape: back on the window, first

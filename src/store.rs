@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 
 CREATE INDEX IF NOT EXISTS chunks_file_id ON chunks(file_id);
+-- How many lines each file spans, for the Stores page, read from the index
+-- alone: without it that is every chunk's text off disk, fourteen seconds on
+-- a 600 MB store, and the portal draws nothing until it has the answer.
+CREATE INDEX IF NOT EXISTS chunks_file_end ON chunks(file_id, end_line);
 -- A search asks whether anything is still being embedded, and which of its
 -- keyword candidates are; without this that is a scan of every file row.
 CREATE INDEX IF NOT EXISTS files_hash ON files(hash);
