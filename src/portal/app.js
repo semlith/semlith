@@ -7624,7 +7624,17 @@ function accelSection() {
       }
       paintSwitch(r, !!lane.enabled);
       const name = lane.label || LANE_NAMES[lane.lane] || lane.lane;
-      setText(r.name, `${name} · ${lane.device || "no device found"}${lane.variant ? ` · ${lane.variant}` : ""}`);
+      // The device is named by the lane's worker when it starts. Before
+      // then it is not "no device": it is not asked yet, or still on its way.
+      const state = lane.status?.state;
+      const device =
+        lane.device ||
+        (state === "unavailable" || state === "failed"
+          ? "no device found"
+          : LANE_MOVING.has(state)
+            ? "starting"
+            : "not started");
+      setText(r.name, `${name} · ${device}${lane.variant ? ` · ${lane.variant}` : ""}`);
       r.badge.hidden = !lane.experimental;
       setText(r.where, `${r.enabled ? "" : "off · "}${laneState(lane.status)}`);
       setText(r.share, `${Math.round(lane.share || 0)} %`);
