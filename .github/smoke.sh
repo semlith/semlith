@@ -1342,8 +1342,14 @@ c_daemon_rate() {
     t=$(now_ms)
     # The cache off here as in the daemon beside it: the three runs index the
     # same text, and the second and third would come from the cache.
+    # On macOS the daemon's index threads run at Utility QoS, by design from
+    # 0.32.0, so the terminal run is clamped to the same class; on Windows it
+    # is put below normal just after it starts, below. What the check then
+    # measures is the daemon throttled by anything other than its class.
+    clamp=""
+    [ "$platform" = macos ] && clamp="taskpolicy -c utility"
     SEMLITH_ACCEL=cpu SEMLITH_VECTOR_CACHE_MB=0 \
-      semlith --store "$rc_dir/cli-store-$i" index "$(native_path "$rc_dir/cli-$i")" --no-review --verbose \
+      $clamp semlith --store "$rc_dir/cli-store-$i" index "$(native_path "$rc_dir/cli-$i")" --no-review --verbose \
       > "$rc_dir/cli-$i.out" 2>&1 &
     cpid=$!
     # From 0.32.0 the daemon indexes below normal on Windows whatever it is
@@ -1374,8 +1380,8 @@ c_daemon_rate() {
     # Where the daemon's time went, for a failure to be read rather than
     # guessed at: its own clock, its wait in the queue, and its stages.
     runs_seen="$runs_seen
-  run $i: ${ms} ms by this clock; $(rc_run "$s" | jq -c '{elapsed_ms, queued_ms, stages}')
-  terminal $i: $(grep -m1 '^stages over' "$rc_dir/cli-$i.out" | tr -d '\r')"
+  run $i: ${ms} ms by this clock; $(rc_run "$s" | jq -c '{threads, lanes, elapsed_ms, queued_ms, stages}')
+  terminal $i: $(grep -E -m3 '^stages over|thread|lane' "$rc_dir/cli-$i.out" | tr -d '\r' | tr '\n' ' ')"
     ratios="$ratios $(( d * 100 / c ))"
   done
   # Milli-chunks per second, so the integer arithmetic keeps three places.
