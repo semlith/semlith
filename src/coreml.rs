@@ -139,12 +139,56 @@ mod mac {
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL};
     use std::path::PathBuf;
 
-    /// One family of compiled models, loaded, and the shape they take.
+    /// One family of compiled models, loaded, and the shape they take. The
+    /// buckets are shared with the thread still loading the rest of them.
     pub struct Session {
         kind: Kind,
         batch: usize,
-        buckets: Vec<(usize, Retained<MLModel>)>,
+        buckets: Loaded,
         device: String,
+    }
+
+    /// The buckets loaded so far, by length, shared with the loading thread.
+    type Loaded = std::sync::Arc<std::sync::Mutex<Vec<(usize, std::sync::Arc<Model>)>>>;
+
+    /// A loaded model, handed from the thread that loaded it to the one that
+    /// runs it.
+    pub struct Model(Retained<MLModel>);
+
+    // SAFETY: Core ML's models are safe to use from any thread once loaded;
+    // each is loaded on one thread and afterwards only predicted from.
+    unsafe impl Send for Model {}
+    // SAFETY: as above; a prediction does not mutate the model.
+    unsafe impl Sync for Model {}
+
+    /// Load one bucket of a family: its function of the multifunction model,
+    /// on the family's compute units. The first load of a model on a Mac
+    /// compiles it for the machine, which is what takes the time.
+    fn load(pack: &Path, kind: Kind, group: &Group, bucket: usize) -> Result<Retained<MLModel>> {
+        let path: PathBuf = pack.join(group.file.replace("{S}", &bucket.to_string()));
+        if !path.exists() {
+            bail!("the Core ML pack has no {}", path.display());
+        }
+        // One configuration per bucket: in a multifunction model the bucket
+        // is the function, named here, and without it every bucket would load
+        // the default function's shapes.
+        let config = unsafe { MLModelConfiguration::new() };
+        unsafe {
+            config.setComputeUnits(match kind {
+                Kind::NeuralEngine => MLComputeUnits::CPUAndNeuralEngine,
+                Kind::Gpu => MLComputeUnits::CPUAndGPU,
+            });
+            if let Some(function) = &group.function {
+                let name = function.replace("{S}", &bucket.to_string());
+                config.setFunctionName(Some(&NSString::from_str(&name)));
+            }
+        }
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+        // SAFETY: a file URL and a configuration this function made; the call
+        // returns a retained model or an error.
+        unsafe { MLModel::modelWithContentsOfURL_configuration_error(&url, &config) }
+            .map_err(error)
+            .with_context(|| format!("loading {}", path.display()))
     }
 
     fn error(e: Retained<objc2_foundation::NSError>) -> anyhow::Error {
@@ -152,10 +196,17 @@ mod mac {
     }
 
     impl Session {
-        /// Load every bucket of one family from an installed pack. The first
-        /// load of a model on a Mac compiles it for this machine's Neural
-        /// Engine (163 s for all six on the M1); later loads read that
-        /// compilation back (0.8 s).
+        /// Open a family from an installed pack, ready as soon as its longest
+        /// bucket has loaded: that one fits every chunk, so the lane takes
+        /// batches from then on, padded up to it. The other buckets load on a
+        /// thread of their own, the lengths most chunks fall in first, and
+        /// each is used from the batch after it arrives. A first load compiles
+        /// the models for this machine — about half a minute a bucket on the
+        /// M1 — so a lane that waited for all six waited three minutes; now it
+        /// waits for one.
+        ///
+        /// The compile lock is held until the last bucket has loaded, so
+        /// another semlith waits for this compile rather than queueing its own.
         pub fn open(
             pack: &Path,
             kind: Kind,
@@ -163,43 +214,42 @@ mod mac {
         ) -> Result<Self> {
             let manifest = manifest(pack)?;
             let group = match kind {
-                Kind::NeuralEngine => &manifest.ane,
-                Kind::Gpu => &manifest.gpu,
+                Kind::NeuralEngine => manifest.ane.clone(),
+                Kind::Gpu => manifest.gpu.clone(),
             };
-            let mut buckets = Vec::new();
-            for (n, bucket) in group.buckets.iter().enumerate() {
-                progress(n, group.buckets.len());
-                let path: PathBuf = pack.join(group.file.replace("{S}", &bucket.to_string()));
-                if !path.exists() {
-                    bail!("the Core ML pack has no {}", path.display());
-                }
-                // One configuration per bucket: in a multifunction model the
-                // bucket is the function, named here, and without it every
-                // bucket would load the default function's shapes.
-                let config = unsafe { MLModelConfiguration::new() };
-                unsafe {
-                    config.setComputeUnits(match kind {
-                        Kind::NeuralEngine => MLComputeUnits::CPUAndNeuralEngine,
-                        Kind::Gpu => MLComputeUnits::CPUAndGPU,
-                    });
-                    if let Some(function) = &group.function {
-                        let name = function.replace("{S}", &bucket.to_string());
-                        config.setFunctionName(Some(&NSString::from_str(&name)));
+            let mut order = group.buckets.clone();
+            order.sort_unstable();
+            let Some(&longest) = order.last() else {
+                bail!("the Core ML pack's manifest names no buckets");
+            };
+            let lock = crate::accel::coreml_compile_lock();
+            progress(0, order.len());
+            let first = load(pack, kind, &group, longest)?;
+            let buckets = std::sync::Arc::new(std::sync::Mutex::new(vec![(
+                longest,
+                std::sync::Arc::new(Model(first)),
+            )]));
+            // Nearest a typical chunk first: granite's chunks run to about two
+            // hundred and fifty tokens.
+            let mut rest: Vec<usize> = order[..order.len() - 1].to_vec();
+            rest.sort_by_key(|len| len.abs_diff(256));
+            let batch = group.batch;
+            let (pack, shared) = (pack.to_path_buf(), std::sync::Arc::clone(&buckets));
+            std::thread::spawn(move || {
+                let _held = lock;
+                for bucket in rest {
+                    // A bucket that will not load is left out: the longer
+                    // ones already loaded carry its chunks.
+                    if let Ok(model) = load(&pack, kind, &group, bucket) {
+                        let mut loaded = shared.lock().unwrap_or_else(|e| e.into_inner());
+                        loaded.push((bucket, std::sync::Arc::new(Model(model))));
+                        loaded.sort_by_key(|(len, _)| *len);
                     }
                 }
-                let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
-                // SAFETY: a file URL and a configuration this function made;
-                // the call returns a retained model or an error.
-                let model =
-                    unsafe { MLModel::modelWithContentsOfURL_configuration_error(&url, &config) }
-                        .map_err(error)
-                        .with_context(|| format!("loading {}", path.display()))?;
-                buckets.push((*bucket, model));
-            }
-            buckets.sort_by_key(|(len, _)| *len);
+            });
             Ok(Self {
                 kind,
-                batch: group.batch,
+                batch,
                 buckets,
                 device: match kind {
                     Kind::NeuralEngine => {
@@ -224,7 +274,13 @@ mod mac {
         /// CPU, which is one rule for every lane rather than one per worker.
         pub fn embed(&mut self, batch: &[&[u32]]) -> Result<Vec<Vec<f32>>> {
             let lens: Vec<usize> = batch.iter().map(|ids| ids.len()).collect();
-            let lengths: Vec<usize> = self.buckets.iter().map(|(len, _)| *len).collect();
+            // The buckets loaded so far; more may arrive between batches.
+            let loaded: Vec<(usize, std::sync::Arc<Model>)> = self
+                .buckets
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let lengths: Vec<usize> = loaded.iter().map(|(len, _)| *len).collect();
             let Some(groups) = plan(&lens, self.batch, &lengths) else {
                 bail!(
                     "a chunk of {} tokens is longer than the longest bucket, {}",
@@ -235,13 +291,12 @@ mod mac {
             let mut out = Vec::with_capacity(batch.len());
             for (start, bucket) in groups {
                 let rows = &batch[start..(start + self.batch).min(batch.len())];
-                let model = &self
-                    .buckets
+                let model = &loaded
                     .iter()
                     .find(|(len, _)| *len == bucket)
                     .expect("a bucket the plan chose")
                     .1;
-                out.extend(self.call(model, rows, bucket)?);
+                out.extend(self.call(&model.0, rows, bucket)?);
             }
             Ok(out)
         }

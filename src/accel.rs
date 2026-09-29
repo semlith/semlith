@@ -58,6 +58,10 @@ const DEADLINE_ENV: &str = "SEMLITH_ACCEL_DEADLINE_MS";
 /// a Mac compiles every model for this machine: 163 s for all six on the M1.
 const HELLO_DEADLINE: Duration = Duration::from_secs(20 * 60);
 
+/// The longest a lane may take to start however alive it says it is: a
+/// compile that never finishes fails the lane, and the CPU takes the run.
+const START_CAP: Duration = Duration::from_secs(60 * 60);
+
 /// How long a worker is kept with nothing to do. Its device memory goes with
 /// it.
 const WORKER_IDLE: Duration = Duration::from_secs(60);
@@ -928,7 +932,12 @@ pub fn pack_for(id: &str) -> Option<crate::packs::Pack> {
 pub fn remove(lane_id: &str) -> Result<u64> {
     let cache = crate::model_cache_dir()?;
     if let Some(pack) = pack_for(lane_id) {
-        return crate::packs::remove(&cache, &pack);
+        let worker = if lane_id == "ane" {
+            remove_coreml_worker(&cache)
+        } else {
+            0
+        };
+        return Ok(crate::packs::remove(&cache, &pack)? + worker);
     }
     let dir = match lane_id {
         "gpu" => component_dir(&cache, &format!("webgpu-{}", crate::gpu::WEBGPU_VERSION)),
@@ -944,6 +953,15 @@ pub fn remove(lane_id: &str) -> Result<u64> {
             .with_context(|| format!("removing {}", crate::plain(&dir.display().to_string())))?;
     }
     Ok(bytes)
+}
+
+/// The Core ML worker's copy of semlith, which goes with the Neural Engine's
+/// models when they are removed.
+fn remove_coreml_worker(cache: &Path) -> u64 {
+    let dir = component_dir(cache, &format!("coreml-worker-v{COREML_WORKER}"));
+    let bytes = dir_bytes(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    bytes
 }
 
 /// What each lane's downloaded components take on disk.
@@ -1326,6 +1344,78 @@ fn worker_args(lane: &Arc<Lane>) -> Result<Vec<String>> {
     })
 }
 
+/// The Core ML worker's protocol: bump it whenever the `__embed-worker ane`
+/// or `gpu-coreml` code, its arguments or its frames change, and a fresh copy
+/// of the binary becomes the worker (see [`coreml_worker`]).
+pub const COREML_WORKER: u32 = 1;
+
+/// Run the Core ML lanes' worker from the binary that is running now rather
+/// than the stable copy: for developing the worker itself.
+pub const COREML_WORKER_ENV: &str = "SEMLITH_COREML_WORKER";
+
+/// The executable the Core ML lanes run as: a copy of semlith kept beside the
+/// models, made once per [`COREML_WORKER`] and left alone by upgrades.
+///
+/// macOS compiles a model for the Neural Engine the first time a program loads
+/// it — minutes — and caches the result for that program: a new semlith binary
+/// compiled all six models again, on every upgrade and every build. A worker
+/// whose executable never changes compiles them once per machine, and every
+/// start after that loads them in about a second and a half. A hard link where
+/// it can be, so the copy costs nothing until the binary it came from is
+/// replaced; a copy where it cannot.
+pub fn coreml_worker(cache: &Path) -> Result<PathBuf> {
+    let current = std::env::current_exe().context("locating this binary")?;
+    if std::env::var(COREML_WORKER_ENV).is_ok_and(|v| v == "current") {
+        return Ok(current);
+    }
+    let dir = component_dir(cache, &format!("coreml-worker-v{COREML_WORKER}"));
+    // Named `semlith`, as the installed binary is: macOS keeps a program's
+    // compiled models under its name.
+    let exe = dir.join(if cfg!(windows) {
+        "semlith.exe"
+    } else {
+        "semlith"
+    });
+    if exe.is_file() {
+        return Ok(exe);
+    }
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let temp = dir.join(format!(".semlith.{}", std::process::id()));
+    let _ = std::fs::remove_file(&temp);
+    if std::fs::hard_link(&current, &temp).is_err() {
+        std::fs::copy(&current, &temp)
+            .with_context(|| format!("copying this binary to {}", temp.display()))?;
+    }
+    std::fs::rename(&temp, &exe).with_context(|| format!("placing {}", exe.display()))?;
+    // Earlier protocols' workers are nobody's any more.
+    if let Ok(entries) = std::fs::read_dir(cache.join("accel")) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("coreml-worker-v") && entry.path() != dir {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    Ok(exe)
+}
+
+/// Held by a Core ML worker while it loads its models: macOS compiles them one
+/// program at a time, and a second semlith asking for the same compile while
+/// the first is under way only queued another minutes-long compile behind it.
+/// The second waits here instead, then loads what the first compiled.
+pub fn coreml_compile_lock() -> Option<std::fs::File> {
+    let dir = crate::model_cache_dir().ok()?.join("accel");
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("coreml-compile.lock"))
+        .ok()?;
+    file.lock().ok()?;
+    Some(file)
+}
+
 /// Start a lane's worker: fetch what it needs, spawn it, and read its hello,
 /// which carries the known-answer check. A worker loading models for the
 /// first time says how far it has got before it says hello.
@@ -1333,7 +1423,11 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
     let mut args = vec!["__embed-worker".to_string()];
     args.extend(worker_args(lane)?);
     lane.set(Status::Starting);
-    let exe = std::env::current_exe().context("locating this binary")?;
+    let exe = if cfg!(target_os = "macos") && matches!(args[1].as_str(), "ane" | "gpu-coreml") {
+        coreml_worker(&crate::model_cache_dir()?)?
+    } else {
+        std::env::current_exe().context("locating this binary")?
+    };
     let mut child = std::process::Command::new(exe)
         .args(&args)
         .stdin(std::process::Stdio::piped())
@@ -1360,8 +1454,18 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
     };
     // The hello, and with it the known-answer check. Bounded like a batch
     // once the models are loaded; a first load says how far it has got.
-    let started = Instant::now();
+    // The deadline is for silence, not for the whole start: every progress
+    // frame renews it, so a compile queued behind another program's is not
+    // failed for taking its turn.
+    let mut started = Instant::now();
+    let began = Instant::now();
     let hello = loop {
+        if began.elapsed() > START_CAP {
+            bail!(
+                "the worker was not ready within {} min",
+                START_CAP.as_secs() / 60
+            );
+        }
         let left = HELLO_DEADLINE.saturating_sub(started.elapsed());
         let frame = match worker.answers.recv_timeout(left) {
             Ok(Ok(frame)) => frame,
@@ -1373,7 +1477,12 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
         };
         let value: serde_json::Value =
             serde_json::from_slice(&frame).context("the worker's hello")?;
+        if value["waiting"].as_bool() == Some(true) {
+            started = Instant::now();
+            continue;
+        }
         if let (Some(done), Some(of)) = (value["loaded"].as_u64(), value["of"].as_u64()) {
+            started = Instant::now();
             lane.set(Status::Compiling {
                 percent: (done * 100 / of.max(1)).min(100) as u8,
                 eta_ms: None,
@@ -1615,6 +1724,22 @@ pub fn worker_main(lane: &str, dir: Option<&Path>, adapter: Option<&str>) -> i32
         );
         return 1;
     }
+    // Said every half minute until the hello, so the host knows a worker
+    // whose first compile is queued behind another program's is alive.
+    let loading = std::sync::Arc::new(AtomicBool::new(true));
+    {
+        let beat = std::sync::Arc::clone(&loading);
+        std::thread::spawn(move || {
+            while beat.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(30));
+                if beat.load(Ordering::Relaxed) {
+                    let frame = serde_json::to_vec(&serde_json::json!({ "waiting": true }))
+                        .unwrap_or_default();
+                    let _ = write_frame(&mut std::io::stdout().lock(), &frame);
+                }
+            }
+        });
+    }
     let opened = {
         let mut progress = |loaded: usize, of: usize| {
             say(
@@ -1624,6 +1749,7 @@ pub fn worker_main(lane: &str, dir: Option<&Path>, adapter: Option<&str>) -> i32
         };
         crate::gpu::Session::open(lane, dir, adapter, &mut progress)
     };
+    loading.store(false, Ordering::Relaxed);
     let mut session = match opened {
         Ok(session) => session,
         Err(e) => {
@@ -1765,6 +1891,36 @@ pub fn component_dir(cache: &Path, lane: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Core ML worker is a copy made once and reused, whatever binary asks
+    /// for it next, and an earlier protocol's copy goes.
+    #[test]
+    fn the_core_ml_worker_is_made_once_and_kept() {
+        let cache = tempfile::tempdir().unwrap();
+        let old = component_dir(cache.path(), "coreml-worker-v0");
+        std::fs::create_dir_all(&old).unwrap();
+        let made = coreml_worker(cache.path()).unwrap();
+        assert!(made.is_file());
+        assert!(made.starts_with(cache.path()));
+        assert_eq!(
+            made.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .trim_end_matches(".exe"),
+            "semlith"
+        );
+        assert!(
+            !old.exists(),
+            "the earlier protocol's worker is still there"
+        );
+        let modified = std::fs::metadata(&made).unwrap().modified().unwrap();
+        let again = coreml_worker(cache.path()).unwrap();
+        assert_eq!(again, made);
+        assert_eq!(
+            std::fs::metadata(&again).unwrap().modified().unwrap(),
+            modified
+        );
+    }
 
     /// A compiling lane is on its way, a failed one is not, and the time left
     /// counts down between steps rather than climbing.

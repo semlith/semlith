@@ -648,7 +648,14 @@ substring of its name), `SEMLITH_OPENVINO_DEVICE` and `SEMLITH_LLAMA_DEVICE`
 (force a device for those lanes; `CPU`/`cpu` is how CI checks their known answer
 without the hardware). Harness-only, undocumented for users:
 `SEMLITH_PACK_<NAME>` names an unpacked pack directory in place of the pinned
-download, which is how a pack is tried before it is published.
+download, which is how a pack is tried before it is published; and
+`SEMLITH_COREML_WORKER=current` runs the Core ML lanes from the binary being
+built rather than the stable copy under `accel/coreml-worker-v<N>`, which is
+what developing the worker needs. The copy is made once per `COREML_WORKER`
+(`src/accel.rs`) and kept across upgrades, because macOS caches a model's
+Neural Engine compilation per program: bump `COREML_WORKER` whenever the Core
+ML worker's code, arguments or frames change, or users keep running the old
+copy.
 
 Deeper rationale lives in `docs/architecture.md`; what is and isn't a stability
 contract lives in `docs/compatibility.md`.

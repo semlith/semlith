@@ -1370,8 +1370,17 @@ c_daemon_rate() {
     t=$(now_ms)
     s=$(rc_index "$rc_dir/served-$i")
     [ -n "$s" ] || { echo "the index route started no run"; return 1; }
-    rc_until 900 rc_finished "$s" || { echo "the daemon's run did not finish:"; rc_run "$s"; return 1; }
-    ms=$(( $(now_ms) - t ))
+    # Asked every two seconds, not every fifth: on a Windows runner each ask
+    # is a curl and two jq, and Git Bash's process spawns took a core from the
+    # daemon being timed. The daemon's time is its own clock, its run and its
+    # wait in the queue, so how often it is asked does not add to it.
+    end=$(( $(date +%s) + 900 ))
+    until rc_finished "$s"; do
+      [ "$(date +%s)" -ge "$end" ] && { echo "the daemon's run did not finish:"; rc_run "$s"; return 1; }
+      sleep 2
+    done
+    ms=$(rc_run "$s" | jq -r '(.elapsed_ms // 0) + (.queued_ms // 0)')
+    [ "$ms" -gt 0 ] || ms=$(( $(now_ms) - t ))
     [ "$(rc_field "$s" status)" = done ] || { echo "the daemon's run did not end done:"; rc_run "$s"; return 1; }
     got=$(rc_field "$s" chunks)
     [ "$got" = "$chunks" ] || { echo "the daemon made $got chunks and the CLI $chunks"; return 1; }
