@@ -1043,6 +1043,17 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         "weighting": shape.weighting(),
         "prefer": prefer,
     });
+    // Mid-run, what share of each store the vector half does not cover yet.
+    // Absent at rest, so a reader written before 0.32.0 sees what it saw.
+    let pending = fleet.pending();
+    if !pending.is_empty() {
+        answer["pending"] = json!(
+            pending
+                .iter()
+                .map(|(store, share)| json!({ "store": store, "share": share }))
+                .collect::<Vec<_>>()
+        );
+    }
     failures_beside(fleet, &mut answer);
     Response::json(&answer)
 }
@@ -2840,6 +2851,7 @@ fn index_runs(state: &Arc<State>) -> Response {
         "held": admission.held(),
         "limits": limits,
         "compaction": compaction_settings(),
+        "vector_cache": vector_cache_settings(),
     }))
 }
 
@@ -2850,6 +2862,21 @@ fn compaction_settings() -> Value {
         "retention_days": crate::compact::retention_in_force(),
         "default_threshold_percent": crate::compact::AUTO_THRESHOLD_PERCENT,
         "default_retention_days": crate::compact::RETENTION_DAYS,
+    })
+}
+
+/// The machine-wide vector cache's cap, where it came from, and what it
+/// holds, for the Machine limits card.
+fn vector_cache_settings() -> Value {
+    let stats = crate::cache::stats();
+    json!({
+        "cap_mb": stats.cap / (1024 * 1024),
+        "default_cap_mb": crate::cache::DEFAULT_CAP_MB,
+        "from_environment": std::env::var(crate::cache::CAP_ENV).is_ok(),
+        "vectors": stats.rows,
+        "bytes": stats.bytes,
+        "hits": stats.hits,
+        "lookups": stats.lookups,
     })
 }
 
@@ -3073,6 +3100,20 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
     if let Some(n) = body.get("history_retention_days").and_then(Value::as_u64) {
         saved.history_retention_days = Some(n.min(36_500));
     }
+    // 0 turns the cache off; the ceiling is a size no laptop disk should be
+    // asked to give a cache.
+    if let Some(n) = body.get("vector_cache_mb").and_then(Value::as_u64) {
+        if std::env::var(crate::cache::CAP_ENV).is_ok() {
+            return Response::error(
+                409,
+                &format!(
+                    "{} is set in this daemon's environment, so the page cannot change it",
+                    crate::cache::CAP_ENV
+                ),
+            );
+        }
+        saved.vector_cache_mb = Some(n.min(65_536));
+    }
     if let Err(e) = saved.save() {
         return Response::error(500, &format!("{e:#}"));
     }
@@ -3099,6 +3140,7 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
         "limits": limits,
         "applied": applied,
         "compaction": compaction_settings(),
+        "vector_cache": vector_cache_settings(),
     }))
 }
 
@@ -3118,15 +3160,21 @@ fn accel_change(request: &Request) -> Response {
         Err(e) => return Response::error(400, &e.to_string()),
     };
     let Some(lane) = body.get("lane").and_then(Value::as_str) else {
-        return Response::error(400, "name the lane: cpu, gpu or cuda");
+        return Response::error(
+            400,
+            &format!("name the lane: {}", crate::accel::SWITCH_NAMES),
+        );
     };
     let outcome = match body.get("action").and_then(Value::as_str) {
-        Some("on") => crate::accel::set(lane, true),
+        // A pack is hundreds of megabytes; the request answers at once and
+        // the lane's row shows the download.
+        Some("on") => crate::accel::set_in_background(lane),
         Some("off") => crate::accel::set(lane, false),
+        // In MiB, the unit the Machine limits card states every size in.
         Some("remove") => crate::accel::remove(lane).map(|bytes| {
             format!(
-                "{lane}'s components removed, {} freed",
-                crate::human_bytes(bytes as i64)
+                "{lane}'s components removed, {:.1} MiB freed",
+                bytes as f64 / (1024.0 * 1024.0)
             )
         }),
         _ => return Response::error(400, "action must be \"on\", \"off\" or \"remove\""),

@@ -207,7 +207,7 @@ fn owner_only(path: &Path) -> bool {
 /// belonging to somebody else is one this file should not have named, which
 /// `owner_only` has already decided.
 #[cfg(unix)]
-fn alive(pid: u32) -> bool {
+pub(crate) fn alive(pid: u32) -> bool {
     // SAFETY: signal 0 delivers nothing; this is the documented liveness probe.
     unsafe {
         libc::kill(pid as i32, 0) == 0
@@ -216,7 +216,7 @@ fn alive(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn alive(_pid: u32) -> bool {
+pub(crate) fn alive(_pid: u32) -> bool {
     true
 }
 
@@ -260,10 +260,21 @@ struct Tally {
     refused: Vec<(String, String)>,
     failed: Vec<(String, String)>,
     skipped_reasons: std::collections::BTreeMap<String, usize>,
+    /// Where the run's time went, slice by slice added up.
+    stages: Box<crate::pipeline::Stages>,
+    /// Chunks the vector cache was asked for, and held.
+    cache_lookups: u64,
+    cache_hits: u64,
+    /// Chunk rows the run wrote, embedded or not yet.
+    rows: u64,
 }
 
 impl Tally {
     fn add(&mut self, report: &crate::IndexReport) {
+        self.stages.add(&report.stages);
+        self.cache_lookups += report.cache_lookups as u64;
+        self.cache_hits += report.cache_hits as u64;
+        self.rows += report.rows as u64;
         self.refused.extend(report.refused.iter().cloned());
         self.failed.extend(report.failed.iter().cloned());
         for (kind, n) in &report.skipped_reasons {
@@ -467,6 +478,8 @@ pub struct RunState {
     pub indexed: u64,
     pub chunks: u64,
     pub symbols: u64,
+    /// Chunk rows written, embedded or not yet.
+    pub rows: u64,
     /// What the run is doing when it is not reading a file.
     ///
     /// Every two hundred files a run flushes its batch and rewrites the
@@ -486,6 +499,10 @@ pub struct RunState {
     /// The `done` event as it was sent, with its refused, failed and
     /// skipped-by-reason lists.
     pub summary: Option<serde_json::Value>,
+    /// Where the run's time has gone so far, as of its last slice.
+    stages: Option<serde_json::Value>,
+    /// Chunks the vector cache was asked for, and held, as of its last slice.
+    cache: (u64, u64),
     /// The last [`LOG_HISTORY`] events, each carrying the sequence number a
     /// client reads after.
     log: VecDeque<serde_json::Value>,
@@ -523,11 +540,14 @@ impl RunState {
             indexed: 0,
             chunks: 0,
             symbols: 0,
+            rows: 0,
             phase: None,
             shown_eta: std::cell::Cell::new(None),
             plan: None,
             plan_eta_ms: None,
             summary: None,
+            stages: None,
+            cache: (0, 0),
             log: VecDeque::new(),
             next_seq: 0,
         }
@@ -748,8 +768,13 @@ impl RunState {
             }
             Some(kind @ ("file" | "progress")) => {
                 // A card asked to pause or stop keeps saying so until the
-                // engine answers; a file line is not that answer.
-                if !matches!(self.status, RunStatus::Pausing | RunStatus::Stopping) {
+                // engine answers; a file line is not that answer. Nor does one
+                // end a pause: only `resumed` does, and a batch that was in
+                // flight when the pause came may still report after it.
+                if !matches!(
+                    self.status,
+                    RunStatus::Pausing | RunStatus::Paused | RunStatus::Stopping
+                ) {
                     self.status = RunStatus::Running;
                 }
                 // A `writing` line is the run saying it has stopped reading
@@ -777,6 +802,7 @@ impl RunState {
                 self.indexed = num("indexed").unwrap_or(self.indexed);
                 self.chunks = num("chunks").unwrap_or(self.chunks);
                 self.symbols = num("symbols").unwrap_or(self.symbols);
+                self.rows = num("rows").unwrap_or(self.rows);
                 self.threads = num("threads").filter(|n| *n > 0).unwrap_or(self.threads);
                 // From the first file embedding starts on, so the walk of
                 // unchanged files before it is not part of either rate.
@@ -802,6 +828,12 @@ impl RunState {
                 self.hold();
             }
             Some("resumed" | "slice") => {
+                if let Some(stages) = event.get("stages") {
+                    self.stages = Some(stages.clone());
+                }
+                if let (Some(asked), Some(held)) = (num("cache_lookups"), num("cache_hits")) {
+                    self.cache = (asked, held);
+                }
                 if self.status != RunStatus::Stopping {
                     self.status = RunStatus::Running;
                 }
@@ -814,6 +846,12 @@ impl RunState {
                     .map(str::to_string);
             }
             Some("done") => {
+                if let Some(stages) = event.get("stages") {
+                    self.stages = Some(stages.clone());
+                }
+                if let (Some(asked), Some(held)) = (num("cache_lookups"), num("cache_hits")) {
+                    self.cache = (asked, held);
+                }
                 let stopped = event
                     .get("stopped")
                     .and_then(serde_json::Value::as_bool)
@@ -1268,8 +1306,31 @@ impl Store {
             "indexed": run.indexed,
             "chunks": run.chunks,
             "symbols": run.symbols,
-            "phase": run.phase,
+            // What the run is doing when it is not reading files — or, while
+            // no lane it may use is ready and one is on its way, what it is
+            // waiting for, with that lane's progress and time left.
+            "phase": (run.status == RunStatus::Running)
+                .then(crate::accel::waiting_for)
+                .flatten()
+                .or_else(|| run.phase.clone()),
             "summary": run.summary,
+            // Walk, read+hash, extract+scan, parse+chunk, tokenize, the wait
+            // on each lane, and write, summing to the run's wall time.
+            "stages": run.stages,
+            // The share of the store the vector half does not cover yet: rows
+            // this run wrote that it has not embedded, over what the store
+            // holds with them. Null outside a running run.
+            "pending_share": (run.status == RunStatus::Running && run.rows > 0).then(|| {
+                let pending = run.rows.saturating_sub(run.chunks) as f64;
+                let whole = (run.chunks_before.unwrap_or(0) + run.rows).max(1) as f64;
+                (pending / whole * 1000.0).round() / 1000.0
+            }),
+            // The vector cache's share of the run: chunks asked for, and held.
+            "cache_lookups": run.cache.0,
+            "cache_hits": run.cache.1,
+            "cache_hit_rate": (run.cache.0 > 0).then(|| {
+                (run.cache.1 as f64 * 1000.0 / run.cache.0 as f64).round() / 10.0
+            }),
             // What a page's log cursor should be if it has never read this
             // run: the oldest line still on the ring, minus one.
             "log_from": run.log.front()
@@ -2403,6 +2464,44 @@ impl State {
         hold: bool,
     ) -> Result<u64> {
         Self::writer_alive(store)?;
+        // A run nobody reviews starts at once. Its plan — the card's summary
+        // and first estimate — is read beside it, from a snapshot of the store
+        // taken before the run is queued, so it describes the store the run
+        // started from. Before 0.32.0 every run waited for a scan of every
+        // file just to put the plan on its card, which on the benchmark corpus
+        // was twenty seconds before the first row.
+        if !review && !hold {
+            let (ready, pinned) = mpsc::channel::<()>();
+            let (give_run, run_id) = mpsc::channel::<u64>();
+            // Weak: the store's lock goes with its last strong reference, and
+            // a plan still reading must not keep a deleted store's lock held
+            // against the same folder indexed again at once.
+            let for_plan = Arc::downgrade(store);
+            let dir = store.dir.clone();
+            let plan_paths = paths.clone();
+            std::thread::Builder::new()
+                .name("semlith-plan".to_string())
+                .spawn(move || {
+                    let reader = crate::Semlith::open_existing(&dir).and_then(|reader| {
+                        reader.pin_snapshot()?;
+                        Ok(reader)
+                    });
+                    let _ = ready.send(());
+                    let Ok(mut reader) = reader else { return };
+                    let Ok(run) = run_id.recv() else { return };
+                    if let Ok(plan) = reader.plan(&plan_paths)
+                        && let Some(store) = for_plan.upgrade()
+                    {
+                        store.set_plan(run, &plan, false);
+                    }
+                    reader.release_snapshot();
+                })
+                .context("starting the plan beside the run")?;
+            let _ = pinned.recv_timeout(Duration::from_secs(10));
+            let (run, _progress) = self.admission.submit(store, paths, RunKind::Run);
+            let _ = give_run.send(run);
+            return Ok(run);
+        }
         let plan = self.plan(store, &paths).ok();
         if (review || hold)
             && let Some(plan) = plan.as_ref().filter(|p| hold || !p.review.is_empty())
@@ -3127,6 +3226,18 @@ pub fn run(
     // Index runs hand batches to the GPU lanes as well as the CPU. Only the
     // daemon does; a terminal `semlith index` stays on the CPU.
     crate::accel::manage();
+    // The Neural Engine's first start compiles its models for this Mac, which
+    // takes minutes once. Begun now, in the background, so the first run does
+    // not wait for it; Machine limits shows how far it has got.
+    if crate::accel::enabled().ane
+        && crate::accel::unavailable_here("ane").is_none()
+        && crate::model_cache_dir()
+            .ok()
+            .is_some_and(|cache| crate::packs::installed(&cache, &crate::packs::coreml()).is_some())
+        && let Some(lane) = crate::accel::lane("ane")
+    {
+        lane.wake();
+    }
 
     // Background while idle, normal while embedding. Before the watchers
     // start, so the catch-up they run is the first thing that lifts it.
@@ -3657,6 +3768,7 @@ fn perform(
             // Without it the chunk counter climbed to a flush boundary and
             // fell back to single figures, which reads as a run losing work.
             let indexed_before = tally.indexed;
+            let rows_before = tally.rows;
             let chunks_before = tally.chunks;
             let symbols_before = tally.symbols;
             let on_file = |path: &Path, progress: crate::IndexProgress| {
@@ -3685,6 +3797,7 @@ fn perform(
                     "bytes_total": if bytes_total_before > 0 { bytes_total_before } else { progress.bytes_total },
                     "indexed": indexed_before + progress.indexed as u64,
                     "chunks": chunks_before + progress.chunks as u64,
+                    "rows": rows_before + progress.rows as u64,
                     "symbols": symbols_before + progress.symbols as u64,
                     "threads": progress.threads,
                     "lanes": progress.lanes,
@@ -3750,6 +3863,8 @@ fn perform(
                     // press the button again.
                     tally.add(&done);
                     let (slice_indexed, slice_chunks) = (tally.indexed, tally.chunks);
+                    let slice_stages = tally.stages.clone();
+                    let slice_cache = (tally.cache_lookups, tally.cache_hits);
                     if done.remaining > 0 {
                         // The remainder of the walk, not the roots. Handing the
                         // roots back meant the next slice walked the tree from
@@ -3787,6 +3902,9 @@ fn perform(
                             "remaining": done.remaining,
                             "indexed": slice_indexed,
                             "chunks": slice_chunks,
+                            "stages": slice_stages,
+                            "cache_lookups": slice_cache.0,
+                            "cache_hits": slice_cache.1,
                         }));
                         return None;
                     }
@@ -3809,8 +3927,16 @@ fn perform(
                     } else {
                         store.note(format!("{} indexed from the portal", tally.indexed));
                     }
+                    // The daemon's log carries where the run's time went, so
+                    // the next bottleneck is read rather than guessed.
+                    if tally.indexed > 0 {
+                        eprintln!("semlith: {}: {}", store.name, tally.stages.line());
+                    }
                     say(serde_json::json!({
                         "event": "done",
+                        "stages": tally.stages,
+                        "cache_lookups": tally.cache_lookups,
+                        "cache_hits": tally.cache_hits,
                         // The run's, not this slice's. A run of 35 files over
                         // three slices used to end by announcing the four the
                         // last slice reached.

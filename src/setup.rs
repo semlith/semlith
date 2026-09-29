@@ -227,6 +227,7 @@ pub fn run(
         announce(step_binary(yes)?),
         announce(step_path(yes)?),
         announce(step_model(yes, airgap)?),
+        announce(step_neural_engine(yes, airgap)?),
         announce(step_agents(register_all, yes)?),
         announce(step_always_load()?),
         announce(step_skill()?),
@@ -688,6 +689,82 @@ fn step_model(yes: bool, airgap: bool) -> Result<Step> {
             name: "model",
             state: State::Failed,
             detail: format!("{e} — `semlith setup` again when the network is back"),
+        }),
+    }
+}
+
+/// Step 3b. On Apple silicon, the Neural Engine's models: granite as Core ML,
+/// pinned by digest, fetched here so the lane is ready before the first index
+/// rather than a run's worth later. The lane compiles them for this Mac the
+/// first time it starts — minutes, once — and a run with no other lane on
+/// waits for it; the daemon starts that compilation when it starts.
+fn step_neural_engine(yes: bool, airgap: bool) -> Result<Step> {
+    let name = "neural engine";
+    if let Some(why) = crate::accel::unavailable_here("ane") {
+        return Ok(Step {
+            name,
+            state: State::Skipped,
+            detail: why,
+        });
+    }
+    if !crate::accel::enabled().ane {
+        return Ok(Step {
+            name,
+            state: State::Skipped,
+            detail: "switched off — `semlith accel on ane` turns it on".into(),
+        });
+    }
+    let cache = model_cache_dir()?;
+    let pack = crate::packs::coreml();
+    if let Some(dir) = crate::packs::installed(&cache, &pack) {
+        return Ok(Step {
+            name,
+            state: State::AlreadyDone,
+            detail: dir.display().to_string(),
+        });
+    }
+    if airgap || embed::airgap() {
+        return Ok(Step {
+            name,
+            state: State::Skipped,
+            detail: format!("--airgap; pre-seed {}", pack.dir(&cache).display()),
+        });
+    }
+    let size = crate::human_bytes(pack.bytes() as i64);
+    let fetch = yes
+        || cliclack::confirm(format!(
+            "Download the Neural Engine models ({size})? Indexing on this Mac is several times faster with them."
+        ))
+        .initial_value(true)
+        .interact()
+        .unwrap_or(false);
+    if !fetch {
+        return Ok(Step {
+            name,
+            state: State::Skipped,
+            detail: "`semlith accel on ane` fetches them later".into(),
+        });
+    }
+    let _ = cliclack::log::step(format!("neural engine: downloading {size}"));
+    let mut said = 0u8;
+    match crate::packs::fetch(&cache, &pack, &mut |percent| {
+        if percent >= said.saturating_add(25) {
+            said = percent;
+            let _ = cliclack::log::step(format!("neural engine: {percent} %"));
+        }
+    }) {
+        Ok(dir) => Ok(Step {
+            name,
+            state: State::Done,
+            detail: format!(
+                "{} — the first run compiles them for this Mac, a few minutes once",
+                dir.display()
+            ),
+        }),
+        Err(e) => Ok(Step {
+            name,
+            state: State::Failed,
+            detail: format!("{e:#} — `semlith accel on ane` tries again"),
         }),
     }
 }

@@ -7,6 +7,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-09-29
+
+### Indexing, several times faster on the machine you already have
+
+**An index pass is three stages running at once.** A pool of threads sized from
+the performance cores reads, hashes, extracts, scans, parses, chunks and
+tokenises each file once; one writer commits rows and vectors and never runs a
+model; an embed stage hands token-budget batches to every device with two in
+flight on each and lands the vectors in id order. Before this release one thread
+did all of it and ran the CPU's model inline, which was 64 % of a run while the
+GPU lane waited for batches. Where the time went — walk, read and hash, extract
+and scan, parse and chunk, tokenize, the wait on each lane, and write — is in
+the run card, the daemon's log and `semlith index --verbose`, and the parts add
+up to the run's wall time.
+
+**The Neural Engine, on Apple silicon.** granite re-implemented in Apple's
+Neural Engine layout and converted to Core ML at fixed shapes places 3 375 of
+its 3 380 ops on the Neural Engine, and runs at 236.5 chunks/s on the M1 Air
+against the CPU's 30.7, with every vector at cosine ≥ 0.9999 against the fp32
+reference. `semlith setup` fetches the models (built in CI, pinned by digest);
+the first start compiles them for the Mac, with its progress and the time left
+on Machine limits: the lane takes batches 39 s after it starts on the M1, once
+its longest bucket has compiled, and a later start, an upgrade included, is
+ready in about 2 s. A run waits for a lane that is
+on and still downloading, starting or compiling, and its card says what it is
+waiting for; the CPU carries a run only when it is switched on or no lane is
+ready or on its way. While the Neural Engine runs,
+nothing else embeds beside it: two CPU threads cut it to a third, and the GPU
+beside it adds 4 % sustained on a fanless Air (`semlith accel on gpu-beside-ane`
+turns that back on). Without the Neural Engine the GPU runs through Core ML
+(73.2 chunks/s on the M1, against WebGPU's 43.7). Every vector any lane returns
+is checked finite and non-zero, and one that is not is embedded again on the CPU.
+
+**A machine-wide vector cache.** The same chunk under the same model, variant,
+chunking rules and truncation gets its vector from the cache instead of a
+device: an edit re-embeds the functions it changed rather than its whole file,
+and a second worktree re-embeds almost nothing. One file under the semlith home,
+bounded by a least-recently-used cap (1 024 MB; Machine limits and
+`vector_cache_mb` set it, 0 turns it off). `stats`, `semlith_stats`, the run card
+and `index --verbose` show its size and hit rate. Compaction never touches it.
+
+**A store that answers while it fills.** Rows are committed as they are written
+and a pass starts on the files changed most recently — by modification time or
+by the last commit that touched them, in every repository up to two folders
+below the one indexed, code before licences within one commit — while the walk
+of the rest goes on beside it. The writer runs up to sixteen windows ahead of
+the devices, and the daemon no longer scans every file for a run's plan before
+starting it. Keyword and graph questions answer about what has been read so
+far; a semantic question embeds up to sixteen of its best keyword matches that
+have no vector yet and says how much of the store is still pending.
+
+**Everywhere else.** `semlith index` and `semlith watch` in a terminal use the
+same lanes as the daemon. WebGPU prefers a discrete GPU over an integrated one
+(`gpu_adapter` names one; `doctor --gpu` says which and why). A bulk index runs
+at Utility QoS on macOS rather than background, below normal priority with
+EcoQoS off on Windows, and under `Nice=5`, `CPUWeight=50` and `IOWeight=50` from
+the systemd unit on Linux. The CPU lane runs granite on ONNX Runtime directly
+with thread spinning off.
+
+**Experimental lanes, built without their hardware.** NVIDIA's TensorRT for RTX
+and Intel's OpenVINO, loaded from the vendors' own plugin execution providers,
+and llama.cpp's server (Metal on macOS, Vulkan on Windows and Linux) on loopback
+with a key only its worker holds. Each is off until turned on, labelled
+experimental in `accel status`, `doctor --gpu` and the portal, says why it
+cannot run on a machine without its device, and falls back. No throughput is
+claimed for any of them. The CUDA lane becomes experimental too; a saved
+`cuda: true` stays on.
+
+### Fixed
+
+- A store built with one of fastembed's own models no longer has its batches
+  sent to a GPU lane, which runs granite and would have given it vectors from
+  the wrong model.
+- `semlith doctor --gpu` printed `n/a` for a lane that failed its check; it
+  prints `FAIL`.
+- A pack that fails its digest is deleted whole, not left half-unpacked.
+- The GPU lane through Core ML was sent batches of one to three chunks on a
+  model that computes eight at a time, so three quarters of its work was
+  padding, and the lane's pace, read from those batches and charged for the
+  wait of a second batch queued behind the first, cut the next batch further.
+  A lane's batch is now a whole number of the model's calls, and its pace is
+  its own time on the device. With the Neural Engine off, the M1 indexes at
+  62.7 chunks/s p10 where it indexed at 16.0; the release's gate for that
+  case, 80, is not met (#164).
+- The vector cache takes 1.7 KB on disk a vector, where it took 4.7 KB: its
+  table kept about a kilobyte of each row on the row's page and moved the
+  rest of the vector to an overflow page of its own, so a full cache was
+  three times its cap. A lookup takes 8.6 µs, where it took 27. A cache
+  written by an earlier 0.32.0 build keeps its layout; deleting
+  `cache/vectors.db` rebuilds it.
+- `semlith stats` names every lane that is on, the Neural Engine and the
+  experimental lanes included; it named only the CPU, the GPU and CUDA.
+- `semlith accel status` shows the running daemon's lanes, so a Neural Engine
+  compiling in the daemon no longer reads as idle in the terminal.
+- A run's rate counts vectors that have landed, not rows written ahead of them.
+- The portal's pages no longer wait seconds on a large store: the Stores
+  figures read how many lines each file spans from a new index on the chunks
+  table instead of every chunk's text (14 s to 0.2 s on a 600 MB store). It is
+  built once when a store is first opened by 0.32.0.
+- A daemon stopped while an accelerator lane was restarting no longer waits
+  for the lane: batches queued on a lane that is not ready go to the CPU.
+- A killed lane worker no longer takes the daemon down with it.
+- The Neural Engine no longer compiles for minutes on every start or fails
+  its start. Three causes. A worker with no batch for a minute was retired
+  even while it was still compiling, so the compile was abandoned half
+  written, the system's compiler went on with it anyway, and the next start
+  compiled it again: a backlog of those once left a lane compiling for over
+  two hours. macOS caches a compile under the program's name, so every new
+  binary compiled all six buckets again. And each start waited for all six.
+  A Core ML worker is now kept until its last bucket has loaded, runs from a
+  copy of semlith kept beside the models, is ready after its longest bucket,
+  compiles the rest at the priority of a user's request, lets one compile run
+  at a time, and deletes the 94 MB a killed compile leaves behind. On the M1:
+  ready 39 s after a cold start with all six compiled 2.5 min later, and
+  ready in 2.1 s on every start after that, an upgrade included, where it had
+  taken 15 min.
+
 ## [0.31.0] - 2026-09-28
 
 ### A store takes the disk its live content needs
@@ -3771,7 +3888,10 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.32.0...HEAD
+[0.32.0]: https://github.com/semlith/semlith/compare/v0.31.0...v0.32.0
+[0.31.0]: https://github.com/semlith/semlith/compare/v0.30.1...v0.31.0
+[0.30.1]: https://github.com/semlith/semlith/compare/v0.30.0...v0.30.1
 [0.30.0]: https://github.com/semlith/semlith/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/semlith/semlith/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/semlith/semlith/compare/v0.27.0...v0.28.0

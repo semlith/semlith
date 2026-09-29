@@ -1300,6 +1300,51 @@ by the retention is not restored by going back to an older binary.
 | `SEMLITH_DOWNLOAD_STALL` | New: seconds a model download may receive nothing before it fails, default 60. |
 | Store meta | `vectors_swapping` is written during a compaction's swap and left `0`. |
 
+## 0.32.0
+
+**Additive.** `FORMAT_VERSION` does not move and no store table is added: a
+store written by 0.32.0 is an ordinary store any binary from 0.23.0 on reads.
+Its `variants` meta row may carry new keys — `fp16-ane`, `fp16-coreml-gpu`,
+`fp16-trt`, `openvino`, `gguf-f16` — which an older binary counts without knowing
+what they are. The vector cache is a new file under the semlith home
+(`cache/vectors.db`) that an older binary never opens and that can be deleted.
+
+| Surface | What changes |
+|---|---|
+| `semlith accel` | The lanes are `cpu`, `gpu`, `ane` (the Neural Engine), `cuda`, `trt` (TensorRT for RTX), `openvino` and `llama` (llama.cpp), plus the switch `gpu-beside-ane`. `on` for a lane whose pack is not installed fetches it first. `status` names the state (now also `compiling` with a percent) and says `(experimental)` beside CUDA, TensorRT for RTX, OpenVINO and llama.cpp, and prints the vector cache line. |
+| `semlith doctor --gpu` | One row per lane: device, known-answer cosine, the reason a lane is unavailable, the fallback, and `(experimental)` where it applies. A failed check prints `FAIL` rather than `n/a`. |
+| `semlith index` | `--verbose` (`-v`, new) prints where the run's time went, what each lane embedded, each lane's state at the end, and the vector cache's hits. `index` and `watch` use the accelerator lanes, as the daemon does; `SEMLITH_ACCEL=cpu` keeps them on the CPU. Files changed most recently are embedded first. |
+| `semlith search` | While a store is still being embedded, one line on stderr says how much of it is pending. |
+| `semlith stats` | New `cache` line: vectors, size, cap, and the share of lookups that hit. |
+| `semlith setup` | On Apple silicon a new step fetches the Neural Engine pack. |
+| `semlith_stats` | `embedding lanes on:` names the new lanes, experimental ones marked; a new last line `vector cache: …`. |
+| `semlith_search` | Mid-run, a last line saying how much of each store is still being embedded. |
+| `GET /api/accel` | Each lane gains `label`, `experimental`, `installed` and `download_bytes`; `status.state` may be `compiling` or `downloading` with a `percent` and, once it can be told, `eta_ms`; the body gains `gpu_beside_ane`; `bytes` gains `ane`, `trt`, `openvino`, `llama` and their `_download` sizes. |
+| `POST /api/accel` | Takes the new lanes and `gpu-beside-ane`. `on` for a lane whose pack is not installed answers at once and fetches it in the background; the lane's status shows the download. |
+| `GET /api/index/runs`, per run | New `stages` (`wall_ms`, `walk_ms`, `read_ms`, `extract_ms`, `parse_ms`, `tokenize_ms`, `write_ms`, `embed_wait_ms` per lane, `prepare_cpu_ms` per part), `cache_lookups`, `cache_hits`, `cache_hit_rate`, `pending_share`, and `rows`. `lane_rates` may name `ane`, `trt`, `openvino`, `llama` and `cache`. |
+| `GET/POST /api/index/settings` | New `vector_cache`: `{cap_mb, default_cap_mb, from_environment, vectors, bytes, hits, lookups}`; POST takes `vector_cache_mb` (0 is off, at most 65 536). |
+| `GET /api/search` | New `pending`: `[{store, share}]`, absent when nothing is being embedded. |
+| `GET /api/about` | `priority` gains `indexing_threads` and `indexing_class`. |
+| `settings.json` | New optional fields: `accelerators` gains `ane`, `trt`, `openvino`, `llama` and `gpu_beside_ane`; `gpu_adapter`; `vector_cache_mb`. A missing field means the default: the Neural Engine on, the experimental lanes off, the GPU off beside the Neural Engine, a 1 024 MB cache. A saved `cuda: true` stays on. An older binary ignores them all. |
+| The model cache | New under `accel/`: `coreml-worker-v1`, a copy of semlith (a hard link where the file system allows) that the Core ML lanes run from so macOS's compile cache outlives upgrades; `coreml-compile.lock`; and `<lane>.compile-ms`, how long the lane's last compile took. All three can be deleted; the next start makes them again, compiling once more. |
+| Environment | New: `SEMLITH_COREML_WORKER` (`current` runs the Core ML lanes from the running binary), `SEMLITH_VECTOR_CACHE_MB`, `SEMLITH_GPU_ADAPTER`, `SEMLITH_OPENVINO_DEVICE`, `SEMLITH_LLAMA_DEVICE`. `SEMLITH_ACCEL` takes the new lane names. |
+| The login service | On Linux the systemd unit gains `Nice=5`, `CPUWeight=50` and `IOWeight=50`; a unit without them is reported stale and rewritten by `semlith setup`. On macOS an index run's threads run at Utility QoS; on Windows the daemon stays below normal priority, with EcoQoS off while it embeds. |
+
+### Which lane runs where
+
+What each lane claims is exactly what has been measured, and nothing else.
+
+| Lane | macOS (Apple silicon) | Linux x86_64 | Windows x86_64 | Measured |
+|---|---|---|---|---|
+| CPU (int8) | yes | yes | yes | M1: 30.7 chunks/s lane alone, 35.5 with spinning off |
+| Neural Engine (`ane`) | yes, with the pack | — | — | M1: 236.5 chunks/s lane alone, sustained; the release gate is end to end |
+| GPU through Core ML | yes, with the pack | — | — | M1: 73.2 chunks/s lane alone |
+| GPU through WebGPU | without the pack | Vulkan | D3D12 | M1: 43.7 chunks/s lane alone; not measured on Linux or Windows |
+| CUDA (experimental) | — | yes | — | built and checked without hardware |
+| TensorRT for RTX (experimental) | — | yes | yes | built and checked without hardware |
+| OpenVINO (experimental) | — | yes, Intel hardware | yes, Intel hardware | built and checked without hardware; known answer on its CPU device in CI on an Intel runner. Intel's plugin offers Intel devices only: on an AMD CPU with no Intel GPU the lane says so and the run goes on without it |
+| llama.cpp (experimental) | Metal | Vulkan | Vulkan | M1 Metal known answer at cosine 0.9999995; not measured for throughput in this release |
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:

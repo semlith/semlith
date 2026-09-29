@@ -119,10 +119,16 @@ Module responsibilities:
 | `src/compact.rs` | `Semlith::compact` and `Semlith::footprint`: the sidecar rewritten to live records, shards packed from it and swapped in, history past the retention dropped, the database vacuumed; the one call the CLI, the daemon, the portal and Semlith Cloud make |
 | `src/chunk.rs` | File bytes → text → chunks. Cut at definitions where tree-sitter found them and at headings in Markdown; 800 chars and 2 overlap lines are the fallback and the budget; 8 MiB cap |
 | `src/formats.rs` | Readers for the thirteen non-plain-text formats. Private on purpose |
-| `src/embed.rs` | Model selection/loading, incl. the hand-assembled granite default |
-| `src/accel.rs` | The lanes: which are on, the per-lane dispatcher and its worker process (`semlith __embed-worker`), the length-framed protocol, fault injection, and the known-answer check behind `doctor --gpu` |
-| `src/gpu.rs` | GPU detection per platform, the software-renderer refusal, the pinned WebGPU plugin and fp16 downloads, and the WebGPU session a worker runs |
+| `src/embed.rs` | Model selection/loading, incl. the hand-assembled granite default; the one place granite's pinned files are fetched and checked (`granite_paths`) |
+| `src/pipeline.rs` | An index pass as stages: the prepare pool (read, hash, extract, scan, parse, chunk, tokenize, cache lookup), the embed scheduler that hands token-budget batches to every lane and returns windows in id order, the soundness guard, and the stage timings |
+| `src/session.rs` | Embedding from token ids: the index pass's own CPU session on ONNX Runtime (spinning off), padding and CLS pooling shared by every ORT lane |
+| `src/cache.rs` | The machine-wide vector cache under the semlith home: keys, the LRU cap, lookups and inserts, and its stats line |
+| `src/accel.rs` | The lanes: which are on, the lane policy, the per-lane dispatcher and its worker process (`semlith __embed-worker`), the length-framed id protocol, background start, fault injection, and the known-answer check behind `doctor --gpu` |
+| `src/gpu.rs` | GPU detection per platform, the software-renderer refusal, the WebGPU adapter choice, the pinned WebGPU plugin and fp16 downloads, and the session enum every worker runs |
 | `src/cuda.rs` | NVML detection, the pinned CUDA pack (Linux x86_64) and the CUDA session a worker runs |
+| `src/coreml.rs` | The Neural Engine and Core ML GPU lanes on Apple silicon: the pack's manifest, bucket planning, and the Core ML calls |
+| `src/packs.rs` | Every downloaded component pinned by URL and digest, fetched, checked and unpacked into the model cache |
+| `src/trt.rs`, `src/openvino.rs`, `src/llama.rs` | The experimental lanes: NVIDIA's TensorRT for RTX and Intel's OpenVINO plugin providers, and llama.cpp's server on loopback |
 | `src/priority.rs` | The daemon's priority following its work: background while idle, normal while anything embeds or a request is served |
 | `src/filter.rs` | `--path`/`--ext`/`--lang` → GLOB patterns → one chunk id set; the deny-list and the credential shapes |
 | `src/keyscan.rs` | The verdict on each secret-shaped match: live or declared test dummy, a 0-100 % confidence with its signals, the mask, the salted fingerprint, redaction, and the one accept/refuse decision every pass applies |
@@ -149,6 +155,29 @@ Module responsibilities:
 | `src/main.rs` | Clap parsing and human output formatting |
 
 ### Invariants worth knowing before editing
+
+- **The writer never runs a model.** From 0.32.0 an index pass is three stages
+  (`pipeline.rs`): a prepare pool that reads, hashes, extracts, scans, parses,
+  chunks and tokenizes each file once, with no database; the writer, which alone
+  touches the store and commits a file's rows in a transaction; and the embed
+  scheduler, which hands batches to every lane, the CPU's own included, and
+  returns whole windows in the order they were sent. Vectors land in id order,
+  window by window, because `exact.f32` is binary-searched and a shard is named
+  by its first id. A window's rows are committed before it is handed over, so no
+  window carries an id whose row could roll back. A checkpoint drains every
+  window in flight before it saves and commits hashes; a stop cancels them and
+  the undo takes their rows.
+- **Every vector is checked before it lands.** `pipeline::sound`: finite and not
+  all zero, on every lane. An unsound one goes back to the CPU, whatever the CPU
+  switch says, and only the CPU may take it. The Neural Engine's fp16 LayerNorm
+  overflow is the failure this exists for, and nothing downstream would notice it.
+- **The vector cache is the machine's, never a store's.** One file under the
+  semlith home, keyed by the hash of the text the model is shown with the model
+  and its revision, the variant, the chunking rules and the truncation folded
+  in. Compaction never touches it and its eviction never touches a store.
+  Only processes that use the lanes (the daemon, `index`, `watch`) read it, or
+  a process that names a cap in the environment; the library alone does not,
+  so the retrieval harness never scores a vector another run left behind (#88).
 
 - **Compaction never changes a live vector.** `compact` rebuilds shards from
   `exact.f32`, and that is only sound because semlith never calibrates turbovec
@@ -611,7 +640,22 @@ nothing, default 60), `SEMLITH_STORE` (PATH-style separated), `SEMLITH_HOME`,
 `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`,
 `SEMLITH_INDEX_MEMORY`, `SEMLITH_SHARD_VECTORS`, `SEMLITH_CHECKPOINT_FILES`,
 `SEMLITH_MODEL_CACHE`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_LEDGER` (`0`, `off`
-or `false` stops the ledger recording on this machine).
+or `false` stops the ledger recording on this machine), `SEMLITH_ACCEL` (the
+lanes on, comma-separated: `cpu`, `gpu`, `ane`, `cuda`, `trt`, `openvino`,
+`llama`, `gpu-beside-ane`), `SEMLITH_VECTOR_CACHE_MB` (the vector cache's cap;
+`0` turns it off), `SEMLITH_GPU_ADAPTER` (the WebGPU adapter to prefer, by a
+substring of its name), `SEMLITH_OPENVINO_DEVICE` and `SEMLITH_LLAMA_DEVICE`
+(force a device for those lanes; `CPU`/`cpu` is how CI checks their known answer
+without the hardware). Harness-only, undocumented for users:
+`SEMLITH_PACK_<NAME>` names an unpacked pack directory in place of the pinned
+download, which is how a pack is tried before it is published; and
+`SEMLITH_COREML_WORKER=current` runs the Core ML lanes from the binary being
+built rather than the stable copy under `accel/coreml-worker-v<N>`, which is
+what developing the worker needs. The copy is made once per `COREML_WORKER`
+(`src/accel.rs`) and kept across upgrades, because macOS caches a model's
+Neural Engine compilation per program: bump `COREML_WORKER` whenever the Core
+ML worker's code, arguments or frames change, or users keep running the old
+copy.
 
 Deeper rationale lives in `docs/architecture.md`; what is and isn't a stability
 contract lives in `docs/compatibility.md`.
@@ -686,7 +730,14 @@ relaxation without an issue like
   - from 0.28.0, the CUDA pack (ONNX Runtime's GPU build from GitHub, and
     NVIDIA's CUDA libraries from their PyPI wheels). It is fetched only after
     somebody turns CUDA on with `semlith accel on cuda` or the switch on the
-    page, and its size is stated before the download starts.
+    page, and its size is stated before the download starts;
+  - from 0.32.0, the packs in `src/packs.rs`: granite as Core ML models (this
+    repository's own release, fetched by `semlith setup` on Apple silicon and by
+    `semlith accel on ane`), and — only on an explicit turn-on of an
+    experimental lane — NVIDIA's TensorRT for RTX and Intel's OpenVINO plugin
+    wheels from PyPI and llama.cpp's server from ggml-org's release with
+    granite as GGUF from this repository's. The llama.cpp server listens on
+    `127.0.0.1` with a key only its worker holds, and dies with the worker.
 
   Every one of them is pinned by digest in `docs/models.md`. `--airgap` refuses
   all of them unless they were pre-seeded into the model cache, naming what it
@@ -783,6 +834,16 @@ makes this set reviewable is being able to read the whole of it at once.
 | `embed::performance_cores` (windows) | `GetSystemCpuSetInformation`, `ptr::read_unaligned`, a union field read | Called first with a null buffer of length zero, which only writes the size it needs into a live `u32`; then with a `Vec<u8>` of exactly that length, which the call is told and will not exceed. Each entry is read unaligned only while it fits inside the bytes the call wrote, the walk advances by the entry's own `Size` and stops if that is zero, and `CpuSet.EfficiencyClass` is read only when `Type` is `CpuSetInformation`. Every field is an integer, so any bytes are a valid value. Windows only. |
 | `priority::platform::set` (macOS) | `libc::setpriority(PRIO_DARWIN_PROCESS, 0, …)` | Plain integers; `who` 0 names this process. Nothing is read back through a pointer. macOS only. |
 | `priority::platform::set` (windows) | `GetCurrentProcess`, `SetPriorityClass`, `SetProcessInformation(ProcessPowerThrottling)` | The pseudo-handle for this process needs no closing, and the `PROCESS_POWER_THROTTLING_STATE` is passed with its own size, which is the documented contract. A build without power throttling fails the second call, and the class alone is the switch. Windows only. |
+| `priority::platform::enter_indexing`/`leave_indexing` (macOS) | `pthread_get_qos_class_np`, `pthread_set_qos_class_self_np` | This thread's own handle, out-parameters that are live locals of the types the calls write, and class values from the enum. Nothing outlives the call. macOS only. |
+| `priority::platform::enter_indexing`/`leave_indexing` (Linux) | `sched_getscheduler`, `sched_getparam`, `sched_setscheduler`, `mem::zeroed` | 0 names this thread; the `sched_param` structs are live locals the calls read and write, and what was read is what is put back. Linux only. |
+| `coreml::mac::Session` | `MLModelConfiguration::setComputeUnits`, `setFunctionName`, `MLModel::modelWithContentsOfURL_configuration_error`, `MLMultiArray::initWithShape_dataType_error`, `dataPointer`, `ptr::copy_nonoverlapping`, `MLDictionaryFeatureProvider::initWithDictionary_error`, `predictionFromFeatures_error`, `featureValueForName`, `multiArrayValue` | Arrays of exactly the shape and type the model was converted with, contiguous as `initWithShape` documents, written through their own data pointer for exactly `batch * bucket` elements before they are read. The output's shape and strides are read rather than assumed and nothing past them is read. Every object is a retained value alive for the call. macOS only. |
+| `trt::nvml` (Linux, Windows) | `dlopen`/`LoadLibraryA`, `dlsym`/`GetProcAddress`, `mem::transmute_copy`, `dlclose`/`FreeLibrary`, `nvmlInit_v2`, `nvmlDeviceGetHandleByIndex_v2`, `nvmlDeviceGetName`, `nvmlDeviceGetCudaComputeCapability`, `nvmlSystemGetDriverVersion`, `nvmlShutdown` | Each symbol is looked up by a NUL-terminated name and used at the signature in nvml.h; `Library::sym` asserts it is pointer-sized. Out-parameters are live locals of the size NVML is told: 96 bytes for the name, 80 for the driver version, two ints for the capability. The handle is used only between init and shutdown, and the library is closed on drop. Strings are read with `CStr::from_bytes_until_nul`. |
+| `trt::native::preload` (Linux) | `libc::dlopen(RTLD_NOW\|RTLD_GLOBAL)`, `libc::dlerror` | A `CString` path that outlives the call. The handle is deliberately never closed. `dlerror` is read on the same thread straight after the failure, null-checked and copied. |
+| `trt::native::search_beside` (Windows) | `SetDllDirectoryW` | A NUL-terminated UTF-16 path that outlives the call, which copies it. The worker runs one lane. |
+| `openvino::ov_device` | `ort::api().EpDevice_EpMetadata`, `GetKeyValue` | The device pointer is one ORT handed out for this environment, alive as long as the device. The key-value pairs belong to the device, are only read, and the value is copied at once. |
+| `llama::watchdog` (unix) | `libc::fork`, then `close`, `sleep`, `getppid`, `kill`, `_exit` in the child | The child of a fork in a threaded process makes only async-signal-safe calls, never returns into Rust, never allocates or locks. It closes fds 0 to 2 so the daemon still sees the worker's pipes close. |
+| `llama::Server::drop` (unix) | `libc::kill`, `libc::waitpid` | The watchdog is this process's own unreaped child, so its pid cannot have been reused. It is signalled and reaped once. |
+| `llama::kill_on_close` (Windows) | `CreateJobObjectW`, `SetInformationJobObject`, `AssignProcessToJobObject` | An anonymous job. `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` is `repr(C)`, size-asserted at 144 bytes, and passed with its own size. The child's handle is alive while `child` is. On any failure the drop guard remains. |
 | `cuda::record` (Linux) | `libc::dlopen`/`dlsym`/`dlclose`, `mem::transmute_copy`, `nvmlInit_v2`, `nvmlDeviceGetCount_v2`, `nvmlDeviceGetHandleByIndex_v2`, `nvmlDeviceGetName`, `nvmlDeviceGetMemoryInfo`, `nvmlSystemGetDriverVersion`, `nvmlShutdown` | Each symbol is looked up by a NUL-terminated name and transmuted to the signature in nvml.h only when it is non-null; a size assert checks it is pointer-sized. Every out-parameter is a live local of the size NVML is told: 96 bytes for the name, 80 for the driver version, three `u64`s for `nvmlMemory_t`. The device handle is used only between init and shutdown, and the library is closed after shutdown. The strings are read with `CStr::from_bytes_until_nul`, so nothing reads past the buffer. |
 | `cuda::load` (Linux) | `libc::dlopen(RTLD_NOW\|RTLD_GLOBAL)`, `libc::dlerror` | Each path is a `CString` that outlives the call. Handles are deliberately never closed, because the libraries must live as long as the worker process. `dlerror` is read on the same thread straight after the failure, null-checked, and copied. |
 | `cuda::append_cuda` | `CreateCUDAProviderOptions`, `SessionOptionsAppendExecutionProvider_CUDA_V2`, `ReleaseCUDAProviderOptions`, `GetErrorMessage`, `ReleaseStatus` | The options pointer is a live out-pointer that ORT fills and owns. It is released exactly once, whatever the append answered. The session-options pointer is the builder's own and is valid while the builder is. A non-null status has its message copied before it is released once. |

@@ -69,24 +69,47 @@ map.
 ## Indexing
 
 ```
-walk paths ──▶ read bytes ──▶ hash ──▶ unchanged? ──▶ skip
-                   │
-                   ▼
-              extract text  (by extension: PDF, documents, else UTF-8)
-                   │
-                   ▼
-              chunk_file()  (cut at definitions and headings; ≤800 chars,
-                              2 lines overlap where there is no cut)
-                   │
-                   ├──▶ INSERT INTO files/chunks  ──▶ chunk ids
-                   │
-                   ▼
-              batch of 32 ──▶ embed ──▶ normalize ──▶ add_with_ids
-                                                          │
-                   ┌──────────────────────────────────────┘
-                   ▼
-              prune vanished files ──▶ write dirty shards ──▶ commit hashes
+ walk ──▶ recently changed first ──▶ paths
+                                      │
+      ┌───────────── prepare pool (one thread per performance core) ─────────┐
+      │ read ─▶ hash ─▶ unchanged? ─▶ skip                                  │
+      │          │                                                           │
+      │          ▼                                                           │
+      │   extract text ─▶ secret scan ─▶ parse (tree-sitter) ─▶ chunk_file() │
+      │          │                                                           │
+      │          ▼                                                           │
+      │   vector cache? ─▶ hit: the vector      miss: tokenize, once          │
+      └──────────────────────────────┬───────────────────────────────────────┘
+                                     ▼  (in walk order)
+      writer: INSERT INTO files/chunks (one transaction per window) ──▶ ids
+                                     │
+                                     ▼  windows of 256 chunks, rows committed
+      embed stage: token-budget batches ──▶ Neural Engine │ GPU │ CPU │ …
+                   two in flight per lane; every vector checked finite, non-zero
+                                     │
+                                     ▼  whole windows, in id order
+      writer: add_with_ids + exact.f32 ──▶ checkpoint: write dirty shards ──▶ commit hashes
 ```
+
+From 0.32.0 the pass is three stages running at once (`src/pipeline.rs`). The
+per-file work that needs no database — reading, hashing, extracting, the secret
+scan, the parse, the chunking and the tokenising — runs on a pool sized from the
+performance cores and hands files back in walk order, so a run is as
+deterministic as it was. The writer is the only thread that touches the store,
+and it never runs a model: it commits rows and lands vectors. The embed stage
+sorts each window by token count, hands the shortest chunks to the CPU and the
+longest to an accelerator, sizes every batch by padded tokens from the lane's own
+measured pace, and keeps two batches queued on each lane so a device never waits
+for its next one. A chunk is tokenised once; lanes receive token ids.
+
+Before 0.32.0 one thread did all of it and ran the CPU's model inline; measured
+on the M1, that was 64 % of a run while the GPU lane waited for batches 28 % of
+the time. The run's wall time is now split by stage — walk, read and hash,
+extract and scan, parse and chunk, tokenize, the wait on each lane, and write —
+in the run snapshot, the daemon log and `semlith index --verbose`, and the parts
+add up to the whole: the writer's wait on the prepare stage is shared out by the
+CPU time each part took, and its wait on the embed stage by the chunks each lane
+embedded.
 
 A few things in that flow are load-bearing:
 
@@ -1085,3 +1108,94 @@ the question reads as code (an identifier-shaped query, a sentence naming an
 identifier, or one asking about a function, a caller or a type — `code_shaped`,
 beside `shape_of`, so the query is still read in one place), and leaves
 Markdown headings out of its graph lines for such a question.
+
+## Every device, and a cache (0.32.0)
+
+### The Neural Engine, through Core ML
+
+ONNX Runtime's Core ML execution provider places almost nothing of granite on
+the Neural Engine; a native Core ML model does. `packs/coreml/` re-implements
+granite in Apple's Neural Engine layout — `(B, C, 1, S)` tensors, 1x1
+convolutions in place of linear layers, attention computed per head — and
+converts it at fixed shapes: four rows at a time, six length buckets from 128 to
+512 tokens. On the M1 3 375 of its 3 380 ops run on the Neural Engine, at 236.5
+chunks/s sustained against the CPU's 30.7, with every vector at cosine ≥ 0.9999
+against the fp32 reference. Two things had to change for fp16: a LayerNorm that
+squares its input overflows, so it squares a sixty-fourth of it; and a padding
+row keeps one key unmasked so its softmax never divides by zero.
+
+The models are built by CI from that directory, published as a pack on this
+repository's own release and pinned by digest in `src/packs.rs`. macOS compiles
+a model for the machine's Neural Engine the first time a process loads it —
+30 to 43 s a bucket on the M1, one bucket at a time in a single system
+compiler service — and caches the result under the loading program's name:
+a new binary compiled all six again. So the Core ML lanes run from a copy of
+semlith under `accel/coreml-worker-v<N>` in the model cache, made once per
+worker protocol and never replaced by an upgrade, and a session is ready once
+its longest bucket has loaded (39 s cold, about 2 s cached), loading the other
+five on a thread of its own at the priority of a user's request (27 s a bucket
+against 44 s at a spawned thread's default). The worker is not retired for
+idling while that thread holds the compile lock: retiring it abandoned the
+compile half written. The lock also keeps a second semlith from queueing
+the same compile behind the first: the compiler service works through a
+killed program's requests anyway, and a backlog of them once kept a lane
+compiling for over two hours. The daemon deletes the half-written compiles a
+killed worker leaves (about 94 MB each), and the time the last compile took is
+the next one's time left. macOS empties the cache when the disk runs low, so a
+start on a nearly full disk may compile again. The daemon starts that
+compilation when it starts, the lane shows it as compiling with a percentage
+and the time left,
+and a run with no other lane on and the CPU switched off waits for it: the
+run card reads what it is waiting for instead of a rate.
+
+### The lane policy
+
+On Apple silicon the Neural Engine goes first, and while it runs nothing else
+embeds beside it: two int8 CPU threads cut it from 236 to 79 chunks/s, because
+they take the cores that tokenise and feed it, and the GPU beside it adds 30 %
+in bursts but 4 % sustained on a fanless Air. `gpu-beside-ane` turns the GPU
+back on for a machine that can cool both. Elsewhere every accelerator that is
+on runs with the CPU beside it. A lane starts in the background and takes
+batches once its worker has passed its known-answer check; until then, and
+after any failure, the run carries on with what it has.
+
+### Blind lanes
+
+TensorRT for RTX, OpenVINO and llama.cpp are built and checked without their
+hardware. NVIDIA and Intel publish their execution providers as plugins on PyPI,
+which load into the ONNX Runtime a worker already has, exactly as Microsoft's
+WebGPU plugin does; llama.cpp runs its own server on `127.0.0.1` with a key only
+its worker knows. CI proves each builds, loads, says why it is unavailable on a
+machine without its device, falls back, and — where a CPU path exists
+(OpenVINO's CPU device, llama.cpp's CPU backend) — gives the known answer. No
+throughput is claimed for any of them, and each is labelled experimental
+wherever a lane is shown. The CUDA lane joins them.
+
+### The vector cache
+
+The same chunk text under the same model, variant, chunking rules and
+truncation always gets the same vector, so the machine keeps them: one SQLite
+file under the semlith home, bounded by a least-recently-used cap. The prepare
+stage looks a chunk up before it tokenises it, and a hit never reaches a lane.
+An edit to one function re-embeds that function's chunk and not its file's
+others; a second worktree of a repository re-embeds almost nothing. The cache is
+the machine's and never a store's: compaction does not touch it, eviction does
+not touch a store, and deleting it costs a re-embed and nothing else.
+
+### A store that answers while it fills
+
+Rows are committed a window at a time, before the window is embedded, and
+readers open their own connections, so keyword and graph search answer for every
+file already written while the vectors are still coming. The writer may hand
+the embed stage up to sixteen windows beyond the three it works on, so in its
+first second a cold run writes thousands of chunks' rows rather than the few
+hundred the devices have embedded. The files changed most recently — by
+modification time or by the last commit that touched them — go first. A pass
+over roots does not wait for the walk: it starts on the files the last commits
+touched in every repository up to two folders below each root, code before
+licences and changelogs within one commit (a shallow clone's only commit
+touched everything), while the walk of the rest goes on beside it. A semantic
+query mid-run embeds up to sixteen of its best keyword matches that have no
+vector yet on the query path, merges them into the vector list by similarity,
+and says how much of the store is still pending; a query shaped like an
+identifier trusts the keyword half and skips that embed.

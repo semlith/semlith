@@ -6777,17 +6777,33 @@ function runCard(run, controls) {
   const bar = el("span", {});
   const track = el("div", { class: "bar", tabindex: "0" }, bar);
   const pct = el("span", { class: "pct" });
-  /* The run's reading, one line of text with its parts as their own nodes, so
-   * a poll moves the words that moved and nothing else — and a field the
-   * daemon adds is one more node here and one `setText` in `absorb`. */
-  const counts = document.createTextNode("");
-  // Each starts holding an empty text node, so its first words are an edit
-  // of that node rather than a child added under a card being watched.
+  /* The run's reading, a strip of small labelled figures, each its own node,
+   * so a poll moves the words that moved and nothing else — and a field the
+   * daemon adds is one more figure here and one `setText` in `absorb`.
+   *
+   * Each value starts holding an empty text node, so its first words are an
+   * edit of that node rather than a child added under a card being watched.
+   * The label is the figure's `data-label`, drawn by CSS, so the value is the
+   * figure's only text. The rate comes first: it is the first `.filters
+   * .meta` on the card, which is where the drive reads it (8.3). */
+  const counts = el("span", {}, "");
+  const chunksNode = el("span", {}, "");
   const rate = el("span", {}, "");
   const lanes = el("span", {}, "");
   const threads = el("span", {}, "");
-  const status = el("span", { class: "meta" }, counts, rate, lanes, threads);
-  const elapsed = el("span", { class: "meta" });
+  const pending = el("span", {}, "");
+  const elapsed = el("span", {}, "");
+  const figure = (label, value) => el("span", { class: "meta run-stat", "data-label": label }, value);
+  const rateFig = figure("rate", rate);
+  const filesFig = figure("files", counts);
+  const chunksFig = figure("chunks", chunksNode);
+  const clockFig = figure("time", elapsed);
+  const lanesFig = figure("devices", lanes);
+  const threadsFig = figure("threads", threads);
+  const pendingFig = figure("not yet embedded", pending);
+  // What the run is doing when it is not reading files, under the bar.
+  const phaseNote = el("div", { class: "meta run-phase", hidden: "" }, "");
+  const progressRow = el("div", { class: "run-progress" }, track, pct);
   const log = el("div", { class: "log", "aria-live": "polite" });
   // What a refused control said, on the card it was pressed on.
   const problem = el("div", { class: "note bad" }, "");
@@ -6799,6 +6815,38 @@ function runCard(run, controls) {
    * Its node is made once and only its words and `hidden` change after, so
    * no poll rebuilds the line (drive finding 8.3). */
   const planLine = el("div", { class: "meta run-plan", hidden: "" }, "");
+  /* Where the run's time went, the vector cache's share of it, and how much
+   * of the store search cannot rank by vector yet: two lines, each made once
+   * and only its words and `hidden` changed after. The stages arrive after
+   * the run's first slice and at its end, in the words the daemon's log and
+   * `semlith index --verbose` use. */
+  const stagesLine = el("div", { class: "meta", hidden: "" }, "");
+  const cacheLineNode = el("div", { class: "meta", hidden: "" }, "");
+  // Whether each detail line has anything to say; `paintFold` shows the ones
+  // that do while the details are open.
+  let hasStages = false;
+  let hasCache = false;
+  function paintStages(next) {
+    const st = next.stages;
+    hasStages = !!st;
+    setText(stagesLine, st ? stagesText(st) : "");
+    const hit = next.cache_hit_rate !== null && next.cache_hit_rate !== undefined;
+    hasCache = hit;
+    setText(
+      cacheLineNode,
+      hit
+        ? `vector cache: ${n(next.cache_hits)} of ${n(next.cache_lookups)} chunks were already embedded (${Number(next.cache_hit_rate).toFixed(1)} %)`
+        : "",
+    );
+    // How much of the store search cannot rank by meaning yet. Keyword and
+    // graph results already cover all of it, and the figure says so.
+    const share = next.pending_share;
+    const showing = share !== null && share !== undefined && share > 0;
+    pendingFig.hidden = !showing;
+    setText(pending, showing ? `${Math.max(1, Math.round(share * 100))} %` : "");
+    const tip = showing ? "keyword and graph search already cover all of the store" : "";
+    if (pendingFig.title !== tip) pendingFig.title = tip;
+  }
   function paintPlan(next) {
     const plan = next.plan;
     planLine.hidden = !plan;
@@ -6856,7 +6904,8 @@ function runCard(run, controls) {
     const next = last;
     let text = "";
     if (next.status === "queued") {
-      text = `waiting ${spellTook(ticking ? shown + since : shown)}`;
+      // Under the figure's "waiting" label, the wait alone.
+      text = spellTook(ticking ? shown + since : shown);
     } else if (next.status === "running") {
       text = next.eta_ms === null || next.eta_ms === undefined ? "estimating…" : spellLeft(next.eta_ms - since);
     } else if (next.finished_at && next.started_at) {
@@ -6868,7 +6917,9 @@ function runCard(run, controls) {
         .slice(0, 5)}${queued >= 1000 ? ` · queued ${spellTook(queued)}` : ""}`;
     }
     setText(elapsed, text);
-    elapsed.hidden = !text;
+    clockFig.hidden = !text;
+    const label = next.status === "queued" ? "waiting" : "time";
+    if (clockFig.dataset.label !== label) clockFig.dataset.label = label;
   }
 
   function absorb(next) {
@@ -6887,6 +6938,9 @@ function runCard(run, controls) {
     // A stopped run undid everything it embedded, so a full bar would say the
     // opposite of what happened.
     const width = finished ? 100 : next.status === "stopped" ? 0 : scanned;
+    // A run still in the line has nothing to show on a bar; its card is its
+    // name, its place in the line, its plan and how long it has waited.
+    progressRow.hidden = next.status === "queued";
     bar.style.width = `${width.toFixed(1)}%`;
     setText(pct, `${Math.round(width)}%`);
     // What the bar is a bar of. The card states files and chunks elsewhere;
@@ -6923,18 +6977,31 @@ function runCard(run, controls) {
     // A compaction reads no files: what it is doing, then what it gave back.
     const compacted = next.kind === "compact" ? next.summary?.compact : null;
     const disk = (f) => (f ? f.database + f.exact + f.vectors : 0);
+    const compacting = next.kind === "compact";
     setText(
       counts,
-      next.kind === "compact"
+      compacting
         ? compacted
-          ? `${bytes(disk(compacted.before))} → ${bytes(disk(compacted.after))} on disk · ${n(compacted.vectors_dropped)} vectors and ${n(compacted.history_dropped)} retired definitions dropped · `
-          : `rewriting vectors and vacuuming · `
-        : next.phase
-        ? `${n(next.scanned)}/${n(next.total)} files · ${next.phase} · `
+          ? `${bytes(disk(compacted.before))} → ${bytes(disk(compacted.after))}`
+          : "rewriting"
         : next.total
-          ? `${n(next.scanned)}/${n(next.total)} files · ${n(next.chunks)} chunks · `
-          : `${RUN_WORD[next.status] || next.status} · `,
+          ? `${n(next.scanned)} / ${n(next.total)}`
+          : RUN_WORD[next.status] || next.status,
     );
+    const filesLabel = compacting ? "on disk" : "files";
+    if (filesFig.dataset.label !== filesLabel) filesFig.dataset.label = filesLabel;
+    // Before the walk has a total there is nothing to count against, and the
+    // pill already says where the run is.
+    filesFig.hidden = !compacting && !next.total;
+    chunksFig.hidden = compacting || !next.total;
+    setText(chunksNode, compacting || !next.total ? "" : n(next.chunks || 0));
+    const phase = compacting
+      ? compacted
+        ? `${n(compacted.vectors_dropped)} vectors and ${n(compacted.history_dropped)} retired definitions dropped`
+        : "rewriting vectors and vacuuming"
+      : next.phase || "";
+    phaseNote.hidden = !phase;
+    setText(phaseNote, phase);
     /* The daemon's rolling rate, over the last ten seconds of work, on every
      * poll while the run is live — "—" until the first batch has given it one.
      * It used to be chunks over the whole elapsed clock, which counted the
@@ -6943,17 +7010,27 @@ function runCard(run, controls) {
     const reading = live ? next.rate : next.rate_average;
     // A run still in the line has read nothing, so it has no rate to show,
     // and a finished run that never embedded a batch has no average either.
-    rate.hidden = next.status === "queued" || (!live && (reading === null || reading === undefined));
-    setText(rate, `${reading === null || reading === undefined ? "—" : perSecond(reading)} chunks/s · `);
+    // Only a run that is reading has a rate now: paused, held or queued, the
+    // last figure it had is not what it is doing.
+    const reading_now = next.status === "running" || next.status === "stopping";
+    rate.hidden = (live && !reading_now) || (!live && (reading === null || reading === undefined));
+    rateFig.hidden = rate.hidden;
+    setText(rate, `${reading === null || reading === undefined ? "—" : perSecond(reading)} chunks/s`);
     const average = next.rate_average;
     const tip = average === null || average === undefined ? "" : `${perSecond(average)} chunks/s on average since the first batch`;
     if (rate.title !== tip) rate.title = tip;
-    // Which device is doing what, once there is more than one doing it.
-    const split = Object.entries(next.lane_rates || {}).sort((a, b) => b[1] - a[1]);
-    lanes.hidden = split.length < 2;
-    setText(lanes, split.length < 2 ? "" : `${split.map(([lane, r]) => `${lane.toUpperCase()} ${n(Math.round(r))}/s`).join(" · ")} · `);
-    threads.hidden = !next.threads;
-    setText(threads, next.threads ? `${n(next.threads)} thread${next.threads === 1 ? "" : "s"} · ` : "");
+    // Which device is doing what. One lane is named too: on a Mac with the
+    // Neural Engine it is the only one, and which one is the question.
+    // A lane that has gone quiet is left out: with the Neural Engine running,
+    // "CPU 0.0/s · GPU 0.0/s" only says what they did while it compiled.
+    const split = Object.entries(next.lane_rates || {})
+      .filter(([, r]) => r > 0)
+      .sort((a, b) => b[1] - a[1]);
+    lanesFig.hidden = !split.length || !reading_now;
+    setText(lanes, split.length ? split.map(([lane, r]) => `${LANE_NAMES[lane] || lane} ${perSecond(r)}/s`).join(" · ") : "");
+    threadsFig.hidden = !next.threads || !live;
+    setText(threads, next.threads ? n(next.threads) : "");
+    paintStages(next);
     setText(where, (next.paths || []).join(", "));
     const deleted = next.delete || "";
     setText(outcome, deleted);
@@ -6981,10 +7058,11 @@ function runCard(run, controls) {
     // carrying a cancellation that killed the next run against it at 0%.
     remove.hidden = live;
 
-    // Finished cards start folded, live ones start open, and whatever the
-    // reader has chosen since is kept.
+    // Every card starts folded to its figures, live ones too: the log and
+    // the stages are a press away, and a running card used to be a screen of
+    // scrolling paths. Whatever the reader has chosen since is kept.
     if (touched === false) {
-      open = live;
+      open = false;
       touched = null;
     }
     paintFold();
@@ -6993,7 +7071,9 @@ function runCard(run, controls) {
   function paintFold() {
     log.hidden = !open;
     where.hidden = !open;
-    setText(expand, open ? "Hide the log" : "Show the log");
+    stagesLine.hidden = !open || !hasStages;
+    cacheLineNode.hidden = !open || !hasCache;
+    setText(expand, open ? "Hide details" : "Details");
     expand.setAttribute("aria-expanded", String(open));
   }
 
@@ -7017,32 +7097,34 @@ function runCard(run, controls) {
   const node = el(
     "div",
     { class: "card pad run-card" },
+    // The name, its state and what can be done to it, on one line: the
+    // buttons never wrap under a reading that has grown.
     el(
       "div",
-      { class: "head" },
+      { class: "head run-head" },
       el("span", { class: "card-title", text: run.store }),
       badge,
       el("span", { class: "spacer" }),
-      pct,
+      el("span", { class: "run-actions" }, expand, pause, stop, remove),
     ),
+    progressRow,
+    phaseNote,
     planLine,
-    track,
     el(
       "div",
-      { class: "filters" },
-      // The clock sits with the counts it belongs to. Files, chunks, rate and
-      // elapsed are one reading of one run; across the card from them the
-      // clock read as a property of the page rather than of the work.
-      status,
-      elapsed,
-      el("span", { class: "spacer" }),
-      expand,
-      pause,
-      stop,
-      remove,
+      { class: "filters run-stats" },
+      rateFig,
+      filesFig,
+      chunksFig,
+      clockFig,
+      lanesFig,
+      threadsFig,
+      pendingFig,
     ),
     problem,
     outcome,
+    stagesLine,
+    cacheLineNode,
     where,
     log,
   );
@@ -7054,6 +7136,25 @@ function runCard(run, controls) {
   }, 1000);
 
   return { node, absorb, log, problem, last: () => last, isOpen: () => open };
+}
+
+/** A run's stages as `Stages::line` writes them: walk, read+hash,
+ * extract+scan, parse+chunk, tokenize, the wait on each lane, write, over the
+ * wall time they sum to. */
+function stagesText(st) {
+  const secs = (ms) => `${((ms || 0) / 1000).toFixed(1)} s`;
+  const parts = [
+    `walk ${secs(st.walk_ms)}`,
+    `read+hash ${secs(st.read_ms)}`,
+    `extract+scan ${secs(st.extract_ms)}`,
+    `parse+chunk ${secs(st.parse_ms)}`,
+    `tokenize ${secs(st.tokenize_ms)}`,
+    ...Object.keys(st.embed_wait_ms || {})
+      .sort()
+      .map((lane) => `embed wait (${lane}) ${secs(st.embed_wait_ms[lane])}`),
+    `write ${secs(st.write_ms)}`,
+  ];
+  return `stages over ${secs(st.wall_ms)}: ${parts.join(", ")}`;
 }
 
 /** Append one log line, keeping the reader's place if they have scrolled up. */
@@ -7254,7 +7355,10 @@ function settingField(key, label, limit, onSave) {
 /* The two compaction settings, on the Machine limits card: when the daemon
  * compacts an idle store on its own, and how much symbol history a compaction
  * keeps. Both take 0 (off, and keep everything), which is why they are not
- * `settingField`s, whose floor is 1. Built once and patched, like those. */
+ * `settingField`s, whose floor is 1. Built once and patched, like those.
+ *
+ * The vector cache's cap sits under them for the same reason — 0 turns the
+ * cache off — with the line `semlith stats` prints about the cache below it. */
 function compactionSettings(onSave) {
   const field = (key, label, max, explain) => {
     let dirty = false;
@@ -7273,6 +7377,7 @@ function compactionSettings(onSave) {
       onSave(key, asked);
     });
     return {
+      input,
       node: el(
         "div",
         { class: "setting" },
@@ -7298,31 +7403,82 @@ function compactionSettings(onSave) {
       ? "Every retired definition is kept, for ever."
       : `A compaction drops definitions retired more than ${v} day${v === 1 ? "" : "s"} ago, so symbol history answers for the last ${v}. ${c.default_retention_days} is the default; 0 keeps everything.`,
   );
+  const cache = field("vector_cache_mb", "cache MiB", 65536, (v, c) =>
+    c.from_environment
+      ? "Set by SEMLITH_VECTOR_CACHE_MB in the daemon's environment, so the page cannot change it."
+      : v === 0
+        ? "Off: every chunk is embedded afresh, even one this machine has embedded before."
+        : `Vectors this machine has embedded are kept, up to ${n(v)} MiB, and any store that meets the same chunk again takes its vector instead of embedding it. ${n(c.default_cap_mb)} is the default; 0 turns it off.`,
+  );
+  const held = el("div", { class: "note" });
   return {
-    node: el(
-      "div",
-      null,
-      el("span", { class: "eyebrow", text: "Keeping stores small" }),
-      el("div", { class: "settings" }, threshold.node, retention.node),
-    ),
-    update(c) {
-      threshold.update(c.threshold_percent, c);
-      retention.update(c.retention_days, c);
+    // Two blocks, so the card spaces the cache from compaction as it spaces
+    // compaction from the three fields above it.
+    node: [
+      el(
+        "div",
+        null,
+        el("span", { class: "eyebrow", text: "Keeping stores small" }),
+        el("div", { class: "settings" }, threshold.node, retention.node),
+      ),
+      el(
+        "div",
+        null,
+        el("span", { class: "eyebrow", text: "Vector cache" }),
+        el("div", { class: "settings" }, cache.node),
+        held,
+      ),
+    ],
+    update(c, vc) {
+      if (c) {
+        threshold.update(c.threshold_percent, c);
+        retention.update(c.retention_days, c);
+      }
+      if (vc) {
+        cache.input.disabled = !!vc.from_environment;
+        cache.update(vc.cap_mb, vc);
+        setText(held, `vector cache: ${cacheLine(vc)}`);
+      }
     },
   };
 }
 
+/** The vector cache as `semlith stats` and `semlith accel status` print it,
+ * with the same figures. The command line's `human_bytes` counts in 1024s and
+ * calls them MB; this card says MiB, because one card with two units for
+ * sizes is what drive finding 3.2 was about. */
+function cacheLine(vc) {
+  const human = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MiB` : b >= 1024 ? `${Math.round(b / 1024)} KiB` : `${b} B`);
+  if (!vc.cap_mb) return "off (vector cache cap is 0)";
+  const rate = vc.lookups > 0 ? `, ${Math.round((vc.hits * 100) / vc.lookups)} % of lookups hit` : "";
+  return `${vc.vectors} vectors, ${human(vc.bytes)} of ${human(vc.cap_mb * 1048576)}${rate}`;
+}
+
 /* The accelerator lanes, on the Machine limits card.
  *
- * One row per lane — the CPU, WebGPU, CUDA, and the worker when it is on —
- * each the row-wide switch the Privacy page's replay control already is, with
- * the lane's device, where it stands and its share of the rate. Built once and
- * patched from `/api/accel`, which the Index page reads with its runs.
+ * One row per lane — the CPU, the Neural Engine, WebGPU, CUDA, TensorRT for
+ * RTX, OpenVINO, llama.cpp, and the worker when it is on — each the row-wide
+ * switch the Privacy page's replay control already is, with the lane's
+ * device, where it stands and its share of the rate. The four lanes built and
+ * checked without their hardware carry an `experimental` pill, as `semlith
+ * accel status` says `(experimental)`. Built once and patched from
+ * `/api/accel`, which the Index page reads with its runs, and read again every
+ * second while a lane is downloading its pack, starting, or compiling its
+ * models — none of which moves a run, so the live poll would not ask.
  *
  * The daemon refuses what it will not do — the CPU off with no GPU lane able
  * to carry the work, CUDA anywhere but Linux — with a 409 that says why, and
  * that sentence is shown as it came, on this card. */
-const LANE_NAMES = { cpu: "CPU", gpu: "GPU", cuda: "CUDA", worker: "Worker" };
+const LANE_NAMES = {
+  cpu: "CPU",
+  ane: "Neural Engine",
+  gpu: "GPU",
+  cuda: "CUDA",
+  trt: "TensorRT for RTX",
+  openvino: "OpenVINO",
+  llama: "llama.cpp",
+  worker: "Worker",
+};
 
 /** A size in the binary units the Machine limits card already counts in: its
  * memory field is "MiB per store", and one card with two units for sizes is
@@ -7332,12 +7488,27 @@ function binarySize(value) {
   return mib >= 1024 ? `${(mib / 1024).toFixed(1)} GiB` : `${mib.toFixed(1)} MiB`;
 }
 
+/** Where a lane stands, in the words `semlith accel status` uses:
+ * `compiling 42 %`, `downloading 7 %`, `failed — why`. */
 function laneState(status) {
   const state = (status && status.state) || "idle";
-  if (state === "downloading") return `downloading ${status.percent ?? 0}%`;
+  const percent = status && typeof status.percent === "number" ? ` ${status.percent} %` : "";
+  // How long is left, from the daemon's reading of how far the compile or
+  // download has got in the time it has taken; nothing until it has one.
+  const left =
+    status && typeof status.eta_ms === "number"
+      ? ` · ${spellLeft(status.eta_ms)}`
+      : state === "compiling" || state === "downloading"
+        ? " · estimating…"
+        : "";
+  if (state === "compiling") return `compiling${percent}${left} — its models compile for this machine, minutes the first time; runs wait for it`;
+  if (state === "downloading") return `downloading${percent}${left}`;
   if (status && status.reason) return `${state} — ${status.reason}`;
-  return state;
+  return `${state}${percent}`;
 }
+
+/** The states that end on their own, which the card watches until they do. */
+const LANE_MOVING = new Set(["downloading", "starting", "compiling"]);
 
 function accelSection() {
   const rows = el("div", { class: "rows accel-lanes" });
@@ -7347,6 +7518,7 @@ function accelSection() {
   let data = null;
   let asked = 0;
   let painted = 0;
+  let again = null;
 
   function say(text, bad) {
     problem.className = bad ? "note bad" : "note";
@@ -7363,9 +7535,13 @@ function accelSection() {
     await refresh();
   }
 
-  function row(lane) {
+  /** One row-wide switch: the knob, a title with room for a pill after it,
+   * the state under it, and a figure at the far end. */
+  function switchRow(onClick) {
     const knob = el("span", { class: "knob", "aria-hidden": "true" });
-    const title = el("span", { class: "replay-state" });
+    const name = document.createTextNode("");
+    const badge = el("span", { class: "pill warn lane-badge", text: "experimental", hidden: "" });
+    const title = el("span", { class: "replay-state" }, name, " ", badge);
     const where = el("span", { class: "replay-switch-note" });
     const share = el("span", { class: "meta" });
     const toggle = el(
@@ -7376,16 +7552,34 @@ function accelSection() {
       el("span", { class: "spacer" }),
       share,
     );
-    const remove = el("button", { class: "button secondary small", type: "button" });
-    const removeRow = el("div", { class: "filters accel-remove" }, remove);
-    const drawnRow = { title, where, share, toggle, remove, removeRow, enabled: false, node: null };
-    toggle.addEventListener("click", () => {
-      const on = !drawnRow.enabled;
+    const drawnRow = { name, badge, where, share, toggle, enabled: false };
+    toggle.addEventListener("click", () => onClick(drawnRow));
+    return drawnRow;
+  }
+
+  function paintSwitch(r, on) {
+    r.enabled = on;
+    r.toggle.classList.toggle("on", on);
+    const checked = String(on);
+    if (r.toggle.getAttribute("aria-checked") !== checked) r.toggle.setAttribute("aria-checked", checked);
+  }
+
+  function row(lane) {
+    const drawnRow = switchRow((r) => {
+      const on = !r.enabled;
+      const now = (data?.lanes || []).find((l) => l.lane === lane) || {};
+      const held = (data?.bytes || {})[lane] || 0;
+      const size = (data?.bytes || {})[`${lane}_download`] || now.download_bytes || 0;
+      // `installed` where the lane has a pack; what is on disk where it has not.
+      const missing = typeof now.installed === "boolean" ? !now.installed : size > 0 && held === 0;
       // A download of that size is somebody's decision, made knowing it.
-      if (on && lane === "cuda") {
+      if (on && missing && size > 0) {
+        const label = now.label || LANE_NAMES[lane] || lane;
         ask({
-          title: "Turn CUDA on?",
-          body: `It downloads the CUDA pack first, ${binarySize(data?.bytes?.cuda_download || 0)}, once, into this machine's model cache. Runs use it from their next batch.`,
+          title: `Turn ${label} on?`,
+          body: `It downloads the ${label} pack first, ${binarySize(size)}, once, into this machine's model cache. Its row shows the download; runs use the lane from their next batch after it.${
+            now.experimental ? ` ${label} is experimental: built and checked without its hardware, and not measured on it.` : ""
+          }`,
           confirm: "Download and turn on",
           run: () => change(lane, "on"),
         });
@@ -7393,8 +7587,28 @@ function accelSection() {
       }
       change(lane, on ? "on" : "off");
     });
+    const remove = el("button", { class: "button secondary small", type: "button" });
     remove.addEventListener("click", () => change(lane, "remove"));
-    drawnRow.node = el("div", { class: "accel-lane" }, toggle, removeRow);
+    /* The GPU lane beside the Neural Engine: off by default, because on a
+     * fanless M1 it added 30 % in bursts and 4 % sustained. Not a lane, so not
+     * a row-wide switch: a pressed-or-not chip in the Neural Engine's action
+     * line, the way the Impact page's `Strict` is a chip in its row. */
+    const beside =
+      lane === "ane"
+        ? el("button", {
+            class: "chip sm",
+            type: "button",
+            "aria-pressed": "false",
+            text: "GPU beside the Neural Engine",
+            title: "Off: while the Neural Engine runs, the GPU lane waits. On: both run.",
+            onclick: () => change("gpu-beside-ane", beside.getAttribute("aria-pressed") === "true" ? "off" : "on"),
+          })
+        : null;
+    const removeRow = el("div", { class: "filters accel-remove" }, beside, remove);
+    drawnRow.remove = remove;
+    drawnRow.beside = beside;
+    drawnRow.removeRow = removeRow;
+    drawnRow.node = el("div", { class: "accel-lane" }, drawnRow.toggle, removeRow);
     return drawnRow;
   }
 
@@ -7408,17 +7622,32 @@ function accelSection() {
         r = row(lane.lane);
         drawn.set(lane.lane, r);
       }
-      r.enabled = !!lane.enabled;
-      r.toggle.classList.toggle("on", r.enabled);
-      const checked = String(r.enabled);
-      if (r.toggle.getAttribute("aria-checked") !== checked) r.toggle.setAttribute("aria-checked", checked);
-      const name = LANE_NAMES[lane.lane] || lane.lane;
-      setText(r.title, `${name} · ${lane.device || "no device found"}${lane.variant ? ` · ${lane.variant}` : ""}`);
+      paintSwitch(r, !!lane.enabled);
+      const name = lane.label || LANE_NAMES[lane.lane] || lane.lane;
+      // The device is named by the lane's worker when it starts. Before
+      // then it is not "no device": it is not asked yet, or still on its way.
+      const state = lane.status?.state;
+      const device =
+        lane.device ||
+        (state === "unavailable" || state === "failed"
+          ? "no device found"
+          : LANE_MOVING.has(state)
+            ? "starting"
+            : "not started");
+      setText(r.name, `${name} · ${device}${lane.variant ? ` · ${lane.variant}` : ""}`);
+      r.badge.hidden = !lane.experimental;
       setText(r.where, `${r.enabled ? "" : "off · "}${laneState(lane.status)}`);
       setText(r.share, `${Math.round(lane.share || 0)} %`);
       const held = (next.bytes || {})[lane.lane] || 0;
-      r.removeRow.hidden = !(held > 0 && (lane.lane === "gpu" || lane.lane === "cuda"));
+      r.remove.hidden = !(held > 0 && lane.lane !== "cpu" && lane.lane !== "worker");
       setText(r.remove, `Remove downloaded files (${binarySize(held)})`);
+      if (r.beside) {
+        // Only where there is a Neural Engine to run beside.
+        r.beside.hidden = lane.status?.state === "unavailable";
+        const pressed = String(!!next.gpu_beside_ane);
+        if (r.beside.getAttribute("aria-pressed") !== pressed) r.beside.setAttribute("aria-pressed", pressed);
+      }
+      r.removeRow.hidden = r.remove.hidden && (!r.beside || r.beside.hidden);
     }
     for (const [lane, r] of drawn) {
       if (seen.has(lane)) continue;
@@ -7427,6 +7656,21 @@ function accelSection() {
     }
     arrange(rows, (next.lanes || []).map((lane) => drawn.get(lane.lane).node));
     setText(fallback, next.cpu_fallback ? "The CPU is carrying the work: no GPU lane can." : "");
+
+    // A download, a start or a compile moves by itself and says how far it
+    // has got, and a lane's share of the work moves with every batch and falls
+    // to 0 when its run pauses or stops, which moves no run. The page asks
+    // again each second until nothing is moving and every share reads 0, and
+    // stops asking once the card has left the page.
+    const moving = (next.lanes || []).some(
+      (lane) => LANE_MOVING.has(lane.status?.state) || (lane.share || 0) > 0,
+    );
+    if (moving && !again) {
+      again = setTimeout(() => {
+        again = null;
+        if (rows.isConnected) refresh();
+      }, 1000);
+    }
   }
 
   /** Read the lanes again. Numbered like the runs, so a late answer to an
@@ -7776,8 +8020,11 @@ async function indexView() {
     text: "Remove all finished",
     hidden: true,
   });
-  /* Whether the note is holding an answer to a button that time can falsify —
-   * "3 runs queued." stayed on screen long after the three had finished. */
+  /* Whether the note is holding an answer to a button that time can falsify,
+   * and which: "queued" for "3 runs queued.", which stops being true the
+   * moment nothing is waiting any more, and "scan" for a scan's plan, which
+   * stops being true once nothing is held for Start indexing. "3 runs queued."
+   * used to stay up through the whole run it announced. */
   let transient = false;
 
   /* One card per run, kept across repaints so a card's log and its scroll
@@ -7947,10 +8194,12 @@ async function indexView() {
     // threw every log back to its top.
     arrange(cards, order);
 
-    // "N runs queued." is an answer to a button, and it stopped being true the
-    // moment the last run finished. It sits in the button row, so its going
-    // moves nothing under it.
-    if (transient && !runs.some((run) => TICKING.has(run.status)) && !(data?.queue || []).length) {
+    // "N runs queued." is an answer to a button, and it stops being true the
+    // moment nothing is waiting: the cards say the rest. It sits in the button
+    // row, so its going moves nothing under it.
+    const queuing = runs.some((run) => run.status === "queued") || (data?.queue || []).length > 0;
+    const held = runs.some((run) => run.status === "review");
+    if ((transient === "queued" && !queuing) || (transient === "scan" && !held)) {
       transient = false;
       say("");
     }
@@ -8013,7 +8262,7 @@ async function indexView() {
       queue.map((row) => queued.get(String(row.run ?? row.store)).node),
     );
 
-    paintSettings(data?.limits, data?.compaction);
+    paintSettings(data?.limits, data?.compaction, data?.vector_cache);
   }
 
   async function saveSetting(key, value) {
@@ -8026,7 +8275,7 @@ async function indexView() {
       // What the daemon is running with now, in its words: all three take
       // effect at once, the running runs at their next batch.
       setText(settingsNote, answer.applied ? `Saved — ${answer.applied}.` : "Saved.");
-      paintSettings(answer.limits, answer.compaction);
+      paintSettings(answer.limits, answer.compaction, answer.vector_cache);
     } catch (e) {
       settingsNote.className = "note bad";
       setText(settingsNote, e.message);
@@ -8046,7 +8295,7 @@ async function indexView() {
   const compactSection = compactionSettings(saveSetting);
   const accel = accelSection();
   let limitsCard = null;
-  function paintSettings(limits, compaction) {
+  function paintSettings(limits, compaction, vectorCache) {
     if (!limits) return;
     const machine = limits.machine || {};
     if (!limitsCard) {
@@ -8086,7 +8335,7 @@ async function indexView() {
         accel.node,
       );
     }
-    if (compaction) compactSection.update(compaction);
+    compactSection.update(compaction, vectorCache);
     // Every field of every limit, every time, and each patch is a no-op when
     // nothing moved. `embed_threads` is derived from the runs actually in
     // force, so changing `runs at once` changes the *sentence* under `threads
@@ -8156,6 +8405,8 @@ async function indexView() {
       : "each";
   }
   field.addEventListener("input", paintTargets);
+  // New paths are a new request: the button offers to scan them.
+  field.addEventListener("input", () => paintStart(state.runs?.runs));
   paintTargets();
 
   fill(
@@ -8179,6 +8430,7 @@ async function indexView() {
       const already = field.value.split("\n").map((p) => p.trim()).filter(Boolean);
       field.value = [...new Set([...already, ...paths])].join("\n");
       field.rows = Math.min(8, Math.max(2, field.value.split("\n").length));
+      paintStart(state.runs?.runs);
     },
     onError: (message) => complain(message),
   });
@@ -8188,6 +8440,7 @@ async function indexView() {
       field.value = paths.join("\n");
       field.rows = Math.min(8, Math.max(2, paths.length));
       target.value = "each";
+      paintStart(state.runs?.runs);
     },
     onError: (message) => complain(message),
   });
@@ -8302,10 +8555,22 @@ async function indexView() {
   });
   const scan = scanPanel();
   let scanning = false;
+  /* The runs this form just started. Until they end, or somebody names
+   * something new to read, the button says the work is going rather than
+   * offering to scan paths the field no longer holds. */
+  let launched = new Set();
   function paintStart(runs) {
     const held = (runs || []).filter((run) => run.status === "review");
-    setText(start, scanning ? "Scanning…" : held.length ? "Start indexing" : "Scan");
-    start.disabled = scanning;
+    const going = (runs || []).some(
+      (run) => launched.has(run.id) && TICKING.has(run.status) && run.status !== "review",
+    );
+    if (!going || field.value.trim()) launched = new Set();
+    const indexing = going && !field.value.trim();
+    setText(
+      start,
+      scanning ? "Scanning…" : held.length ? "Start indexing" : indexing ? "Indexing…" : "Scan",
+    );
+    start.disabled = scanning || indexing;
     discard.hidden = !held.length || scanning;
     scan.paint(runs);
   }
@@ -8325,7 +8590,7 @@ async function indexView() {
       const answer = await post(route, body);
       const started = (answer.runs || []).filter((run) => run.run !== undefined);
       const refused = (answer.runs || []).filter((run) => run.error);
-      transient = true;
+      transient = body.review === "always" ? "scan" : "queued";
       const many = started.length === 1 ? "" : "s";
       const done =
         body.review === "always"
@@ -8356,8 +8621,13 @@ async function indexView() {
         for (const run of held) {
           await post("/api/index/control", { store: run.store, run: run.id, action: "start" });
         }
-        transient = true;
+        transient = "queued";
         say(`${held.length} run${held.length === 1 ? "" : "s"} queued.`);
+        // What was asked for is on its way; the field is ready for the next.
+        launched = new Set(held.map((run) => run.id));
+        field.value = "";
+        field.rows = 2;
+        paintTargets();
       } catch (e) {
         complain(e.message);
       }

@@ -249,16 +249,52 @@ share one query session.
 | 60 s after the last run ends | 465 MB, no writer session loaded |
 | 0.27.0, after indexing | 5 392 MB |
 
-Only the daemon uses GPU lanes. `semlith index` in a terminal and
-`tests/retrieval.rs` run on the CPU alone. A single lane is deterministic, but
-which lane embeds a given chunk depends on timing. Two hybrid runs over the same
-corpus therefore produce the same chunks but not bit-identical vectors.
+From 0.32.0 `semlith index` in a terminal uses the lanes as the daemon does;
+`tests/retrieval.rs` runs on the CPU alone unless `SEMLITH_ACCEL` is set. A
+single lane is deterministic, but which lane embeds a given chunk depends on
+timing. Two hybrid runs over the same corpus therefore produce the same chunks
+but not bit-identical vectors.
+
+## The Neural Engine and the accelerator lanes
+
+Taken for 0.32.0 on the same M1 Air, on AC, in a scratch `SEMLITH_HOME` with
+the vector cache off, over the 0.30.1 gate corpus (nine repositories, 20 146
+files, 120 000 chunks). The rate is chunks over wall time per slice, and the
+figure is the tenth percentile over slices two to fifteen, the median of three
+runs.
+
+| run | p10 chunks/s | gate |
+|---|---|---|
+| the daemon, Neural Engine lane (runs: 229.2, 229.8, 233.3) | **229.8**, median 243 | ≥ 200, met |
+| the daemon, Neural Engine off: CPU and the GPU through Core ML | **62.7** (was 16.0 before the batching fix) | ≥ 80, **not met** (#164) |
+| the same, the GPU lane alone | 58.2, the lane at 74.4 | — |
+| `semlith index` in a terminal against the daemon, one repository, three each | 240.7 against 240.6 | within 10 %, met |
+
+The Core ML GPU model runs about 72 chunks/s on its own at batch 8 or 16, and
+the CPU lane about 30; together they contend for the four performance cores. A
+GPU model converted at six buckets instead of three measured 67.2 and is not
+shipped yet.
+
+| other gate | measured | gate |
+|---|---|---|
+| a cold store's first keyword / graph answer, mid-run semantic p50 | 0.66 s / 0.59 s / 0.91 s, pending share reported | < 2 s |
+| re-index after a scripted edit series, cache on against off | 7.62x less embedding time | ≥ 5x |
+| a second worktree of the same repository | 0 % of its chunks re-embedded | < 10 % |
+| retrieval, 77 development questions, hit@1 / @3 / @8 | CPU 58 / 61 / 67, Neural Engine 58 / 61 / 69, half each 57 / 62 / 67; the 0.31.0 release suite 57 / 61 / 68 | within one question |
+| the Neural Engine lane ready after a start: cold, cached, after a rebuild | 39 s (all six buckets 2.5 min later), 2.1 s, 6.0 s | a second process < 2 s to load the models: 0.8 s a bucket |
+| the vector cache on disk, and a lookup | 1 703 bytes a vector (a full 1 024 MB cap is about 1.1 GB), 8.6 µs | recorded |
+| peak RSS, daemon and its workers, Neural Engine run | 686 MB | recorded |
+
+macOS empties the Neural Engine's compile cache when the disk runs low: with
+13 GB free all six buckets were gone within ten minutes, with 32 GB free none
+were.
 
 ## The binary, and what a Linux machine needs
 
 | what | measured | when |
 |---|---|---|
-| the macOS arm64 binary | **116 679 872 bytes** — 111.3 MiB, of which 1.8 MB is the image support | 0.17.2 |
+| the macOS arm64 binary | **123 110 976 bytes** — 117.4 MiB, 996 KB more than 0.31.0's for the Core ML bridge; the packs are downloaded, never linked in | 0.32.0 |
+| the same | 116 679 872 bytes — 111.3 MiB, of which 1.8 MB is the image support | 0.17.2 |
 | the same, when forty grammars landed | 116 683 392 bytes | 0.17.0 |
 | the Linux glibc floor | **GLIBC_2.34**, with GLIBCXX_3.4.22 | 0.17.1's artifact |
 

@@ -164,7 +164,7 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 | `semlith languages` | List the language names `--lang` accepts. |
 | `semlith setup [--yes] [--register-all] [--no-hooks] [--hook-mode M] [--no-agents]` | Put `~/.semlith/bin` on `PATH`, pre-fetch the model, register semlith in every agent client on the machine that has a registration command — at the scope that means every project, launching `semlith mcp`, so no configuration file carries the key — install the semlith Agent Skill and link it into every user-level skill directory a client reads, write the steering hook into the clients that document one, set Claude Code's `alwaysLoad` so the tools are there from the first turn, and write a read-only `semlith-explorer` research agent. Idempotent, so it is also the repair command. `--register-all` also writes the configuration file of the clients that have no command, and the rules file of the clients that document one, listing every path first and backing each file up beside itself. `--no-hooks` removes the hook; `--hook-mode gate\|hard` writes a refusing form; `--no-agents` removes the research agent; `--airgap` skips the model. |
 | `semlith doctor [--fix] [--gpu]` | Per client: installed, registered, at what scope, and what to run otherwise. Plus the Privacy rules that are readings of this machine. `--fix` applies the repairs that narrow access to a path semlith owns, and clears a per-project disable of semlith for the current directory. `--gpu` embeds 32 fixed chunks on every lane and prints each lane's cosine against committed vectors, its rate and its device. |
-| `semlith accel [status\|on\|off\|remove] [cpu\|gpu\|cuda]` | Which devices embed. The CPU and a GPU through WebGPU are on by default; CUDA on Linux is off until you turn it on. A switch reaches every running run at its next batch; `remove` deletes a lane's downloads. |
+| `semlith accel [status\|on\|off\|remove] [lane]` | Which devices embed: `cpu`, `ane` (the Neural Engine on Apple silicon), `gpu`, and the experimental `cuda`, `trt`, `openvino` and `llama`. The CPU, the GPU and the Neural Engine are on by default; an experimental lane is off until you turn it on. A switch reaches every running run at its next batch; `remove` deletes a lane's downloads. |
 | `semlith upgrade` | Replace this binary with the newest release, checksum-verified. `--check` only says whether one exists (exit 10 when it does). `--version <TAG>` pins one. Never runs on its own. |
 
 `semlith add` fetches over https only, refuses redirects that leave https, caps
@@ -480,7 +480,7 @@ of these drifts from its source:
 |---|---|---|
 | warm search at 700 / 7 000 / 70 000 chunks, peak RSS under 240 MB | **16.2 / 37.9 / 159.1 ms**, against the previous release's 20.5 / 46.9 / 362.4 measured beside it | `cargo test --release --test measure -- --ignored --nocapture` |
 | edit on disk to searchable | **under 5 s** | the same |
-| indexing through the login service, CPU alone / CPU and WebGPU | **15.1 / 36.8 chunks/s**, against 24.7 for `semlith index` in a terminal | `docs/performance.md` |
+| indexing on an M1 Air, Neural Engine / CPU and GPU through Core ML | **229.8 / 62.7 chunks/s** p10, and `semlith index` in a terminal within 1 % of the daemon | `docs/performance.md` |
 | daemon memory 60 s after a run, seven stores open | **465 MB** | `footprint -p <pid>` |
 | idle watcher CPU, over 60 s | **under 1.0 s** | the same |
 | one changed file | **1 shard rewritten** | `cargo test --release --test shards -- --ignored --nocapture` |
@@ -489,7 +489,7 @@ of these drifts from its source:
 | one search, rescoring off / on | **8.2 ms** / 132.2 ms on a 300-file store | the same |
 | one answered question, `brief` against search-then-read | **1.00 calls vs 2.54**, 1 112 tokens vs 725 | the same |
 | call-edge resolution | **62 %** settled | the same |
-| the macOS arm64 binary | **116 679 872 bytes** (111.3 MiB) | `ls -l target/release/semlith` |
+| the macOS arm64 binary | **123 110 976 bytes** (117.4 MiB) | `ls -l target/release/semlith` |
 | the Linux glibc floor | **GLIBC_2.34** | `objdump -T semlith runtime/libonnxruntime.so` |
 
 Peak memory does not grow with the corpus — 105k chunks is 85 times the work of
@@ -501,9 +501,9 @@ at. Query latency does grow: the index scan is linear.
 
 - One writer per store. A second `index` run against a store already being
   indexed exits with an error naming the process that holds it.
-- First-time indexing is bound by transformer speed: roughly 24 chunks/sec on
-  the CPU, and about 37 with the GPU beside it on an M1. Later runs touch only
-  what changed. On macOS the login service indexes at about 60 % of the same
+- First-time indexing is bound by the model: about 230 chunks/s on an M1's
+  Neural Engine, 63 on its CPU and GPU, 30 on the CPU alone. Later runs embed
+  only what changed, and what the vector cache already holds not at all. On macOS the login service indexes at about 60 % of the same
   binary in a terminal, because of how launchd schedules an agent's threads.
 - CUDA runs on Linux x86_64 only; an NVIDIA card on Windows embeds through
   WebGPU. A GPU lane is never a software renderer.

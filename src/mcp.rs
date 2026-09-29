@@ -842,7 +842,11 @@ fn call_tool(
                     Ok(hits) => {
                         let paths = stores.shortener();
                         let rows = locate(&hits, query, max_tokens, &|p| paths.short(p));
-                        paths.with_header(format!("{}\n{rows}", reading(query, prefer)))
+                        let note = stores
+                            .pending_note()
+                            .map(|n| format!("\n{n}"))
+                            .unwrap_or_default();
+                        paths.with_header(format!("{}\n{rows}{note}", reading(query, prefer)))
                     }
                     // Tool failures are reported in-band so the agent can react,
                     // rather than as a protocol-level error.
@@ -1165,14 +1169,12 @@ fn call_tool(
                     body
                 });
             }
-            // The lanes that embed, once for the whole answer.
-            let on = crate::accel::enabled();
-            let lanes: Vec<&str> = [("cpu", on.cpu), ("gpu", on.gpu), ("cuda", on.cuda)]
-                .into_iter()
-                .filter(|(_, on)| *on)
-                .map(|(lane, _)| lane)
-                .collect();
+            // The lanes that embed, once for the whole answer, experimental
+            // ones said so.
+            let lanes = crate::accel::enabled().named();
             lines.push(format!("embedding lanes on: {}", lanes.join(", ")));
+            // The machine's vector cache, shared by every store.
+            lines.push(format!("vector cache: {}", crate::cache::stats().line()));
             lines.join("\n")
         }
         "semlith_files" => {

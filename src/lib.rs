@@ -19,11 +19,13 @@ pub mod accel;
 pub mod add;
 pub mod agentfiles;
 pub mod brief;
+pub mod cache;
 pub mod chunk;
 pub mod clientfile;
 pub mod clients;
 pub mod clock;
 pub mod compact;
+pub mod coreml;
 pub mod cuda;
 pub mod daemon;
 pub mod doctor;
@@ -42,9 +44,14 @@ pub mod image;
 pub mod index;
 pub mod keyscan;
 pub mod ledger;
+pub mod llama;
 pub mod lock;
 pub mod mcp;
+pub mod openvino;
+pub mod packs;
 pub mod pattern;
+/// The daemon as a login service, so a client never finds nothing.
+pub mod pipeline;
 pub mod portal;
 pub mod priority;
 pub mod proxy;
@@ -53,12 +60,13 @@ pub mod report;
 pub mod rerank;
 pub mod routes;
 pub mod schedule;
-/// The daemon as a login service, so a client never finds nothing.
 pub mod service;
+pub mod session;
 pub mod setup;
 pub mod store;
 pub mod system;
 pub mod tree;
+pub mod trt;
 pub mod upgrade;
 pub mod watch;
 
@@ -86,17 +94,9 @@ const BIT_WIDTH: usize = 4;
 /// chunks/sec), because a smaller batch also wastes less of itself on padding.
 const EMBED_BATCH: usize = 8;
 
-/// Batches a GPU lane holds queued at once, so its device never waits on the
-/// writer's own CPU batch to be handed the next one.
-const LANE_DEPTH: usize = 2;
-
-/// Told after every embedding batch: chunks embedded, the session's thread
-/// count, and each lane's running total for the store.
-type Tick<'a> = dyn FnMut(usize, usize, &std::collections::BTreeMap<String, usize>) + 'a;
-
 /// Embed each window in walk order rather than by length: the unsorted path
 /// the length-sorted window is measured against.
-const UNSORTED_ENV: &str = "SEMLITH_UNSORTED";
+pub(crate) const UNSORTED_ENV: &str = "SEMLITH_UNSORTED";
 
 /// The meta row counting a store's chunks per vector variant.
 const VARIANTS_KEY: &str = "variants";
@@ -109,14 +109,63 @@ pub fn writer_sessions() -> usize {
     SESSIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Chunks an index pass holds before it embeds them, sorted by length.
+/// Chunks an index pass hands the embed stage at once, sorted by length there.
 ///
-/// A batch pads every text to its longest, and the pass used to flush eight
+/// A batch pads every row to its longest, and the pass used to flush eight
 /// chunks in file order — so one long chunk made seven short ones pay for its
 /// length. Holding sixty-four and embedding them shortest first measured 19.5
-/// to 29.1 chunks/s on the reference M1, CPU alone, median of three. Formed in
-/// walk order and sorted stably, so a corpus always produces the same batches.
-const SORT_WINDOW: usize = 64;
+/// to 29.1 chunks/s on the reference M1, CPU alone, median of three. From
+/// 0.32.0 a window is 256: the stage works on several at once, and a longer
+/// window sorts tighter. Formed in walk order and sorted stably, so a corpus
+/// always produces the same batches.
+const SORT_WINDOW: usize = 256;
+
+/// The longest an index pass holds written rows uncommitted.
+const ROW_COMMIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How often a pass says how far it has got while the writer waits on the
+/// devices. A window lands every 256 chunks, which on a slow CPU is a quarter
+/// of a minute of a run card standing still; batches come back far oftener.
+const PROGRESS_TICK: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How often a writer waiting with nothing moving says so anyway.
+const PROGRESS_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The last batch count a waiting writer reported, and when.
+struct Progress {
+    seen: usize,
+    at: std::time::Instant,
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self {
+            seen: 0,
+            at: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Progress {
+    /// The count, when it has moved and a tick has passed since the last, or
+    /// every [`PROGRESS_HEARTBEAT`] when it has not: a run waiting for a lane
+    /// to compile still says so, with the lane's time left, as it goes.
+    fn due(&mut self, batched: &std::sync::atomic::AtomicUsize) -> Option<usize> {
+        let n = batched.load(std::sync::atomic::Ordering::Relaxed);
+        let since = self.at.elapsed();
+        if since < PROGRESS_TICK || (n == self.seen && since < PROGRESS_HEARTBEAT) {
+            return None;
+        }
+        self.seen = n;
+        self.at = std::time::Instant::now();
+        Some(n)
+    }
+}
+
+/// Keyword candidates with no vector yet that a search mid-run embeds on the
+/// query path. Sixteen chunks on the CPU is about half a second on the M1,
+/// which keeps a mid-run search inside two.
+const PENDING_EMBED: usize = 16;
 
 /// Default model: 384-dim, ~52 MB on disk. Measured against the previous
 /// default (BGE-small) on a 6260-chunk corpus it scored 16.00 code MRR@10
@@ -1049,6 +1098,8 @@ pub struct IndexProgress {
     /// about how much work is left.
     pub bytes: u64,
     pub bytes_total: u64,
+    /// Chunk rows written so far, embedded or not yet.
+    pub rows: usize,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -1129,6 +1180,10 @@ pub struct IndexReport {
     /// Chunks embedded so far in this call, counted per batch. `chunks` counts
     /// finished files, so it stands still through a large one; this does not.
     pub embedded: usize,
+    /// Chunks whose batch has come back from a device, ahead of their window
+    /// landing: what progress moves on while the writer waits.
+    #[serde(skip)]
+    pub batched: usize,
     /// Chunks each lane has embedded for this store, since it was opened.
     #[serde(skip)]
     pub lanes: std::collections::BTreeMap<String, usize>,
@@ -1141,6 +1196,22 @@ pub struct IndexReport {
     /// the slices of one logical run, so stopping can undo the whole run
     /// rather than only the slice that happened to be going.
     pub written: Vec<String>,
+    /// Where this call's wall time went, stage by stage.
+    pub stages: pipeline::Stages,
+    /// Chunks the machine-wide vector cache was asked for, and held.
+    pub cache_lookups: usize,
+    pub cache_hits: usize,
+    /// Chunk rows this call wrote, embedded or not yet: what `embedded` is
+    /// catching up with, and what a card's pending share is taken from.
+    pub rows: usize,
+}
+
+/// What an index call puts into the vector cache and takes out of it, by the
+/// hash of each chunk's embedded text and the variant of its vector.
+#[derive(Default)]
+struct CacheWrites {
+    fresh: Vec<([u8; 32], &'static str, Vec<f32>)>,
+    hits: Vec<([u8; 32], &'static str)>,
 }
 
 /// The version of the scan rules a store was last swept under. A store below
@@ -1210,7 +1281,7 @@ fn embeddable_bytes(meta: Option<std::fs::Metadata>) -> u64 {
 /// all — `chunk::extract` returning nothing — is why the portal's counter
 /// never reached its total.
 fn say_file(
-    on_file: &mut impl FnMut(&Path, IndexProgress),
+    on_file: &mut dyn FnMut(&Path, IndexProgress),
     report: &IndexReport,
     total: usize,
     path: &Path,
@@ -1232,7 +1303,10 @@ fn say_file(
             outcome,
             scanned: report.scanned,
             indexed: report.indexed,
-            chunks: report.embedded.max(report.chunks),
+            // Vectors landed, not rows written: the writer runs ahead of the
+            // embed stage, and a rate taken from rows would count work not
+            // yet done.
+            chunks: report.embedded.max(report.batched),
             total,
             symbols: report.symbols,
             why,
@@ -1240,6 +1314,7 @@ fn say_file(
             lanes: report.lanes.clone(),
             bytes: report.bytes,
             bytes_total: report.bytes_total,
+            rows: report.rows,
         },
     );
 }
@@ -1341,18 +1416,6 @@ pub enum Flow {
 /// resuming feels immediate, long enough that a paused run costs nothing.
 const PAUSE_TICK: std::time::Duration = std::time::Duration::from_millis(120);
 
-/// Ask `control` until it says to go on. `false` for a stop. Inside a window a
-/// yield is a go: stepping aside happens between files, never inside one.
-fn hold(control: &dyn Fn() -> Flow) -> bool {
-    loop {
-        match control() {
-            Flow::Run | Flow::Yield => return true,
-            Flow::Pause => std::thread::sleep(PAUSE_TICK),
-            Flow::Stop => return false,
-        }
-    }
-}
-
 pub struct Semlith {
     dir: PathBuf,
     db: Connection,
@@ -1372,6 +1435,11 @@ pub struct Semlith {
     /// The intra-op thread count `embedder` was built with. A different value
     /// in force rebuilds it at the next batch.
     embedder_threads: usize,
+    /// The index pass's own CPU session, fed token ids, kept between slices.
+    /// Queries go through `embedder`; the query path is not the index pass's.
+    index_session: Option<pipeline::CpuWork>,
+    /// The intra-op thread count `index_session` was built with.
+    index_threads: usize,
     /// The second session a `mix` harness run alternates with, batch by batch.
     embedder_alt: Option<TextEmbedding>,
     /// A query session of a variant other than the index pass's, for the
@@ -1486,6 +1554,8 @@ impl Semlith {
             dim,
             embedder: None,
             embedder_threads: 0,
+            index_session: None,
+            index_threads: 0,
             embedder_alt: None,
             query_embedder: None,
             batches: 0,
@@ -1709,6 +1779,9 @@ impl Semlith {
         if self.embedder.take().is_some() {
             SESSIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
+        if self.index_session.take().is_some() {
+            SESSIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
         self.embedder_alt = None;
         self.query_embedder = None;
         self.clip = image::Clip::default();
@@ -1723,7 +1796,10 @@ impl Semlith {
     /// is waiting on.
     pub fn release_if_idle(&mut self, idle: std::time::Duration) -> bool {
         match self.last_embed {
-            Some(at) if self.embedder.is_some() && at.elapsed() >= idle => {
+            Some(at)
+                if (self.embedder.is_some() || self.index_session.is_some())
+                    && at.elapsed() >= idle =>
+            {
                 self.release_embedder();
                 true
             }
@@ -1801,16 +1877,40 @@ impl Semlith {
         Ok(out)
     }
 
-    /// The walk an index pass takes: [`walk`], plus the generated folders a
-    /// person accepted.
-    fn walk(&self, roots: &[PathBuf]) -> Walked {
-        let allowed: Vec<PathBuf> = store::acceptances(&self.db)
+    /// Hold one read transaction open, so everything this connection reads
+    /// until [`Semlith::release_snapshot`] sees the store as it was now, however
+    /// a writer beside it moves on. What a plan read beside its own run needs.
+    pub fn pin_snapshot(&self) -> Result<()> {
+        self.db.execute_batch("BEGIN")?;
+        // The snapshot is taken at the first read, not at BEGIN.
+        let _: i64 = self
+            .db
+            .query_row("SELECT COUNT(*) FROM meta", [], |r| r.get(0))?;
+        Ok(())
+    }
+
+    pub fn release_snapshot(&self) {
+        let _ = self.db.execute_batch("COMMIT");
+    }
+
+    /// The generated folders a person accepted, which the walk goes into.
+    fn accepted_folders(&self) -> Vec<PathBuf> {
+        store::acceptances(&self.db)
             .unwrap_or_default()
             .into_iter()
             .filter(|a| a.class == store::class::POLICY)
             .map(|a| PathBuf::from(a.path))
-            .collect();
-        walk_allowing(roots, &allowed)
+            .collect()
+    }
+
+    /// The walk an index pass takes: [`walk`], plus the generated folders a
+    /// person accepted.
+    fn walk(&self, roots: &[PathBuf]) -> Walked {
+        let allowed = self.accepted_folders();
+        let started = std::time::Instant::now();
+        let mut walked = walk_allowing(roots, &allowed);
+        walked.walk_ms = started.elapsed().as_millis() as u64;
+        walked
     }
 
     /// The scan phase (2.7): what a run over `roots` would do, decided without
@@ -2130,7 +2230,7 @@ impl Semlith {
     ) -> Result<IndexReport> {
         let deadline = std::time::Instant::now() + budget;
         self.index_set(
-            self.walk(roots),
+            Walk::Roots(roots.to_vec()),
             true,
             Handed::Walked(Some(deadline)),
             None,
@@ -2147,7 +2247,7 @@ impl Semlith {
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         self.index_set(
-            self.walk(roots),
+            Walk::Roots(roots.to_vec()),
             true,
             Handed::Walked(None),
             Some(control),
@@ -2170,7 +2270,7 @@ impl Semlith {
     ) -> Result<IndexReport> {
         let deadline = std::time::Instant::now() + budget;
         self.index_set(
-            self.walk(roots),
+            Walk::Roots(roots.to_vec()),
             true,
             Handed::Walked(Some(deadline)),
             Some(control),
@@ -2203,14 +2303,15 @@ impl Semlith {
             // Every one of these came out of the walk this run started with,
             // so they are walked paths and are held to the same boundary rule
             // they were held to then — each as the slice reaches it.
-            Walked {
+            Walk::Done(Walked {
+                walk_ms: 0,
                 files,
                 named: Vec::new(),
                 unreadable: Vec::new(),
                 generated: Vec::new(),
                 credentials: Vec::new(),
                 excluded: Vec::new(),
-            },
+            }),
             true,
             Handed::Rest {
                 budget,
@@ -2228,7 +2329,13 @@ impl Semlith {
         roots: &[PathBuf],
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
-        self.index_set(self.walk(roots), true, Handed::Walked(None), None, on_file)
+        self.index_set(
+            Walk::Roots(roots.to_vec()),
+            true,
+            Handed::Walked(None),
+            None,
+            on_file,
+        )
     }
 
     /// Re-index exactly `paths`, evicting any that have gone from disk.
@@ -2245,14 +2352,15 @@ impl Semlith {
             // Every one of these came out of a filesystem event on a watched
             // tree and was filtered through the same walk, so they are walked
             // paths and not paths a caller named.
-            Walked {
+            Walk::Done(Walked {
+                walk_ms: 0,
                 files: paths,
                 named: Vec::new(),
                 unreadable: Vec::new(),
                 generated: Vec::new(),
                 credentials: Vec::new(),
                 excluded: Vec::new(),
-            },
+            }),
             false,
             Handed::Walked(None),
             None,
@@ -2265,7 +2373,7 @@ impl Semlith {
     /// events, which only knows about the paths in it.
     fn index_set(
         &mut self,
-        walked: Walked,
+        walk: Walk,
         sweep: bool,
         handed: Handed,
         control: Option<&dyn Fn() -> Flow>,
@@ -2275,11 +2383,12 @@ impl Semlith {
         // between batches is the run's work too, and dropping to background
         // for it would put the next batch behind the efficiency cores again.
         let _lifted = priority::embedding();
+        let _class = priority::indexing_thread();
         let _writer = embed::writer();
         // Every path that writes to this store funnels through here, so this is
         // where the connection stops refusing writes — and, when this returns,
         // starts refusing them again. See `store::Writing` and `writing` below.
-        self.writing(move |me| me.index_set_writing(walked, sweep, handed, control, on_file))
+        self.writing(move |me| me.index_set_writing(walk, sweep, handed, control, on_file))
     }
 
     /// Do something that writes, with the connection's refusal lifted for
@@ -2292,6 +2401,10 @@ impl Semlith {
     fn writing<T>(&mut self, body: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         store::read_only(&self.db, false)?;
         let out = body(self);
+        // A pass that failed part-way leaves its open transaction committed,
+        // as its autocommitted statements always were: the rows carry the
+        // pending hash, which is what makes the next run redo them.
+        let _ = self.tx_commit();
         let _ = store::read_only(&self.db, true);
         out
     }
@@ -2305,7 +2418,7 @@ impl Semlith {
         total: usize,
         path: &Path,
         refusal: &Refusal,
-        on_file: &mut impl FnMut(&Path, IndexProgress),
+        on_file: &mut dyn FnMut(&Path, IndexProgress),
     ) -> Result<()> {
         // A file semlith has decided it will not hold is a file it does
         // not keep holding. A rule that widens — this release widened two
@@ -2360,7 +2473,7 @@ impl Semlith {
 
     fn index_set_writing(
         &mut self,
-        walked: Walked,
+        walk: Walk,
         sweep: bool,
         handed: Handed,
         control: Option<&dyn Fn() -> Flow>,
@@ -2372,7 +2485,6 @@ impl Semlith {
         self.index.clean();
 
         let mut report = IndexReport::default();
-        let mut pending = Batch::default();
         // Every file this run embedded, so a stop can put the store back the
         // way it found it rather than leaving half a corpus indexed.
         let mut written: Vec<String> = Vec::new();
@@ -2400,22 +2512,9 @@ impl Semlith {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0)
             < GRAPH_RULES;
-        let mut prehashed = std::mem::take(&mut self.prehashed);
+        let prehashed = std::mem::take(&mut self.prehashed);
         let run_started = std::time::Instant::now();
 
-        // Refused before anything is read. A path that names a credential or
-        // sits outside this caller's boundary is reported by name with the rule
-        // that refused it, rather than dropped from the walk — an agent that
-        // asked for a file and got silence cannot tell that from a file that
-        // was not there.
-        let Walked {
-            files: walked_paths,
-            named,
-            unreadable: unwalkable,
-            generated,
-            credentials: hidden_credentials,
-            excluded,
-        } = walked;
         // Once for the run, not once for the file. The home directory and the
         // roots cannot move while a run is going, and resolving them per file
         // was an opened handle per file on Windows.
@@ -2433,454 +2532,667 @@ impl Semlith {
         // speed of a large run: ~66,000 paths re-proved admissible each slice
         // before anything was embedded. Its files are held to the same rule
         // one at a time, as the loop reaches them, so a slice costs the files
-        // it handles rather than the files left. A first slice keeps the pass
-        // up front, because its plan, its refused rows and its evictions are
-        // reported before any file is read.
+        // it handles rather than the files left.
         let each = budget.is_some().then_some(&boundary);
-        let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, Refusal)>) = if each.is_some() {
-            let mut allowed = walked_paths;
-            allowed.sort();
-            (allowed, Vec::new())
-        } else {
-            let mut allowed = Vec::with_capacity(walked_paths.len() + named.len());
-            let mut refused = Vec::new();
-            let all = named
-                .into_iter()
-                .map(|p| (p, false))
-                .chain(walked_paths.into_iter().map(|p| (p, true)));
-            for (path, walked) in all {
-                match boundary.refuses(&path, walked) {
-                    Some(why) => refused.push((path, why)),
-                    None => allowed.push(path),
-                }
+
+        // A pass over roots starts on the files changed most recently while
+        // the walk of the whole tree goes on beside it, so a store filling
+        // from cold answers about the code being worked on within a second or
+        // two rather than after a walk of every file. The library alone walks
+        // first and keeps path order, which is what its figures were measured on.
+        let (head, pending_walk, done_walk) = match walk {
+            Walk::Done(walked) => (Vec::new(), None, Some(walked)),
+            Walk::Roots(roots) => {
+                let accepted = self.accepted_folders();
+                let head = if accel::managed() {
+                    recent_head(&roots, &boundary, &accepted)
+                } else {
+                    Vec::new()
+                };
+                (head, Some((roots, accepted)), None)
             }
-            allowed.sort();
-            (allowed, refused)
         };
-        let total = paths.len() + refused.len() + unwalkable.len();
-        // One `stat` per file the run will open, which is microseconds against
-        // the read, hash and embed that follow it — once per run. A later
-        // slice is handed the figure the run settled on its first. A file over
-        // the cap is skipped without being read, so it counts for nothing here
-        // either.
-        report.bytes_total = bytes_known.unwrap_or_else(|| {
-            paths
-                .iter()
-                .map(|p| embeddable_bytes(p.metadata().ok()))
-                .sum()
-        });
-        for (path, refusal) in &refused {
-            self.refuse_file(&mut report, total, path, refusal, &mut on_file)?;
-        }
-        report.generated = generated.iter().map(|p| p.display().to_string()).collect();
-        for (path, rule) in &excluded {
-            let folder = path.is_dir();
-            // What `.semlithignore` left out is counted with the run's skips,
-            // so the Index page's card says so beside binary and empty (1.8).
-            if rule == IGNORE_FILE {
-                report.skipped += 1;
-                *report
-                    .skipped_reasons
-                    .entry(IGNORE_FILE.to_string())
-                    .or_insert(0) += 1;
+        let mut total;
+        let mut walk_ms = 0u64;
+        let first = match done_walk {
+            Some(walked) => {
+                walk_ms = walked.walk_ms;
+                let (paths, counted) =
+                    self.walk_setup(walked, &boundary, each.is_some(), &mut report, &mut on_file)?;
+                total = counted;
+                report.bytes_total = bytes_known.unwrap_or_else(|| bytes_of(&paths));
+                paths
             }
-            store::refuse(
-                &self.db,
-                &path.to_string_lossy(),
-                store::class::EXCLUDED,
-                &format!("left out by {rule}; change the rule rather than accept the file"),
-                &[],
-                if folder { 0 } else { 1 },
-                now(),
-            )?;
-        }
-        // What a rule now leaves out is not what the store keeps holding. A
-        // `.semlithignore` or `.gitignore` line added after a folder was
-        // indexed left its files searchable for ever, because only a file gone
-        // from disk was ever swept: this repository's own store still held the
-        // 134 files 0.30.0's `.semlithignore` excluded.
-        if !excluded.is_empty() {
-            let out: Vec<&Path> = excluded.iter().map(|(p, _)| p.as_path()).collect();
-            for key in store::all_paths(&self.db)? {
-                if out.iter().any(|o| Path::new(&key).starts_with(o)) {
-                    let (chunks, images) = self.evict(&key)?;
-                    report.removed += usize::from(chunks + images > 0);
-                }
+            None => {
+                total = head.len();
+                report.bytes_total = bytes_of(&head);
+                head.clone()
             }
-        }
-        for path in &hidden_credentials {
-            let why = filter::denied(path).map(|d| d.reason()).unwrap_or_default();
-            store::refuse(
-                &self.db,
-                &path.to_string_lossy(),
-                store::class::CREDENTIAL,
-                &why,
-                &[],
-                1,
-                now(),
-            )?;
-        }
-        for dir in &generated {
-            store::refuse(
-                &self.db,
-                &dir.to_string_lossy(),
-                store::class::POLICY,
-                "a generated or vendored folder the walk steps over",
-                &[],
-                0,
-                now(),
-            )?;
-        }
-        // Entries the walk could not read. They used to be a line on stderr,
-        // which the daemon and the portal never see, so an unreadable
-        // directory looked like a tree that simply had nothing in it.
-        for (path, why) in &unwalkable {
-            store::refuse(
-                &self.db,
-                &path.to_string_lossy(),
-                store::class::UNINDEXABLE,
-                why,
-                &[],
-                1,
-                now(),
-            )?;
-            report
-                .failed
-                .push((path.display().to_string(), why.clone()));
-            report.scanned += 1;
-            say_file(
-                &mut on_file,
-                &report,
-                total,
-                path,
-                FileOutcome::Failed,
-                Some(why.clone()),
-            );
-        }
+        };
+        let head_set: std::collections::HashSet<PathBuf> = head.iter().cloned().collect();
 
         // Taken here, after the setup above, so a slice's budget is spent on
         // its files rather than on getting ready to read them.
         let deadline = deadline.or_else(|| budget.map(|b| std::time::Instant::now() + b));
-        for (seen, path) in paths.iter().enumerate() {
-            // Cloned per file so `paths` outlives the loop and the remainder
-            // can be handed to the next slice. One `PathBuf` clone against
-            // opening and hashing the file it names.
-            let path = path.clone();
-            // Only ever after something was embedded: a budget too small for
-            // any work at all must still make progress, or calling again is
-            // the same call forever.
-            if let Some(deadline) = deadline
-                && report.indexed > 0
-                && std::time::Instant::now() >= deadline
-            {
-                report.remaining = paths.len() - seen;
-                report.pending = paths[seen..].to_vec();
-                break;
+
+        // What the prepare stage reads, all of it before the first file: the
+        // writer is the one thing that moves a file's hash, and it moves each
+        // one at most once in a run.
+        let granite = self.model == Model::Granite;
+        let tokenizer = if granite && (!first.is_empty() || pending_walk.is_some()) {
+            let cache = model_cache_dir()?;
+            // Fetched and checked before the tokenizer beside it is read; a
+            // no-op after the first time.
+            embed::granite_graph(&cache, self.quiet, embed::index_variant().0)?;
+            if self.tokenizer.is_none() {
+                self.tokenizer = self.model.tokenizer(&cache);
             }
-            if let Some(ask) = control {
-                let mut stop = false;
-                let mut yielded = false;
-                loop {
-                    match ask() {
-                        Flow::Run => break,
-                        // Held here rather than returning: the run keeps the
-                        // store lock, so resuming is this loop waking up and
-                        // not a second walk of the tree.
-                        Flow::Pause => std::thread::sleep(PAUSE_TICK),
-                        Flow::Yield => {
-                            yielded = true;
-                            break;
-                        }
-                        Flow::Stop => {
-                            stop = true;
-                            break;
-                        }
+            Some(session::tokenizer(&cache)?)
+        } else {
+            None
+        };
+        let ctx = pipeline::Context {
+            rechunk,
+            rescan,
+            regraph,
+            allow_secrets: self.boundary.allow_secrets,
+            hashes: store::all_hashes(&self.db)?,
+            over_cap: store::acceptances(&self.db)?
+                .into_iter()
+                .filter(|a| a.class == store::class::POLICY)
+                .map(|a| a.path)
+                .collect(),
+            prehashed,
+            each: each.cloned(),
+            tokenizer,
+            clocks: pipeline::Clocks::default(),
+            cache: accel::cache_in_use().then(|| cache::Scope::of(&self.model)),
+            variants: accel::cache_variants(),
+            lookups: Default::default(),
+            hits: Default::default(),
+        };
+        let mut cached = CacheWrites::default();
+        let mut clock = pipeline::WriterClock::start(walk_ms);
+        let sealed = pending_walk.is_none();
+        let mut run_lanes: std::collections::BTreeMap<String, usize> = Default::default();
+        let (cpu_back, cpu_returned) = std::sync::mpsc::channel();
+        let prepare_threads = pipeline::prepare_threads();
+
+        std::thread::scope(|scope| -> Result<()> {
+            let prefetch = pipeline::Prefetch::start(scope, first, sealed, &ctx, prepare_threads);
+            // The walk of the whole tree, when the pass started on its head.
+            let mut walker = pending_walk.map(|(roots, accepted)| {
+                scope.spawn(move || {
+                    let started = std::time::Instant::now();
+                    let mut walked = walk_allowing(&roots, &accepted);
+                    walked.walk_ms = started.elapsed().as_millis() as u64;
+                    walked
+                })
+            });
+            let mut stage: Option<pipeline::Embedder> = None;
+            let mut window = pipeline::Window {
+                ids: Vec::new(),
+                pieces: Vec::new(),
+                hashes: Vec::new(),
+            };
+            let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            // Asked whenever the writer waits on the embed stage: a pause
+            // stops new batches at once, a stop gives up. `false` for a stop.
+            let ask = |paused: &std::sync::atomic::AtomicBool| -> bool {
+                let Some(ask) = control else { return true };
+                match ask() {
+                    Flow::Pause => {
+                        paused.store(true, std::sync::atomic::Ordering::Relaxed);
+                        std::thread::sleep(PAUSE_TICK);
+                        true
+                    }
+                    Flow::Stop => false,
+                    Flow::Run | Flow::Yield => {
+                        paused.store(false, std::sync::atomic::Ordering::Relaxed);
+                        true
                     }
                 }
-                if yielded {
-                    report.remaining = paths.len() - seen;
-                    report.pending = paths[seen..].to_vec();
-                    break;
-                }
-                if stop {
-                    report.remaining = paths.len() - seen;
-                    report.stopped = true;
-                    break;
-                }
-            }
-            // The moment before the file is opened, for a slice that did not
-            // check its files up front.
-            if let Some(boundary) = each
-                && let Some(refusal) = boundary.refuses(&path, true)
-            {
-                self.refuse_file(&mut report, total, &path, &refusal, &mut on_file)?;
-                continue;
-            }
-            report.scanned += 1;
-            let key = path.to_string_lossy().into_owned();
+            };
 
-            // Opened once, and the size read off the open handle rather than
-            // off the name. Two `stat`s and a `read` of the same path are three
-            // answers about three moments: a file that grew between the check
-            // and the read was read in full anyway, so the cap was advisory.
-            let opened = std::fs::File::open(&path);
-            let measured = opened.as_ref().ok().and_then(|f| f.metadata().ok());
-            let bytes_before = report.bytes;
-            let file_bytes = embeddable_bytes(measured.clone());
-            report.bytes += file_bytes;
-            // Named, not just detected. Every one of these used to be the same
-            // silent `skipped`, and a person looking at two thousand of them
-            // could not tell an empty `__init__.py` from a file the operating
-            // system would not open.
-            // Taken by the scan phase a moment ago and unchanged since: the
-            // store already holds these bytes, so they are not read again.
-            if !rechunk
-                && !rescan
-                && !regraph
-                && let (Some((size, mtime, hash)), Some(meta)) =
-                    (prehashed.remove(&path), measured.as_ref())
-                && meta.len() == size
-                && meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_secs() as i64)
-                    == mtime
-                && store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str())
-            {
-                store::heal_stamps(&self.db, &key, size as i64, mtime, now())?;
-                report.unchanged += 1;
-                say_file(
-                    &mut on_file,
-                    &report,
-                    total,
-                    &path,
-                    FileOutcome::Unchanged,
-                    None,
-                );
-                continue;
-            }
-            // A file over the cap that a person accepted is read whole.
-            let cap = if store::acceptance(&self.db, &key)?
-                .is_some_and(|a| a.class == store::class::POLICY)
-            {
-                u64::MAX - 1
-            } else {
-                chunk::MAX_FILE_BYTES
+            let mut committed = std::time::Instant::now();
+            // Finish the walk if it is still going, hold its files to the
+            // run's rules, and put what the head did not cover on the list.
+            // Asked when the head runs out, and before a slice hands its
+            // remainder on.
+            let finish_walk = |me: &mut Self,
+                               walker: &mut Option<std::thread::ScopedJoinHandle<'_, Walked>>,
+                               report: &mut IndexReport,
+                               total: &mut usize,
+                               clock: &mut pipeline::WriterClock,
+                               on_file: &mut dyn FnMut(&Path, IndexProgress)|
+             -> Result<()> {
+                let Some(handle) = walker.take() else {
+                    return Ok(());
+                };
+                let waiting = std::time::Instant::now();
+                let walked = handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("the walk of the tree panicked"))?;
+                clock.waited_on_walk(waiting);
+                let (rest, counted) = me.walk_setup(walked, &boundary, false, report, on_file)?;
+                let rest: Vec<PathBuf> =
+                    rest.into_iter().filter(|p| !head_set.contains(p)).collect();
+                *total = head_set.len() + counted.saturating_sub(head_set.len());
+                report.bytes_total += bytes_of(&rest);
+                prefetch.extend_and_seal(rest);
+                Ok(())
             };
-            let unusable = match (&opened, &measured) {
-                (Err(e), _) => Some(SkipReason::Unreadable(e.to_string())),
-                (_, None) => Some(SkipReason::Unreadable(
-                    "its metadata could not be read".to_string(),
-                )),
-                (_, Some(m)) if !m.is_file() => Some(SkipReason::NotRegular),
-                (_, Some(m)) if m.len() == 0 => Some(SkipReason::Empty),
-                (_, Some(m)) if m.len() > cap => Some(SkipReason::TooLarge),
-                _ => None,
-            };
-            if let Some(why) = unusable {
-                // A batch of events can name a file that has just been
-                // deleted or renamed away. Evicting it here is what makes
-                // a deletion visible without a full sweep.
-                if !path.exists() {
-                    let ids = store::delete_file(&self.db, &key, now())?;
-                    if !ids.is_empty() {
-                        for id in ids {
-                            self.index.remove(id)?;
+            let mut next = 0usize;
+            loop {
+                let seen = next;
+                let (listed, complete) = prefetch.len();
+                if seen >= listed {
+                    if complete {
+                        break;
+                    }
+                    finish_walk(
+                        self,
+                        &mut walker,
+                        &mut report,
+                        &mut total,
+                        &mut clock,
+                        &mut on_file,
+                    )?;
+                    continue;
+                }
+                next += 1;
+                let path = prefetch.path(seen).expect("inside the list");
+                // Only ever after something was embedded: a budget too small for
+                // any work at all must still make progress, or calling again is
+                // the same call forever.
+                if let Some(deadline) = deadline
+                    && report.indexed > 0
+                    && std::time::Instant::now() >= deadline
+                {
+                    finish_walk(
+                        self,
+                        &mut walker,
+                        &mut report,
+                        &mut total,
+                        &mut clock,
+                        &mut on_file,
+                    )?;
+                    report.pending = prefetch.from(seen);
+                    report.remaining = report.pending.len();
+                    break;
+                }
+                if let Some(ask) = control {
+                    let mut stop = false;
+                    let mut yielded = false;
+                    loop {
+                        match ask() {
+                            Flow::Run => break,
+                            // Held here rather than returning: the run keeps the
+                            // store lock, so resuming is this loop waking up and
+                            // not a second walk of the tree.
+                            Flow::Pause => {
+                                paused.store(true, std::sync::atomic::Ordering::Relaxed);
+                                std::thread::sleep(PAUSE_TICK)
+                            }
+                            Flow::Yield => {
+                                yielded = true;
+                                break;
+                            }
+                            Flow::Stop => {
+                                stop = true;
+                                break;
+                            }
                         }
-                        report.removed += 1;
+                    }
+                    paused.store(false, std::sync::atomic::Ordering::Relaxed);
+                    if yielded {
+                        finish_walk(
+                            self,
+                            &mut walker,
+                            &mut report,
+                            &mut total,
+                            &mut clock,
+                            &mut on_file,
+                        )?;
+                        report.pending = prefetch.from(seen);
+                        report.remaining = report.pending.len();
+                        break;
+                    }
+                    if stop {
+                        report.remaining = prefetch.len().0 - seen;
+                        report.stopped = true;
+                        break;
+                    }
+                }
+                // Whatever the embed stage has finished, into the index.
+                if let Some(stage) = stage.as_mut() {
+                    while let Some(done) = stage.next(std::time::Duration::ZERO) {
+                        let done = done.map_err(anyhow::Error::msg)?;
+                        self.land(done, &mut report, &mut run_lanes, &mut cached)?;
                         say_file(
                             &mut on_file,
                             &report,
                             total,
                             &path,
-                            FileOutcome::Removed,
+                            FileOutcome::Progress,
+                            None,
+                        );
+                    }
+                }
+
+                let waiting = std::time::Instant::now();
+                let prepared = prefetch.take(seen);
+                clock.waited_on_prepare(waiting);
+
+                let key = path.to_string_lossy().into_owned();
+                if let pipeline::Prepared::Refused(refusal) = &prepared {
+                    self.refuse_file(&mut report, total, &path, refusal, &mut on_file)?;
+                    continue;
+                }
+                report.scanned += 1;
+                let bytes_before = report.bytes;
+                // Named, not just detected. Every one of these used to be the
+                // same silent `skipped`, and a person looking at two thousand of
+                // them could not tell an empty `__init__.py` from a file the
+                // operating system would not open.
+                let (hash, len, text, found, ready) = match prepared {
+                    pipeline::Prepared::Refused(_) => unreachable!("handled above"),
+                    // Taken by the scan phase a moment ago and unchanged since:
+                    // the store already holds these bytes, so they were not read
+                    // again.
+                    pipeline::Prepared::Unchanged {
+                        size,
+                        mtime,
+                        file_bytes,
+                    } => {
+                        report.bytes += file_bytes;
+                        self.tx_begin()?;
+                        store::heal_stamps(&self.db, &key, size as i64, mtime, now())?;
+                        report.unchanged += 1;
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &path,
+                            FileOutcome::Unchanged,
                             None,
                         );
                         continue;
                     }
-                }
-                skip(&mut report, &why);
-                store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
-                say_file(
-                    &mut on_file,
-                    &report,
-                    total,
-                    &path,
-                    FileOutcome::Skipped,
-                    Some(why.as_str()),
-                );
-                continue;
-            }
-            // From the handle that was measured, through a reader that stops
-            // one byte past the cap: a file that grew between the two is
-            // refused by the `take` rather than read whole.
-            let read = opened.and_then(|file| {
-                use std::io::Read;
-                let mut bytes = Vec::new();
-                file.take(cap + 1).read_to_end(&mut bytes).map(|_| bytes)
-            });
-            let bytes = match read {
-                Ok(bytes) if bytes.len() as u64 <= cap => bytes,
-                // Grew past the cap between the measure and the read, or the
-                // read itself failed. Two different answers, and the person
-                // chasing the file needs to know which.
-                Ok(_) => {
-                    let why = SkipReason::TooLarge;
-                    skip(&mut report, &why);
-                    store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
-                    say_file(
-                        &mut on_file,
-                        &report,
-                        total,
-                        &path,
-                        FileOutcome::Skipped,
-                        Some(why.as_str()),
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    let why = SkipReason::Unreadable(e.to_string());
-                    skip(&mut report, &why);
-                    store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
-                    say_file(
-                        &mut on_file,
-                        &report,
-                        total,
-                        &path,
-                        FileOutcome::Skipped,
-                        Some(why.as_str()),
-                    );
-                    continue;
-                }
-            };
-
-            let hash = blake3::hash(&bytes).to_hex().to_string();
-            let same =
-                !rechunk && store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str());
-            // The upgrade pass (2.7): an unchanged file is scanned again under
-            // the new rules, and one they now refuse leaves the store.
-            if same
-                && rescan
-                && !self.boundary.allow_secrets
-                && !image::is_image(&path)
-                && let Ok(text) = chunk::extract(&path, &bytes)
-                && let found = keyscan::scan(&key, &text)
-                && let keyscan::Decision::Refuse(why) =
-                    keyscan::decide(&self.db, &key, &text, &found)?
-            {
-                let live: Vec<keyscan::Match> =
-                    found.into_iter().filter(|m| m.dummy.is_none()).collect();
-                store::refuse(&self.db, &key, store::class::CONTENT, &why, &live, 1, now())?;
-                let (gone, images) = self.evict(&key)?;
-                report.removed += usize::from(gone + images > 0);
-                report
-                    .refused
-                    .push((path.display().to_string(), why.clone()));
-                say_file(
-                    &mut on_file,
-                    &report,
-                    total,
-                    &path,
-                    FileOutcome::Refused,
-                    Some(why),
-                );
-                continue;
-            }
-            // The graph half of the upgrade pass: an unchanged file's symbols
-            // and edges written again under this release's extractor.
-            if same
-                && regraph
-                && !image::is_image(&path)
-                && graph::language_of(&path).is_some()
-                && let Ok(text) = chunk::extract(&path, &bytes)
-                && let Ok(Some(extraction)) = graph::extract(&path, &text)
-                && let Some((file_id, spans)) = store::graph_input(&self.db, &key)?
-            {
-                store::delete_graph(&self.db, file_id)?;
-                let (symbols, edges) = self.write_graph(Some(extraction), file_id, &spans)?;
-                report.symbols += symbols;
-                report.edges += edges;
-            }
-            if same {
-                // Same bytes, but `git checkout` gave the file a new mtime, and
-                // every search hit in it read as stale from then on. The row's
-                // stamps catch up with the file; nothing is re-embedded, and
-                // the freshness rule itself stays as conservative as it was.
-                if let Some(meta) = &measured {
-                    let mtime = meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map_or(0, |d| d.as_secs() as i64);
-                    store::heal_stamps(&self.db, &key, bytes.len() as i64, mtime, now())?;
-                }
-                report.unchanged += 1;
-                say_file(
-                    &mut on_file,
-                    &report,
-                    total,
-                    &path,
-                    FileOutcome::Unchanged,
-                    None,
-                );
-                continue;
-            }
-
-            // An image is a different kind of content in the same pass: read
-            // for its pixels rather than for its text, embedded with CLIP's
-            // vision encoder, and recorded in the store's second vector space.
-            // Handled before `chunk::extract`, which reads a PNG as binary and
-            // rejects it.
-            if image::is_image(&path) {
-                // Before the decoder sees it. A header claiming 60,000 by
-                // 60,000 pixels is a few hundred bytes on disk and fourteen
-                // gigabytes in memory, and the refusal says which file and how
-                // big it claimed to be.
-                if let Some(why) = image::too_large(&bytes) {
-                    report
-                        .refused
-                        .push((path.display().to_string(), why.clone()));
-                    say_file(
-                        &mut on_file,
-                        &report,
-                        total,
-                        &path,
-                        FileOutcome::Refused,
-                        Some(why),
-                    );
-                    continue;
-                }
-                let Some((width, height)) = image::dimensions(&bytes) else {
-                    let why = SkipReason::NotDecodableImage;
-                    skip(&mut report, &why);
-                    store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
-                    say_file(
-                        &mut on_file,
-                        &report,
-                        total,
-                        &path,
-                        FileOutcome::Skipped,
-                        Some(why.as_str()),
-                    );
-                    continue;
+                    pipeline::Prepared::Unusable {
+                        why,
+                        gone,
+                        file_bytes,
+                    } => {
+                        report.bytes += file_bytes;
+                        self.tx_begin()?;
+                        // A batch of events can name a file that has just been
+                        // deleted or renamed away. Evicting it here is what makes
+                        // a deletion visible without a full sweep.
+                        if gone {
+                            let ids = store::delete_file(&self.db, &key, now())?;
+                            if !ids.is_empty() {
+                                for id in ids {
+                                    self.index.remove(id)?;
+                                }
+                                report.removed += 1;
+                                say_file(
+                                    &mut on_file,
+                                    &report,
+                                    total,
+                                    &path,
+                                    FileOutcome::Removed,
+                                    None,
+                                );
+                                continue;
+                            }
+                        }
+                        skip(&mut report, &why);
+                        store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &path,
+                            FileOutcome::Skipped,
+                            Some(why.as_str()),
+                        );
+                        continue;
+                    }
+                    pipeline::Prepared::Same {
+                        len,
+                        mtime,
+                        file_bytes,
+                        rescan: rescanned,
+                        regraph: regraphed,
+                    } => {
+                        report.bytes += file_bytes;
+                        self.tx_begin()?;
+                        // The upgrade pass (2.7): an unchanged file is scanned
+                        // again under the new rules, and one they now refuse
+                        // leaves the store.
+                        if let Some((text, found)) = rescanned
+                            && let keyscan::Decision::Refuse(why) =
+                                keyscan::decide(&self.db, &key, &text, &found)?
+                        {
+                            let live: Vec<keyscan::Match> =
+                                found.into_iter().filter(|m| m.dummy.is_none()).collect();
+                            store::refuse(
+                                &self.db,
+                                &key,
+                                store::class::CONTENT,
+                                &why,
+                                &live,
+                                1,
+                                now(),
+                            )?;
+                            let (gone, images) = self.evict(&key)?;
+                            report.removed += usize::from(gone + images > 0);
+                            report
+                                .refused
+                                .push((path.display().to_string(), why.clone()));
+                            say_file(
+                                &mut on_file,
+                                &report,
+                                total,
+                                &path,
+                                FileOutcome::Refused,
+                                Some(why),
+                            );
+                            continue;
+                        }
+                        // The graph half of the upgrade pass: an unchanged file's
+                        // symbols and edges written again under this release's
+                        // extractor.
+                        if let Some(extraction) = regraphed
+                            && let Some((file_id, spans)) = store::graph_input(&self.db, &key)?
+                        {
+                            store::delete_graph(&self.db, file_id)?;
+                            let (symbols, edges) =
+                                self.write_graph(Some(extraction), file_id, &spans)?;
+                            report.symbols += symbols;
+                            report.edges += edges;
+                        }
+                        // Same bytes, but `git checkout` gave the file a new
+                        // mtime, and every search hit in it read as stale from
+                        // then on. The row's stamps catch up with the file;
+                        // nothing is re-embedded, and the freshness rule itself
+                        // stays as conservative as it was.
+                        if let Some(mtime) = mtime {
+                            store::heal_stamps(&self.db, &key, len as i64, mtime, now())?;
+                        }
+                        report.unchanged += 1;
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &path,
+                            FileOutcome::Unchanged,
+                            None,
+                        );
+                        continue;
+                    }
+                    // An image is a different kind of content in the same pass:
+                    // read for its pixels rather than for its text, embedded with
+                    // CLIP's vision encoder, and recorded in the store's second
+                    // vector space.
+                    pipeline::Prepared::Image {
+                        bytes,
+                        hash,
+                        file_bytes,
+                    } => {
+                        report.bytes += file_bytes;
+                        self.tx_begin()?;
+                        // Before the decoder sees it. A header claiming 60,000 by
+                        // 60,000 pixels is a few hundred bytes on disk and
+                        // fourteen gigabytes in memory, and the refusal says which
+                        // file and how big it claimed to be.
+                        if let Some(why) = image::too_large(&bytes) {
+                            report
+                                .refused
+                                .push((path.display().to_string(), why.clone()));
+                            say_file(
+                                &mut on_file,
+                                &report,
+                                total,
+                                &path,
+                                FileOutcome::Refused,
+                                Some(why),
+                            );
+                            continue;
+                        }
+                        let Some((width, height)) = image::dimensions(&bytes) else {
+                            let why = SkipReason::NotDecodableImage;
+                            skip(&mut report, &why);
+                            store::refuse(
+                                &self.db,
+                                &key,
+                                why.class(),
+                                &why.as_str(),
+                                &[],
+                                1,
+                                now(),
+                            )?;
+                            say_file(
+                                &mut on_file,
+                                &report,
+                                total,
+                                &path,
+                                FileOutcome::Skipped,
+                                Some(why.as_str()),
+                            );
+                            continue;
+                        };
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &path,
+                            FileOutcome::Indexing,
+                            None,
+                        );
+                        // The one call in the image path that can fail on this
+                        // file's own bytes — a header the dimension reader
+                        // accepted and the decoder did not. Caught here, before a
+                        // single row is written, so the file leaves the store
+                        // exactly as it found it and the next file is embedded.
+                        // Everything after this line is the store's, and a
+                        // failure there is the run's.
+                        let vector = match self.clip.embed_image(&path, self.quiet) {
+                            Ok(vector) => vector,
+                            Err(e) => {
+                                failed(&mut report, &path, &e);
+                                say_file(
+                                    &mut on_file,
+                                    &report,
+                                    total,
+                                    &path,
+                                    FileOutcome::Failed,
+                                    Some(format!("{e:#}")),
+                                );
+                                continue;
+                            }
+                        };
+                        // Replacing an image: its old vector goes before the new
+                        // one arrives, and the row goes with the file's cascade.
+                        for id in store::image_ids_of(&self.db, &key)? {
+                            self.images.remove(id as u64)?;
+                        }
+                        for id in store::delete_file(&self.db, &key, now())? {
+                            self.index.remove(id)?;
+                        }
+                        let file_id =
+                            store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
+                        written.push(key.clone());
+                        let image_id = store::insert_image(&self.db, file_id, width, height)?;
+                        self.images.add(&vector, &[image_id as u64])?;
+                        completed.push((file_id, hash));
+                        report.indexed += 1;
+                        report.images += 1;
+                        continue;
+                    }
+                    // A reader that panics on one file's bytes is that file's
+                    // failure. Before 0.28.0 the panic unwound the store's
+                    // writer thread, the store stopped being kept current, and
+                    // `/api/stores` went on saying it was watched.
+                    pipeline::Prepared::Failed { error, file_bytes } => {
+                        report.bytes += file_bytes;
+                        failed(&mut report, &path, &error);
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &path,
+                            FileOutcome::Failed,
+                            Some(format!("{error:#}")),
+                        );
+                        continue;
+                    }
+                    // This branch reported nothing at all before 0.19.0 — no
+                    // event, no reason, no counter movement — so a tree of
+                    // binaries left the portal's progress bar short of its own
+                    // total with no line saying why.
+                    pipeline::Prepared::Skipped { why, file_bytes } => {
+                        report.bytes += file_bytes;
+                        self.tx_begin()?;
+                        skip(&mut report, &why);
+                        store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &path,
+                            FileOutcome::Skipped,
+                            Some(why.as_str()),
+                        );
+                        continue;
+                    }
+                    pipeline::Prepared::Text {
+                        len,
+                        hash,
+                        file_bytes,
+                        text,
+                        found,
+                        ready,
+                    } => {
+                        report.bytes += file_bytes;
+                        (hash, len, text, found, ready)
+                    }
                 };
-                say_file(
-                    &mut on_file,
-                    &report,
-                    total,
-                    &path,
-                    FileOutcome::Indexing,
-                    None,
-                );
-                // The one call in the image path that can fail on this file's
-                // own bytes — a header the dimension reader accepted and the
-                // decoder did not. Caught here, before a single row is
-                // written, so the file leaves the store exactly as it found
-                // it and the next file is embedded. Everything after this line
-                // is the store's, and a failure there is the run's.
-                let vector = match self.clip.embed_image(&path, self.quiet) {
-                    Ok(vector) => vector,
+                let file_bytes = report.bytes - bytes_before;
+                self.tx_begin()?;
+
+                // Before a single chunk, a single row or a single vector. The
+                // scan is the one rule that cannot be decided from a file's
+                // name, so it is decided from the text a reader produced —
+                // which is also what catches an AWS key sitting in the body of a
+                // `.docx`. Images never reach this line; they were never text.
+                // The prepare stage scanned; this is where it is decided.
+                let decided = if self.boundary.allow_secrets {
+                    // Counted, not hidden. `--include-secrets` is the user
+                    // saying they meant it, not semlith agreeing it is fine.
+                    if keyscan::refuses(&found) {
+                        report.secrets_indexed += 1;
+                    }
+                    store::unrefuse(&self.db, &key)?;
+                    None
+                } else {
+                    match keyscan::decide(&self.db, &key, &text, &found)? {
+                        keyscan::Decision::Index {
+                            text: decided,
+                            accepted,
+                        } => {
+                            if accepted {
+                                report.accepted_indexed += 1;
+                                store::unrefuse(&self.db, &key)?;
+                            } else if !found.is_empty() {
+                                // Every match a declared test dummy: indexed, and
+                                // listed so a person can see what was let through.
+                                report.dummies_indexed += 1;
+                                store::refuse(
+                                    &self.db,
+                                    &key,
+                                    store::class::DUMMY,
+                                    "every match is a declared test dummy",
+                                    &found,
+                                    1,
+                                    now(),
+                                )?;
+                            } else {
+                                store::unrefuse(&self.db, &key)?;
+                            }
+                            (decided != text).then_some(decided)
+                        }
+                        keyscan::Decision::Refuse(why) => {
+                            let live: Vec<keyscan::Match> = found
+                                .iter()
+                                .filter(|m| m.dummy.is_none())
+                                .cloned()
+                                .collect();
+                            store::refuse(
+                                &self.db,
+                                &key,
+                                store::class::CONTENT,
+                                &why,
+                                if live.is_empty() { &found } else { &live },
+                                1,
+                                now(),
+                            )?;
+                            // A file that held no credential when it was indexed
+                            // and holds one now leaves the store on this run.
+                            let (gone, images) = self.evict(&key)?;
+                            let evicted = gone + images;
+                            report.removed += usize::from(evicted > 0);
+                            let why = if evicted > 0 {
+                                format!(
+                                    "{why}. Its earlier contents have been removed from this store."
+                                )
+                            } else {
+                                why
+                            };
+                            report
+                                .refused
+                                .push((path.display().to_string(), why.clone()));
+                            say_file(
+                                &mut on_file,
+                                &report,
+                                total,
+                                &path,
+                                FileOutcome::Refused,
+                                Some(why),
+                            );
+                            continue;
+                        }
+                    }
+                };
+                // Parsed before a single row is written, which is the whole
+                // reason this sits above the inserts: tree-sitter failing on
+                // this file's own bytes is the text path's one file-shaped
+                // failure, and catching it before the rows exist means there is
+                // nothing to undo and no window is left holding an id whose row
+                // was rolled back. The prepare stage did it already unless the
+                // text the store may hold is not the text it read.
+                let ready = match (decided, ready) {
+                    (Some(redacted), _) => pipeline::take_ready(
+                        &path,
+                        &redacted,
+                        &ctx,
+                        None,
+                        std::time::Instant::now(),
+                    ),
+                    (None, Some(ready)) => ready,
+                    (None, None) => {
+                        pipeline::take_ready(&path, &text, &ctx, None, std::time::Instant::now())
+                    }
+                };
+                drop(text);
+                let pipeline::Ready {
+                    extraction,
+                    chunks,
+                    pieces,
+                    hashes,
+                } = match ready {
+                    Ok(ready) => ready,
                     Err(e) => {
                         failed(&mut report, &path, &e);
                         say_file(
@@ -2894,51 +3206,8 @@ impl Semlith {
                         continue;
                     }
                 };
-                // Replacing an image: its old vector goes before the new one
-                // arrives, and the row goes with the file's cascade.
-                for id in store::image_ids_of(&self.db, &key)? {
-                    self.images.remove(id as u64)?;
-                }
-                for id in store::delete_file(&self.db, &key, now())? {
-                    self.index.remove(id)?;
-                }
-                let file_id =
-                    store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
-                written.push(key.clone());
-                let image_id = store::insert_image(&self.db, file_id, width, height)?;
-                self.images.add(&vector, &[image_id as u64])?;
-                completed.push((file_id, hash));
-                report.indexed += 1;
-                report.images += 1;
-                continue;
-            }
-
-            // This branch reported nothing at all before 0.19.0 — no event,
-            // no reason, no counter movement — so a tree of binaries left the
-            // portal's progress bar short of its own total with no line
-            // saying why.
-            // A reader that panics on one file's bytes is that file's failure.
-            // Before 0.28.0 the panic unwound the store's writer thread, the
-            // store stopped being kept current, and `/api/stores` went on
-            // saying it was watched.
-            let text = match contained(|| {
-                fault_panic(&path);
-                chunk::extract(&path, &bytes)
-            }) {
-                Err(e) => {
-                    failed(&mut report, &path, &e);
-                    say_file(
-                        &mut on_file,
-                        &report,
-                        total,
-                        &path,
-                        FileOutcome::Failed,
-                        Some(format!("{e:#}")),
-                    );
-                    continue;
-                }
-                Ok(Ok(text)) => text,
-                Ok(Err(why)) => {
+                if chunks.is_empty() {
+                    let why = SkipReason::NoText;
                     skip(&mut report, &why);
                     store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
                     say_file(
@@ -2951,280 +3220,10 @@ impl Semlith {
                     );
                     continue;
                 }
-            };
-            // Before a single chunk, a single row or a single vector. The
-            // scan is the one rule that cannot be decided from a file's name,
-            // so it is decided from the text a reader produced — which is also
-            // what catches an AWS key sitting in the body of a `.docx`. Images
-            // never reach this line; they were never text.
-            let found = keyscan::scan(&key, &text);
-            let text = if self.boundary.allow_secrets {
-                // Counted, not hidden. `--include-secrets` is the user saying
-                // they meant it, not semlith agreeing it is fine.
-                if keyscan::refuses(&found) {
-                    report.secrets_indexed += 1;
-                }
-                store::unrefuse(&self.db, &key)?;
-                text
-            } else {
-                match keyscan::decide(&self.db, &key, &text, &found)? {
-                    keyscan::Decision::Index { text, accepted } => {
-                        if accepted {
-                            report.accepted_indexed += 1;
-                            store::unrefuse(&self.db, &key)?;
-                        } else if !found.is_empty() {
-                            // Every match a declared test dummy: indexed, and
-                            // listed so a person can see what was let through.
-                            report.dummies_indexed += 1;
-                            store::refuse(
-                                &self.db,
-                                &key,
-                                store::class::DUMMY,
-                                "every match is a declared test dummy",
-                                &found,
-                                1,
-                                now(),
-                            )?;
-                        } else {
-                            store::unrefuse(&self.db, &key)?;
-                        }
-                        text
-                    }
-                    keyscan::Decision::Refuse(why) => {
-                        let live: Vec<keyscan::Match> = found
-                            .iter()
-                            .filter(|m| m.dummy.is_none())
-                            .cloned()
-                            .collect();
-                        store::refuse(
-                            &self.db,
-                            &key,
-                            store::class::CONTENT,
-                            &why,
-                            if live.is_empty() { &found } else { &live },
-                            1,
-                            now(),
-                        )?;
-                        // A file that held no credential when it was indexed and
-                        // holds one now leaves the store on this run.
-                        let (gone, images) = self.evict(&key)?;
-                        let evicted = gone + images;
-                        report.removed += usize::from(evicted > 0);
-                        let why = if evicted > 0 {
-                            format!(
-                                "{why}. Its earlier contents have been removed from this store."
-                            )
-                        } else {
-                            why
-                        };
-                        report
-                            .refused
-                            .push((path.display().to_string(), why.clone()));
-                        say_file(
-                            &mut on_file,
-                            &report,
-                            total,
-                            &path,
-                            FileOutcome::Refused,
-                            Some(why),
-                        );
-                        continue;
-                    }
-                }
-            };
 
-            // Parsed before a single row is written, which is the whole
-            // reason this call sits above the inserts: tree-sitter failing on
-            // this file's own bytes is the text path's one file-shaped
-            // failure, and catching it before the rows exist means there is
-            // nothing to undo and the shared pending batch is never left
-            // holding an id whose row was rolled back.
-            //
-            let extraction = match contained(|| graph::extract(&path, &text)).and_then(|r| r) {
-                Ok(extraction) => extraction,
-                Err(e) => {
-                    failed(&mut report, &path, &e);
-                    say_file(
-                        &mut on_file,
-                        &report,
-                        total,
-                        &path,
-                        FileOutcome::Failed,
-                        Some(format!("{e:#}")),
-                    );
-                    continue;
-                }
-            };
-
-            let chunks = match contained(|| {
-                chunk::chunk_file(
-                    &path,
-                    &text,
-                    extraction.as_ref().map_or(&[][..], |e| &e.symbols),
-                )
-            }) {
-                Ok(chunks) => chunks,
-                Err(e) => {
-                    failed(&mut report, &path, &e);
-                    say_file(
-                        &mut on_file,
-                        &report,
-                        total,
-                        &path,
-                        FileOutcome::Failed,
-                        Some(format!("{e:#}")),
-                    );
-                    continue;
-                }
-            };
-            if chunks.is_empty() {
-                let why = SkipReason::NoText;
-                skip(&mut report, &why);
-                store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
-                say_file(
-                    &mut on_file,
-                    &report,
-                    total,
-                    &path,
-                    FileOutcome::Skipped,
-                    Some(why.as_str()),
-                );
-                continue;
-            }
-
-            // Not yet through it: its bytes are counted as its chunks embed.
-            let file_end = report.bytes;
-            report.bytes = bytes_before;
-            say_file(
-                &mut on_file,
-                &report,
-                total,
-                &path,
-                FileOutcome::Indexing,
-                None,
-            );
-
-            // Replacing a file: evict its old vectors before adding new ones.
-            for id in store::delete_file(&self.db, &key, now())? {
-                self.index.remove(id)?;
-            }
-
-            let file_id = store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
-            // Written down the moment it has a row, not when it is finished:
-            // a stop can now land inside a file, and the undo has to take the
-            // half-embedded file out along with the finished ones.
-            written.push(key.clone());
-            // What the parser made of this file, recorded now because it
-            // cannot be told afterwards: a file whose parse expired and a file
-            // whose language has no grammar both leave no symbols behind, and
-            // only one of them is a gap in the graph's coverage.
-            let parsed = match (&extraction, graph::language_of(&path)) {
-                (Some(_), _) => "parsed",
-                (None, Some(lang)) if graph::has_graph(lang) => "timeout",
-                (None, _) => "none",
-            };
-            store::set_file_graph(&self.db, file_id, parsed)?;
-            let mut spans: Vec<(u32, u32, i64)> = Vec::with_capacity(chunks.len());
-            let mut halted = false;
-            for (ord, c) in chunks.iter().enumerate() {
-                let id =
-                    store::insert_chunk(&self.db, file_id, ord, c.start_line, c.end_line, &c.text)?;
-                spans.push((c.start_line, c.end_line, id));
-                pending.ids.push(id as u64);
-                pending.texts.push(c.embedded());
-
-                // Flushed by the window, not per file. One 8 MB file chunks
-                // into thousands of pieces, and holding them all to embed in a
-                // single call makes peak memory a function of the largest
-                // file in the corpus rather than of the window.
-                if pending.ids.len() >= SORT_WINDOW {
-                    report.bytes =
-                        bytes_before + file_bytes * (ord as u64 + 1) / chunks.len() as u64;
-                }
-                if pending.ids.len() >= SORT_WINDOW
-                    && !self.flush(&mut pending, control, &mut |n, threads, lanes| {
-                        report.embedded += n;
-                        report.threads = threads;
-                        report.lanes = lanes.clone();
-                        say_file(
-                            &mut on_file,
-                            &report,
-                            total,
-                            &path,
-                            FileOutcome::Progress,
-                            None,
-                        );
-                    })?
-                {
-                    halted = true;
-                    break;
-                }
-            }
-            report.threads = self.embedder_threads;
-            report.lanes = self.lane_chunks.clone();
-            report.bytes = file_end;
-            if halted {
-                // Stopped inside this file. Its rows are in `written`, so the
-                // caller's undo takes it out with everything else; nothing of
-                // it is finished, so nothing of it is counted or committed.
-                report.remaining = paths.len() - seen;
-                report.stopped = true;
-                break;
-            }
-
-            // The structure half, on the same changed-file path and inside the
-            // same lock. A file whose symbols were extracted by an earlier run
-            // had them deleted by `delete_file` above, along with its chunks
-            // and the edges leaving them, so this writes a whole fresh set
-            // rather than reconciling one.
-            let (symbols, edges) = self.write_graph(extraction, file_id, &spans)?;
-            report.symbols += symbols;
-            report.edges += edges;
-
-            completed.push((file_id, hash));
-            report.indexed += 1;
-            report.chunks += chunks.len();
-
-            // Between files, never inside one: a file half-written into the
-            // index is a file whose hash must not be committed, and this is the
-            // one point in the loop where that cannot be true.
-            //
-            // Counted, not timed. See `CHECKPOINT_FILES`: a checkpoint flushes
-            // the pending batch, so a checkpoint that lands somewhere different
-            // on every run splits the batches differently and produces
-            // different vectors from the same corpus.
-            since_checkpoint += 1;
-            if checkpointing && since_checkpoint >= every {
-                // Said before and after, because the work between these two
-                // lines is the longest thing a run does without reading a
-                // file: the batch is flushed and every shard is rewritten.
-                say_file(
-                    &mut on_file,
-                    &report,
-                    total,
-                    &path,
-                    FileOutcome::Writing,
-                    Some("writing the index to disk".to_string()),
-                );
-                if !self.flush(&mut pending, control, &mut |n, threads, lanes| {
-                    report.embedded += n;
-                    report.threads = threads;
-                    report.lanes = lanes.clone();
-                    say_file(
-                        &mut on_file,
-                        &report,
-                        total,
-                        &path,
-                        FileOutcome::Progress,
-                        None,
-                    );
-                })? {
-                    report.remaining = paths.len() - seen - 1;
-                    report.stopped = true;
-                    break;
-                }
-                self.checkpoint(&mut completed)?;
-                since_checkpoint = 0;
+                // Not yet through it: its bytes are counted as its chunks embed.
+                let file_end = report.bytes;
+                report.bytes = bytes_before;
                 say_file(
                     &mut on_file,
                     &report,
@@ -3233,19 +3232,280 @@ impl Semlith {
                     FileOutcome::Indexing,
                     None,
                 );
-            }
-        }
 
-        if !report.stopped
-            && !self.flush(&mut pending, control, &mut |n, threads, lanes| {
-                report.embedded += n;
-                report.threads = threads;
-                report.lanes = lanes.clone();
-            })?
-        {
-            report.stopped = true;
+                // Replacing a file: evict its old vectors before adding new ones.
+                for id in store::delete_file(&self.db, &key, now())? {
+                    self.index.remove(id)?;
+                }
+
+                let file_id = store::insert_file(&self.db, &key, PENDING, len, now())?;
+                // Written down the moment it has a row, not when it is finished:
+                // a stop can now land inside a file, and the undo has to take the
+                // half-embedded file out along with the finished ones.
+                written.push(key.clone());
+                // What the parser made of this file, recorded now because it
+                // cannot be told afterwards: a file whose parse expired and a file
+                // whose language has no grammar both leave no symbols behind, and
+                // only one of them is a gap in the graph's coverage.
+                let parsed = match (&extraction, graph::language_of(&path)) {
+                    (Some(_), _) => "parsed",
+                    (None, Some(lang)) if graph::has_graph(lang) => "timeout",
+                    (None, _) => "none",
+                };
+                store::set_file_graph(&self.db, file_id, parsed)?;
+                let mut spans: Vec<(u32, u32, i64)> = Vec::with_capacity(chunks.len());
+                let mut halted = false;
+                let count = chunks.len();
+                for (((ord, c), piece), hash) in chunks.iter().enumerate().zip(pieces).zip(hashes) {
+                    let id = store::insert_chunk(
+                        &self.db,
+                        file_id,
+                        ord,
+                        c.start_line,
+                        c.end_line,
+                        &c.text,
+                    )?;
+                    spans.push((c.start_line, c.end_line, id));
+                    report.rows += 1;
+                    window.ids.push(id as u64);
+                    window.pieces.push(piece);
+                    window.hashes.push(hash);
+
+                    // Handed over by the window, not per file. One 8 MB file
+                    // chunks into thousands of pieces, and holding them all makes
+                    // peak memory a function of the largest file in the corpus
+                    // rather than of the window.
+                    if window.ids.len() >= SORT_WINDOW {
+                        report.bytes = bytes_before + file_bytes * (ord as u64 + 1) / count as u64;
+                        if !self.hand_over(
+                            scope,
+                            &mut stage,
+                            &mut window,
+                            &cpu_back,
+                            &paused,
+                            &ask,
+                            &mut clock,
+                            &mut |n| {
+                                report.batched = n;
+                                say_file(
+                                    &mut on_file,
+                                    &report,
+                                    total,
+                                    &path,
+                                    FileOutcome::Progress,
+                                    None,
+                                )
+                            },
+                        )? {
+                            halted = true;
+                            break;
+                        }
+                    }
+                }
+                report.threads = self.index_threads();
+                report.lanes = self.lane_chunks.clone();
+                report.bytes = file_end;
+                if halted {
+                    // Stopped inside this file. Its rows are in `written`, so the
+                    // caller's undo takes it out with everything else; nothing of
+                    // it is finished, so nothing of it is counted or committed.
+                    report.remaining = prefetch.len().0 - seen;
+                    report.stopped = true;
+                    break;
+                }
+
+                // The structure half, on the same changed-file path and inside
+                // the same lock. A file whose symbols were extracted by an
+                // earlier run had them deleted by `delete_file` above, along with
+                // its chunks and the edges leaving them, so this writes a whole
+                // fresh set rather than reconciling one.
+                let (symbols, edges) = self.write_graph(extraction, file_id, &spans)?;
+                report.symbols += symbols;
+                report.edges += edges;
+
+                completed.push((file_id, hash));
+                report.indexed += 1;
+                report.chunks += count;
+                // Rows reach readers when they are committed, and a window can
+                // take seconds to fill on a store of small files. Committed at
+                // least this often, so a store filling from cold answers
+                // keyword and graph questions about what it has read so far.
+                if committed.elapsed() >= ROW_COMMIT {
+                    self.tx_commit()?;
+                    committed = std::time::Instant::now();
+                }
+
+                // Between files, never inside one: a file half-written into the
+                // index is a file whose hash must not be committed, and this is
+                // the one point in the loop where that cannot be true.
+                //
+                // Counted, not timed. See `CHECKPOINT_FILES`: a checkpoint lands
+                // on the same file every run, so a run's windows are the same
+                // windows every time and so are its vectors.
+                since_checkpoint += 1;
+                if checkpointing && since_checkpoint >= every {
+                    // Said before and after, because the work between these two
+                    // lines is the longest thing a run does without reading a
+                    // file: every window in flight is waited for and the shards
+                    // are rewritten.
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &path,
+                        FileOutcome::Writing,
+                        Some("writing the index to disk".to_string()),
+                    );
+                    let drained = self.hand_over(
+                        scope,
+                        &mut stage,
+                        &mut window,
+                        &cpu_back,
+                        &paused,
+                        &ask,
+                        &mut clock,
+                        &mut |n| {
+                            report.batched = n;
+                            say_file(
+                                &mut on_file,
+                                &report,
+                                total,
+                                &path,
+                                FileOutcome::Progress,
+                                None,
+                            )
+                        },
+                    )? && self.drain(
+                        &mut stage,
+                        &mut report,
+                        &mut run_lanes,
+                        &mut cached,
+                        &paused,
+                        &ask,
+                        &mut clock,
+                        &mut |report: &IndexReport| {
+                            say_file(
+                                &mut on_file,
+                                report,
+                                total,
+                                &path,
+                                FileOutcome::Progress,
+                                None,
+                            )
+                        },
+                    )?;
+                    if !drained {
+                        report.remaining = prefetch.len().0 - seen - 1;
+                        report.stopped = true;
+                        break;
+                    }
+                    self.checkpoint(&mut completed)?;
+                    since_checkpoint = 0;
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &path,
+                        FileOutcome::Indexing,
+                        None,
+                    );
+                }
+            }
+            let last = prefetch
+                .path(prefetch.len().0.saturating_sub(1))
+                .unwrap_or_default();
+            drop(prefetch);
+
+            if !report.stopped {
+                let drained = self.hand_over(
+                    scope,
+                    &mut stage,
+                    &mut window,
+                    &cpu_back,
+                    &paused,
+                    &ask,
+                    &mut clock,
+                    &mut |n| {
+                        report.batched = n;
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &last,
+                            FileOutcome::Progress,
+                            None,
+                        )
+                    },
+                )? && self.drain(
+                    &mut stage,
+                    &mut report,
+                    &mut run_lanes,
+                    &mut cached,
+                    &paused,
+                    &ask,
+                    &mut clock,
+                    &mut |report: &IndexReport| {
+                        say_file(
+                            &mut on_file,
+                            report,
+                            total,
+                            &last,
+                            FileOutcome::Progress,
+                            None,
+                        )
+                    },
+                )?;
+                if !drained {
+                    report.stopped = true;
+                }
+            }
+            // A stop gives up on what is in flight: those windows' rows are
+            // the undo's to remove, and none of their vectors may land.
+            if let Some(stage) = stage.as_mut() {
+                if report.stopped {
+                    stage.cancel();
+                } else {
+                    stage.close();
+                }
+            }
+            drop(stage);
+            drop(cpu_back);
+            Ok(())
+        })?;
+        // The CPU session outlives the run, as the fastembed one always did:
+        // a store indexing slice after slice loads it once.
+        if let Ok(work) = cpu_returned.try_recv() {
+            if let pipeline::CpuWork::Ids { main, .. } = &work {
+                self.index_threads = main.threads();
+            }
+            self.index_session = Some(work);
         }
-        report.threads = self.embedder_threads;
+        self.tx_commit()?;
+        report.stages = clock.stages(&ctx.clocks, &run_lanes);
+        report.threads = self.index_threads();
+        report.cache_lookups = ctx.lookups.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        report.cache_hits = ctx.hits.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        // What this call embedded goes into the machine's cache, and what it
+        // took out is marked used. A cache that cannot be written is a cache
+        // that misses next time, never a failed run.
+        if let Some(scope) = &ctx.cache
+            && report.cache_lookups > 0
+            && let Some(mut cache) = cache::Cache::open()
+        {
+            let fresh: Vec<([u8; 32], &'static str, &[f32])> = cached
+                .fresh
+                .iter()
+                .map(|(hash, variant, vector)| {
+                    (scope.key(hash, variant), *variant, vector.as_slice())
+                })
+                .collect();
+            let hits: Vec<[u8; 32]> = cached
+                .hits
+                .iter()
+                .map(|(hash, variant)| scope.key(hash, variant))
+                .collect();
+            let _ = cache.record(&fresh, &hits, report.cache_lookups as u64);
+        }
 
         // A stopped slice still commits what it embedded. Undoing is the
         // caller's, because one logical run is several slices and a stop has
@@ -3331,6 +3591,157 @@ impl Semlith {
         Ok(report)
     }
 
+    /// What a walk found, held to this run's rules: every refusal, exclusion,
+    /// credential, generated folder and unreadable entry recorded and reported,
+    /// and the paths that remain in the order the run will take them. Returns
+    /// them and the walk's file count for progress. A continuation (`each`)
+    /// is handed its paths already decided, and holds each file to the rules
+    /// as it reaches it instead.
+    fn walk_setup(
+        &mut self,
+        walked: Walked,
+        boundary: &ResolvedBoundary,
+        each: bool,
+        report: &mut IndexReport,
+        on_file: &mut dyn FnMut(&Path, IndexProgress),
+    ) -> Result<(Vec<PathBuf>, usize)> {
+        // Refused before anything is read. A path that names a credential or
+        // sits outside this caller's boundary is reported by name with the rule
+        // that refused it, rather than dropped from the walk — an agent that
+        // asked for a file and got silence cannot tell that from a file that
+        // was not there.
+        let Walked {
+            walk_ms: _,
+            files: walked_paths,
+            named,
+            unreadable: unwalkable,
+            generated,
+            credentials: hidden_credentials,
+            excluded,
+        } = walked;
+        // A large tree refuses thousands of paths: their rows go in one
+        // transaction, not a commit each.
+        self.tx_begin()?;
+        let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, Refusal)>) = if each {
+            // A continuation is handed the rest of the run in the order the
+            // run chose on its first slice; sorting it again would undo that.
+            (walked_paths, Vec::new())
+        } else {
+            let mut allowed = Vec::with_capacity(walked_paths.len() + named.len());
+            let mut refused = Vec::new();
+            let all = named
+                .into_iter()
+                .map(|p| (p, false))
+                .chain(walked_paths.into_iter().map(|p| (p, true)));
+            for (path, walked) in all {
+                match boundary.refuses(&path, walked) {
+                    Some(why) => refused.push((path, why)),
+                    None => allowed.push(path),
+                }
+            }
+            allowed.sort();
+            // Where the lanes are used, the files changed most recently go
+            // first, so a store filling from cold answers about the code being
+            // worked on before it answers about the rest. The library alone
+            // keeps path order, which is what its figures were measured on.
+            if accel::managed() {
+                recent_first(&mut allowed);
+            }
+            (allowed, refused)
+        };
+        let total = paths.len() + refused.len() + unwalkable.len();
+        for (path, refusal) in &refused {
+            self.refuse_file(report, total, path, refusal, &mut *on_file)?;
+        }
+        report.generated = generated.iter().map(|p| p.display().to_string()).collect();
+        for (path, rule) in &excluded {
+            let folder = path.is_dir();
+            // What `.semlithignore` left out is counted with the run's skips,
+            // so the Index page's card says so beside binary and empty (1.8).
+            if rule == IGNORE_FILE {
+                report.skipped += 1;
+                *report
+                    .skipped_reasons
+                    .entry(IGNORE_FILE.to_string())
+                    .or_insert(0) += 1;
+            }
+            store::refuse(
+                &self.db,
+                &path.to_string_lossy(),
+                store::class::EXCLUDED,
+                &format!("left out by {rule}; change the rule rather than accept the file"),
+                &[],
+                if folder { 0 } else { 1 },
+                now(),
+            )?;
+        }
+        // What a rule now leaves out is not what the store keeps holding. A
+        // `.semlithignore` or `.gitignore` line added after a folder was
+        // indexed left its files searchable for ever, because only a file gone
+        // from disk was ever swept: this repository's own store still held the
+        // 134 files 0.30.0's `.semlithignore` excluded.
+        if !excluded.is_empty() {
+            let out: Vec<&Path> = excluded.iter().map(|(p, _)| p.as_path()).collect();
+            for key in store::all_paths(&self.db)? {
+                if out.iter().any(|o| Path::new(&key).starts_with(o)) {
+                    let (chunks, images) = self.evict(&key)?;
+                    report.removed += usize::from(chunks + images > 0);
+                }
+            }
+        }
+        for path in &hidden_credentials {
+            let why = filter::denied(path).map(|d| d.reason()).unwrap_or_default();
+            store::refuse(
+                &self.db,
+                &path.to_string_lossy(),
+                store::class::CREDENTIAL,
+                &why,
+                &[],
+                1,
+                now(),
+            )?;
+        }
+        for dir in &generated {
+            store::refuse(
+                &self.db,
+                &dir.to_string_lossy(),
+                store::class::POLICY,
+                "a generated or vendored folder the walk steps over",
+                &[],
+                0,
+                now(),
+            )?;
+        }
+        // Entries the walk could not read. They used to be a line on stderr,
+        // which the daemon and the portal never see, so an unreadable
+        // directory looked like a tree that simply had nothing in it.
+        for (path, why) in &unwalkable {
+            store::refuse(
+                &self.db,
+                &path.to_string_lossy(),
+                store::class::UNINDEXABLE,
+                why,
+                &[],
+                1,
+                now(),
+            )?;
+            report
+                .failed
+                .push((path.display().to_string(), why.clone()));
+            report.scanned += 1;
+            say_file(
+                &mut *on_file,
+                report,
+                total,
+                path,
+                FileOutcome::Failed,
+                Some(why.clone()),
+            );
+        }
+        self.tx_commit()?;
+        Ok((paths, total))
+    }
+
     /// Make everything embedded so far durable, then record the files it
     /// covers as indexed.
     ///
@@ -3340,6 +3751,7 @@ impl Semlith {
     /// checkpoints has many more chances to get wrong than one that does it
     /// once at the end.
     fn checkpoint(&mut self, completed: &mut Vec<(i64, String)>) -> Result<()> {
+        self.tx_commit()?;
         if completed.is_empty() {
             return Ok(());
         }
@@ -3374,6 +3786,52 @@ impl Semlith {
             graph::EXTRACTED | graph::RESOLVED => 1.0,
             _ => INFERRED_EXPANSION,
         }
+    }
+
+    /// The vector list with up to [`PENDING_EMBED`] of the keyword list's
+    /// chunks that have no vector yet embedded now and merged in by their
+    /// similarity. Unchanged when nothing in the store is pending.
+    ///
+    /// ponytail: the chunk's stored text is embedded, without the heading path
+    /// the index pass prepends, because the path is stored nowhere; the vector
+    /// it gets when its run reaches it is the real one.
+    fn with_pending(
+        &mut self,
+        query: &[f32],
+        keyword: &[u64],
+        scores: Vec<f32>,
+        ids: Vec<u64>,
+    ) -> Result<(Vec<f32>, Vec<u64>)> {
+        if store::pending_share(&self.db)?.is_none() {
+            return Ok((scores, ids));
+        }
+        let candidates: Vec<u64> = keyword
+            .iter()
+            .filter(|id| !ids.contains(id))
+            .copied()
+            .collect();
+        let pending: Vec<(u64, String)> = store::pending_among(&self.db, &candidates)?
+            .into_iter()
+            .take(PENDING_EMBED)
+            .collect();
+        if pending.is_empty() {
+            return Ok((scores, ids));
+        }
+        let texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
+        let vectors = self.embed(texts)?;
+        let mut merged: Vec<(u64, f32)> = ids.into_iter().zip(scores).collect();
+        for ((id, _), vector) in pending.iter().zip(&vectors) {
+            merged.push((*id, index::cosine(query, vector)));
+        }
+        merged.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let (ids, scores) = merged.into_iter().unzip();
+        Ok((scores, ids))
+    }
+
+    /// The share of this store still being embedded, or `None` when nothing
+    /// is. A search mid-run says so beside its answer.
+    pub fn pending_share(&self) -> Result<Option<f64>> {
+        store::pending_share(&self.db)
     }
 
     /// Reorder the vector list by the vectors themselves, where the store kept
@@ -3636,158 +4094,222 @@ impl Semlith {
         Ok(())
     }
 
-    /// Embed the window, shortest first, asking `control` before every
-    /// batch. `false` when a stop was asked for, and then nothing of the
-    /// window reaches the index: its rows are the undo's to remove.
+    /// Hand the window to the embed stage, starting the stage with the first
+    /// window of the call. `Ok(false)` when a stop was asked for while it
+    /// waited for room.
     ///
-    /// Asked per batch rather than per file, because one file can be thousands
-    /// of chunks and a pause or stop that waited for the file's end took a
-    /// minute. A pause holds here with the window in memory; nothing is
-    /// half-committed, because a file's hash is written only after its last
-    /// chunk is durable, whichever batch that is.
-    fn flush(
+    /// The window's rows are committed first: its ids are rows' ids, and a
+    /// window never goes out carrying an id whose row could still roll back.
+    #[allow(clippy::too_many_arguments)]
+    fn hand_over<'scope>(
         &mut self,
-        batch: &mut Batch,
-        control: Option<&dyn Fn() -> Flow>,
-        tick: &mut Tick<'_>,
+        scope: &'scope std::thread::Scope<'scope, '_>,
+        stage: &mut Option<pipeline::Embedder>,
+        window: &mut pipeline::Window,
+        cpu_back: &std::sync::mpsc::Sender<pipeline::CpuWork>,
+        paused: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        ask: &dyn Fn(&std::sync::atomic::AtomicBool) -> bool,
+        clock: &mut pipeline::WriterClock,
+        tick: &mut dyn FnMut(usize),
     ) -> Result<bool> {
-        if batch.ids.is_empty() {
+        if window.ids.is_empty() {
             return Ok(true);
         }
-        let ids = std::mem::take(&mut batch.ids);
-        let texts = std::mem::take(&mut batch.texts);
+        self.tx_commit()?;
+        if stage.is_none() {
+            let work = self.index_work()?;
+            *stage = Some(pipeline::Embedder::start(
+                scope,
+                work,
+                self.model == Model::Granite,
+                cpu_back.clone(),
+                std::sync::Arc::clone(paused),
+            ));
+        }
+        let running = stage.as_mut().expect("started above");
+        let full = std::mem::replace(
+            window,
+            pipeline::Window {
+                ids: Vec::new(),
+                pieces: Vec::new(),
+                hashes: Vec::new(),
+            },
+        );
+        let waiting = std::time::Instant::now();
+        let mut stopped = false;
+        let batched = std::sync::Arc::clone(&running.batched);
+        let mut progress = Progress::default();
+        let sent = running.send(full, || {
+            if !ask(paused) {
+                stopped = true;
+                return false;
+            }
+            // Silent while paused: what lands meanwhile is counted, and said
+            // with the first line after the resume, so a paused run holds still.
+            if !paused.load(std::sync::atomic::Ordering::Relaxed)
+                && let Some(n) = progress.due(&batched)
+            {
+                tick(n);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            true
+        });
+        clock.waited_on_embed(waiting);
+        if !sent && !stopped {
+            bail!("the embed stage ended before the run did");
+        }
+        Ok(sent)
+    }
 
-        // Loaded first so the tokenizer is there to sort by: the same count
-        // the model pads by, on every window including the first.
-        self.embedder()?;
-        self.follow_budget();
-        let order = self.length_order(&texts);
-        let Some(vectors) = self.embed_window(&texts, order, control, tick)? else {
-            return Ok(false);
+    /// Wait for every window in flight and put it in the index. `Ok(false)`
+    /// when a stop was asked for while waiting.
+    #[allow(clippy::too_many_arguments)]
+    fn drain(
+        &mut self,
+        stage: &mut Option<pipeline::Embedder>,
+        report: &mut IndexReport,
+        run_lanes: &mut std::collections::BTreeMap<String, usize>,
+        cached: &mut CacheWrites,
+        paused: &std::sync::atomic::AtomicBool,
+        ask: &dyn Fn(&std::sync::atomic::AtomicBool) -> bool,
+        clock: &mut pipeline::WriterClock,
+        tick: &mut dyn FnMut(&IndexReport),
+    ) -> Result<bool> {
+        let Some(running) = stage.as_mut() else {
+            return Ok(true);
         };
-        let flat: Vec<f32> = vectors.into_iter().flatten().collect();
-        self.index.add(&flat, &ids)?;
-        // The sidecar is written in the same breath as the codes, from the same
-        // values, so the two cannot describe different vectors. A failure to
-        // write it fails the index pass rather than leaving a store whose
-        // rescoring silently reorders by a stale vector.
-        self.exact.append(&flat, &ids)?;
+        let mut progress = Progress::default();
+        while running.outstanding > 0 {
+            let waiting = std::time::Instant::now();
+            let got = running.next(std::time::Duration::from_millis(20));
+            clock.waited_on_embed(waiting);
+            match got {
+                Some(done) => {
+                    self.land(done.map_err(anyhow::Error::msg)?, report, run_lanes, cached)?;
+                    if !paused.load(std::sync::atomic::Ordering::Relaxed) {
+                        tick(report);
+                    }
+                }
+                None => {
+                    if !ask(paused) {
+                        return Ok(false);
+                    }
+                    if !paused.load(std::sync::atomic::Ordering::Relaxed)
+                        && let Some(n) = progress.due(&running.batched)
+                    {
+                        report.batched = n;
+                        tick(report);
+                    }
+                }
+            }
+        }
         Ok(true)
     }
 
-    /// Embed a sorted window across every lane a run may use, asking
-    /// `control` before each batch. `None` when a stop was asked for.
-    ///
-    /// The CPU takes the shortest chunks from the front of the window and each
-    /// GPU lane the longest from the back, whenever it is free, so a faster
-    /// device ends up with a larger share without anything being tuned. A
-    /// batch a lane fails, or loses with its worker, goes back on the window
-    /// for another lane; the lane is marked failed with its reason and the
-    /// window completes with the same vectors a CPU-only pass would have
-    /// counted. With no lane but the CPU this is the loop it always was.
-    fn embed_window(
+    /// One embedded window into the index and its sidecar, in the same
+    /// breath and from the same values, so the two cannot describe different
+    /// vectors. A failure to write the sidecar fails the pass rather than
+    /// leaving a store whose rescoring silently reorders by a stale vector.
+    fn land(
         &mut self,
-        texts: &[String],
-        order: Vec<usize>,
-        control: Option<&dyn Fn() -> Flow>,
-        tick: &mut Tick<'_>,
-    ) -> Result<Option<Vec<Vec<f32>>>> {
-        let (mut lanes, mut cpu_on): (Vec<std::sync::Arc<accel::Lane>>, bool);
-        let mut vectors: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
-        let mut waiting: std::collections::VecDeque<usize> = order.into();
-        type Answer = std::sync::mpsc::Receiver<std::result::Result<Vec<Vec<f32>>, String>>;
-        let mut flying: Vec<(std::sync::Arc<accel::Lane>, Vec<usize>, Answer)> = Vec::new();
-        let mut counts: Vec<(&'static str, usize)> = Vec::new();
-
-        loop {
-            if let Some(ask) = control
-                && !hold(ask)
-            {
-                return Ok(None);
-            }
-            // Read before every batch, so a switch reaches a run already
-            // going at its next batch rather than at its next window.
-            (lanes, cpu_on) = accel::for_run();
-            // Every lane with room takes the longest chunks left. A lane keeps
-            // [`LANE_DEPTH`] batches queued: the writer refills lanes only
-            // between its own CPU batches, and a GPU that had to wait for the
-            // CPU's batch to end before getting its next one sat idle for most
-            // of every CPU batch.
-            for lane in &lanes {
-                while !waiting.is_empty()
-                    && lane.usable()
-                    && flying
-                        .iter()
-                        .filter(|(l, _, _)| std::sync::Arc::ptr_eq(l, lane))
-                        .count()
-                        < LANE_DEPTH
-                {
-                    let take = lane.batch().min(waiting.len());
-                    let group: Vec<usize> = (0..take).filter_map(|_| waiting.pop_back()).collect();
-                    let batch: Vec<String> = group.iter().map(|i| texts[*i].clone()).collect();
-                    let answer = lane.submit(batch);
-                    flying.push((std::sync::Arc::clone(lane), group, answer));
-                }
-            }
-            // Whatever has come back.
-            let mut still = Vec::with_capacity(flying.len());
-            for (lane, group, answer) in flying.drain(..) {
-                match answer.try_recv() {
-                    Ok(Ok(got)) if got.len() == group.len() => {
-                        for (at, vector) in group.iter().zip(got) {
-                            vectors[*at] = vector;
-                        }
-                        counts.push((lane.variant(), group.len()));
-                        self.note_lane(lane.id, group.len());
-                        tick(group.len(), self.embedder_threads, &self.lane_chunks);
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => still.push((lane, group, answer)),
-                    // Failed, lost, or the wrong shape: back on the window.
-                    _ => waiting.extend(group),
-                }
-            }
-            flying = still;
-
-            // The CPU's switch is honoured only while a GPU lane can carry the
-            // run; with none, the CPU is the fallback whatever it says.
-            let cpu = cpu_on || !lanes.iter().any(|lane| lane.usable());
-            if cpu && !waiting.is_empty() {
-                let take = EMBED_BATCH.min(waiting.len());
-                let group: Vec<usize> = (0..take).filter_map(|_| waiting.pop_front()).collect();
-                let batch: Vec<String> = group.iter().map(|i| texts[*i].clone()).collect();
-                for (at, vector) in group.iter().zip(self.embed(batch)?) {
-                    vectors[*at] = vector;
-                }
-                accel::count_cpu(group.len());
-                counts.push((self.last_variant, group.len()));
-                self.note_lane("cpu", group.len());
-                tick(group.len(), self.embedder_threads, &self.lane_chunks);
-                continue;
-            }
-            if waiting.is_empty() && flying.is_empty() {
-                break;
-            }
-            // Nothing for the CPU to do: wait a moment on the oldest batch out.
-            if !flying.is_empty() {
-                let (lane, group, answer) = flying.remove(0);
-                match answer.recv_timeout(std::time::Duration::from_millis(20)) {
-                    Ok(Ok(got)) if got.len() == group.len() => {
-                        for (at, vector) in group.iter().zip(got) {
-                            vectors[*at] = vector;
-                        }
-                        counts.push((lane.variant(), group.len()));
-                        self.note_lane(lane.id, group.len());
-                        tick(group.len(), self.embedder_threads, &self.lane_chunks);
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        flying.insert(0, (lane, group, answer))
-                    }
-                    _ => waiting.extend(group),
-                }
+        done: pipeline::Embedded,
+        report: &mut IndexReport,
+        run_lanes: &mut std::collections::BTreeMap<String, usize>,
+        cached: &mut CacheWrites,
+    ) -> Result<()> {
+        let flat: Vec<f32> = done.vectors.iter().flatten().copied().collect();
+        anyhow::ensure!(
+            flat.len() == done.ids.len() * self.dim,
+            "the embed stage handed back {} values for {} chunks",
+            flat.len(),
+            done.ids.len()
+        );
+        self.follow_budget();
+        self.index.add(&flat, &done.ids)?;
+        self.exact.append(&flat, &done.ids)?;
+        self.record_variants(&done.variants)?;
+        for (lane, n) in &done.lanes {
+            self.note_lane(lane, *n);
+            *run_lanes.entry(lane.to_string()).or_default() += n;
+        }
+        report.embedded += done.ids.len();
+        report.threads = self.index_threads();
+        report.lanes = self.lane_chunks.clone();
+        self.last_embed = Some(std::time::Instant::now());
+        for (at, ((variant, from_cache), hash)) in done.rows.iter().zip(&done.hashes).enumerate() {
+            let Some(hash) = hash else { continue };
+            if *from_cache {
+                cached.hits.push((*hash, variant));
+            } else if !variant.is_empty() {
+                cached
+                    .fresh
+                    .push((*hash, variant, done.vectors[at].clone()));
             }
         }
-        self.record_variants(&counts)?;
-        Ok(Some(vectors))
+        Ok(())
+    }
+
+    /// The CPU session an index pass embeds with, loaded once per store and
+    /// kept between slices; rebuilt when the thread count in force changed.
+    fn index_work(&mut self) -> Result<pipeline::CpuWork> {
+        let threads = embed::threads_in_force();
+        if let Some(work) = self.index_session.take() {
+            if self.index_threads == threads {
+                return Ok(work);
+            }
+            SESSIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let cache = model_cache_dir()?;
+        let work = match self.model {
+            Model::Granite => {
+                let (main, alt) = embed::index_variant();
+                pipeline::CpuWork::Ids {
+                    main: session::CpuSession::open(&cache, main, threads, self.quiet)?,
+                    alt: alt
+                        .map(|variant| {
+                            session::CpuSession::open(&cache, variant, threads, self.quiet)
+                        })
+                        .transpose()?,
+                }
+            }
+            Model::Builtin(_) => pipeline::CpuWork::Text(Box::new(self.model.load_variant(
+                cache,
+                chunk::MAX_CHARS / 2,
+                self.quiet,
+                threads,
+                embed::Variant::Int8,
+            )?)),
+        };
+        self.index_threads = threads;
+        SESSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(work)
+    }
+
+    /// The intra-op thread count the index pass's CPU session was built with.
+    fn index_threads(&self) -> usize {
+        // The CPU lane's own count once it has embedded a batch: it follows a
+        // count saved mid-run, and the card shows what the lane runs with.
+        match pipeline::CPU_THREADS.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => self.index_threads,
+            live => live,
+        }
+    }
+
+    /// Open a transaction if none is open. An index pass writes a file's rows
+    /// in one rather than a commit per statement, and commits before it hands
+    /// the rows' ids to the embed stage and before every checkpoint.
+    fn tx_begin(&self) -> Result<()> {
+        if self.db.is_autocommit() {
+            self.db.execute_batch("BEGIN")?;
+        }
+        Ok(())
+    }
+
+    fn tx_commit(&self) -> Result<()> {
+        if !self.db.is_autocommit() {
+            self.db.execute_batch("COMMIT")?;
+        }
+        Ok(())
     }
 
     /// Count chunks one lane embedded in this pass, for the run card's rate
@@ -3822,29 +4344,6 @@ impl Semlith {
             .flatten()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default()
-    }
-
-    /// Positions of `texts`, shortest first by the model's own token count.
-    /// Stable, so equal lengths keep their walk order and a corpus always
-    /// produces the same batches.
-    fn length_order(&self, texts: &[String]) -> Vec<usize> {
-        let lengths: Vec<usize> = texts
-            .iter()
-            .map(|text| match &self.tokenizer {
-                Some(tokenizer) => tokenizer
-                    .encode(text.as_str(), false)
-                    .map(|e| e.len())
-                    .unwrap_or(text.len() / 4),
-                None => text.len() / 4,
-            })
-            .collect();
-        let mut order: Vec<usize> = (0..texts.len()).collect();
-        // The comparison the sorted window was measured against. Not part of
-        // the documented environment.
-        if std::env::var_os(UNSORTED_ENV).is_none() {
-            order.sort_by_key(|i| lengths[*i]);
-        }
-        order
     }
 
     /// Take a stopped run's files out of the store, and write the index once.
@@ -4190,8 +4689,14 @@ impl Semlith {
 
         // `is_empty` is about the text index. A store holding only images has
         // no chunks and is still searchable, so it is asked about separately
-        // rather than dismissed with the same test.
-        if k == 0 || (self.is_empty() && store::image_count(&self.db)? == 0) {
+        // rather than dismissed with the same test. Nor is a store filling from
+        // cold, whose rows are readable before any vector is: its keyword and
+        // graph halves answer while the index is still empty.
+        if k == 0
+            || (self.is_empty()
+                && store::chunk_count(&self.db)? == 0
+                && store::image_count(&self.db)? == 0)
+        {
             return Ok(Vec::new());
         }
 
@@ -4278,6 +4783,19 @@ impl Semlith {
         let seeds = dense_ids.clone();
         let (dense_scores, dense_ids) = self.rescored(vector, dense_scores, dense_ids);
         let keyword_ids = store::keyword_search(&self.db, query, depth, filter.groups())?;
+        // Mid-run, the keyword half already holds chunks the vector half has
+        // not reached. A few of the best of them are embedded here, on the
+        // query path, and join the vector list by their own similarity, so a
+        // semantic question asked while a store fills still gets a semantic
+        // answer from the part that is only rows so far. Not for a query
+        // shaped like an identifier: its own text says to trust the keyword
+        // half, which already holds them, and the embed is seconds on a cold
+        // model while the run has every core.
+        let (dense_scores, dense_ids) = if shape == Shape::Identifier {
+            (dense_scores, dense_ids)
+        } else {
+            self.with_pending(vector, &keyword_ids, dense_scores, dense_ids)?
+        };
 
         // The image list. Only when the store actually holds an image: the
         // query has to be embedded a second time, with CLIP's text encoder
@@ -5022,12 +5540,6 @@ impl Semlith {
     }
 }
 
-#[derive(Default)]
-struct Batch {
-    ids: Vec<u64>,
-    texts: Vec<String>,
-}
-
 pub(crate) fn normalize(v: &mut [f32]) {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
@@ -5398,7 +5910,17 @@ pub(crate) enum Handed {
 /// A pair rather than a bare `Vec` since 0.19.0: the entries the walk gave up
 /// on are part of what the run has to report, and a function that returns only
 /// the successes gives its caller nothing to report them with.
+/// What an index pass is handed to index: a walk already done, or roots to
+/// walk, which a pass that uses the lanes walks beside its first files.
+pub(crate) enum Walk {
+    Done(Walked),
+    Roots(Vec<PathBuf>),
+}
+
 pub(crate) struct Walked {
+    /// Milliseconds the walk took, for the run's stage timings. Zero where
+    /// the caller handed over paths it already had.
+    pub walk_ms: u64,
     pub files: Vec<PathBuf>,
     /// Roots that were files rather than directories, so the caller named them
     /// one by one. They are held to the hidden-file rule; the walked ones are
@@ -5566,6 +6088,200 @@ fn walk(roots: &[PathBuf]) -> Walked {
     walk_allowing(roots, &[])
 }
 
+/// The bytes a run's files count for, one `stat` each: microseconds against
+/// the read, hash and embed that follow, and what the remaining-time estimate
+/// is taken from. A file over the cap is skipped unread and counts nothing.
+fn bytes_of(paths: &[PathBuf]) -> u64 {
+    paths
+        .iter()
+        .map(|p| embeddable_bytes(p.metadata().ok()))
+        .sum()
+}
+
+/// How many recently committed files a pass starts on before its walk is done.
+const HEAD_FILES: usize = 48;
+
+/// The files the last commits under `roots` touched, newest first, held to
+/// the rules the walk applies — not hidden, not in a generated folder a
+/// person has not accepted, not left out by `.semlithignore`, inside the
+/// boundary — so a pass can start on them before the walk of the whole tree is
+/// done. What `.gitignore` leaves out git does not commit. Empty outside a
+/// git repository or without git.
+fn recent_head(
+    roots: &[PathBuf],
+    boundary: &ResolvedBoundary,
+    accepted: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    // A root that is a repository, or a folder of them: the repositories up
+    // to two levels down, which is how a projects folder is laid out.
+    let mut repos: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        let root = canonical(root);
+        if !root.is_dir() {
+            continue;
+        }
+        let mut level = vec![root];
+        for _ in 0..3 {
+            let mut next = Vec::new();
+            for dir in level {
+                if dir.join(".git").exists() {
+                    repos.push(dir);
+                    continue;
+                }
+                for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                    let path = entry.path();
+                    if entry.file_type().is_ok_and(|t| t.is_dir())
+                        && !entry.file_name().to_string_lossy().starts_with('.')
+                        && !is_generated_dir(&path)
+                    {
+                        next.push(path);
+                    }
+                }
+            }
+            level = next;
+        }
+    }
+    // A share of the head each, so one busy repository does not take it all.
+    let each = (HEAD_FILES / repos.len().max(1)).max(4);
+    for root in repos {
+        let mut taken = 0;
+        let Ok(log) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args([
+                "log",
+                "-n",
+                "60",
+                "--name-only",
+                "--format=%x00",
+                "--relative",
+                "--",
+                ".",
+            ])
+            .stderr(std::process::Stdio::null())
+            .output()
+        else {
+            continue;
+        };
+        // Within one commit every file is as recent as the next. A commit
+        // that touched hundreds, as a shallow clone's only commit does, would
+        // start the pass on its alphabetical first few, the licence and the
+        // changelog; code goes first, which is what an agent asks about.
+        let text = String::from_utf8_lossy(&log.stdout);
+        let mut lines: Vec<&str> = Vec::new();
+        for commit in text.split('\0') {
+            let mut names: Vec<&str> = commit.lines().collect();
+            names.sort_by_key(|name| !filter::is_code(name.trim()));
+            lines.extend(names);
+        }
+        for line in lines {
+            if out.len() >= HEAD_FILES {
+                return out;
+            }
+            if taken >= each {
+                break;
+            }
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let rel = Path::new(line);
+            let hidden = rel
+                .components()
+                .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+            let path = root.join(rel);
+            if hidden || out.contains(&path) || !path.is_file() {
+                continue;
+            }
+            let generated = path
+                .ancestors()
+                .skip(1)
+                .take_while(|a| a.starts_with(&root) && *a != root)
+                .any(|a| is_generated_dir(a) && !accepted.iter().any(|x| x.as_path() == a));
+            let ignored = path
+                .parent()
+                .and_then(semlithignore_for)
+                .is_some_and(|m| m.matched_path_or_any_parents(&path, false).is_ignore());
+            if generated || ignored || boundary.refuses(&path, true).is_some() {
+                continue;
+            }
+            out.push(path);
+            taken += 1;
+        }
+    }
+    out
+}
+
+/// Put the most recently changed files first: by the later of a file's
+/// modification time and the time of the last git commit that touched it.
+///
+/// Both, because each misses what the other sees. A fresh clone gives every
+/// file the same mtime, and git has not heard of an edit nobody committed.
+/// Stable, so files changed at the same second keep their path order.
+fn recent_first(paths: &mut [PathBuf]) {
+    let committed = git_recency(paths);
+    let when = |path: &Path| -> i64 {
+        let mtime = path
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs() as i64);
+        mtime.max(committed.get(path).copied().unwrap_or(0))
+    };
+    let mut keyed: Vec<(i64, PathBuf)> = paths.iter().map(|p| (when(p), p.clone())).collect();
+    keyed.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    for (slot, (_, path)) in paths.iter_mut().zip(keyed) {
+        *slot = path;
+    }
+}
+
+/// When each file was last committed, for the repositories the paths sit in:
+/// the last few hundred commits of each, which is the part of history that
+/// says what is being worked on. Nothing when git is not installed.
+fn git_recency(paths: &[PathBuf]) -> std::collections::HashMap<PathBuf, i64> {
+    const COMMITS: &str = "400";
+    let mut tops: std::collections::BTreeSet<PathBuf> = Default::default();
+    let mut seen: std::collections::HashSet<PathBuf> = Default::default();
+    for path in paths {
+        let mut dir = path.parent();
+        while let Some(d) = dir {
+            if !seen.insert(d.to_path_buf()) {
+                break;
+            }
+            if d.join(".git").exists() {
+                tops.insert(d.to_path_buf());
+                break;
+            }
+            dir = d.parent();
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    for top in tops {
+        let Ok(log) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&top)
+            .args(["log", "-n", COMMITS, "--name-only", "--format=%x00%ct"])
+            .stderr(std::process::Stdio::null())
+            .output()
+        else {
+            continue;
+        };
+        let mut at = 0i64;
+        for line in String::from_utf8_lossy(&log.stdout).lines() {
+            if let Some(stamp) = line.strip_prefix('\0') {
+                at = stamp.trim().parse().unwrap_or(0);
+            } else if !line.is_empty() {
+                // Newest first, so the first time a file appears is the last
+                // time it changed.
+                out.entry(top.join(line)).or_insert(at);
+            }
+        }
+    }
+    out
+}
+
 /// [`walk`], descending into the generated folders a person accepted (2.5).
 fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
     let mut out = Vec::new();
@@ -5593,6 +6309,13 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
             }
             continue;
         }
+        // Resolved once for the root rather than once per file: a
+        // `canonicalize` is a walk up every component, and 69 000 of them
+        // were most of a five-second walk of the benchmark corpus. A file
+        // under the root is the canonical root joined to its relative path,
+        // because the walk never follows a directory link; a file that is
+        // itself a link is still resolved, since that is where it points.
+        let canonical_root = canonical(root);
         let mut builder = ignore::WalkBuilder::new(root);
         builder
             .hidden(true)
@@ -5654,7 +6377,10 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
                 continue;
             }
             yielded.insert(entry.path().to_path_buf());
-            let path = canonical(entry.path());
+            let path = match entry.path().strip_prefix(root) {
+                Ok(rest) if !entry.path_is_symlink() => canonical_root.join(rest),
+                _ => canonical(entry.path()),
+            };
             if seen.insert(path.clone()) {
                 out.push(path);
             }
@@ -5745,6 +6471,7 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
     generated.sort();
     generated.dedup();
     Walked {
+        walk_ms: 0,
         files: out,
         named,
         unreadable,
@@ -5771,6 +6498,53 @@ fn semlithignore_for(dir: &Path) -> Option<ignore::gitignore::Gitignore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The head finds repositories below a projects folder, and within one
+    /// commit takes the code before the licence and the changelog.
+    #[test]
+    fn the_head_takes_code_first_from_repositories_below_the_root() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("group").join("app");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        for (name, text) in [
+            ("CHANGELOG.md", "# Changes\n"),
+            ("LICENSE", "MIT\n"),
+            ("src/main.rs", "fn main() {}\n"),
+        ] {
+            std::fs::write(repo.join(name), text).unwrap();
+        }
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q"]).status.success() {
+            return; // no git on this machine: the head is empty by design
+        }
+        git(&["add", "."]);
+        assert!(git(&["commit", "-q", "-m", "one"]).status.success());
+        let head = recent_head(
+            &[root.path().to_path_buf()],
+            &Boundary::default().resolved(Some(Path::new("/nonexistent-home"))),
+            &[],
+        );
+        let names: Vec<String> = head
+            .iter()
+            .map(|p| {
+                p.strip_prefix(canonical(&repo))
+                    .unwrap()
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        let main = Path::new("src").join("main.rs").display().to_string();
+        assert_eq!(names.first(), Some(&main), "{names:?}");
+        assert_eq!(names.len(), 3, "{names:?}");
+    }
 
     /// For a question that does not name tests, no test hit sits above the
     /// first product-code hit; prose keeps its place (1.15).

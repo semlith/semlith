@@ -582,11 +582,33 @@ fn index_and_score(root: &Path, questions: &[Question], check_determinism: bool)
     // chunks and is not allowed to halve the indexing rate — and one corpus on
     // one machine measured by the same harness is the only way that comparison
     // means anything.
+    // With `SEMLITH_ACCEL` set the accelerator lanes embed, as the daemon's
+    // do: the release gate that a store the Neural Engine built retrieves as
+    // the CPU's does. Unset, as in CI, the CPU embeds alone as before.
+    // `SEMLITH_RETRIEVAL_MIX_AFTER=<seconds>` starts on the CPU alone and
+    // hands to the lanes that far in, for a store built half by each.
+    if std::env::var_os("SEMLITH_ACCEL").is_some() {
+        match std::env::var("SEMLITH_RETRIEVAL_MIX_AFTER")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            Some(after) => {
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(after));
+                    semlith::accel::manage();
+                });
+            }
+            None => semlith::accel::manage(),
+        }
+    }
     let started = std::time::Instant::now();
     semlith
         .index_paths(std::slice::from_ref(&root.to_path_buf()), |_, _| {})
         .expect("the pinned corpus indexes");
     let indexed_in = started.elapsed();
+    if check_determinism {
+        println!("  embedded by {:?}", semlith.variants());
+    }
 
     let score_all = |semlith: &mut Semlith| {
         let mut report = Report::default();

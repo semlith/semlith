@@ -242,6 +242,70 @@ jobs:
           cat out.txt
           grep -q "Linux-only" out.txt
 
+  # 0.32.0's experimental lanes on runners without their devices: each pack
+  # is fetched and every digest verified, a corrupted one is refused and
+  # deleted, each lane says why it cannot run, a run with all of them on
+  # completes on the CPU, and where a CPU path exists — OpenVINO's CPU device,
+  # llama.cpp's CPU backend — the lane gives the known answer.
+  lanes:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - run: cargo build --release
+
+      - name: A corrupted pack is refused and deleted
+        run: cargo test --release --test packs -- --ignored
+
+      - name: Every lane, on a machine without its device
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$PWD/target/release/semlith"
+          export SEMLITH_HOME="$RUNNER_TEMP/semlith-home"
+          mkdir -p "$SEMLITH_HOME"
+          if [ "$RUNNER_OS" != macOS ]; then
+            # OpenVINO's CPU device: the known answer, which proves the plugin
+            # loads into this build's ONNX Runtime and computes granite right. The
+            # plugin offers Intel hardware only, and a hosted runner's CPU may be
+            # AMD: there the lane must say so, and the known answer waits for a
+            # run that lands on an Intel runner.
+            SEMLITH_ACCEL=openvino SEMLITH_OPENVINO_DEVICE=CPU "$bin" doctor --gpu --json | tee ov.json
+            if { grep -m1 vendor_id /proc/cpuinfo 2>/dev/null || echo "${PROCESSOR_IDENTIFIER:-}"; } | grep -q GenuineIntel; then
+              jq -e '.[] | select(.lane == "openvino") | .passed == true and .cosine >= 0.999' ov.json
+            else
+              jq -e '.[] | select(.lane == "openvino") | .reason | contains("Intel devices only")' ov.json
+              echo "::notice::OpenVINO known answer not run: this runner's CPU is not Intel"
+            fi
+            # TensorRT for RTX: the pack fetches and verifies, and with no RTX
+            # card the lane says so and names the fallback.
+            "$bin" accel on trt
+            "$bin" doctor --gpu --json | tee trt.json
+            jq -e '.[] | select(.lane == "trt") | (.reason | startswith("unavailable")) and (.experimental == true)' trt.json
+            "$bin" accel off trt
+          fi
+          # llama.cpp's CPU backend: the known answer through its own server.
+          SEMLITH_ACCEL=llama SEMLITH_LLAMA_DEVICE=cpu "$bin" doctor --gpu --json | tee llama.json
+          jq -e '.[] | select(.lane == "llama") | .passed == true and .cosine >= 0.999' llama.json
+          # Every experimental lane on and no device for any of them: the run
+          # completes, on the CPU where nothing else can carry it.
+          mkdir -p corpus
+          for i in 1 2 3; do printf '# Note %s\n\nThe harbour ledger %s closes quarterly.\n' "$i" "$i" > "corpus/n$i.md"; done
+          SEMLITH_ACCEL=cpu,cuda,trt,openvino,llama "$bin" --store "$SEMLITH_HOME/s" index corpus --quiet --no-review --verbose
+          "$bin" --store "$SEMLITH_HOME/s" stats | tee stats.txt
+          grep -Eq 'chunks +[1-9]' stats.txt
+
   # The --release suites: measured claims and the retrieval harness. Hours on
   # the reference laptop, so a release pull request's CI is their gate, and
   # the record says so. Only on release branches. macOS arm64, because that is
