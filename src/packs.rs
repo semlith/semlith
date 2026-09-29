@@ -352,8 +352,8 @@ pub const COREML_VERSION: &str = "1";
 
 const COREML_ASSETS: &[Asset] = &[Asset {
     url: "https://github.com/semlith/semlith/releases/download/pack-coreml-v1/semlith-coreml-1.zip",
-    sha256: "0000000000000000000000000000000000000000000000000000000000000000",
-    size: 0,
+    sha256: "64343cbb2cc69465dda4ed914669995e4bea47df72c0c1da43d2dbb4b2f59ad0",
+    size: 147_881_077,
     form: Form::Zip,
 }];
 

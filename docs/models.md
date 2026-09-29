@@ -132,6 +132,57 @@ it beside the libraries in `licences/`. semlith does not redistribute the
 libraries, so the redistribution terms in the CUDA Toolkit EULA and the cuDNN
 Software License Agreement do not apply to it.
 
+### The Core ML pack
+
+Apple silicon only, for the Neural Engine lane and the Core ML GPU lane. semlith
+builds it: `.github/workflows/packs.yml` runs `packs/coreml/convert.py` on a
+macOS runner and publishes the zip to this repository's `pack-coreml-v1`
+release, and `src/packs.rs` pins it by URL, SHA-256 and size. granite at
+`ibm-granite/granite-embedding-small-english-r2@2ab6fa8e` is converted twice:
+once in the Neural Engine's layout (batch 4; sequence buckets 128, 192, 256,
+320, 384, 512) and once in the standard layout for the GPU (batch 8; 128, 256,
+512). Each layout is one multifunction model with a function per bucket, so the
+weights are stored once per layout.
+
+| Asset | SHA-256 | Bytes |
+|---|---|---|
+| [`semlith-coreml-1.zip`](https://github.com/semlith/semlith/releases/download/pack-coreml-v1/semlith-coreml-1.zip) | `64343cbb2cc69465dda4ed914669995e4bea47df72c0c1da43d2dbb4b2f59ad0` | 147 881 077 |
+
+On the M1 Air, every Neural Engine function places 99.85 % of its operations on
+the Neural Engine, and its vectors agree with the fp32 reference at cosine
+0.99998 or better on the 512-chunk fixture in `tests/fixtures/coreml`. The
+first load on a Mac compiles the models for that machine, about three minutes,
+and macOS keeps the result; a new semlith binary compiles them once more.
+
+### The llama.cpp pack
+
+Experimental. ggml-org's own `llama-server` build b11146 for the platform, and
+granite as GGUF f16, which semlith builds with llama.cpp's converter at the
+same build (`packs/llama/convert.sh`) and publishes to `pack-llama-v1`.
+
+| Asset | SHA-256 | Bytes |
+|---|---|---|
+| [`llama-b11146-bin-macos-arm64.tar.gz`](https://github.com/ggml-org/llama.cpp/releases/download/b11146/llama-b11146-bin-macos-arm64.tar.gz) | `1ad3f9eff80edb9dbef4259ad564d1720612ef7eea48fa4afed0e54f5f3d5711` | 11 189 714 |
+| [`llama-b11146-bin-ubuntu-vulkan-x64.tar.gz`](https://github.com/ggml-org/llama.cpp/releases/download/b11146/llama-b11146-bin-ubuntu-vulkan-x64.tar.gz) | `d3ce40fce7403cc93bcf5718fc46c6efb61ed9709f8e5d9f10c86bf0e30e8fb3` | 30 598 492 |
+| [`llama-b11146-bin-win-vulkan-x64.zip`](https://github.com/ggml-org/llama.cpp/releases/download/b11146/llama-b11146-bin-win-vulkan-x64.zip) | `55a378aa095b466979d85075234f66d7655c7a7483222af0c006c0e55b4d7bd6` | 32 127 004 |
+| [`granite-embedding-small-english-r2-f16.gguf`](https://github.com/semlith/semlith/releases/download/pack-llama-v1/granite-embedding-small-english-r2-f16.gguf) | `e9d55517cdadcf30eb18a65ea069778dd134914dee2554959bcedd5717d8faa8` | 97 119 616 |
+
+### TensorRT for RTX and OpenVINO
+
+Experimental, x86_64 Windows and Linux. Each is the vendor's own ONNX Runtime
+plugin execution provider, downloaded from PyPI where the vendor publishes it,
+as the WebGPU plugin is; semlith never hosts a copy.
+
+| Plugin | Platform | Wheel | SHA-256 | Bytes |
+|---|---|---|---|---|
+| TensorRT for RTX 0.4.0 (cu12) | Linux | [`onnxruntime_ep_nv_tensorrt_rtx_cu12-0.4.0-…manylinux_2_28_x86_64.whl`](https://files.pythonhosted.org/packages/52/a6/1405069d40e2d6d37b21031e5dc2cc8b8197fbb2e3d4e4f65b9155c57e4f/onnxruntime_ep_nv_tensorrt_rtx_cu12-0.4.0-py3-none-manylinux_2_28_x86_64.whl) | `221807b1797a6270f37dfd7981f66e25ca7483f3883bfe23ef2b6a4198fe2b10` | 167 721 016 |
+| TensorRT for RTX 0.4.0 (cu12) | Windows | [`onnxruntime_ep_nv_tensorrt_rtx_cu12-0.4.0-…win_amd64.whl`](https://files.pythonhosted.org/packages/8b/e4/f19fdbffcf8faf18d9f81973f81e3d378ef371f857b049a3f355535a015c/onnxruntime_ep_nv_tensorrt_rtx_cu12-0.4.0-py3-none-win_amd64.whl) | `5d9dba6aafd8e0863f34d0e5f51ad7c7ae9a5d6a92a55fe45d9637d3a5f1e1a7` | 105 822 356 |
+| OpenVINO 1.7.0 | Linux | [`onnxruntime_ep_openvino-1.7.0-…manylinux_2_28_x86_64.whl`](https://files.pythonhosted.org/packages/78/b6/7d168ff711e6034c4df4c5144242a230c7e6329f24b50454103510671b85/onnxruntime_ep_openvino-1.7.0-py3-none-manylinux_2_28_x86_64.whl) | `7016c5ba4154f2a2b6da87e8b8654e5e811151186fb97cc29bde5d2fabde6c93` | 51 725 826 |
+| OpenVINO 1.7.0 | Windows | [`onnxruntime_ep_openvino-1.7.0-…win_amd64.whl`](https://files.pythonhosted.org/packages/c3/c7/4ebac45e18e3c32655948f831ac95711849824bd7b3e793c3f8c6bc2060e/onnxruntime_ep_openvino-1.7.0-py3-none-win_amd64.whl) | `0b48601ff6720a9fdbf06de99073665cec9b8d7983226455d4f766aa4d8be16c` | 67 675 843 |
+
+Intel's plugin offers Intel hardware only: on a machine with an AMD CPU and no
+Intel GPU or NPU it offers no device, and the lane says so.
+
 ## Rescoring: jina-reranker-v1-turbo-en
 
 A cross-encoder, 37 M parameters, int8, Apache-2.0. It reads the query and a
