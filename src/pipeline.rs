@@ -1069,6 +1069,10 @@ pub struct Embedder {
     windows: Option<mpsc::SyncSender<Window>>,
     done: mpsc::Receiver<Result<Embedded, String>>,
     pub abort: Arc<AtomicBool>,
+    /// Chunks whose batch has come back from a device, counted as each batch
+    /// does rather than as its window lands: what a run's progress moves on
+    /// while the writer waits.
+    pub batched: Arc<AtomicUsize>,
     /// Windows sent and not yet received back.
     pub outstanding: usize,
 }
@@ -1095,18 +1099,24 @@ impl Embedder {
                 let _ = cpu_back.send(cpu_lane(cpu, cpu_rx));
             })
             .expect("spawning the CPU lane");
-        let (a, p) = (Arc::clone(&abort), Arc::clone(&paused));
+        let batched = Arc::new(AtomicUsize::new(0));
+        let (a, p, b) = (
+            Arc::clone(&abort),
+            Arc::clone(&paused),
+            Arc::clone(&batched),
+        );
         std::thread::Builder::new()
             .name("semlith-embed".to_string())
             .spawn_scoped(scope, move || {
                 let _class = crate::priority::indexing_thread();
-                schedule(windows_rx, done_tx, cpu_tx, lanes, &a, &p);
+                schedule(windows_rx, done_tx, cpu_tx, lanes, &a, &p, &b);
             })
             .expect("spawning the embed stage");
         Self {
             windows: Some(windows_tx),
             done: done_rx,
             abort,
+            batched,
             outstanding: 0,
         }
     }
@@ -1170,6 +1180,7 @@ fn schedule(
     may_use_lanes: bool,
     abort: &AtomicBool,
     paused: &AtomicBool,
+    batched: &AtomicUsize,
 ) {
     let mut active: VecDeque<Active> = VecDeque::new();
     let mut closed = false;
@@ -1330,6 +1341,7 @@ fn schedule(
                         kept += 1;
                     }
                     window.left -= kept;
+                    batched.fetch_add(kept, Ordering::Relaxed);
                     *window.variants.entry(variant).or_default() += kept;
                     *window.lanes.entry(target.id()).or_default() += kept;
                 }

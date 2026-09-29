@@ -123,6 +123,39 @@ const SORT_WINDOW: usize = 256;
 /// The longest an index pass holds written rows uncommitted.
 const ROW_COMMIT: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// How often a pass says how far it has got while the writer waits on the
+/// devices. A window lands every 256 chunks, which on a slow CPU is a quarter
+/// of a minute of a run card standing still; batches come back far oftener.
+const PROGRESS_TICK: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The last batch count a waiting writer reported, and when.
+struct Progress {
+    seen: usize,
+    at: std::time::Instant,
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self {
+            seen: 0,
+            at: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Progress {
+    /// The count, when it has moved and a tick has passed since the last.
+    fn due(&mut self, batched: &std::sync::atomic::AtomicUsize) -> Option<usize> {
+        let n = batched.load(std::sync::atomic::Ordering::Relaxed);
+        if n == self.seen || self.at.elapsed() < PROGRESS_TICK {
+            return None;
+        }
+        self.seen = n;
+        self.at = std::time::Instant::now();
+        Some(n)
+    }
+}
+
 /// Keyword candidates with no vector yet that a search mid-run embeds on the
 /// query path. Sixteen chunks on the CPU is about half a second on the M1,
 /// which keeps a mid-run search inside two.
@@ -1141,6 +1174,10 @@ pub struct IndexReport {
     /// Chunks embedded so far in this call, counted per batch. `chunks` counts
     /// finished files, so it stands still through a large one; this does not.
     pub embedded: usize,
+    /// Chunks whose batch has come back from a device, ahead of their window
+    /// landing: what progress moves on while the writer waits.
+    #[serde(skip)]
+    pub batched: usize,
     /// Chunks each lane has embedded for this store, since it was opened.
     #[serde(skip)]
     pub lanes: std::collections::BTreeMap<String, usize>,
@@ -1263,7 +1300,7 @@ fn say_file(
             // Vectors landed, not rows written: the writer runs ahead of the
             // embed stage, and a rate taken from rows would count work not
             // yet done.
-            chunks: report.embedded,
+            chunks: report.embedded.max(report.batched),
             total,
             symbols: report.symbols,
             why,
@@ -3242,6 +3279,17 @@ impl Semlith {
                             &paused,
                             &ask,
                             &mut clock,
+                            &mut |n| {
+                                report.batched = n;
+                                say_file(
+                                    &mut on_file,
+                                    &report,
+                                    total,
+                                    &path,
+                                    FileOutcome::Progress,
+                                    None,
+                                )
+                            },
                         )? {
                             halted = true;
                             break;
@@ -3310,6 +3358,17 @@ impl Semlith {
                         &paused,
                         &ask,
                         &mut clock,
+                        &mut |n| {
+                            report.batched = n;
+                            say_file(
+                                &mut on_file,
+                                &report,
+                                total,
+                                &path,
+                                FileOutcome::Progress,
+                                None,
+                            )
+                        },
                     )? && self.drain(
                         &mut stage,
                         &mut report,
@@ -3360,6 +3419,17 @@ impl Semlith {
                     &paused,
                     &ask,
                     &mut clock,
+                    &mut |n| {
+                        report.batched = n;
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &last,
+                            FileOutcome::Progress,
+                            None,
+                        )
+                    },
                 )? && self.drain(
                     &mut stage,
                     &mut report,
@@ -4034,6 +4104,7 @@ impl Semlith {
         paused: &std::sync::Arc<std::sync::atomic::AtomicBool>,
         ask: &dyn Fn(&std::sync::atomic::AtomicBool) -> bool,
         clock: &mut pipeline::WriterClock,
+        tick: &mut dyn FnMut(usize),
     ) -> Result<bool> {
         if window.ids.is_empty() {
             return Ok(true);
@@ -4060,10 +4131,15 @@ impl Semlith {
         );
         let waiting = std::time::Instant::now();
         let mut stopped = false;
+        let batched = std::sync::Arc::clone(&running.batched);
+        let mut progress = Progress::default();
         let sent = running.send(full, || {
             if !ask(paused) {
                 stopped = true;
                 return false;
+            }
+            if let Some(n) = progress.due(&batched) {
+                tick(n);
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
             true
@@ -4092,6 +4168,7 @@ impl Semlith {
         let Some(running) = stage.as_mut() else {
             return Ok(true);
         };
+        let mut progress = Progress::default();
         while running.outstanding > 0 {
             let waiting = std::time::Instant::now();
             let got = running.next(std::time::Duration::from_millis(20));
@@ -4104,6 +4181,10 @@ impl Semlith {
                 None => {
                     if !ask(paused) {
                         return Ok(false);
+                    }
+                    if let Some(n) = progress.due(&running.batched) {
+                        report.batched = n;
+                        tick(report);
                     }
                 }
             }
