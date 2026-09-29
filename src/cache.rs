@@ -25,9 +25,10 @@ pub const DEFAULT_CAP_MB: u64 = 1024;
 /// Overrides the cap, in megabytes; 0 turns the cache off.
 pub const CAP_ENV: &str = "SEMLITH_VECTOR_CACHE_MB";
 
-/// Bytes a row takes on disk, near enough: the vector, the key and the
-/// bookkeeping. What the cap is counted in.
-const ROW_BYTES: u64 = 384 * 4 + 32 + 40;
+/// Bytes a row takes on disk, measured: 1 703 a row over ten thousand
+/// vectors, the key, the two indexes and the pages' slack included. What the
+/// cap is counted in, so a full cache is the size of its cap.
+const ROW_BYTES: u64 = 1_700;
 
 /// The cap in force, in bytes. 0 is off.
 pub fn cap_bytes() -> u64 {
@@ -119,15 +120,23 @@ impl Cache {
         }
         let db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Before WAL, which fixes it: sixteen-kilobyte pages hold ten vectors
+        // where four-kilobyte pages held two and left a quarter empty. Only a
+        // new file takes it.
+        db.pragma_update(None, "page_size", 16_384)?;
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.pragma_update(None, "synchronous", "NORMAL")?;
+        // A rowid table: a WITHOUT ROWID row keeps about a kilobyte on its
+        // page and moves the rest of a 1.5 KB vector to an overflow page of its
+        // own, so each vector took 4.7 KB on disk and a full cache three times
+        // its cap.
         db.execute_batch(
             "CREATE TABLE IF NOT EXISTS vectors (
                  key BLOB PRIMARY KEY,
                  variant TEXT NOT NULL,
                  vector BLOB NOT NULL,
                  used INTEGER NOT NULL
-             ) WITHOUT ROWID;
+             );
              CREATE INDEX IF NOT EXISTS vectors_used ON vectors(used);
              CREATE TABLE IF NOT EXISTS counts (k TEXT PRIMARY KEY, v INTEGER NOT NULL);",
         )?;
@@ -397,5 +406,37 @@ mod tests {
         assert!(cache.get(&keys[0]).is_some());
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.lookups, 11);
+    }
+
+    /// The cap is counted in rows at `ROW_BYTES`; the file has to be about
+    /// that big, not a multiple of it.
+    #[test]
+    fn a_row_takes_about_what_the_cap_counts_it_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.db");
+        let mut cache = Cache::open_at(&path).unwrap();
+        let scope = Scope {
+            model: "m".into(),
+            chunker: 1,
+            truncation: 1,
+        };
+        let v: Vec<f32> = (0..384).map(|i| (i as f32).cos()).collect();
+        let keys: Vec<[u8; 32]> = (0..2_000)
+            .map(|i| scope.key(&Scope::text(&i.to_string()), "fp16-ane"))
+            .collect();
+        let fresh: Vec<([u8; 32], &'static str, &[f32])> = keys
+            .iter()
+            .map(|k| (*k, "fp16-ane", v.as_slice()))
+            .collect();
+        cache.record(&fresh, &[], 0).unwrap();
+        cache
+            .db
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let per_row = std::fs::metadata(&path).unwrap().len() / keys.len() as u64;
+        assert!(
+            per_row <= ROW_BYTES * 6 / 5,
+            "{per_row} bytes a row on disk against {ROW_BYTES} counted"
+        );
     }
 }

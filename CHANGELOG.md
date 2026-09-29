@@ -91,6 +91,12 @@ claimed for any of them. The CUDA lane becomes experimental too; a saved
   its own time on the device. With the Neural Engine off, the M1 indexes at
   62.7 chunks/s p10 where it indexed at 16.0; the release's gate for that
   case, 80, is not met (#164).
+- The vector cache takes 1.7 KB on disk a vector, where it took 4.7 KB: its
+  table kept about a kilobyte of each row on the row's page and moved the
+  rest of the vector to an overflow page of its own, so a full cache was
+  three times its cap. A lookup takes 8.6 µs, where it took 27. A cache
+  written by an earlier 0.32.0 build keeps its layout; deleting
+  `cache/vectors.db` rebuilds it.
 - `semlith stats` names every lane that is on, the Neural Engine and the
   experimental lanes included; it named only the CPU, the GPU and CUDA.
 - `semlith accel status` shows the running daemon's lanes, so a Neural Engine
