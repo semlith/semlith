@@ -1,0 +1,145 @@
+name: packs
+
+# Builds a model pack from the checked-in script and publishes it to its own
+# GitHub release, where the binary pins it by URL and SHA-256. Run by hand,
+# once per pack version, before the binary that pins it is tagged. One job per
+# pack; add a choice and a job for the next one. Dispatchable only once this
+# file is on the default branch.
+on:
+  workflow_dispatch:
+    inputs:
+      pack:
+        description: Pack to build
+        type: choice
+        options: [coreml, llama]
+      version:
+        description: Pack version; must equal PACK_VERSION in the pack's build script
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Two runs publishing the same release would race on its assets.
+concurrency:
+  group: packs-${{ inputs.pack }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  coreml:
+    if: inputs.pack == 'coreml'
+    # Core ML conversion and compilation need macOS; arm64 like the machines it serves.
+    runs-on: macos-15
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+      TAG: pack-coreml-v${{ inputs.version }}
+    defaults:
+      run:
+        working-directory: packs/coreml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      # The archive is named from the script's PACK_VERSION; a mismatched input
+      # would publish semlith-coreml-1.zip under pack-coreml-v2.
+      - name: Check the version matches the script
+        run: |
+          grep -qx "PACK_VERSION = ${VERSION}" convert.py \
+            || { echo "::error::input version ${VERSION} is not PACK_VERSION in packs/coreml/convert.py"; exit 1; }
+
+      - name: Install the pinned requirements
+        run: |
+          uv venv --python 3.11 "$RUNNER_TEMP/venv"
+          uv pip install --python "$RUNNER_TEMP/venv/bin/python" -r requirements.txt
+
+      - name: Convert and compile
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" convert.py --out "$RUNNER_TEMP/coreml-pack"
+          cat "$RUNNER_TEMP/coreml-pack/SHA256SUMS"
+
+      # The runner is a VM that may not expose the Neural Engine, so its plan says
+      # nothing about the owner's hardware: recorded, never gating here.
+      # verify.py and a real placement run are local, on Apple silicon.
+      - name: Placement report
+        continue-on-error: true
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" placement.py "$RUNNER_TEMP/coreml-pack/semlith-coreml-${VERSION}" \
+            | tee "$RUNNER_TEMP/coreml-pack/placement.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ !cancelled() }}
+        with:
+          name: coreml-pack-${{ inputs.version }}
+          path: |
+            ${{ runner.temp }}/coreml-pack/semlith-coreml-*.zip
+            ${{ runner.temp }}/coreml-pack/SHA256SUMS
+            ${{ runner.temp }}/coreml-pack/semlith-coreml-${{ inputs.version }}/manifest.json
+            ${{ runner.temp }}/coreml-pack/placement.json
+          if-no-files-found: warn
+
+      - name: Publish to the pack's release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP/coreml-pack"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+              --title "Core ML pack v${VERSION}" \
+              --notes "Neural Engine and Core ML GPU models for semlith, built by the packs workflow from packs/coreml at ${GITHUB_SHA}. sha256: $(cut -d' ' -f1 SHA256SUMS)"
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "semlith-coreml-${VERSION}.zip" SHA256SUMS
+
+  llama:
+    if: inputs.pack == 'llama'
+    # llama.cpp's converter is plain Python; the GGUF is the same on any host.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+      TAG: pack-llama-v${{ inputs.version }}
+    defaults:
+      run:
+        working-directory: packs/llama
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Check the version matches the script
+        run: |
+          grep -qx "PACK_VERSION=${VERSION}" convert.sh \
+            || { echo "::error::input version ${VERSION} is not PACK_VERSION in packs/llama/convert.sh"; exit 1; }
+
+      - name: Convert
+        run: sh convert.sh "$RUNNER_TEMP/llama-pack"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ !cancelled() }}
+        with:
+          name: llama-pack-${{ inputs.version }}
+          path: |
+            ${{ runner.temp }}/llama-pack/granite-embedding-small-english-r2-f16.gguf
+            ${{ runner.temp }}/llama-pack/SHA256SUMS
+          if-no-files-found: warn
+
+      - name: Publish to the pack's release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP/llama-pack"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+              --title "llama.cpp pack v${VERSION}" \
+              --notes "granite-embedding-small-english-r2 as GGUF f16 for semlith's llama.cpp lane, built by the packs workflow from packs/llama at ${GITHUB_SHA}. sha256: $(cut -d' ' -f1 SHA256SUMS)"
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber granite-embedding-small-english-r2-f16.gguf SHA256SUMS
