@@ -1321,7 +1321,8 @@ rc_stop
 # is judged: a runner's speed drifts by a quarter between runs, which a
 # comparison of two medians taken minutes apart reads as the daemon. On
 # Windows the daemon is put below normal priority first, the way the logon task
-# starts it, so what is measured is its own lift.
+# starts it, and the terminal run beside it goes in the same class, because a
+# daemon from 0.32.0 stays there while it indexes.
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 median3() { printf '%s\n' "$@" | sort -n | sed -n 2p; }
 
@@ -1342,8 +1343,18 @@ c_daemon_rate() {
     # The cache off here as in the daemon beside it: the three runs index the
     # same text, and the second and third would come from the cache.
     SEMLITH_ACCEL=cpu SEMLITH_VECTOR_CACHE_MB=0 \
-      semlith --store "$rc_dir/cli-store-$i" index "$(native_path "$rc_dir/cli-$i")" --quiet ||
-      { echo "the CLI index failed"; return 1; }
+      semlith --store "$rc_dir/cli-store-$i" index "$(native_path "$rc_dir/cli-$i")" --quiet &
+    cpid=$!
+    # From 0.32.0 the daemon indexes below normal on Windows whatever it is
+    # doing, by design, so the terminal run is put in the same class: what
+    # this measures there is EcoQoS, which throttles the daemon if it is not
+    # switched off for the run, not the priority class a person's work outranks.
+    if [ "$family" = windows ]; then
+      cwin=$(cat "/proc/$cpid/winpid" 2>/dev/null)
+      [ -n "$cwin" ] && powershell -NoProfile -Command \
+        "(Get-Process -Id $cwin -ErrorAction SilentlyContinue).PriorityClass = 'BelowNormal'" > /dev/null 2>&1
+    fi
+    wait "$cpid" || { echo "the CLI index failed"; return 1; }
     ms=$(( $(now_ms) - t ))
     chunks=$(semlith --store "$rc_dir/cli-store-$i" stats | awk '$1 == "chunks" {print $2}' | tr -d '\r')
     c=$(( chunks * 1000000 / ms ))
