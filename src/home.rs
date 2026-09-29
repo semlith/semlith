@@ -230,9 +230,18 @@ pub struct Settings {
     /// so nothing reads them until somebody says so on the Privacy page.
     #[serde(default)]
     pub session_replay: Option<bool>,
-    /// The CPU, GPU and CUDA switches. Absent means CPU and GPU on, CUDA off.
+    /// The lane switches. Absent means CPU, GPU and the Neural Engine on and
+    /// the experimental lanes off.
     #[serde(default)]
     pub accelerators: crate::accel::Switches,
+    /// The WebGPU adapter to prefer, by a substring of its name. Absent means
+    /// semlith's own choice: a discrete GPU over an integrated one.
+    #[serde(default)]
+    pub gpu_adapter: Option<String>,
+    /// The machine-wide vector cache's cap in megabytes; 0 turns it off.
+    /// Absent means [`crate::cache::DEFAULT_CAP_MB`].
+    #[serde(default)]
+    pub vector_cache_mb: Option<u64>,
     /// Days of symbol history a compaction keeps; 0 keeps all of it. Absent
     /// means [`crate::compact::RETENTION_DAYS`].
     pub history_retention_days: Option<u64>,

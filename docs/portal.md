@@ -959,8 +959,11 @@ screen saying it had happened.
   any run is held the button reads **Start indexing**, and pressing it queues
   every held run. **Discard scan**, beside it, drops the held runs instead, and
   deletes each store that held no files before its scan — the store a scan of a
-  new folder makes — so discarding that scan leaves nothing behind. The note empties once there is
-  nothing to say, so no blank line is left above the cards.
+  new folder makes — so discarding that scan leaves nothing behind. After Start
+  indexing the path field empties and the button reads a disabled
+  **Indexing…** until those runs end or new paths are chosen or typed. The note
+  empties once there is nothing to say — `2 runs queued.` as soon as nothing is
+  waiting in the queue — so no blank line is left above the cards.
 
 **The scan panel** appears above the cards while any run is held. It opens with
 a summary: files **to embed** and their size, **unchanged** files already
@@ -1022,15 +1025,44 @@ rather than showing nothing. Each card carries its store's name, a status pill, 
 percentage and bar, files scanned over files found, chunks written, a
 chunks-per-second rate, the thread count, the clock, the paths, and the log.
 
+**What a run card shows.** One line holds the store's name, its state and its
+buttons: Details, Pause and Stop while it runs, Remove once it has finished.
+Under it is the bar with its percentage, and, when the run is doing something
+other than reading files, what that is (`writing the index to disk`). Then a
+strip of labelled figures: **rate**, **files** read of the total, **chunks**,
+**time** (how long is left, or how long it took), the **devices** doing the
+work now, **threads**, and how much of the store is **not yet embedded**. A
+queued card has no bar: its name, its place in the line, its plan and how long
+it has waited. Details opens the stages, the cache line, the paths and the
+log; every card starts with them closed.
+
 **The rate is the last ten seconds.** The chunks/s figure is what the daemon
 reports as `rate`: chunks embedded over the last 10 seconds of active time.
 Paused and held time is not counted, and neither is time spent queued or
 walking files that had not changed. It is shown on every poll while the run is
 live, including while the index is being written to disk, and reads `—` until
-the first batch has been embedded. The rate since the first batch is in the
-figure's tooltip. When more than one lane is embedding, the card also shows the
-rate per lane, for example `GPU 48/s · CPU 25/s`, so you can see which device is
-doing the work.
+the first batch has been embedded. A paused or held run shows no rate and no
+devices: the last figures it had are not what it is doing. The rate since the first batch is in the
+figure's tooltip. The card also shows the rate per lane, for example `Neural
+Engine 141/s · cache 722/s`, so you can see which device is doing the work —
+named even when there is only one, because on a Mac with the Neural Engine that
+one is the answer. A lane that has gone quiet is left out. `cache` is the
+vector cache handing back vectors it already held.
+
+**Where the time went.** After the run's first 45-second slice, and again when
+it finishes, the card adds the run's stages in the words `semlith index
+--verbose` and the daemon's log use: `stages over 172.8 s: walk 0.0 s,
+read+hash 0.2 s, extract+scan 0.1 s, parse+chunk 0.6 s, tokenize 2.5 s, embed
+wait (ane) 125.3 s, embed wait (cache) 32.4 s, write 11.8 s`. The parts sum to the wall time, so the largest
+one is where a faster run has to come from.
+
+**The vector cache and what is not embedded yet.** A line in Details says
+how many of the run's chunks the machine-wide vector cache already held —
+`vector cache: 12,386 of 41,558 chunks were already embedded (29.8 %)` — and,
+while the run is going the *not yet embedded* figure says how much of the store
+search cannot rank by vector yet (`38 %`). Keyword and graph results cover all
+of it in the meantime. The figures are the run's `cache_hits`,
+`cache_lookups`, `cache_hit_rate` and `pending_share` in `/api/index/runs`.
 
 **The thread count is what the engine used.** The card shows the thread count
 the run's session was actually built with, which is not necessarily the value
@@ -1227,27 +1259,70 @@ submission order as slots free. None of their work is undone. The free-memory
 reading is shown in a subtitle that updates in place, not inside the
 explanations, so the card does not redraw every time free memory changes.
 
+**Vector cache** sits under the two compaction settings. *cache MiB* is the cap
+on the machine-wide cache of vectors this machine has already embedded, which
+any store meeting the same chunk again reads instead of embedding it; 1024 is
+the default and 0 turns the cache off. Under it is the line `semlith stats`
+prints about the cache, with the same figures: `vector cache: 41276 vectors,
+63.3 MiB of 768.0 MiB, 23 % of lookups hit`. The command line counts the same
+1024s and calls them MB; the card says MiB, like its other fields. When
+`SEMLITH_VECTOR_CACHE_MB` is set in the daemon's environment the field is
+disabled and says so, and the route refuses a change with a 409.
+
 **Accelerators** is the section at the foot of the card: one switch each for
-CPU, GPU and CUDA. Each row names its device, its state and its live share of
-the chunks/s. The state is `active`, `idle`, `downloading` with a percentage,
-`unavailable` with the reason, or `failed` with the reason. A change reaches
-every run at its next window of chunks. It is the same control as `semlith accel`,
+the CPU, the Neural Engine, the GPU, CUDA, TensorRT for RTX, OpenVINO and
+llama.cpp, in that order, and the CPU worker when it is on. Each row names its
+device and variant, its state and its live share of the chunks/s: taken over
+the last three seconds, and 0 % within a second and a half of a lane going
+quiet — a paused or stopped run, or a lane switched off. The state is
+`active`, `idle`, `starting`, `compiling` or `downloading` with a percentage,
+`unavailable` with the reason, or `failed` with the reason — the words `semlith
+accel status` prints. While any lane is downloading, starting or compiling, or
+has a share above 0 %, the card reads the lanes again every second. A change reaches every
+run at its next window of chunks. It is the same control as `semlith accel`,
 and it is saved to `accelerators` in `settings.json`.
 
+CUDA, TensorRT for RTX, OpenVINO and llama.cpp carry an amber `experimental`
+pill, the page's form of the `(experimental)` the command line prints: they are
+built and checked without their hardware, and no throughput is claimed for
+them. Turning on any lane whose pack is not installed asks first, naming the
+pack's size; the request answers at once and the row shows the download's
+percentage, then the lane's state.
+
 - **CPU** is the in-process session, running the int8 model. It can be turned
-  off only while a GPU lane is on and usable. With no GPU, or a failed one, the
-  CPU keeps indexing whatever its switch says, and the row says it is doing so
-  as the fallback.
+  off only while a GPU lane is on and usable. With no accelerator ready and
+  none on its way — none on, or every one failed or unavailable — the CPU
+  keeps indexing whatever its switch says, and the row says it is doing so as
+  the fallback. While an accelerator that is on is still downloading, starting
+  or compiling, a run waits for it rather than falling back to the CPU, and
+  its card says so: `waiting for the Neural Engine lane to compile its models:
+  33 %, about 2 min left`.
 - **GPU** is WebGPU (Metal, D3D12 or Vulkan), in a worker process running the
   fp16 model. It is on by default. On a machine with a hardware adapter, the
   first run downloads the plugin and the fp16 weights, about 103 to 111 MB
   depending on the platform, and the row shows the download's progress. A
   machine whose only adapter is a software renderer reads `unavailable — no
   hardware GPU found`, and nothing is downloaded.
+- **Neural Engine** is Core ML on Apple silicon, through the `coreml` pack. It
+  is on by default once the pack is installed, and while it runs no CPU lane
+  runs beside it. Its first start on a Mac compiles its models for that
+  machine, about 40 s before it takes batches on the M1: the row reads
+  `compiling` with a percentage and the time left, counted down from how long
+  the last compile took, and runs wait for it unless the CPU or another
+  lane is on. A download shows its percentage and time left the same way.
+- **GPU beside the Neural Engine** is a chip under the Neural Engine's row,
+  shown where there is a Neural Engine, and the `gpu-beside-ane` switch of
+  `semlith accel`. Off, the GPU lane waits while the Neural Engine runs;
+  pressed, both run. It is off by default because on a fanless M1 it added
+  30 % in bursts and 4 % sustained.
 - **CUDA** is NVIDIA's runtime, on x86_64 Linux in this release. It is off by
   default. Turning it on downloads a 1.89 GB pack, and the switch states that
   size before the download starts. Until the pack is installed, an NVIDIA card
   is used through the GPU lane.
+- **TensorRT for RTX** and **OpenVINO** are NVIDIA's and Intel's runtimes, built
+  for Windows and Linux on x86_64, and **llama.cpp** runs the model as GGUF on
+  Metal or Vulkan. All three are experimental and off by default; elsewhere
+  their rows read `unavailable` with the reason.
 
 A lane that fails, whether its worker crashes, a batch takes longer than 30
 seconds, or it fails the known-answer check, reads `failed` with the reason.

@@ -527,7 +527,7 @@ def _(d):
     if buttons is None:
         fail("no run card for %s in a terminal state was found on the Index page" % store_name)
     # The fold toggle a finished card starts with; it is not a run control.
-    buttons = [b for b in buttons if b not in ("Show the log", "Hide the log")]
+    buttons = [b for b in buttons if b not in ("Details", "Hide details")]
 
     live = [b for b in buttons if b.lower() in ("pause", "stop", "resume")]
     if live:

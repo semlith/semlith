@@ -106,6 +106,12 @@ enum Command {
         /// with no terminal never asks either.
         #[arg(long)]
         no_review: bool,
+
+        /// After the run, say where its time went — walk, read and hash,
+        /// extract and scan, parse and chunk, tokenize, the wait on each
+        /// embedding lane, and writing — and what each lane embedded.
+        #[arg(long, short)]
+        verbose: bool,
     },
 
     /// Run the daemon: hold every registered store's write lock, keep them
@@ -587,7 +593,8 @@ enum Command {
         gpu: bool,
     },
 
-    /// Which devices embed: the CPU, a GPU through WebGPU, and NVIDIA's CUDA.
+    /// Which devices embed: the CPU, a GPU, and the experimental accelerator
+    /// lanes (the Neural Engine, TensorRT, OpenVINO, llama.cpp).
     ///
     /// `status` names each lane, its device and whether it is on. `on` and
     /// `off` take effect at the next batch of every run. `remove` deletes a
@@ -596,7 +603,7 @@ enum Command {
         /// status, on, off or remove.
         #[arg(default_value = "status")]
         action: String,
-        /// cpu, gpu or cuda.
+        /// cpu, gpu, cuda, ane, trt, openvino or llama.
         lane: Option<String>,
         /// Machine-readable output.
         #[arg(long)]
@@ -606,7 +613,11 @@ enum Command {
     /// An accelerator lane's worker: embeds batches on stdin for the daemon.
     /// Started by the daemon and nothing else; not part of the interface.
     #[command(name = "__embed-worker", hide = true)]
-    EmbedWorker { lane: String, dir: Option<PathBuf> },
+    EmbedWorker {
+        lane: String,
+        dir: Option<PathBuf>,
+        adapter: Option<String>,
+    },
 
     /// Replace this binary with the newest release for this machine. Runs only
     /// when asked: semlith never checks for an update on its own.
@@ -1083,18 +1094,32 @@ fn run() -> Result<()> {
 
         Command::Accel { action, lane, json } => match (action.as_str(), lane.as_deref()) {
             ("status", _) => {
-                let status = semlith::accel::snapshot();
+                // The running daemon's lanes when there is one: a lane it is
+                // compiling or downloading is idle in this process.
+                let dirs = semlith::home::all_dirs(&cli.store, &cwd).unwrap_or_default();
+                let status = semlith::proxy::find(&semlith::proxy::candidates(&dirs))
+                    .and_then(|daemon| daemon.accel().ok())
+                    .unwrap_or_else(semlith::accel::snapshot);
                 if json {
                     println!("{}", serde_json::to_string_pretty(&status)?);
                 } else {
                     for row in status["lanes"].as_array().into_iter().flatten() {
                         let state = &row["status"];
-                        let detail = state["reason"]
-                            .as_str()
-                            .map(|r| format!("{} — {r}", state["state"].as_str().unwrap_or("")))
-                            .unwrap_or_else(|| state["state"].as_str().unwrap_or("").to_string());
+                        let mut detail = state["state"].as_str().unwrap_or("").to_string();
+                        if let Some(percent) = state["percent"].as_u64() {
+                            detail.push_str(&format!(" {percent} %"));
+                        }
+                        if let Some(eta) = state["eta_ms"].as_u64() {
+                            detail.push_str(&format!(", {}", semlith::accel::spell_left(eta)));
+                        }
+                        if let Some(reason) = state["reason"].as_str() {
+                            detail.push_str(&format!(" — {reason}"));
+                        }
+                        if row["experimental"].as_bool() == Some(true) {
+                            detail.push_str(" (experimental)");
+                        }
                         println!(
-                            "{:<5} {:<4} {:<28} {detail}",
+                            "{:<9} {:<4} {:<34} {detail}",
                             row["lane"].as_str().unwrap_or("?"),
                             if row["enabled"].as_bool() == Some(true) {
                                 "on"
@@ -1104,11 +1129,30 @@ fn run() -> Result<()> {
                             row["device"].as_str().unwrap_or("not asked for yet"),
                         );
                     }
-                    println!("switches: {}", status["source"].as_str().unwrap_or(""));
+                    println!(
+                        "switches: {}; GPU beside the Neural Engine {}",
+                        status["source"].as_str().unwrap_or(""),
+                        if status["gpu_beside_ane"].as_bool() == Some(true) {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    );
+                    println!("vector cache: {}", semlith::cache::stats().line());
                 }
             }
             ("on" | "off", Some(lane)) => {
-                println!("{}", semlith::accel::set(lane, action == "on")?)
+                let mut said = 101u8;
+                let line =
+                    semlith::accel::set_with_progress(lane, action == "on", &mut |percent| {
+                        // Every tenth, not every percent: a pack is hundreds of
+                        // megabytes on a slow link and one line each is noise.
+                        if percent / 10 != said / 10 {
+                            said = percent;
+                            eprintln!("  fetching: {percent} %");
+                        }
+                    })?;
+                println!("{line}");
             }
             ("remove", Some(lane)) => {
                 let freed = semlith::accel::remove(lane)?;
@@ -1118,12 +1162,17 @@ fn run() -> Result<()> {
                 );
             }
             _ => anyhow::bail!(
-                "usage: semlith accel [status | on <lane> | off <lane> | remove <lane>], lanes cpu, gpu, cuda"
+                "usage: semlith accel [status | on <lane> | off <lane> | remove <lane>]; the switches are {}",
+                semlith::accel::SWITCH_NAMES
             ),
         },
 
-        Command::EmbedWorker { lane, dir } => {
-            std::process::exit(semlith::accel::worker_main(&lane, dir.as_deref()));
+        Command::EmbedWorker { lane, dir, adapter } => {
+            std::process::exit(semlith::accel::worker_main(
+                &lane,
+                dir.as_deref(),
+                adapter.as_deref(),
+            ));
         }
 
         Command::Upgrade {
@@ -1180,8 +1229,13 @@ fn run() -> Result<()> {
             reconcile,
             scan_only,
             no_review,
+            verbose,
         } => {
             arm_airgap(airgap);
+            // The daemon's lanes, in a terminal too: before 0.32.0 a terminal
+            // run embedded on the CPU alone, so the person who never started
+            // the daemon got the slowest path. `SEMLITH_ACCEL` still decides.
+            semlith::accel::manage();
 
             // `--projects` turns a folder into the paths under it, and means
             // `--each`: asking which repositories are under a folder and then
@@ -1273,19 +1327,24 @@ fn run() -> Result<()> {
 
                 // The scan phase (2.7): the whole plan before the model is
                 // even loaded, and a stop for review only when a person is at
-                // the terminal and something is theirs to decide.
-                let plan = store.plan(roots)?;
-                if !quiet || scan_only {
-                    print_plan(&plan);
-                }
-                if scan_only {
-                    continue;
-                }
+                // the terminal and something is theirs to decide. A run nobody
+                // can review — `--no-review`, or no terminal — starts at once:
+                // waiting for a scan of every file to print a plan is the
+                // seconds a store filling from cold spends answering nothing.
                 use std::io::IsTerminal;
                 let interactive =
                     !no_review && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-                if interactive && !plan.review.is_empty() {
-                    review_plan(&mut store, &plan)?;
+                if scan_only || interactive {
+                    let plan = store.plan(roots)?;
+                    if !quiet || scan_only {
+                        print_plan(&plan);
+                    }
+                    if scan_only {
+                        continue;
+                    }
+                    if !plan.review.is_empty() {
+                        review_plan(&mut store, &plan)?;
+                    }
                 }
 
                 let started = Instant::now();
@@ -1449,6 +1508,42 @@ fn run() -> Result<()> {
                     semlith::human_bytes(bytes),
                     dir.display()
                 );
+                if verbose {
+                    eprintln!("{}", report.stages.line());
+                    if report.cache_lookups > 0 {
+                        eprintln!(
+                            "vector cache: {} of {} chunks were already embedded",
+                            report.cache_hits, report.cache_lookups
+                        );
+                    }
+                    let lanes: Vec<String> = report
+                        .lanes
+                        .iter()
+                        .map(|(lane, n)| format!("{lane} {n}"))
+                        .collect();
+                    if !lanes.is_empty() {
+                        eprintln!("chunks by lane: {}", lanes.join(", "));
+                    }
+                    // Where each lane stood when the run ended, so a lane that
+                    // failed part-way says why rather than showing as a small
+                    // share.
+                    let status = semlith::accel::snapshot();
+                    for row in status["lanes"].as_array().into_iter().flatten() {
+                        if row["enabled"].as_bool() != Some(true) {
+                            continue;
+                        }
+                        let state = &row["status"];
+                        eprintln!(
+                            "lane {}: {}{}",
+                            row["lane"].as_str().unwrap_or("?"),
+                            state["state"].as_str().unwrap_or("?"),
+                            state["reason"]
+                                .as_str()
+                                .map(|r| format!(" — {r}"))
+                                .unwrap_or_default()
+                        );
+                    }
+                }
                 if report.dummies_indexed > 0 {
                     eprintln!(
                         "{} file(s) indexed holding only declared test dummies (semlith refused lists them)",
@@ -1487,6 +1582,7 @@ fn run() -> Result<()> {
             debounce,
             quiet,
         } => {
+            semlith::accel::manage();
             let roots = if paths.is_empty() {
                 vec![PathBuf::from(".")]
             } else {
@@ -1631,6 +1727,10 @@ fn run() -> Result<()> {
             // count for exactly as much as an agent's. Recorded under `cli`, in
             // the same table, through the same path.
             semlith::ledger::search(&fleet, &CLI_LEDGER, &query, &hits, elapsed);
+            // Said on stderr, so `--json` and a pipe read the hits alone.
+            if let Some(note) = fleet.pending_note() {
+                eprintln!("{note}");
+            }
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&hits)?);
@@ -2350,12 +2450,7 @@ fn run() -> Result<()> {
                     println!("variants {}", parts.join(", "));
                 }
                 let on = semlith::accel::enabled();
-                let lanes: Vec<&str> = [("cpu", on.cpu), ("gpu", on.gpu), ("cuda", on.cuda)]
-                    .into_iter()
-                    .filter(|(_, on)| *on)
-                    .map(|(lane, _)| lane)
-                    .collect();
-                println!("lanes    {} ({})", lanes.join(", "), on.source);
+                println!("lanes    {} ({})", on.named().join(", "), on.source);
                 let images = store.image_count()?;
                 if images > 0 {
                     println!("images   {images}");
@@ -2395,6 +2490,9 @@ fn run() -> Result<()> {
                         format!("; {}", semlith::compact::REINDEX_TO_COMPACT)
                     },
                 );
+                // The machine's, not the store's: one cache serves every store,
+                // and deleting it is safe.
+                println!("cache    {}", semlith::cache::stats().line());
                 // Zero here reads the same as "nothing ever changed", so the
                 // line says which by naming the table rather than the number
                 // alone.
@@ -3508,6 +3606,13 @@ const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2)
 /// walked — so it is printed as an approximation and never as a countdown. A
 /// wrong estimate is still worth far more than a silent hour.
 fn predict(p: semlith::IndexProgress, elapsed: std::time::Duration) -> String {
+    // A run waiting for a lane has no rate to give: it says what it waits for.
+    if let Some(waiting) = semlith::accel::waiting_for() {
+        return format!(
+            "{}/{} files, {} chunks, {waiting}",
+            p.scanned, p.total, p.chunks
+        );
+    }
     let secs = elapsed.as_secs_f32().max(0.001);
     let rate = p.chunks as f32 / secs;
     let left = p.total.saturating_sub(p.scanned);
@@ -3597,28 +3702,17 @@ const CLI_LEDGER: semlith::ledger::Who<'static> = semlith::ledger::Who {
 /// Exit quietly when whoever was reading our output goes away.
 ///
 /// `semlith files | head` is the most ordinary thing anyone types, and it
-/// printed a panic and a non-zero status (#75). Two halves, because the
-/// mechanism differs:
+/// printed a panic and a non-zero status (#75). The Rust runtime ignores
+/// `SIGPIPE` on unix, so the write returns `EPIPE`; on Windows it fails with
+/// `BrokenPipe`. Either way `println!` panics, and the hook turns that one
+/// panic — and only that one — into a silent exit 0, which is what the reader
+/// closing the pipe means.
 ///
-/// On unix the Rust runtime sets `SIGPIPE` to `SIG_IGN` before `main`, so the
-/// write returns `EPIPE` and `println!` panics on it. Restoring the default
-/// makes the process end the way `cat` and `grep` do, and a shell reports the
-/// pipeline's status, which is the reader's.
-///
-/// On Windows there is no `SIGPIPE`: the write fails with `BrokenPipe` and
-/// reaches the same panic. The hook turns that one panic — and only that one —
-/// into a silent exit 0, which is what the reader closing the pipe means.
+/// `SIGPIPE` stays ignored. 0.17.1 restored its default on unix, and that
+/// killed the daemon without a word the moment it wrote its next batch to a
+/// lane worker that had died: a pipe write the process must survive to fail
+/// that lane and carry on.
 fn quiet_on_a_closed_pipe() {
-    #[cfg(unix)]
-    {
-        // SAFETY: called once, at the top of `main`, before any thread is
-        // spawned and before anything has been printed. `SIG_DFL` is what the
-        // process would have had if the Rust runtime had not changed it.
-        unsafe {
-            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-        }
-    }
-
     let inherited = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let said = info
@@ -3900,15 +3994,28 @@ fn print_gpu_checks(checks: &[serde_json::Value]) {
     println!("{}Accelerators{}", bold(), reset());
     for check in checks {
         let lane = check["lane"].as_str().unwrap_or("?");
+        // Said beside the lane every time, so a lane built without its
+        // hardware never reads as one that was measured on it.
+        let experimental = if check["experimental"].as_bool() == Some(true) {
+            " (experimental)"
+        } else {
+            ""
+        };
+        let failed = check["passed"].as_bool() == Some(false);
         match check.get("reason").and_then(|r| r.as_str()) {
-            Some(reason) => println!("  {:<4} {lane:<7} {reason}", "n/a "),
+            Some(reason) => {
+                let fallback = check["fallback"]
+                    .as_str()
+                    .map(|f| format!("; {f}"))
+                    .unwrap_or_default();
+                println!(
+                    "  {:<4} {lane:<9} {reason}{fallback}{experimental}",
+                    if failed { "FAIL" } else { "n/a " }
+                )
+            }
             None => println!(
-                "  {:<4} {lane:<7} {} · {} · cosine {:.4} (min over 32) · {} chunks/s",
-                if check["passed"].as_bool() == Some(true) {
-                    "ok  "
-                } else {
-                    "FAIL"
-                },
+                "  {:<4} {lane:<9} {} · {} · cosine {:.4} (min over 32) · {} chunks/s{experimental}",
+                if failed { "FAIL" } else { "ok  " },
                 check["device"].as_str().unwrap_or("?"),
                 check["variant"].as_str().unwrap_or("?"),
                 check["cosine"].as_f64().unwrap_or(0.0),

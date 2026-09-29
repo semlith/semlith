@@ -901,6 +901,10 @@ rc_markdown() {
 # `rc_start <tag> [VAR=value ...]`: a daemon on its own home, up and holding a
 # token, or a non-zero status with its log beside it.
 #
+# The vector cache is off unless a caller turns it on: these checks watch runs
+# as they go, and a second check indexing the same generated text would have
+# every vector from the cache and finish before it could be watched.
+#
 # The port is whichever of these the daemon manages to bind, and never 7365:
 # that is the port a developer's own daemon holds. Asking the daemon rather
 # than probing first, because a probe that finds a port free says nothing
@@ -912,7 +916,7 @@ rc_start() {
   rc_home="$rc_dir/home"
   mkdir -p "$rc_home"
   for rc_port in 7481 7483 7487 7489 7491 7493 7497 7499; do
-    env "$@" SEMLITH_HOME="$rc_home" semlith start --port "$rc_port" > "$rc_dir/daemon.out" 2>&1 &
+    env SEMLITH_VECTOR_CACHE_MB=0 "$@" SEMLITH_HOME="$rc_home" semlith start --port "$rc_port" > "$rc_dir/daemon.out" 2>&1 &
     rc_pid=$!
     rc_token=""
     i=0
@@ -1204,14 +1208,54 @@ c_limit_live() {
   return 0
 }
 
+# A bulk index runs at the class this release gives it on each system, read
+# back from the daemon while the run is going (0.32.0, item 6): Utility QoS on
+# macOS, SCHED_BATCH on Linux, below-normal with EcoQoS off on Windows. And the
+# run's stage timings add up to its wall time within 5 %.
+c_run_class() {
+  case "$platform" in
+    macos)   want=utility ;;
+    linux)   want=SCHED_BATCH ;;
+    windows) want="below-normal, EcoQoS off" ;;
+    *)       echo "no class is expected on $platform"; return 1 ;;
+  esac
+  mkdir -p "$rc_dir/class"
+  rc_markdown "$rc_dir/class/big.md" 1000
+  s=$(rc_index "$rc_dir/class")
+  [ -n "$s" ] || { echo "the index route started no run"; return 1; }
+  seen=""
+  end=$(( $(date +%s) + 600 ))
+  while [ "$(date +%s)" -lt "$end" ]; do
+    about=$(rc_get /api/about)
+    if [ "$(printf '%s' "$about" | jq -r '.priority.indexing_threads // 0')" -gt 0 ]; then
+      seen=$(printf '%s' "$about" | jq -r '.priority.indexing_class')
+      [ "$platform" = windows ] && [ "$(printf '%s' "$about" | jq -r '.priority.state')" != normal ] &&
+        { echo "a run is going and EcoQoS is still on: $about"; return 1; }
+      break
+    fi
+    rc_finished "$s" && break
+    sleep 0.2
+  done
+  [ "$seen" = "$want" ] || { echo "the index threads reported \"$seen\", not \"$want\""; return 1; }
+  rc_until 600 rc_finished "$s" || { echo "the run did not finish"; return 1; }
+  r=$(rc_run "$s")
+  printf '%s' "$r" | jq -e '
+    .stages as $s
+    | ($s.walk_ms + $s.read_ms + $s.extract_ms + $s.parse_ms + $s.tokenize_ms + $s.write_ms
+       + ([$s.embed_wait_ms[]] | add // 0)) as $parts
+    | $s.wall_ms > 0 and (($parts - $s.wall_ms) | fabs) <= $s.wall_ms * 0.05' > /dev/null ||
+    { echo "the stages do not add up to the wall time: $(printf '%s' "$r" | jq -c '.stages')"; return 1; }
+}
+
 if rc_start limits SEMLITH_ACCEL=cpu; then
   check cli/runs/delete-on-stop  "stop with delete removes the store"  c_delete_on_stop
   check cli/runs/rate-every-poll "a live run always carries a rate"    c_rate_every_poll
   check cli/runs/limit-live      "embed_threads reaches a live run"    c_limit_live
+  check cli/runs/class           "a run's threads report this OS's bulk class" c_run_class
 else
   echo "the limits daemon did not come up:"
   sed 's/^/  /' "$runs_root/limits/daemon.out" 2>/dev/null | head -20
-  for id in delete-on-stop rate-every-poll limit-live; do skip "cli/runs/$id" "the limits daemon did not start"; done
+  for id in delete-on-stop rate-every-poll limit-live class; do skip "cli/runs/$id" "the limits daemon did not start"; done
 fi
 rc_stop
 
@@ -1277,7 +1321,8 @@ rc_stop
 # is judged: a runner's speed drifts by a quarter between runs, which a
 # comparison of two medians taken minutes apart reads as the daemon. On
 # Windows the daemon is put below normal priority first, the way the logon task
-# starts it, so what is measured is its own lift.
+# starts it, and the terminal run beside it goes in the same class, because a
+# daemon from 0.32.0 stays there while it indexes.
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 median3() { printf '%s\n' "$@" | sort -n | sed -n 2p; }
 
@@ -1292,11 +1337,31 @@ c_daemon_rate() {
     powershell -NoProfile -Command "(Get-Process -Id $winpid).PriorityClass = 'BelowNormal'" ||
       { echo "could not lower the daemon's priority"; return 1; }
   fi
-  cli="" served="" ratios=""
+  cli="" served="" ratios="" runs_seen=""
   for i in 1 2 3; do
     t=$(now_ms)
-    SEMLITH_ACCEL=cpu semlith --store "$rc_dir/cli-store-$i" index "$(native_path "$rc_dir/cli-$i")" --quiet ||
-      { echo "the CLI index failed"; return 1; }
+    # The cache off here as in the daemon beside it: the three runs index the
+    # same text, and the second and third would come from the cache.
+    # On macOS the daemon's index threads run at Utility QoS, by design from
+    # 0.32.0, so the terminal run is clamped to the same class; on Windows it
+    # is put below normal just after it starts, below. What the check then
+    # measures is the daemon throttled by anything other than its class.
+    clamp=""
+    [ "$platform" = macos ] && clamp="taskpolicy -c utility"
+    SEMLITH_ACCEL=cpu SEMLITH_VECTOR_CACHE_MB=0 \
+      $clamp semlith --store "$rc_dir/cli-store-$i" index "$(native_path "$rc_dir/cli-$i")" --no-review --verbose \
+      > "$rc_dir/cli-$i.out" 2>&1 &
+    cpid=$!
+    # From 0.32.0 the daemon indexes below normal on Windows whatever it is
+    # doing, by design, so the terminal run is put in the same class: what
+    # this measures there is EcoQoS, which throttles the daemon if it is not
+    # switched off for the run, not the priority class a person's work outranks.
+    if [ "$family" = windows ]; then
+      cwin=$(cat "/proc/$cpid/winpid" 2>/dev/null)
+      [ -n "$cwin" ] && powershell -NoProfile -Command \
+        "(Get-Process -Id $cwin -ErrorAction SilentlyContinue).PriorityClass = 'BelowNormal'" > /dev/null 2>&1
+    fi
+    wait "$cpid" || { echo "the CLI index failed"; return 1; }
     ms=$(( $(now_ms) - t ))
     chunks=$(semlith --store "$rc_dir/cli-store-$i" stats | awk '$1 == "chunks" {print $2}' | tr -d '\r')
     c=$(( chunks * 1000000 / ms ))
@@ -1305,19 +1370,33 @@ c_daemon_rate() {
     t=$(now_ms)
     s=$(rc_index "$rc_dir/served-$i")
     [ -n "$s" ] || { echo "the index route started no run"; return 1; }
-    rc_until 900 rc_finished "$s" || { echo "the daemon's run did not finish:"; rc_run "$s"; return 1; }
-    ms=$(( $(now_ms) - t ))
+    # Asked every two seconds, not every fifth: on a Windows runner each ask
+    # is a curl and two jq, and Git Bash's process spawns took a core from the
+    # daemon being timed. The daemon's time is its own clock, its run and its
+    # wait in the queue, so how often it is asked does not add to it.
+    end=$(( $(date +%s) + 900 ))
+    until rc_finished "$s"; do
+      [ "$(date +%s)" -ge "$end" ] && { echo "the daemon's run did not finish:"; rc_run "$s"; return 1; }
+      sleep 2
+    done
+    ms=$(rc_run "$s" | jq -r '(.elapsed_ms // 0) + (.queued_ms // 0)')
+    [ "$ms" -gt 0 ] || ms=$(( $(now_ms) - t ))
     [ "$(rc_field "$s" status)" = done ] || { echo "the daemon's run did not end done:"; rc_run "$s"; return 1; }
     got=$(rc_field "$s" chunks)
     [ "$got" = "$chunks" ] || { echo "the daemon made $got chunks and the CLI $chunks"; return 1; }
     d=$(( got * 1000000 / ms ))
     served="$served $d"
+    # Where the daemon's time went, for a failure to be read rather than
+    # guessed at: its own clock, its wait in the queue, and its stages.
+    runs_seen="$runs_seen
+  run $i: ${ms} ms by this clock; $(rc_run "$s" | jq -c '{threads, lanes, elapsed_ms, queued_ms, stages}')
+  terminal $i: $(grep -E -m3 '^stages over|thread|lane' "$rc_dir/cli-$i.out" | tr -d '\r' | tr '\n' ' ')"
     ratios="$ratios $(( d * 100 / c ))"
   done
   # Milli-chunks per second, so the integer arithmetic keeps three places.
   r=$(median3 $ratios)
   echo "CLI$cli, daemon$served (chunks/s x 1000); daemon as % of the CLI run beside it:$ratios"
-  [ "$r" -ge 85 ] || { echo "the daemon ran at a median $r % of the CLI, under 85 %"; return 1; }
+  [ "$r" -ge 85 ] || { echo "the daemon ran at a median $r % of the CLI, under 85 %:$runs_seen"; return 1; }
 }
 
 if rc_start rate SEMLITH_ACCEL=cpu; then
@@ -1552,6 +1631,19 @@ else
   # domain. That is the runner's shape, not semlith's defect, and blaming the
   # product for it is what rule 3 at the top of this file forbids.
   skip cli/service/install "$(head -1 "$work/service-probe.out" 2>/dev/null)"
+fi
+
+# The unit is written whether or not a user manager runs it, and from 0.32.0
+# it carries the daemon's lower scheduling weight.
+c_unit_weights() {
+  unit="$HOME/.config/systemd/user/semlith.service"
+  [ -f "$unit" ] || { echo "no unit at $unit"; return 1; }
+  for line in Nice=5 CPUWeight=50 IOWeight=50; do
+    grep -qx "$line" "$unit" || { echo "the unit has no $line:"; cat "$unit"; return 1; }
+  done
+}
+if [ "$platform" = linux ]; then
+  check cli/service/weights "the systemd unit carries Nice, CPUWeight and IOWeight" c_unit_weights
 fi
 
 # Whether this session has a facility that can restart a daemon nobody is
