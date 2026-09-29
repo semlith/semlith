@@ -13,8 +13,11 @@
 //! Nothing here leaves the machine. A row is written into the store it came
 //! from, beside the chunks, and deleting every one of them is one `DELETE`.
 
+use crate::Semlith;
 use crate::fleet::Fleet;
 use crate::store;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 /// The label on a row counted at four characters per token.
 ///
@@ -118,7 +121,7 @@ fn query_id() -> String {
     format!("{at:x}-{:x}", SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Record one search-shaped retrieval into every store that answered it./// Record one search-shaped retrieval into every store that answered it.
+/// Record one search-shaped retrieval into every store that answered it.
 ///
 /// `whole_file_tokens` is what reading those files whole would have cost,
 /// which is the honest denominator: the ratio is measured against a real
@@ -205,76 +208,216 @@ pub fn search(
 /// measure is the reply itself - which is the honest thing to measure anyway:
 /// the reply is what the agent paid for. The denominator is the files that
 /// reply names, read whole.
+///
+/// One row per store the reply's headings name, sharing one query id, so a
+/// fleet answer is counted the way [`search`] counts one: each store's chain
+/// and figures are about its own hits. Until 0.33.0 the whole reply went into
+/// the first store open with zero hits — its headings are `label path` with the
+/// path relative to a root, which the old reader resolved against the daemon's
+/// working directory and never found — so every proxied session in the access
+/// report sat under one store as a zero-hit read.
+///
+/// `scope` is the call's `store` argument. A reply that names no file is still
+/// one row, against the first store it was scoped to — every one of them was
+/// searched and none answered, so one row keeps it one zero-hit retrieval
+/// rather than one per store — or against the first store open when unscoped.
 pub fn reply(
     fleet: &Fleet,
     who: &Who<'_>,
     tool: &str,
     query: &str,
     body: &str,
+    scope: &[String],
     elapsed: std::time::Duration,
 ) {
     if !enabled() {
         return;
     }
     let counter = fleet.counter();
-    let paths = paths_in(body);
-    let whole: i64 = paths
-        .iter()
-        .filter_map(|p| std::fs::metadata(p).ok())
-        .map(|m| counter.count_bytes(m.len()))
-        .sum();
-    let hits = paths.len() as i64;
-    // One row for one answer. A reply that has already been rendered to text
-    // cannot be attributed store by store, so it is recorded against the first
-    // store open rather than duplicated across all of them.
-    if let Some((_, store)) = fleet.each().next() {
+    let id = query_id();
+    let write = |db: &rusqlite::Connection, paths: &BTreeSet<String>, text: &str| {
+        let whole: i64 = paths
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| counter.count_bytes(m.len()))
+            .sum();
         let _ = store::record_retrieval(
-            store.db(),
+            db,
             &store::NewRetrieval {
                 client: who.client,
                 session: who.session,
                 tool,
                 query,
-                hits,
+                hits: paths.len() as i64,
                 micros: elapsed.as_micros() as i64,
-                excerpt_tokens: counter.count(body),
+                excerpt_tokens: counter.count(text),
                 whole_file_tokens: whole,
-                stale_hits: body.matches("· stale").count() as i64,
+                stale_hits: text.matches("· stale").count() as i64,
                 tokenizer: counter.label(),
-                query_id: &query_id(),
+                query_id: &id,
             },
         );
+    };
+
+    let members: Vec<(&str, &Semlith)> = fleet.each().collect();
+    let parts = shares(&members, &fleet.roots(), body);
+    if parts.is_empty() {
+        let searched = fleet
+            .selected(Some(scope))
+            .ok()
+            .and_then(|chosen| chosen.into_iter().next())
+            .or_else(|| members.first().copied());
+        if let Some((_, first)) = searched {
+            write(first.db(), &BTreeSet::new(), body);
+        }
+        return;
+    }
+    for share in &parts {
+        write(members[share.member].1.db(), &share.paths, &share.text);
     }
 }
 
-/// The file paths a rendered reply names.
+/// One store's part of a rendered reply: the files it answered with, and the
+/// lines that showed them, which is what the agent paid for.
+#[derive(Debug)]
+struct Share {
+    /// Index into the members the reply was read against.
+    member: usize,
+    paths: BTreeSet<String>,
+    text: String,
+}
+
+/// Split a rendered reply into the stores whose files it names.
 ///
-/// A locate reply puts a bare path on its own line and indents the rows under
-/// it; an excerpt reply puts `path:start-end` after a `[n]` marker. Both are
-/// read here, and a candidate is only kept if it is a file that exists, so a
-/// line of prose that happens to contain a slash is not counted as a read.
-fn paths_in(body: &str) -> std::collections::BTreeSet<String> {
-    let mut out = std::collections::BTreeSet::new();
+/// Each heading starts a block that runs to the next one, and the block's
+/// lines are that store's share of the reply's cost. The lines above the first
+/// heading — which roots the paths are relative to, how the query was read —
+/// were paid once and go to the store that answered first, so the shares add
+/// up to the reply.
+fn shares(members: &[(&str, &Semlith)], roots: &[PathBuf], body: &str) -> Vec<Share> {
+    let mut out: Vec<Share> = Vec::new();
+    let mut current: Option<usize> = None;
+    let mut preamble = String::new();
     for line in body.lines() {
-        let trimmed = line
-            .trim_start_matches(|c: char| c == '[' || c.is_ascii_digit() || c == ']')
-            .trim();
-        if trimmed.is_empty() {
-            continue;
+        if let Some((member, path)) = heading(members, roots, line) {
+            let at = match out.iter().position(|s| s.member == member) {
+                Some(at) => at,
+                None => {
+                    out.push(Share {
+                        member,
+                        paths: BTreeSet::new(),
+                        text: String::new(),
+                    });
+                    out.len() - 1
+                }
+            };
+            out[at].paths.insert(path);
+            current = Some(at);
         }
-        // A locate reply's file heading: a bare path, alone on its line.
-        if !trimmed.contains(' ') && std::path::Path::new(trimmed).is_file() {
-            out.insert(trimmed.to_string());
-            continue;
-        }
-        // An excerpt row: `path:start-end (score ...)`.
-        if let Some((path, _)) = trimmed.split_once(':')
-            && std::path::Path::new(path).is_file()
-        {
-            out.insert(path.to_string());
-        }
+        let text = match current {
+            Some(at) => &mut out[at].text,
+            None => &mut preamble,
+        };
+        text.push_str(line);
+        text.push('\n');
+    }
+    if let Some(first) = out.first_mut() {
+        first.text.insert_str(0, &preamble);
     }
     out
+}
+
+/// The store and the file one heading of a rendered reply names.
+///
+/// Every reply shape puts a file at the margin and indents what is under it:
+/// a locate heading is `path` or, across stores, `label path`; a brief span and
+/// an exact search's file are `[label] path:start-end …` and `[label] path`; an
+/// excerpt is `[n] label path:start-end (score …)`. The path is relative to a
+/// store root unless no root holds it, and a candidate is kept only if it is a
+/// file that exists, so a line of prose containing a slash is not a read.
+///
+/// A labelled heading belongs to that store, and of the roots that could hold
+/// its path the one that store indexed wins — two stores can both hold a
+/// `src/lib.rs`. An unlabelled one belongs to whichever store indexed the
+/// file, which in a fleet of one is the one store.
+fn heading(members: &[(&str, &Semlith)], roots: &[PathBuf], line: &str) -> Option<(usize, String)> {
+    if members.is_empty() || line.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let mut rest = line.trim_end();
+    // An excerpt's `[n] ` marker.
+    if let Some((n, tail)) = rest.strip_prefix('[').and_then(|r| r.split_once("] "))
+        && !n.is_empty()
+        && n.bytes().all(|b| b.is_ascii_digit())
+    {
+        rest = tail;
+    }
+    let mut named = None;
+    for (i, (label, _)) in members.iter().enumerate() {
+        let tail = rest
+            .strip_prefix('[')
+            .and_then(|r| r.strip_prefix(*label))
+            .and_then(|r| r.strip_prefix("] "))
+            .or_else(|| rest.strip_prefix(*label).and_then(|r| r.strip_prefix(' ')));
+        if let Some(tail) = tail {
+            named = Some(i);
+            rest = tail;
+            break;
+        }
+    }
+    // `path:12-40 …` ends at the colon before the line number, which a Windows
+    // drive's colon is never followed by.
+    let path = match rest
+        .char_indices()
+        .find(|&(i, c)| c == ':' && rest[i + 1..].starts_with(|d: char| d.is_ascii_digit()))
+    {
+        Some((i, _)) => &rest[..i],
+        None => rest.split(" \u{2014} image").next().unwrap_or(rest),
+    };
+    // Unlabelled, a path is the whole line; a line with a space in it is prose.
+    if path.is_empty() || (named.is_none() && path.contains(char::is_whitespace)) {
+        return None;
+    }
+
+    let given = Path::new(path);
+    let candidates: Vec<PathBuf> = if given.is_absolute() {
+        vec![given.to_path_buf()]
+    } else {
+        roots
+            .iter()
+            .map(|r| r.join(given))
+            .chain([given.to_path_buf()])
+            .collect()
+    };
+    let files: Vec<String> = candidates
+        .iter()
+        .filter(|c| c.is_file())
+        .map(|c| crate::canonical(c).to_string_lossy().into_owned())
+        .collect();
+    let held = |m: usize, file: &str| {
+        store::file_hash(members[m].1.db(), file)
+            .ok()
+            .flatten()
+            .is_some()
+    };
+    let (member, file) = match named {
+        Some(m) => (
+            m,
+            files
+                .iter()
+                .find(|f| held(m, f.as_str()))
+                .or(files.first())?,
+        ),
+        None => files
+            .iter()
+            .find_map(|f| {
+                (0..members.len())
+                    .find(|&m| held(m, f.as_str()))
+                    .map(|m| (m, f))
+            })
+            .or_else(|| files.first().map(|f| (0, f)))?,
+    };
+    Some((member, file.clone()))
 }
 
 /// Record one graph answer: `neighbors`, `path` or `symbol`.
@@ -332,8 +475,8 @@ pub fn graph(
 /// [`reply`] recovers the files an answer named by reading them back out of the
 /// rendered text, which works for the MCP tools whose rendering it was written
 /// against and silently does not for `semlith brief` at a terminal: the CLI
-/// hands it the JSON, `paths_in` finds no bare path or `path:start-end` row in
-/// it, and every brief is recorded with no hits and no saving.
+/// hands it the JSON, `heading` finds no file heading at the margin of it, and
+/// every brief is recorded with no hits and no saving.
 ///
 /// The cost of that was not a missing row. It was a ledger in which the one
 /// command 0.23.0 exists for was counted, 107 times out of 107, as a retrieval
@@ -487,4 +630,231 @@ pub struct Who<'a> {
     pub client: &'a str,
     /// One conversation. Lets a session be read, and credited, as a unit.
     pub session: &'a str,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store at `dir` that holds `files`, written straight into its table.
+    /// What is under test is which store a reply's row lands in, not indexing,
+    /// so no model is loaded.
+    fn store_holding(dir: &Path, files: &[PathBuf]) -> Semlith {
+        std::fs::create_dir_all(dir).unwrap();
+        let s = Semlith::open(dir, None).unwrap();
+        store::read_only(s.db(), false).unwrap();
+        for f in files {
+            s.db()
+                .execute(
+                    "INSERT INTO files (path, hash, bytes, indexed_at) VALUES (?1, 'h', 1, 0)",
+                    [crate::canonical(f).to_string_lossy().into_owned()],
+                )
+                .unwrap();
+        }
+        store::read_only(s.db(), true).unwrap();
+        s
+    }
+
+    fn canon(p: &Path) -> String {
+        crate::canonical(p).to_string_lossy().into_owned()
+    }
+
+    /// Two roots that both hold a `src/lib.rs`, each indexed by its own store,
+    /// and a third file only the first holds.
+    fn two_roots(tmp: &Path) -> (PathBuf, PathBuf) {
+        let (a, b) = (tmp.join("a"), tmp.join("b"));
+        for root in [&a, &b] {
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(root.join("src").join("lib.rs"), "fn x() {}\n").unwrap();
+        }
+        std::fs::write(a.join("notes.md"), "# notes\n").unwrap();
+        (a, b)
+    }
+
+    /// A fleet's locate reply is split by the store each heading names, and a
+    /// relative path is resolved against the root that store indexed — not
+    /// against the first root that happens to hold a file of that name.
+    #[test]
+    fn a_fleet_reply_is_split_by_the_store_each_heading_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = two_roots(tmp.path());
+        let alpha = store_holding(
+            &tmp.path().join("alpha"),
+            &[a.join("src").join("lib.rs"), a.join("notes.md")],
+        );
+        let beta = store_holding(&tmp.path().join("beta"), &[b.join("src").join("lib.rs")]);
+        let members = [("alpha", &alpha), ("beta", &beta)];
+        let roots = [a.clone(), b.clone()];
+
+        let body = "roots a, b\n\
+                    identifier · keyword\n\
+                    beta src/lib.rs\n\
+                    \x20 1-1 x fn · stale | fn x() {}\n\
+                    alpha src/lib.rs\n\
+                    \x20 1-1 x fn | fn x() {}\n\
+                    alpha notes.md\n\
+                    \x20 1-1 | # notes";
+        let got = shares(&members, &roots, body);
+        assert_eq!(got.len(), 2, "{got:?}");
+
+        assert_eq!(got[0].member, 1, "beta answered first: {got:?}");
+        assert_eq!(
+            got[0].paths,
+            BTreeSet::from([canon(&b.join("src").join("lib.rs"))]),
+            "beta's src/lib.rs is the one under beta's root"
+        );
+        assert!(got[0].text.contains("· stale"));
+        assert!(
+            got[0].text.starts_with("roots a, b\n"),
+            "the lines above the first heading go to the first store: {:?}",
+            got[0].text
+        );
+
+        assert_eq!(got[1].member, 0);
+        assert_eq!(
+            got[1].paths,
+            BTreeSet::from([
+                canon(&a.join("src").join("lib.rs")),
+                canon(&a.join("notes.md"))
+            ])
+        );
+        assert!(!got[1].text.contains("stale"));
+        assert_eq!(
+            got[0].text.len() + got[1].text.len(),
+            body.len() + 1,
+            "every line of the reply is in exactly one share"
+        );
+    }
+
+    /// The brief's `[label] path:start-end`, the excerpt's `[n] label
+    /// path:start-end`, and a fleet of one's unlabelled headings are all read;
+    /// prose that mentions a path is not.
+    #[test]
+    fn every_reply_shape_names_its_store_and_prose_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = two_roots(tmp.path());
+        let alpha = store_holding(
+            &tmp.path().join("alpha"),
+            &[a.join("src").join("lib.rs"), a.join("notes.md")],
+        );
+        let beta = store_holding(&tmp.path().join("beta"), &[b.join("src").join("lib.rs")]);
+        let members = [("alpha", &alpha), ("beta", &beta)];
+        let roots = [a.clone(), b.clone()];
+        let abs = crate::plain(&a.join("notes.md").to_string_lossy());
+
+        let body = format!(
+            "[beta] src/lib.rs:1-1 x @1 [vector]\n\
+             \x20   fn x() {{}}\n\
+             [1] alpha {abs}:1-1 (score 0.500 via vector)\n\
+             # notes\n\
+             see src/lib.rs for the rest"
+        );
+        let got = shares(&members, &roots, &body);
+        let by = |m: usize| got.iter().find(|s| s.member == m).map(|s| s.paths.clone());
+        assert_eq!(
+            by(1),
+            Some(BTreeSet::from([canon(&b.join("src").join("lib.rs"))]))
+        );
+        assert_eq!(by(0), Some(BTreeSet::from([canon(&a.join("notes.md"))])));
+
+        // A fleet of one labels nothing, and its headings are its own.
+        let one = [("alpha", &alpha)];
+        let got = shares(
+            &one,
+            std::slice::from_ref(&a),
+            "src/lib.rs\n  1-1 | x\nnotes.md:1-1 notes\n",
+        );
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].paths.len(), 2, "{got:?}");
+
+        assert!(shares(&members, &roots, "No match for that query.").is_empty());
+    }
+
+    /// End to end through a fleet: each store that answered gets a row with
+    /// its own hits, the rows are one retrieval, and both chains verify.
+    ///
+    /// Before 0.33.0 this wrote one row, into the first store, with no hits.
+    #[test]
+    fn a_fleet_reply_writes_a_row_per_store_that_answered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = two_roots(tmp.path());
+        let (alpha_dir, beta_dir) = (tmp.path().join("alpha"), tmp.path().join("beta"));
+        drop(store_holding(&alpha_dir, &[a.join("notes.md")]));
+        drop(store_holding(&beta_dir, &[b.join("src").join("lib.rs")]));
+
+        let fleet = Fleet::open(&[alpha_dir.clone(), beta_dir.clone()]).unwrap();
+        assert_eq!(fleet.labels(), vec!["alpha", "beta"]);
+        // Absolute, as a fleet whose stores the registry does not know prints
+        // them.
+        let body = format!(
+            "alpha {}\n  1-1 | # notes\nbeta {}\n  1-1 x fn · stale | fn x() {{}}",
+            crate::plain(&a.join("notes.md").to_string_lossy()),
+            crate::plain(&b.join("src").join("lib.rs").to_string_lossy()),
+        );
+        let who = Who {
+            client: "harness",
+            session: "s",
+        };
+        reply(
+            &fleet,
+            &who,
+            "search",
+            "notes",
+            &body,
+            &[],
+            std::time::Duration::from_millis(1),
+        );
+        drop(fleet);
+
+        let mut ids = Vec::new();
+        for dir in [&alpha_dir, &beta_dir] {
+            let s = Semlith::open(dir, None).unwrap();
+            let rows = store::retrievals(s.db(), 10).unwrap();
+            assert_eq!(rows.len(), 1, "{}: {rows:?}", dir.display());
+            assert_eq!(rows[0].hits, 1, "{}: {rows:?}", dir.display());
+            assert!(rows[0].whole_file_tokens > 0);
+            assert_eq!(store::ledger_break(s.db()).unwrap(), None);
+            ids.push(rows[0].query_id.clone());
+        }
+        assert_eq!(ids[0], ids[1], "one reply is one retrieval");
+    }
+
+    /// A reply that named nothing is one zero-hit row, in the store the call
+    /// was scoped to — or the first store open when it was not scoped.
+    #[test]
+    fn a_zero_hit_reply_is_one_row_in_the_store_searched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (alpha_dir, beta_dir) = (tmp.path().join("alpha"), tmp.path().join("beta"));
+        drop(store_holding(&alpha_dir, &[]));
+        drop(store_holding(&beta_dir, &[]));
+        let fleet = Fleet::open(&[alpha_dir.clone(), beta_dir.clone()]).unwrap();
+        let who = Who {
+            client: "harness",
+            session: "s",
+        };
+        let nothing = "No match for that query.";
+        let at = std::time::Duration::from_millis(1);
+        reply(
+            &fleet,
+            &who,
+            "search",
+            "q1",
+            nothing,
+            &["beta".to_string()],
+            at,
+        );
+        reply(&fleet, &who, "search", "q2", nothing, &[], at);
+        drop(fleet);
+
+        let queries = |dir: &Path| -> Vec<(String, i64)> {
+            let s = Semlith::open(dir, None).unwrap();
+            store::retrievals(s.db(), 10)
+                .unwrap()
+                .into_iter()
+                .map(|r| (r.query, r.hits))
+                .collect()
+        };
+        assert_eq!(queries(beta_dir.as_path()), vec![("q1".to_string(), 0)]);
+        assert_eq!(queries(alpha_dir.as_path()), vec![("q2".to_string(), 0)]);
+    }
 }

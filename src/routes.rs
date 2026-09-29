@@ -857,7 +857,7 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
         // what this route hands it is JSON -- so every brief from this page was
         // recorded with no hits and no saving, exactly as every brief from the
         // command line was. The MCP tool still goes through `reply` because
-        // what it hands over really is the rendered text `paths_in` was written
+        // what it hands over really is the rendered text `reply` splits by store
         // for, and because a span whose text the budget dropped should be
         // counted at its locator rather than at its file.
         crate::ledger::brief(
@@ -1763,7 +1763,6 @@ fn doctor(state: &Arc<State>) -> Response {
     Response::json(&json!({
         "clients": crate::doctor::clients_report(),
         "rules": crate::doctor::privacy_findings(&open_stores(state)),
-        "unregisterable": crate::clients::UNREGISTERABLE,
     }))
 }
 

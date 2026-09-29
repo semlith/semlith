@@ -11,7 +11,7 @@ that supports skills reads the same text. Re-running `setup` refreshes it, which
 makes it the repair command for a skill as much as for a registration.
 
 `RULES.md` is the always-on rule block for clients that have no skill mechanism,
-only a rules file — AGENTS.md, Kiro steering, Windsurf, Cline. It stands alone
+only a rules file — AGENTS.md, GEMINI.md, Copilot's instructions, Cline. It stands alone
 without the skill, and it is written into those files only under
 `semlith setup --register-all`, because editing a file an agent already owns is
 not something a plain `setup` should do unasked.

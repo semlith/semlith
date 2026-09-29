@@ -319,7 +319,7 @@ pub fn privacy_findings(stores: &[(String, PathBuf)]) -> Vec<Finding> {
 /// Every `semlith` on `PATH`, and which one a bare command reaches.
 ///
 /// Reported here rather than beside the clients because it is a reading of the
-/// machine and not of a client: it is the same answer for all twenty-seven, and
+/// machine and not of a client: it is the same answer for all eleven, and
 /// it is the shape `Finding` already has — an id, what was measured, and the
 /// command a person would type. The Privacy page renders the rules it names by
 /// id and so does not show this one, which is right: it is not a privacy rule
@@ -681,7 +681,7 @@ pub struct ClientReport {
     ///
     /// The distinction is what makes the exit code usable in a script. A client
     /// that is not installed is not a fault — most people have two or three of
-    /// the twenty-seven. Nor is a file-only client the user has never opted into
+    /// the eleven. Nor is a file-only client the user has never opted into
     /// writing: `--register-all` is an offer, and a report that went red because
     /// the user had not taken it would be red on almost every machine, which is
     /// the same as not reporting at all. A fault is a client that is on this
@@ -933,8 +933,8 @@ fn bare_entries() -> Vec<(
             };
             // Where the command lives is read out of the documented stanza
             // rather than guessed, because the four products put it in four
-            // places — `mcpServers.semlith`, `mcp.servers.semlith`,
-            // `amp.mcpServers.semlith`, `servers.semlith` — and a walker that
+            // places — `mcpServers.semlith`, `mcp.semlith`,
+            // `context_servers.semlith`, `servers.semlith` — and a walker that
             // went looking for any `"command"` anywhere in the file would find
             // somebody else's server and rewrite it.
             let Some(site) = command_site(&documented) else {
@@ -998,8 +998,8 @@ pub fn clients_report_read_only() -> Vec<ClientReport> {
     report(&[])
 }
 
-/// Reads files; runs nothing. Asking sixteen client CLIs whether they know
-/// about semlith would be sixteen processes, and the portal calls this on every
+/// Reads files; runs nothing. Asking each client's CLI whether it knows
+/// about semlith would be a process per client, and the portal calls this on every
 /// load — `src/setup.rs` already carries the scar from doing that with one.
 fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
     // After the repair, so a file that was just rewritten is not also reported
@@ -1046,19 +1046,17 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
             let only_project = client.name == "Claude Code" && !project_scoped.is_empty();
             let registered = in_a_file || (client.name == "Claude Code" && claude_user_entry());
 
-            let note = if crate::clients::UNREGISTERABLE.contains(&client.name.as_str()) {
-                Some(client.note.clone())
-            } else {
-                None
-            };
+            // Every supported client has a route in, so none carries a
+            // paste-it-yourself note.
+            let note: Option<String> = None;
             // "On this machine" for a client with a CLI means the CLI is on
             // `PATH`. For a file-only client it means its own configuration
             // file exists — not merely the directory above it.
             //
             // The parent directory used to count, and on an ordinary developer's
             // machine that is `~/.config` or `~/Library/Application Support`,
-            // which exist because something else put them there. Twenty-seven
-            // clients then produced thirteen "in use" and eleven faults, six of
+            // which exist because something else put them there. The clients
+            // documented then produced thirteen "in use" and eleven faults, six of
             // them for software not installed at all — so `semlith doctor`
             // exited non-zero on a healthy machine and `--brief`, whose whole
             // job is to be a session-start hook, was red every time. A check
@@ -1098,11 +1096,11 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
                 note.is_none() && in_use && (!registered || disabled_here || bare.is_some());
 
             // A client that is not on this machine gets no command. It used to
-            // get one — Kilo Code read "not installed" and carried `semlith
+            // get one — a client read "not installed" and carried `semlith
             // setup --register-all` beside it, and the Agents page's dry run
             // then proposed writing a configuration file for a client semlith
             // had just said was not there. Most people have two or three of
-            // the twenty-seven; a report that offered a remedy for the other
+            // the eleven; a report that offered a remedy for the other
             // twenty-four is a report nobody reads twice.
             let repair = if note.is_some() || !in_use {
                 None
@@ -1375,8 +1373,8 @@ fn claude_config() -> Option<serde_json::Value> {
 
 /// Whether a program name resolves on `PATH`.
 ///
-/// A walk rather than a spawn. The caller asks about sixteen of these on a
-/// route the portal loads every time, and sixteen processes there is the
+/// A walk rather than a spawn. The caller asks about seven of these on a
+/// route the portal loads every time, and seven processes there would be the
 /// twenty-second hang `semlith setup` already learned about with one.
 fn on_path(program: &str) -> bool {
     if program.contains('/') || program.contains('\\') {
@@ -1389,7 +1387,7 @@ fn on_path(program: &str) -> bool {
 
 /// Every place `program` resolves on `PATH`, in the order `PATH` would try them.
 ///
-/// [`on_path`] above stops at the first, because for the sixteen client CLIs the
+/// [`on_path`] above stops at the first, because for the client CLIs the
 /// question is only whether there is one. This one keeps looking, and is asked
 /// about `semlith` alone: the first is what a bare command reaches and the rest
 /// are what it does not, which is a distinction no other program here needs.
@@ -1454,6 +1452,52 @@ pub struct OnPath {
     pub version: String,
 }
 
+/// Gemini CLI's folder trust, said out loud.
+///
+/// With folder trust on — its default — Gemini disables every user-level MCP
+/// server in a folder not listed in `~/.gemini/trustedFolders.json`. `gemini
+/// mcp list` then shows semlith as Disabled, and `gemini mcp enable semlith`
+/// answers that there is no such server, which sends a person looking in the
+/// wrong place. `None` when folder trust is off.
+pub fn gemini_trust_note(here: &std::path::Path) -> Option<String> {
+    let gemini = crate::home::user_home().ok()?.join(".gemini");
+    let settings: serde_json::Value = std::fs::read_to_string(gemini.join("settings.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let off =
+        settings["security"]["folderTrust"]["enabled"] == false || settings["folderTrust"] == false;
+    if off {
+        return None;
+    }
+    let trusted: serde_json::Value = std::fs::read_to_string(gemini.join("trustedFolders.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let here_trusted = trusted.as_object().is_some_and(|folders| {
+        folders.iter().any(|(dir, rule)| {
+            let dir = std::path::Path::new(dir);
+            match rule.as_str() {
+                Some("TRUST_FOLDER") => here.starts_with(dir),
+                Some("TRUST_PARENT") => dir.parent().is_some_and(|p| here.starts_with(p)),
+                _ => false,
+            }
+        })
+    });
+    Some(if here_trusted {
+        "Gemini CLI's folder trust is on; this folder is trusted, so semlith is enabled here. \
+         In a folder not in ~/.gemini/trustedFolders.json Gemini disables it."
+            .to_string()
+    } else {
+        format!(
+            "Gemini CLI's folder trust is on and {} is not trusted, so Gemini disables semlith \
+             here (`gemini mcp list` shows it Disabled). Trust the folder when Gemini asks, \
+             or add it to ~/.gemini/trustedFolders.json.",
+            here.display()
+        )
+    })
+}
+
 /// Every `semlith` on `PATH`, with its version, first one first.
 ///
 /// The machine this was found on had two: `~/.semlith/bin/semlith` at 0.20.1 in
@@ -1467,7 +1511,7 @@ pub struct OnPath {
 /// One spawn per binary found, which is normally one and is normally none: the
 /// running executable is asked nothing, because it knows its own version. This
 /// is deliberately not on `clients_report`'s path, which the portal calls on
-/// every page load and which already refuses to ask sixteen client CLIs
+/// every page load and which already refuses to ask the client CLIs
 /// anything.
 pub fn semliths_on_path() -> Vec<OnPath> {
     let running = std::env::current_exe().ok();

@@ -44,6 +44,7 @@ pub mod image;
 pub mod index;
 pub mod keyscan;
 pub mod ledger;
+pub mod leftovers;
 pub mod llama;
 pub mod lock;
 pub mod mcp;

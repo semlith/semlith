@@ -26,7 +26,7 @@ language when it renders, so both are invisible on the page and in the portal.
 From 0.18.0 you do not paste any of this by hand for a client that has a
 registration CLI. `semlith setup` runs that CLI itself, at the scope that means
 every project rather than this directory, and always in the form where the
-client launches `semlith mcp` as a subprocess. Sixteen of the clients below
+client launches `semlith mcp` as a subprocess. Six of the eleven clients below
 register that way; the rest are a file you edit once, and `semlith setup
 --register-all` will write the user-level one for you.
 
@@ -405,391 +405,17 @@ gemini mcp remove --scope user semlith
 gemini mcp add --scope user semlith "${SEMLITH_BIN}" mcp
 ```
 
+A registration at user scope is not the same as a server that runs everywhere.
+With folder trust on, which is the default, Gemini CLI disables user-level MCP
+servers in any folder not listed in `~/.gemini/trustedFolders.json`, and `gemini
+mcp list` run there shows semlith as Disabled. Nothing is wrong with the entry:
+trust the folder and semlith connects.
+
 Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
 <https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/gemini-md.md>.
 
 ```md rules path=~/.gemini/GEMINI.md
 ${SEMLITH_RULES}
-```
-
-**Qwen Code** — `~/.qwen/settings.json`, the same schema as Gemini CLI down to
-`httpUrl` winning over `url` when both are present. The CLI is the same shape
-too: `-s, --scope user` writes `~/.qwen/settings.json` and `--scope project`
-writes `.qwen/settings.json`
-(<https://github.com/QwenLM/qwen-code/blob/main/docs/users/features/mcp.md>).
-
-```json config path=~/.qwen/settings.json
-{
-  "mcpServers": {
-    "semlith": {
-      "command": "${SEMLITH_BIN}",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-The skill directory is the same shape as the settings file's:
-
-```text skills path=~/.qwen/skills
-semlith
-```
-
-Or against a daemon on another machine, over HTTP:
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "httpUrl": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
-    }
-  }
-}
-```
-
-```sh
-qwen mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer ${SEMLITH_AGENT_KEY}"
-```
-
-Replacing an existing entry — unlike `add`, Qwen's `remove` documents no scope
-flag at all:
-
-```sh unregister
-qwen mcp remove semlith
-```
-
-```sh register
-qwen mcp add --scope user semlith "${SEMLITH_BIN}" mcp
-```
-
-Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
-<https://github.com/QwenLM/qwen-code>.
-
-```md rules path=~/.qwen/QWEN.md
-${SEMLITH_RULES}
-```
-
-**Amp** — `~/.config/amp/settings.json`, or the editor extension's own
-`settings.json`. The root key is the dotted string `amp.mcpServers`, which
-means the entry lives inside a wider settings file rather than in one of its
-own. `amp mcp add` has no scope flag, and does not need one: it always writes
-the global user settings at `~/.config/amp/settings.json`, and a workspace
-entry means editing `.amp/settings.json` by hand
-(<https://ampcode.com/docs/customize/mcp>).
-
-```json config path=~/.config/amp/settings.json
-{
-  "amp.mcpServers": {
-    "semlith": {
-      "command": "${SEMLITH_BIN}",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-Or against a daemon on another machine, over HTTP:
-
-```json
-{
-  "amp.mcpServers": {
-    "semlith": {
-      "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
-    }
-  }
-}
-```
-
-```sh register
-amp mcp add semlith -- "${SEMLITH_BIN}" mcp
-```
-
-Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
-<https://ampcode.com/manual>.
-
-```md rules path=~/.config/amp/AGENTS.md
-${SEMLITH_RULES}
-```
-
-**Crush** — `crush.json` in the project root. The root key is `mcp`, not
-`mcpServers`, and the TUI reads the file once at start, so relaunch it after
-editing. Semlith cannot register Crush for you: it has no registration CLI, and
-the only configuration file Charm documents is `crush.json` in a project root,
-which is per-checkout rather than global. Paste the stanza below into each
-repository you want it in.
-
-```json
-{
-  "$schema": "https://charm.land/crush.json",
-  "mcp": {
-    "semlith": {
-      "type": "http",
-      "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
-    }
-  }
-}
-```
-
-Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
-<https://github.com/charmbracelet/crush/blob/main/README.md>.
-
-```md rules path=~/.config/crush/CRUSH.md
-${SEMLITH_RULES}
-```
-
-**Droid** — `~/.factory/mcp.json` for every project, or `.factory/mcp.json` in
-one repository. `droid mcp add` has no scope flag; Factory's own documentation
-says servers added that way "always go to your user config", so the default is
-already every project (<https://docs.factory.ai/cli/configuration/mcp>). Its
-flags are `--type`, `--env`, `--header` and `--no-oauth`, and a subprocess entry
-takes the command as one quoted argument rather than after a `--`.
-
-```json config path=~/.factory/mcp.json
-{
-  "mcpServers": {
-    "semlith": {
-      "type": "stdio",
-      "command": "${SEMLITH_BIN}",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-Or against a daemon on another machine, over HTTP:
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "type": "http",
-      "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
-    }
-  }
-}
-```
-
-```sh
-droid mcp add semlith http://127.0.0.1:7365/mcp --type http --header "Authorization: Bearer ${SEMLITH_AGENT_KEY}"
-```
-
-Replacing an existing entry:
-
-```sh unregister
-droid mcp remove semlith
-```
-
-```sh register
-droid mcp add semlith "${SEMLITH_BIN} mcp" --type stdio
-```
-
-Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
-<https://docs.factory.ai/cli/configuration/agents-md>.
-
-```md rules path=~/.factory/AGENTS.md
-${SEMLITH_RULES}
-```
-
-**Goose** — `goose configure` → Add Extension → Remote Extension, or
-`~/.config/goose/config.yaml`. Goose calls them extensions, spells the
-transport `streamable_http` with an underscore, and takes the address as `uri`
-rather than `url`. `goose configure` is a wizard rather than a one-line command,
-so there is nothing to register non-interactively; the file below is written
-instead.
-
-```yaml config path=~/.config/goose/config.yaml
-extensions:
-  semlith:
-    type: stdio
-    name: semlith
-    enabled: true
-    cmd: "${SEMLITH_BIN}"
-    args:
-      - mcp
-    timeout: 300
-```
-
-Or against a daemon on another machine, over HTTP:
-
-```yaml
-extensions:
-  semlith:
-    type: streamable_http
-    name: semlith
-    enabled: true
-    uri: "http://127.0.0.1:7365/mcp"
-    headers:
-      Authorization: "Bearer ${SEMLITH_AGENT_KEY}"
-    timeout: 300
-```
-
-Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
-<https://block.github.io/goose/docs/guides/using-goosehints>.
-
-```md rules path=~/.config/goose/.goosehints
-${SEMLITH_RULES}
-```
-
-**Amazon Q Developer CLI** — `~/.aws/amazonq/mcp.json` for every workspace, or
-`.amazonq/mcp.json` in one. A remote entry takes only `type` and `url` and
-authenticates over OAuth, with nowhere to put a header, so this is the stdio
-form, which needs no key: `semlith mcp` proxies to the running daemon. The CLI
-spells its scope `--scope global`, against `workspace` and `default`
-(<https://github.com/aws/amazon-q-developer-cli/issues/2932>).
-
-```json config path=~/.aws/amazonq/mcp.json
-{
-  "mcpServers": {
-    "semlith": {
-      "command": "${SEMLITH_BIN}",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-Replacing an existing entry — `remove` takes the same `--name` and `--scope`,
-and `rm` is an alias for it:
-
-```sh unregister
-q mcp remove --name semlith --scope global
-```
-
-```sh register
-q mcp add --name semlith --command "${SEMLITH_BIN}" --args mcp --scope global
-```
-
-**OpenClaw** — `~/.openclaw/openclaw.json`. The servers are nested two deep
-under `mcp` then `servers`, and the transport field is called `transport`, not
-`type`. `openclaw mcp add` has no scope flag: its documented flags are
-`--command`, `--arg`, `--env`, `--cwd` for a subprocess and `--url`,
-`--transport`, `--header`, `--auth` for a remote one, and a definition saved
-either way is a global one (<https://docs.openclaw.ai/cli/mcp/registry>).
-
-```json config path=~/.openclaw/openclaw.json
-{
-  "mcp": {
-    "servers": {
-      "semlith": {
-        "command": "${SEMLITH_BIN}",
-        "args": ["mcp"]
-      }
-    }
-  }
-}
-```
-
-Or against a daemon on another machine, over HTTP:
-
-```json
-{
-  "mcp": {
-    "servers": {
-      "semlith": {
-        "transport": "streamable-http",
-        "url": "http://127.0.0.1:7365/mcp",
-        "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
-      }
-    }
-  }
-}
-```
-
-```sh
-openclaw mcp add semlith --url http://127.0.0.1:7365/mcp --transport streamable-http --header "Authorization=Bearer ${SEMLITH_AGENT_KEY}"
-```
-
-Replacing an existing entry — OpenClaw spells the removal `unset`, which deletes
-the whole definition by name and fails if that name is not there:
-
-```sh unregister
-openclaw mcp unset semlith
-```
-
-```sh register
-openclaw mcp add semlith --command "${SEMLITH_BIN}" --arg mcp
-```
-
-Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
-<https://docs.openclaw.ai/concepts/agent-workspace>.
-
-```md rules path=~/.openclaw/workspace/AGENTS.md
-${SEMLITH_RULES}
-```
-
-**DeepSeek** — `~/.deepseek/mcp.json`, read by DeepSeek-TUI, which has since
-renamed itself Codewhale and now looks in `~/.codewhale/mcp.json` first and
-falls back to the old path. Either file takes `servers` or `mcpServers` as the
-root key, and needs no transport field: a `url` is enough. `codewhale mcp add`
-has no scope flag and no project-level file to choose between — there is one
-configuration file, `~/.codewhale/mcp.json`, overridable only by
-`DEEPSEEK_MCP_CONFIG` (<https://codewhale.net/en/docs/mcp>). It also has no
-header flag, so for the HTTP form the key goes in the environment:
-`export SEMLITH_KEY="$SEMLITH_AGENT_KEY"`, then
-`codewhale mcp add semlith --url "http://127.0.0.1:7365/mcp" --bearer-token-env-var SEMLITH_KEY`.
-
-```json config path=~/.codewhale/mcp.json
-{
-  "mcpServers": {
-    "semlith": {
-      "command": "${SEMLITH_BIN}",
-      "args": ["mcp"],
-      "env": {},
-      "disabled": false
-    }
-  }
-}
-```
-
-Or against a daemon on another machine, over HTTP:
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
-    }
-  }
-}
-```
-
-```sh register
-codewhale mcp add semlith --command "${SEMLITH_BIN}" --arg "mcp"
-```
-
-**Warp** — `~/.warp/.mcp.json`, or Settings → AI → MCP servers → + Add, which
-writes it for you. An entry carries exactly one of `command` or `url` and Warp
-rejects one holding both.
-
-```json config path=~/.warp/.mcp.json
-{
-  "mcpServers": {
-    "semlith": {
-      "command": "${SEMLITH_BIN}",
-      "args": ["mcp"],
-      "start_on_launch": true
-    }
-  }
-}
-```
-
-Or against a daemon on another machine, over HTTP:
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" },
-      "start_on_launch": true
-    }
-  }
-}
 ```
 
 #### Editors
@@ -822,9 +448,17 @@ code --add-mcp '{"name":"semlith","type":"http","url":"http://127.0.0.1:7365/mcp
 code --add-mcp '{"name":"semlith","command":"${SEMLITH_BIN}","args":["mcp"]}'
 ```
 
+With your own model key (BYOK) and no GitHub sign-in, Copilot Chat also needs
+the `chat.utilitySmallModel` setting pointed at one of your own models; the
+registration above is not enough on its own.
+
 **Cursor** — `~/.cursor/mcp.json` everywhere, or `.cursor/mcp.json` in one
 repo. Cursor infers the transport from the presence of `url` and has no `type`
 field of its own; adding one copied from another client confuses it.
+
+Cursor is connection-tested each release: the registration below is exercised
+and its MCP log is checked for `connected=true`. Its tool calls are not tested,
+so a search that returns wrong results there is a report worth filing.
 
 ```json config path=~/.cursor/mcp.json
 {
@@ -850,53 +484,19 @@ Or against a daemon on another machine, over HTTP:
 }
 ```
 
-**Windsurf** — `~/.codeium/windsurf/mcp_config.json`. The address key is
-`serverUrl`, not `url`, and Windsurf reloads MCP servers only on a full
-restart, not on a window reload.
+**Zed** — `~/.config/zed/settings.json`, which the `zed: open settings file`
+command opens. Zed calls MCP servers context servers and keys them under
+`context_servers`. Its remote support has moved between versions and older
+builds start local processes only, so this is the stdio form, which needs no
+key: `semlith mcp` proxies to the running daemon. Zed has no registration CLI,
+so `semlith setup --register-all` writes the entry into that file.
 
-```json config path=~/.codeium/windsurf/mcp_config.json
-{
-  "mcpServers": {
-    "semlith": {
-      "command": "${SEMLITH_BIN}",
-      "args": ["mcp"]
-    }
-  }
-}
-```
+Zed allows comments and trailing commas in `settings.json`, which a strict JSON
+parser rejects. When the file has either, semlith leaves it untouched rather
+than rewrite it without them, and prints the stanza below with the reason so
+you can paste it in.
 
-Windsurf keeps global rules in a file of their own, and
-`semlith setup --register-all` appends the rule block to it between markers,
-backing it up beside itself first. Windsurf documents no skill directory, so
-there is nothing to link there yet.
-
-```md rules path=~/.codeium/windsurf/memories/global_rules.md
-${SEMLITH_RULES}
-```
-
-Or against a daemon on another machine, over HTTP:
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "serverUrl": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
-    }
-  }
-}
-```
-
-**Zed** — the `zed: open settings file` command. Zed calls MCP servers context
-servers and keys them under `context_servers`. Its remote support has moved
-between versions and older builds start local processes only, so this is the
-stdio form, which needs no key: `semlith mcp` proxies to the running daemon.
-Semlith cannot register Zed for you: it has no registration CLI, and Zed
-documents no path for the settings file — it is whatever `zed: open settings
-file` opens, which moves with the platform and the install. Run that command and
-paste the stanza in.
-
-```json
+```json config path=~/.config/zed/settings.json
 {
   "context_servers": {
     "semlith": {
@@ -915,12 +515,15 @@ Its user-level instructions file, which `semlith setup --register-all` appends t
 ${SEMLITH_RULES}
 ```
 
-**JetBrains** — Junie reads `~/.junie/mcp/mcp.json`, or `.junie/mcp/mcp.json`
-per project; AI Assistant takes the same JSON under Settings → Tools → AI
-Assistant → Model Context Protocol. The transport is spelled `streamable-http`
-with a hyphen.
+**Cline** — `~/.cline/data/settings/cline_mcp_settings.json`, the one file
+both the VS Code extension (4.x) and the CLI (3.x) read, and the one the MCP
+Servers panel's Configure button opens. It moves with `CLINE_DIR` when that is
+set, and Cline creates it as `{"mcpServers": {}}` on first activation.
+`semlith setup --register-all` writes the entry below into it, which covers the
+extension and the CLI at once
+(<https://docs.cline.bot/mcp/mcp-overview>).
 
-```json config path=~/.junie/mcp/mcp.json
+```json config path=~/.cline/data/settings/cline_mcp_settings.json root=CLINE_DIR
 {
   "mcpServers": {
     "semlith": {
@@ -931,36 +534,9 @@ with a hyphen.
 }
 ```
 
-Or against a daemon on another machine, over HTTP:
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
-    }
-  }
-}
-```
-
-Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
-<https://junie.jetbrains.com/docs/guidelines-and-memory.html>.
-
-```md rules path=~/.junie/AGENTS.md
-${SEMLITH_RULES}
-```
-
-**Cline** — the MCP Servers panel, Configure. Cline's own documentation gives
-two different paths for the file it writes, so let the panel open it rather
-than guessing, and nothing here writes it for you. The transport is
+Or against a daemon on another machine, over HTTP. The transport is
 `streamableHttp` in camel case; anything else falls back to SSE and the endpoint
-answers 405. The CLI spells the verb `install`, not `add`, takes everything
-after `--` as the subprocess command, and has no scope flag — it keeps one
-configuration file, `~/.cline/mcp.json`
-(<https://github.com/cline/cline/blob/main/apps/cli/README.md>,
-<https://docs.cline.bot/mcp/mcp-overview>).
+answers 405:
 
 ```json
 {
@@ -976,10 +552,6 @@ configuration file, `~/.cline/mcp.json`
 }
 ```
 
-```sh register
-cline mcp install semlith -- "${SEMLITH_BIN}" mcp
-```
-
 Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
 <https://docs.cline.bot/customization/cline-rules>.
 
@@ -987,193 +559,7 @@ Its user-level instructions file, which `semlith setup --register-all` appends t
 ${SEMLITH_RULES}
 ```
 
-**Roo Code** — `.roo/mcp.json` in the project, or the global file the MCP
-Servers panel opens. Roo spells the same transport `streamable-http`, with the
-hyphen, which is the one thing that does not copy across from a Cline config.
-Semlith cannot register Roo Code for you: it has no registration CLI, and the
-only file Roo documents by path is the project one, `.roo/mcp.json` — the global
-copy has no documented location, it is only ever opened by the MCP Servers
-panel. Open it from the panel and paste the stanza in.
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" },
-      "alwaysAllow": ["semlith_search"]
-    }
-  }
-}
-```
-
-Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
-<https://docs.roocode.com/features/custom-instructions>.
-
-```md rules path=~/.roo/rules/semlith.md
-${SEMLITH_RULES}
-```
-
-**Kilo Code** — `.kilocode/mcp.json` in the project, or the global file from
-the MCP Servers panel. The `type` is required here: without it Kilo Code picks
-SSE and the connection fails. The file below is the project one and is not
-written for you. `kilo mcp add` has no global scope flag — its options are
-`--url`, `--env` and `--header`, and `--global` exists only on `kilo plugin`
-(<https://kilo.ai/docs/code-with-ai/platforms/cli-reference>) — so the
-registration lands in the project configuration and semlith does not run it for
-you. `~/.config/kilo/kilo.json` is the global file that covers every workspace,
-and that is the one `semlith setup --register-all` writes.
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "type": "streamable-http",
-      "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" },
-      "alwaysAllow": ["semlith_search"],
-      "disabled": false
-    }
-  }
-}
-```
-
-The global file uses the CLI's own schema instead — the root key is `mcp`, and
-a subprocess entry is `type: "local"` with the command as an array:
-
-```json config path=~/.config/kilo/kilo.json
-{
-  "mcp": {
-    "semlith": {
-      "type": "local",
-      "command": ["${SEMLITH_BIN}", "mcp"],
-      "enabled": true
-    }
-  }
-}
-```
-
-```sh register scope=project
-kilo mcp add semlith -- "${SEMLITH_BIN}" mcp
-```
-
-**Continue** — one block file per server at
-`~/.continue/mcpServers/semlith.yaml`, or the same entry inlined in
-`config.yaml`. The headers hang off `requestOptions`, not off the server
-itself.
-
-```yaml config path=~/.continue/mcpServers/semlith.yaml
-name: Semlith
-version: 0.0.1
-schema: v1
-mcpServers:
-  - name: semlith
-    command: "${SEMLITH_BIN}"
-    args:
-      - mcp
-```
-
-Or against a daemon on another machine, over HTTP:
-
-```yaml
-name: Semlith
-version: 0.0.1
-schema: v1
-mcpServers:
-  - name: semlith
-    type: streamable-http
-    url: "http://127.0.0.1:7365/mcp"
-    requestOptions:
-      headers:
-        Authorization: "Bearer ${SEMLITH_AGENT_KEY}"
-```
-
-**Kiro** — `.kiro/settings/mcp.json` in the workspace, or
-`~/.kiro/settings/mcp.json` for every workspace. The workspace file wins where
-both name the same server, so an old copy in the repository quietly overrides
-the one you just edited — only the user-level file below is written for you.
-`kiro-cli mcp add` takes `--scope workspace` or `--scope global`
-(<https://kiro.dev/docs/reference/cli-commands/>).
-
-```json config path=~/.kiro/settings/mcp.json
-{
-  "mcpServers": {
-    "semlith": {
-      "command": "${SEMLITH_BIN}",
-      "args": ["mcp"],
-      "disabled": false,
-      "autoApprove": ["semlith_search"]
-    }
-  }
-}
-```
-
-Or against a daemon on another machine, over HTTP:
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" },
-      "disabled": false,
-      "autoApprove": ["semlith_search"]
-    }
-  }
-}
-```
-
-Replacing an existing entry — `remove` takes the same `--name` and `--scope`:
-
-```sh unregister
-kiro-cli mcp remove --name semlith --scope global
-```
-
-```sh register
-kiro-cli mcp add --name semlith --command "${SEMLITH_BIN}" --args "mcp" --scope global
-```
-
-```text skills path=~/.kiro/skills
-semlith
-```
-
-Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
-<https://kiro.dev/docs/steering/>.
-
-```md rules path=~/.kiro/steering/semlith.md
-${SEMLITH_RULES}
-```
-
 #### Desktop apps
-
-**LM Studio** — `~/.lmstudio/mcp.json`, reached from the Program tab → Install
-→ Edit `mcp.json`. LM Studio follows Cursor's notation, so there is no
-transport field and a `url` is enough.
-
-```json config path=~/.lmstudio/mcp.json
-{
-  "mcpServers": {
-    "semlith": {
-      "command": "${SEMLITH_BIN}",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-Or against a daemon on another machine, over HTTP:
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
-    }
-  }
-}
-```
 
 **Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json`
 on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows. Settings →

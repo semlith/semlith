@@ -112,8 +112,8 @@ pub fn status() -> Status {
     // Read from each client's own configuration file rather than by asking
     // each client's CLI. This used to run `claude mcp list` and wait for it,
     // which on a slow machine turned the portal's Agents page into a
-    // twenty-second hang — and that was for one client. Sixteen processes here
-    // would be sixteen times that, on a route the page calls on every load.
+    // twenty-second hang — and that was for one client. A process per client
+    // would be that many times over, on a route the page calls on every load.
     let registered = crate::clientfile::registered_clients();
     let installed = bin.is_ok() && bin_path.join(exe_name()).exists();
     let path_has_bin = bin.is_ok() && on_path(bin_path);
@@ -229,6 +229,7 @@ pub fn run(
         announce(step_model(yes, airgap)?),
         announce(step_neural_engine(yes, airgap)?),
         announce(step_agents(register_all, yes)?),
+        announce(step_leftovers()),
         announce(step_always_load()?),
         announce(step_skill()?),
         announce(step_explorer(agents)?),
@@ -893,6 +894,39 @@ fn step_agents(register_all: bool, yes: bool) -> Result<Step> {
     })
 }
 
+/// Take semlith's own entries back out of clients it no longer supports, once.
+///
+/// Unconditional and unprompted, because each removal is only what an earlier
+/// `semlith setup` put there, each edited file is backed up beside itself, and
+/// every removal is listed. A second run finds nothing and says nothing.
+fn step_leftovers() -> Step {
+    let removed = crate::leftovers::clean();
+    for line in &removed {
+        let _ = match line.left {
+            None => cliclack::log::info(line.to_string()),
+            Some(_) => cliclack::log::warning(line.to_string()),
+        };
+    }
+    let done = removed.iter().filter(|r| r.left.is_none()).count();
+    Step {
+        name: "leftovers",
+        state: if done > 0 {
+            State::Done
+        } else {
+            State::AlreadyDone
+        },
+        detail: if removed.is_empty() {
+            "nothing left in unsupported clients".into()
+        } else {
+            format!(
+                "removed {done} semlith entr{} from clients semlith no longer supports; \
+                 each file is backed up beside itself as .semlith-backup",
+                if done == 1 { "y" } else { "ies" }
+            )
+        },
+    }
+}
+
 /// Write the user-level configuration file for every client semlith cannot ask
 /// to register itself.
 ///
@@ -958,10 +992,11 @@ fn write_client_files(clients: &[&clients::Client], yes: bool) -> Result<Vec<Pat
 /// Print one client's stanzas for a user to paste.
 ///
 /// The stdio form first, because it is what semlith would have registered and
-/// it needs no key. The HTTP form follows for a daemon on another machine, with
-/// the live key substituted — writing the placeholder would be handing someone
-/// a configuration file to go and edit, which is the thing the persisted key
-/// exists to stop.
+/// it needs no key. The HTTP form follows for a daemon on another machine,
+/// naming `${SEMLITH_AGENT_KEY}` as `docs/clients.md` promises. Until 0.33.0 it
+/// carried the live key, which an installer run printed twenty-six times into
+/// terminal scrollback and whatever the run was piped into; `semlith key show`
+/// is the one command that prints it.
 fn print_stanza(client: &clients::Client) {
     let mut body = client
         .stanzas
@@ -970,22 +1005,25 @@ fn print_stanza(client: &clients::Client) {
         .map(|stanza| stanza.text.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
-    if let Ok(key) = home::agent_key()
-        && !key.is_empty()
-    {
-        let http = crate::clients::http_stanzas(&key);
-        if !http.is_empty() {
-            body.push_str("\n\nOr over HTTP, against a running `semlith start`:\n\n");
-            body.push_str(
-                &http
-                    .iter()
-                    .map(|s| s.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
-        }
-    }
+    body.push_str(&http_suffix());
     let _ = cliclack::note(format!("{} — {}", client.name, client.note), body);
+}
+
+/// The HTTP stanzas as `print_stanza` appends them, with the placeholder in
+/// place of the key.
+fn http_suffix() -> String {
+    let http = crate::clients::http_stanzas(crate::clients::KEY_PLACEHOLDER);
+    if http.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nOr over HTTP, against a running `semlith start` (export {KEY_ENV} from \
+         `semlith key show` first):\n\n{}",
+        http.iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 /// What happened when semlith tried to register one client.
@@ -995,7 +1033,7 @@ pub enum Registration {
     /// Registered, naming whatever was replaced to get there.
     Registered { replaced: Vec<String> },
     /// The client's CLI is not on this machine. Not a failure: most people have
-    /// two or three of the twenty-seven.
+    /// two or three of the eleven.
     Absent,
     /// The CLI is here and did not accept the registration. The stanza is
     /// printed instead and the install continues.
@@ -1003,8 +1041,9 @@ pub enum Registration {
     /// The CLI registers the directory it is run in, so semlith does not run
     /// it. `--register-all` writes this client's user-level file instead.
     ProjectScoped,
-    /// No registration CLI and no documented user-level file: Crush, Zed and
-    /// Roo Code. Nothing is broken; there is nowhere to write.
+    /// No registration CLI and no documented user-level file. No supported
+    /// client is in this state; the arm stays so a documentation change that
+    /// puts one here is reported rather than miscounted.
     Unregisterable,
 }
 
@@ -1012,7 +1051,7 @@ pub enum Registration {
 ///
 /// The exit status decides and no output is parsed. That contract was written
 /// for `claude mcp add`, whose flags have changed between Claude Code versions,
-/// and it holds harder across sixteen CLIs than it did across one: semlith
+/// and it holds harder across seven CLIs than it did across one: semlith
 /// controls none of them, and a message it matched on today is a message
 /// somebody rewords next release.
 ///
@@ -1383,17 +1422,62 @@ fn step_service(wanted: bool) -> Result<Step> {
         && names_the_binary(&installed, binary.as_deref())
         && crate::service::stale_definition().is_none()
     {
+        // The definition being current says nothing about the process: an
+        // upgrade replaces the binary under a daemon that keeps serving the
+        // old one until it is restarted (F1, 0.33.0).
+        return Ok(match crate::service::restart_if_stale() {
+            Ok(Some(previous)) => Step {
+                name: "service",
+                state: State::Done,
+                detail: format!(
+                    "restarted the daemon, which was serving {previous}, onto {} ({})",
+                    env!("CARGO_PKG_VERSION"),
+                    installed.mechanism,
+                ),
+            },
+            Ok(None) => Step {
+                name: "service",
+                state: State::AlreadyDone,
+                detail: format!(
+                    "running from every login ({}) — remove with `semlith start --no-service`",
+                    installed.mechanism,
+                ),
+            },
+            Err(e) => Step {
+                name: "service",
+                state: State::Failed,
+                detail: format!("{e:#}"),
+            },
+        });
+    }
+
+    let installed = crate::service::install(binary.as_deref(), None);
+    // A reinstall while a daemon answers registers for the next login and
+    // leaves that daemon running; if it is an older one, it goes now.
+    let restarted = match &installed {
+        Ok(status) if status.installed && !status.started_now => crate::service::restart_if_stale(),
+        _ => Ok(None),
+    };
+    if let Err(e) = &restarted {
         return Ok(Step {
             name: "service",
-            state: State::AlreadyDone,
+            state: State::Failed,
+            detail: format!("{e:#}"),
+        });
+    }
+    if let (Ok(status), Ok(Some(previous))) = (&installed, &restarted) {
+        return Ok(Step {
+            name: "service",
+            state: State::Done,
             detail: format!(
-                "running from every login ({}) — remove with `semlith start --no-service`",
-                installed.mechanism,
+                "restarted the daemon, which was serving {previous}, onto {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                status.mechanism,
             ),
         });
     }
 
-    match crate::service::install(binary.as_deref(), None) {
+    match installed {
         Ok(status) if status.installed => Ok(Step {
             name: "service",
             state: State::Done,
@@ -1546,11 +1630,10 @@ pub fn recarry_key(previous: &str, fresh: &str) -> Vec<PathBuf> {
     done
 }
 
-/// Where the clients the README documents keep their configuration.
+/// Where the clients `docs/clients.md` documents keep their configuration.
 ///
 /// The user-level file for each, plus the project-level ones relative to
-/// wherever the daemon was started. It mirrors the paths in the README's
-/// client section; a path that is absent is simply skipped, so listing one
+/// wherever the daemon was started. It mirrors the paths in that document; a path that is absent is simply skipped, so listing one
 /// costs nothing and missing one costs a manual edit after a rotation.
 fn client_configs() -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -1563,24 +1646,9 @@ fn client_configs() -> Vec<PathBuf> {
             ".config/opencode/opencode.json",
             ".copilot/mcp-config.json",
             ".gemini/settings.json",
-            ".qwen/settings.json",
-            ".config/amp/settings.json",
-            ".factory/mcp.json",
-            ".config/goose/config.yaml",
-            ".aws/amazonq/mcp.json",
-            ".openclaw/openclaw.json",
-            ".codewhale/mcp.json",
-            ".deepseek/mcp.json",
-            ".warp/.mcp.json",
             ".cursor/mcp.json",
-            ".codeium/windsurf/mcp_config.json",
             ".config/zed/settings.json",
-            ".junie/mcp/mcp.json",
-            ".kiro/settings/mcp.json",
-            ".lmstudio/mcp.json",
-            ".cache/lm-studio/mcp.json",
-            ".config/kilo/kilo.jsonc",
-            ".continue/config.yaml",
+            ".cline/data/settings/cline_mcp_settings.json",
             // The editors that keep their MCP file inside a per-platform
             // application-support directory.
             "Library/Application Support/Claude/claude_desktop_config.json",
@@ -1588,10 +1656,6 @@ fn client_configs() -> Vec<PathBuf> {
             ".config/Code/User/mcp.json",
         ] {
             out.push(home_dir.join(rest));
-        }
-        // Continue keeps one file per server rather than one file.
-        if let Ok(entries) = std::fs::read_dir(home_dir.join(".continue/mcpServers")) {
-            out.extend(entries.flatten().map(|e| e.path()));
         }
     }
     if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
@@ -1604,14 +1668,7 @@ fn client_configs() -> Vec<PathBuf> {
             ".mcp.json",
             ".vscode/mcp.json",
             ".cursor/mcp.json",
-            ".roo/mcp.json",
-            ".kilocode/mcp.json",
-            ".kiro/settings/mcp.json",
-            ".junie/mcp/mcp.json",
-            ".factory/mcp.json",
-            ".amazonq/mcp.json",
             "opencode.json",
-            "crush.json",
             "io.local.toml",
         ] {
             out.push(here.join(rest));
@@ -1623,6 +1680,14 @@ fn client_configs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod rotation_tests {
     use super::*;
+
+    /// F2: a printed stanza names the variable, never the key.
+    #[test]
+    fn a_printed_stanza_carries_the_placeholder_and_no_key() {
+        let text = http_suffix();
+        assert!(text.contains("${SEMLITH_AGENT_KEY}"), "{text}");
+        assert!(!text.contains("sml_"), "{text}");
+    }
 
     /// The whole point: a file that carries the old key is rewritten, and a
     /// file that does not is not touched at all.

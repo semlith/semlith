@@ -22,33 +22,17 @@ const CLIENTS_DOC: &str = include_str!("../docs/clients.md");
 const SECTION: &str = "### Setting it up in your client";
 
 /// Every client the release promises a stanza for.
-const CLIENTS: [&str; 27] = [
+const CLIENTS: [&str; 11] = [
     "Claude Code",
     "OpenAI Codex",
     "OpenCode",
     "IO CLI",
     "GitHub Copilot CLI",
     "Gemini CLI",
-    "Qwen Code",
-    "Amp",
-    "Crush",
-    "Droid",
-    "Goose",
-    "Amazon Q Developer CLI",
-    "OpenClaw",
-    "DeepSeek",
-    "Warp",
     "GitHub Copilot in VS Code",
     "Cursor",
-    "Windsurf",
     "Zed",
-    "JetBrains",
     "Cline",
-    "Roo Code",
-    "Kilo Code",
-    "Continue",
-    "Kiro",
-    "LM Studio",
     "Claude Desktop",
 ];
 

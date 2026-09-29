@@ -2267,37 +2267,32 @@ pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let prev: String = db
-        .query_row(
-            "SELECT hash FROM retrievals ORDER BY id DESC LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or_default();
-    let hash = chain_hash(&prev, at, row);
-    db.execute(
-        "INSERT INTO retrievals
-         (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
-          session, tool, stale_hits, tokenizer, query_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-        params![
-            at,
-            client,
-            query,
-            hits,
-            micros,
-            excerpt_tokens,
-            whole_file_tokens,
-            prev,
-            hash,
-            row.session,
-            row.tool,
-            row.stale_hits,
-            row.tokenizer,
-            row.query_id
-        ],
-    )?;
+    append_chained(db, |prev| {
+        let hash = chain_hash(prev, at, row);
+        db.execute(
+            "INSERT INTO retrievals
+             (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
+              session, tool, stale_hits, tokenizer, query_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                at,
+                client,
+                query,
+                hits,
+                micros,
+                excerpt_tokens,
+                whole_file_tokens,
+                prev,
+                hash,
+                row.session,
+                row.tool,
+                row.stale_hits,
+                row.tokenizer,
+                row.query_id
+            ],
+        )?;
+        Ok(())
+    })?;
     // The one place a retrieval is written, so the one place the portal's
     // ledger counter moves — every surface that records goes through here.
     crate::daemon::changes::bump(crate::daemon::changes::Domain::Ledger);
@@ -2402,6 +2397,61 @@ pub fn record_legacy_retrieval(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    let (hits, micros) = (1, 1000);
+    append_chained(db, |prev| {
+        let hash = legacy_chain_hash(
+            prev,
+            at,
+            client,
+            query,
+            hits,
+            micros,
+            excerpt_tokens,
+            whole_file_tokens,
+        );
+        // The four 0.15.0 columns are left NULL, which is what makes this a row
+        // of the older kind and what `ledger_break` reads to choose the formula.
+        db.execute(
+            "INSERT INTO retrievals
+             (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                at,
+                client,
+                query,
+                hits,
+                micros,
+                excerpt_tokens,
+                whole_file_tokens,
+                prev,
+                hash
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// Read the chain's last hash and append the row chained to it, as one write.
+///
+/// Two statements on their own were a race. Two connections to one store —
+/// the daemon and a `semlith search` from a terminal, or the portal's fleet
+/// beside the daemon's `/mcp` fleet — could each read the same last hash and
+/// each insert a row chained to it, and `ledger_break` then reported the second
+/// as edited or removed though nothing was. `BEGIN IMMEDIATE` takes the write
+/// lock before the read, so the second writer waits out the busy timeout for
+/// the first and reads its row.
+///
+/// A caller already inside a transaction keeps it rather than being refused a
+/// nested one; its write lock is taken at the insert, as it always was.
+fn append_chained(db: &Connection, append: impl FnOnce(&str) -> Result<()>) -> Result<()> {
+    let tx = if db.is_autocommit() {
+        Some(rusqlite::Transaction::new_unchecked(
+            db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
+    } else {
+        None
+    };
     let prev: String = db
         .query_row(
             "SELECT hash FROM retrievals ORDER BY id DESC LIMIT 1",
@@ -2410,35 +2460,10 @@ pub fn record_legacy_retrieval(
         )
         .optional()?
         .unwrap_or_default();
-    let (hits, micros) = (1, 1000);
-    let hash = legacy_chain_hash(
-        &prev,
-        at,
-        client,
-        query,
-        hits,
-        micros,
-        excerpt_tokens,
-        whole_file_tokens,
-    );
-    // The four 0.15.0 columns are left NULL, which is what makes this a row of
-    // the older kind and what `ledger_break` reads to choose the formula.
-    db.execute(
-        "INSERT INTO retrievals
-         (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![
-            at,
-            client,
-            query,
-            hits,
-            micros,
-            excerpt_tokens,
-            whole_file_tokens,
-            prev,
-            hash
-        ],
-    )?;
+    append(&prev)?;
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
     Ok(())
 }
 
@@ -4594,5 +4619,55 @@ mod tests {
         );
         assert!(rows.iter().any(|r| r.query == "an ordinary question"));
         assert_eq!(ledger_break(&db).unwrap(), None);
+    }
+
+    /// Two connections to one store recording at once leave one chain.
+    ///
+    /// The daemon and a CLI search are two such writers. Before 0.33.0 each read
+    /// the last hash and then inserted, so a writer that read while the other
+    /// held an uncommitted row chained to the row before it, and the ledger
+    /// reported the second row as edited though nothing had been.
+    #[test]
+    fn two_connections_recording_at_once_leave_a_chain_that_verifies() {
+        fn row(query: &str) -> NewRetrieval<'_> {
+            NewRetrieval {
+                client: "cli",
+                session: "s",
+                tool: "search",
+                query,
+                hits: 1,
+                micros: 1,
+                excerpt_tokens: 1,
+                whole_file_tokens: 1,
+                stale_hits: 0,
+                tokenizer: "chars4",
+                query_id: "",
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db");
+        let first = open(&path).unwrap();
+        let second = open(&path).unwrap();
+
+        // `first` is mid-write: its row is in, not yet committed.
+        read_only(&first, false).unwrap();
+        first.execute_batch("BEGIN IMMEDIATE").unwrap();
+        record_retrieval(&first, &row("first")).unwrap();
+
+        // `second` records meanwhile, and has to end up chained to that row.
+        let waiting = std::thread::spawn(move || record_retrieval(&second, &row("second")));
+        // Long enough for the unguarded read to have happened; the guarded one
+        // is waiting on the lock and is unaffected by how long this is.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        read_only(&first, false).unwrap();
+        first.execute_batch("COMMIT").unwrap();
+        waiting.join().unwrap().unwrap();
+
+        assert_eq!(retrievals(&first, 10).unwrap().len(), 2);
+        assert_eq!(
+            ledger_break(&first).unwrap(),
+            None,
+            "two writers forked the chain"
+        );
     }
 }

@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Eleven clients, each tested every release
+
+**`semlith setup` supports eleven clients:** Claude Code, OpenAI Codex,
+OpenCode, IO CLI, GitHub Copilot CLI, GitHub Copilot in VS Code, Gemini CLI,
+Claude Desktop, Zed, Cline and Cursor (Cursor's connection is tested, its tool
+calls are not). Sixteen clients are no longer supported, because one maintainer
+cannot verify twenty-seven vendors each release and three of them had been
+renamed or shut down unnoticed: Kiro, Qwen Code, Amp, Crush, Droid, Goose,
+Amazon Q Developer CLI, OpenClaw, DeepSeek-TUI / Codewhale, Warp, Windsurf /
+Devin Desktop, JetBrains Junie, Roo Code, Kilo Code, Continue and LM Studio.
+
+**Upgrading cleans up after them, once.** The first `semlith setup` on 0.33.0
+removes from those clients only what semlith wrote there — the `semlith` server
+entry (when it launches or points at semlith), the rule block between semlith's
+markers, and a skill link into semlith's own skill directory — keeps every other
+byte of each file, backs each edited file up beside itself as
+`<name>.semlith-backup`, and lists every removal. A second run removes nothing.
+To keep using semlith in one of them, add it back by hand from that client's own
+MCP documentation: the command is the absolute path of `semlith` with the one
+argument `mcp`.
+
+**Zed and Cline are registered by setup.** `semlith setup --register-all` writes
+Zed's `~/.config/zed/settings.json` (`context_servers`) and Cline's
+`~/.cline/data/settings/cline_mcp_settings.json` (honouring `CLINE_DIR`). A Zed
+settings file with comments or trailing commas is left untouched and its stanza
+printed with the reason.
+
+**Nothing is created for a client that is not installed.** A skill link, a rules
+file or a configuration file is written only where that client's own directory
+already exists.
+
+### Fixed
+
+- **Copilot in VS Code refused every chat with semlith enabled** ("tool
+  parameters array type must have items"). Every array parameter in the tool
+  schemas now says it holds strings, and a test walks every tool's schema.
+- **An upgrade left every client on the old daemon.** `semlith setup` and
+  `semlith upgrade` now restart the login service when the running daemon serves
+  another version (`launchctl kickstart -k`, `systemctl --user restart`, or the
+  logon task ended and run again), and `semlith doctor` fails, naming the fix,
+  while they differ.
+- **`semlith doctor` reported the wrong start time for the daemon.** It read the
+  discovery file's modification time, which every store open and key rotation
+  moves; `daemon.json` now records when the daemon started.
+- **Setup printed the agent key.** Printed stanzas name `${SEMLITH_AGENT_KEY}`;
+  `semlith key show` is the one command that prints the key.
+- **The access report filed every proxied session under one store with zero
+  hits.** A reply is recorded against each store that answered it, with that
+  store's hits.
+- **The ledger chain could fork** when the daemon and a terminal search recorded
+  at the same moment; reading the chain's tail and appending to it is now one
+  transaction.
+- **The stdio proxy's start line** names the daemon it forwards to, and no longer
+  names an arbitrary store.
+- **`semlith doctor` explains Gemini CLI's folder trust**, which disables
+  user-level MCP servers in folders not in `~/.gemini/trustedFolders.json`.
+- **Stopping the daemon mid-index printed an ONNX Runtime error** (#163). Writers
+  for stores opened after startup are now joined at shutdown.
+- A test of the Neural Engine compile countdown no longer fails on a slow runner
+  (#166).
+
 ## [0.32.0] - 2026-09-29
 
 ### Indexing, several times faster on the machine you already have

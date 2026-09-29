@@ -1014,11 +1014,26 @@ fn run() -> Result<()> {
             // opens, and not from the portal, which reads `clients_report` on
             // every page load. This one starts a server and asks a client.
             let proof = (!brief).then(semlith::doctor::proof);
+            // F1: after an upgrade every client proxies to whatever daemon is
+            // running, and nothing restarted it. A version other than this
+            // binary's is a fault, with the command that fixes it.
+            let running = semlith::service::running_version();
+            let stale = semlith::service::is_stale(running.as_deref()).then(|| {
+                format!(
+                    "the running daemon serves {}, this binary is {} — run `semlith setup` to restart it",
+                    running.as_deref().unwrap_or_default(),
+                    env!("CARGO_PKG_VERSION")
+                )
+            });
 
             if brief {
                 print_brief(&report, &rules);
+                if let Some(stale) = &stale {
+                    println!("semlith: {stale}");
+                }
                 let faults = report.iter().filter(|c| c.fault).count()
-                    + rules.iter().filter(|r| !r.ok).count();
+                    + rules.iter().filter(|r| !r.ok).count()
+                    + usize::from(stale.is_some());
                 if faults > 0 {
                     std::process::exit(1);
                 }
@@ -1030,6 +1045,12 @@ fn run() -> Result<()> {
                     "clients": report,
                     "rules": rules,
                     "service": semlith::service::status(),
+                    "daemon": {
+                        "version": running,
+                        "binary": env!("CARGO_PKG_VERSION"),
+                        "started": semlith::service::last_started(),
+                        "stale": stale,
+                    },
                     "proof": proof,
                     "applied": applied
                         .iter()
@@ -1045,13 +1066,24 @@ fn run() -> Result<()> {
                 if let Some(proof) = &proof {
                     print_proof(proof);
                 }
+                match (&stale, &running) {
+                    (Some(stale), _) => {
+                        println!("  {:<4} {:<20} {stale}", "FAIL", "daemon version")
+                    }
+                    (None, Some(v)) => println!(
+                        "  {:<4} {:<20} {v}, the same as this binary",
+                        "ok  ", "daemon version"
+                    ),
+                    (None, None) => {}
+                }
             }
 
             // Non-zero when something on this machine is not as it should be,
             // so a script can gate on it. A client that is simply not installed
-            // is not a fault: most people have two or three of twenty-seven.
+            // is not a fault: most people have two or three of the eleven.
             let faults = report.iter().filter(|c| c.fault).count()
                 + rules.iter().filter(|r| !r.ok).count()
+                + usize::from(stale.is_some())
                 + usize::from(proof.as_ref().is_some_and(|p| p.failed.is_some()));
             if faults > 0 {
                 std::process::exit(1);
@@ -2942,6 +2974,15 @@ fn run() -> Result<()> {
             if service {
                 let installed = semlith::service::install(None, port)?;
                 print_service(&installed);
+                // `semlith upgrade` re-registers through here with the new
+                // binary, so this is also where an upgrade's clients are moved
+                // off the old daemon.
+                if let Some(previous) = semlith::service::restart_if_stale()? {
+                    println!(
+                        "semlith: restarted the daemon, which was serving {previous}, onto {}",
+                        env!("CARGO_PKG_VERSION")
+                    );
+                }
                 return Ok(());
             }
             arm_airgap(airgap);
@@ -3170,11 +3211,13 @@ fn run() -> Result<()> {
             // open. Forwarding removes that: the daemon answers, and it is the
             // one process allowed to write.
             if let Some(upstream) = semlith::proxy::find(&semlith::proxy::candidates(&dirs)) {
+                // Which daemon, and nothing else. It used to add "(found via
+                // <store>)", which named whichever registered store happened to
+                // be read first and made that store look special (F8).
                 eprintln!(
-                    "semlith {}: forwarding to the daemon on 127.0.0.1:{} (found via {})",
+                    "semlith {}: forwarding MCP to the semlith daemon at http://127.0.0.1:{}",
                     env!("CARGO_PKG_VERSION"),
                     upstream.port,
-                    upstream.via.display(),
                 );
                 return semlith::proxy::serve(
                     &upstream,
@@ -4172,7 +4215,7 @@ fn print_doctor(
     println!("{}Clients{}", bold(), reset());
     for client in clients {
         // "Not installed" is only an answer for a client that has a CLI to be
-        // installed. For the ten that semlith reaches by writing a file, the
+        // installed. For a client semlith reaches by writing a file, the
         // CLI is not the question and saying it is absent would be reporting a
         // fault that is not one.
         let state = match (client.registered, &client.note, &client.command) {
@@ -4223,6 +4266,13 @@ fn print_doctor(
         }
         if let Some(repair) = &client.repair {
             println!("      run: {repair}");
+        }
+        if client.name == "Gemini CLI"
+            && client.registered
+            && let Some(note) =
+                semlith::doctor::gemini_trust_note(&std::env::current_dir().unwrap_or_default())
+        {
+            println!("      {note}");
         }
     }
 

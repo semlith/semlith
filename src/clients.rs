@@ -25,7 +25,7 @@ const HTTP_SECTION: &str = "### Connecting over HTTP";
 /// names it keeps working across every rotation, and one that carries the key
 /// itself goes stale the moment somebody rotates. The portal substitutes the
 /// literal value into this only when the reader has pressed Reveal.
-const KEY_PLACEHOLDER: &str = "${SEMLITH_AGENT_KEY}";
+pub const KEY_PLACEHOLDER: &str = "${SEMLITH_AGENT_KEY}";
 
 /// What a stanza names where the semlith binary goes.
 ///
@@ -91,6 +91,10 @@ pub struct Stanza {
     /// From `os=` in the info string, when a client's file is somewhere else on
     /// another platform. `None` means the path is the same everywhere.
     pub os: Option<String>,
+    /// From `root=` in the info string: an environment variable that, when set,
+    /// replaces the path's first directory under `~` — Cline's `CLINE_DIR`
+    /// moves `~/.cline` and everything in it.
+    pub root: Option<String>,
     /// From a bare `hook` on a fence: the `PreToolUse` block `semlith setup`
     /// merges into this client's settings, and `semlith setup --no-hooks`
     /// removes again. Its `path=` is the settings file.
@@ -106,9 +110,9 @@ pub struct Stanza {
     /// From `scope=` on a `register` fence: what that command actually
     /// registers.
     ///
-    /// `global` unless the fence says otherwise, and two clients say otherwise.
-    /// `opencode mcp add` on 1.18.11 and `kilo mcp add` have no global flag, so
-    /// running them registers semlith for the directory the user happened to be
+    /// `global` unless the fence says otherwise, and one client says otherwise.
+    /// `opencode mcp add` on 1.18.11 has no global flag, so running it
+    /// registers semlith for the directory the user happened to be
     /// standing in — which is the defect this release exists to end. semlith
     /// does not run a `scope=project` command; those clients reach every
     /// project through their user-level file instead.
@@ -137,13 +141,14 @@ fn info(line: &str) -> Info {
     let mut format = String::new();
     let (mut register, mut unregister) = (false, false);
     let (mut hook, mut skills, mut rules) = (false, false, false);
-    let (mut path, mut os, mut scope) = (None, None, Scope::Global);
+    let (mut path, mut os, mut root, mut scope) = (None, None, None, Scope::Global);
     // Hand-split rather than `split_whitespace`, because one path has a space
     // in it — Claude Desktop's on macOS — and a quoted value has to survive.
     for word in split_attributes(line) {
         match word.split_once('=') {
             Some(("path", value)) => path = Some(unquote(value).to_string()),
             Some(("os", value)) => os = Some(unquote(value).to_string()),
+            Some(("root", value)) => root = Some(unquote(value).to_string()),
             Some(("scope", "project")) => scope = Scope::Project,
             Some(("scope", _)) => scope = Scope::Global,
             _ if word == "register" => register = true,
@@ -164,6 +169,7 @@ fn info(line: &str) -> Info {
         rules,
         path,
         os,
+        root,
         scope,
     }
 }
@@ -178,6 +184,7 @@ struct Info {
     rules: bool,
     path: Option<String>,
     os: Option<String>,
+    root: Option<String>,
     scope: Scope,
 }
 
@@ -314,18 +321,6 @@ impl Client {
     }
 }
 
-/// The clients `docs/clients.md` documents no way for semlith to register.
-///
-/// Not an omission and not a to-do. Crush and Roo Code document only a
-/// project-level file, and registering semlith into one repository's committed
-/// configuration is the defect this release exists to end rather than a smaller
-/// version of the fix. Zed's own instruction is to open its settings through a
-/// command palette entry, and no vendor documentation gives the path that
-/// opens. `semlith doctor` names these three and prints their stanza rather
-/// than reporting them as failures, because nothing is broken: there is
-/// nowhere to write.
-pub const UNREGISTERABLE: [&str; 3] = ["Crush", "Zed", "Roo Code"];
-
 /// The HTTP stanzas, with `key` substituted for `docs/clients.md`'s placeholder.
 ///
 /// One template for every client rather than one per client: the endpoint and
@@ -437,6 +432,7 @@ fn stanza(info: Info, text: &str) -> Stanza {
         rules: info.rules,
         path: info.path,
         os: info.os,
+        root: info.root,
         scope: info.scope,
     }
 }
@@ -557,7 +553,7 @@ mod tests {
     fn every_documented_client_is_parsed_with_at_least_one_stanza() {
         let parsed = clients();
         assert!(
-            parsed.len() >= 27,
+            parsed.len() == 11,
             "only {} clients parsed out of the CLIENTS_DOC",
             parsed.len()
         );
@@ -638,32 +634,28 @@ mod tests {
         }
     }
 
-    /// Sixteen of the twenty-seven clients have a registration CLI, and those
-    /// sixteen are exactly the set `semlith setup` registers without being
-    /// asked. The number is asserted rather than counted at runtime because a
+    /// Seven of the eleven clients have a registration CLI; six of them register
+    /// every project, and those six are exactly the set `semlith setup`
+    /// registers without being asked. The number is asserted rather than counted at runtime because a
     /// client silently losing its `sh register` fence is a client that goes
     /// back to being a stanza somebody pastes, which is the defect 0.18.0
     /// exists to end and which nothing else here would notice.
     #[test]
-    fn sixteen_clients_carry_a_registration_command() {
+    fn seven_clients_carry_a_registration_command() {
         let with: Vec<&str> = clients()
             .iter()
             .filter(|client| client.register_command().is_some())
             .map(|client| client.name.as_str())
             .collect();
-        assert_eq!(with.len(), 16, "registration commands found: {with:?}");
+        assert_eq!(with.len(), 7, "registration commands found: {with:?}");
     }
 
-    /// Every documented client is reachable, and the three that are not are
-    /// named rather than left to be discovered.
-    ///
-    /// A client is reachable when semlith can register it for every project:
-    /// by its own CLI, or by writing its user-level configuration file under
-    /// `--register-all`. The three in `UNREGISTERABLE` are neither, for the
-    /// reasons recorded there. A fourth appearing here means a client lost its
-    /// route in without anyone deciding that it should.
+    /// Every documented client is reachable: semlith can register it for every
+    /// project, by its own CLI or by writing its user-level configuration file
+    /// under `--register-all`. One appearing here lost its route in without
+    /// anyone deciding that it should.
     #[test]
-    fn every_client_is_reachable_or_is_one_of_the_three_that_are_not() {
+    fn every_client_is_reachable() {
         let mut unreachable = Vec::new();
         let mut by_file = Vec::new();
         for client in clients() {
@@ -676,18 +668,17 @@ mod tests {
             }
             unreachable.push(client.name.as_str());
         }
-        assert_eq!(
-            unreachable,
-            UNREGISTERABLE.to_vec(),
-            "the set semlith cannot register has changed; by file: {by_file:?}"
+        assert!(
+            unreachable.is_empty(),
+            "semlith cannot register {unreachable:?}; by file: {by_file:?}"
         );
     }
 
-    /// Two clients register the directory they are run in, and semlith does not
-    /// run those. Asserted by name: if a third joins them, or one of these two
-    /// gains a global flag, that is a release decision rather than an edit.
+    /// One client registers the directory it is run in, and semlith does not
+    /// run that. Asserted by name: if another joins it, or it gains a global
+    /// flag, that is a release decision rather than an edit.
     #[test]
-    fn the_project_scoped_registrations_are_the_two_that_are_known_to_be() {
+    fn the_project_scoped_registration_is_the_one_known_to_be() {
         let project: Vec<&str> = clients()
             .iter()
             .filter(|client| {
@@ -698,7 +689,7 @@ mod tests {
             })
             .map(|client| client.name.as_str())
             .collect();
-        assert_eq!(project, vec!["OpenCode", "Kilo Code"]);
+        assert_eq!(project, vec!["OpenCode"]);
         for name in &project {
             let client = clients()
                 .iter()
@@ -813,8 +804,8 @@ mod tests {
     /// document or a machine whose home has a space in it — `C:/Users/Ada
     /// Lovelace/…`, and every Windows machine with a full name on it — would
     /// register a program called `C:/Users/Ada` and an argument called
-    /// `Lovelace/…`. Word-containment rather than equality because one client,
-    /// Droid, takes the whole command line as a single quoted argument.
+    /// `Lovelace/…`. Word-containment rather than equality, so a client that
+    /// takes the whole command line as one quoted argument still passes.
     #[test]
     fn every_registration_hands_the_client_the_resolved_path_whole() {
         for client in clients() {

@@ -144,8 +144,8 @@ fn mode_of(path: &Path) -> u32 {
 
 /// A machine with nothing installed is not a machine with something wrong.
 ///
-/// Most people have two or three of the twenty-seven clients. A report that
-/// called the other twenty-four faults would be a report nobody reads twice,
+/// Most people have two or three of the eleven clients. A report that
+/// called the other eight faults would be a report nobody reads twice,
 /// and an exit code that went non-zero for them would be useless in a script.
 #[test]
 fn a_machine_with_no_client_installed_reports_no_fault_and_exits_zero() {
@@ -164,29 +164,17 @@ fn a_machine_with_no_client_installed_reports_no_fault_and_exits_zero() {
     );
 }
 
-/// The three clients semlith cannot register are named with the reason, and
-/// carry no repair — there is nothing to run.
+/// Every documented client is in the report, and none of them is one semlith
+/// has no way to register, so none carries a paste-it-yourself note.
 #[test]
-fn the_clients_semlith_cannot_register_are_named_rather_than_left_as_a_gap() {
+fn every_client_is_reported_and_none_is_left_without_a_route_in() {
     let machine = Machine::new();
     let run = machine.doctor(&["--json"]);
     let report: serde_json::Value = serde_json::from_slice(&run.stdout).expect("--json emits JSON");
     let clients = report["clients"].as_array().expect("clients");
-    assert_eq!(clients.len(), 27, "every documented client is reported");
-
-    for name in ["Crush", "Zed", "Roo Code"] {
-        let client = clients
-            .iter()
-            .find(|c| c["name"] == name)
-            .unwrap_or_else(|| panic!("{name} is not in the report"));
-        assert!(
-            client["note"].is_string(),
-            "{name} carries no reason it cannot be registered"
-        );
-        assert!(
-            client["repair"].is_null(),
-            "{name} was given a repair it cannot act on"
-        );
+    assert_eq!(clients.len(), 11, "every documented client is reported");
+    for client in clients {
+        assert!(client["note"].is_null(), "{client}");
     }
 }
 

@@ -15,23 +15,18 @@
 //!
 //! Reading needs none of that and is always allowed. `semlith doctor` and the
 //! portal's setup status both ask these files whether a client has semlith
-//! registered and at what scope, because asking sixteen client CLIs instead
-//! would be sixteen processes on a route the portal calls on every load.
+//! registered and at what scope, because asking every client's CLI instead
+//! would be a process per client on a route the portal calls on every load.
 //!
 //! ## Formats
 //!
-//! Nineteen of the twenty-one documented paths are JSON, and `serde_json` is
-//! already in the tree, so those are merged properly: parsed, the semlith entry
-//! set, re-serialized, every sibling key intact.
-//!
-//! The two that are not are YAML — Goose's `config.yaml` and Continue's
-//! per-server `semlith.yaml` — and semlith adds no YAML dependency for them.
-//! Continue needs none: its path is one file per server, so there is nothing to
-//! merge into and the file is written whole. Goose's is a shared file, so
-//! semlith writes it only when it does not exist yet; where one is already
-//! there, the block and the path are printed and the file is not touched. A
-//! hand-rolled YAML rewriter is exactly the thing that eventually corrupts
-//! somebody's configuration, and this release is not the place to find that out.
+//! Every documented path is JSON, and `serde_json` is already in the tree, so
+//! each is merged properly: parsed, the semlith entry set, re-serialized, every
+//! sibling key intact. A file that strict JSON cannot parse — Zed allows
+//! comments and trailing commas — is refused and left exactly as it was, and
+//! its stanza is printed instead. The YAML arm below writes a new file whole
+//! and never rewrites an existing one: a hand-rolled YAML rewriter is exactly
+//! the thing that eventually corrupts somebody's configuration.
 
 use crate::clients::{Client, Stanza};
 use crate::home;
@@ -93,6 +88,9 @@ pub fn plan(clients: &[&Client]) -> Vec<Plan> {
             let Some(path) = resolve(stanza) else {
                 continue;
             };
+            if !client_present(&path) {
+                continue;
+            }
             let action = decide(stanza, &path);
             out.push(Plan {
                 client: client.name.clone(),
@@ -179,6 +177,16 @@ pub fn resolve(stanza: &Stanza) -> Option<PathBuf> {
         _ => {}
     }
     if let Some(rest) = raw.strip_prefix("~/") {
+        // A client whose whole directory an environment variable moves.
+        if let Some(moved) = stanza
+            .root
+            .as_deref()
+            .and_then(std::env::var_os)
+            .filter(|v| !v.is_empty())
+            && let Some((_, below)) = rest.split_once('/')
+        {
+            return Some(PathBuf::from(moved).join(below));
+        }
         return home::user_home().ok().map(|home| home.join(rest));
     }
     if let Some(rest) = raw.strip_prefix("%APPDATA%\\") {
@@ -188,6 +196,39 @@ pub fn resolve(stanza: &Stanza) -> Option<PathBuf> {
         return std::env::var_os("APPDATA").map(|base| PathBuf::from(base).join(rest));
     }
     Some(PathBuf::from(raw))
+}
+
+/// The directory a client makes for itself, above a file of its own: `~/.x`,
+/// `~/.config/x`, `~/Documents/x`, `~/Library/Application Support/x`, or
+/// `AppData\Roaming\x`. `None` for a path outside the home.
+pub fn client_home(path: &Path) -> Option<PathBuf> {
+    let home = home::user_home().ok()?;
+    let rest = path.strip_prefix(&home).ok()?;
+    let parts: Vec<_> = rest.components().collect();
+    let depth = match parts.first()?.as_os_str().to_str()? {
+        ".config" | "Documents" => 2,
+        "Library" | "AppData" => 3,
+        _ => 1,
+    };
+    // The file itself is never its own client's home.
+    if parts.len() <= depth {
+        return None;
+    }
+    Some(parts[..depth].iter().fold(home, |at, part| at.join(part)))
+}
+
+/// Whether the client that owns `path` is on this machine: its own directory
+/// exists. Setup writes nothing, and links nothing, for a client that is not —
+/// a skill link used to create a client's directory on a machine that never
+/// had the client.
+///
+/// A path outside the home — one a `root=` variable moved — counts its own
+/// directory, since the variable names where the client lives.
+pub fn client_present(path: &Path) -> bool {
+    match client_home(path) {
+        Some(dir) => dir.is_dir(),
+        None => path.parent().is_some_and(Path::is_dir),
+    }
 }
 
 /// What would happen to this file, without touching it.
@@ -283,8 +324,8 @@ pub fn back_up(path: &Path) -> Result<()> {
 /// `existing` with the documented stanza's keys set into it.
 ///
 /// A recursive merge of objects rather than a replace: the stanza names the
-/// path to the semlith entry — `mcpServers.semlith`, `mcp.servers.semlith`,
-/// `amp.mcpServers.semlith` — and everything alongside it at every level is
+/// path to the semlith entry — `mcpServers.semlith`, `mcp.semlith`,
+/// `context_servers.semlith` — and everything alongside it at every level is
 /// kept. That is what makes the write idempotent and what keeps somebody's
 /// other twelve servers.
 fn merged_json(stanza: &Stanza, existing: &str) -> Result<String> {
@@ -344,6 +385,7 @@ mod tests {
             rules: false,
             path: Some(path.to_string()),
             os: None,
+            root: None,
             scope: Scope::Global,
         }
     }

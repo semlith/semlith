@@ -720,7 +720,7 @@ This is a contract for exactly one kind of reader: a packager or a fork that
 patched the README's client section moves that patch to the new file. The
 stanzas themselves are unchanged — the same bytes, at the same heading levels,
 because `src/clients.rs` parses those headings — and `GET /api/agents` returns
-the same twenty-seven clients in the same three groups. `src/clients.rs`'s
+the same clients in the same three groups. `src/clients.rs`'s
 `include_str!` names the new path, so the file is part of the published crate;
 a build that excluded it would not compile.
 
@@ -764,18 +764,16 @@ withdrawn: a daemon on another machine still needs a header, `docs/clients.md`
 still documents the HTTP stanzas, and a user who pastes one exports the variable
 themselves. What changed is that nothing semlith writes depends on it.
 
-**An existing semlith registration is replaced, not added beside.** For the ten
-clients that document a remove verb, `semlith setup` runs it before the add, at
+**An existing semlith registration is replaced, not added beside.** For every
+client that documents a remove verb, `semlith setup` runs it before the add, at
 every scope that client has. Claude Code's `local` scope is included
 deliberately: an entry under `projects."…".mcpServers` in `~/.claude.json` is
 what made semlith invisible from every directory but one, and it is removed.
 
-**Two clients are no longer registered by their own CLI.** `opencode mcp add`
-on 1.18.11 and `kilo mcp add` have no flag that means every project, so running
-them would register the directory the user was standing in. They are registered
-by writing their user-level configuration file under `--register-all` instead.
-Three others — Crush, Zed and Roo Code — document no user-level path at all and
-semlith registers them nowhere; `semlith doctor` names all three with the reason.
+**OpenCode is registered by its file, not its CLI.** `opencode mcp add` on
+1.18.11 has no flag that means every project, so running it would register the
+directory the user was standing in. It is registered by writing its user-level
+configuration file under `--register-all` instead.
 
 **`semlith doctor` is added**, with `--json` and `--fix`. It reports, per client,
 whether it is installed, whether semlith is registered, at what scope, and what
@@ -793,8 +791,8 @@ is in the environment the daemon inherited.
 **`GET /api/setup`'s `claude_registered` is replaced by `registered_clients`.**
 The old field was a tri-state about one client, answered by spawning
 `claude mcp list`. The new one is a list of the clients whose own configuration
-file names semlith, read from disk, because asking sixteen client CLIs on a route
-the portal calls on every load is sixteen processes per page load.
+file names semlith, read from disk, because asking every client's CLI on a route
+the portal calls on every load is a process per client per page load.
 
 **An index is now a function of its corpus.** Indexing one corpus twice used to
 produce two different sets of vectors, because the checkpoint that makes a run
@@ -1344,6 +1342,21 @@ What each lane claims is exactly what has been measured, and nothing else.
 | TensorRT for RTX (experimental) | — | yes | yes | built and checked without hardware |
 | OpenVINO (experimental) | — | yes, Intel hardware | yes, Intel hardware | built and checked without hardware; known answer on its CPU device in CI on an Intel runner. Intel's plugin offers Intel devices only: on an AMD CPU with no Intel GPU the lane says so and the run goes on without it |
 | llama.cpp (experimental) | Metal | Vulkan | Vulkan | M1 Metal known answer at cosine 0.9999995; not measured for throughput in this release |
+
+## 0.33.0
+
+**The agent clients are these eleven**, in the same three groups: Claude Code,
+OpenAI Codex, OpenCode, IO CLI, GitHub Copilot CLI and Gemini CLI under
+Terminal; GitHub Copilot in VS Code, Cursor, Zed and Cline under Editors; Claude
+Desktop under Desktop apps. `GET /api/agents`, `semlith doctor` and its `--json`
+report exactly these, and every one of them has a way in: its own registration
+CLI, or a user-level file `semlith setup --register-all` writes.
+
+**Zed and Cline are registered by their user-level file.** `--register-all`
+writes `~/.config/zed/settings.json` and
+`~/.cline/data/settings/cline_mcp_settings.json`, the latter under `CLINE_DIR`
+when that is set. A Zed settings file carrying comments or trailing commas is
+left untouched, and the stanza is printed with the reason.
 
 ## What a break would look like
 

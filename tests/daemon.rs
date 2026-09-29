@@ -1167,7 +1167,7 @@ fn the_agents_route_serves_the_documented_stanzas_verbatim() {
     let agents = daemon.get("/api/agents").json();
 
     let clients = agents["clients"].as_array().expect("clients");
-    assert!(clients.len() >= 12, "only {} clients", clients.len());
+    assert_eq!(clients.len(), 11, "{} clients", clients.len());
     assert_eq!(clients[0]["name"], "Claude Code");
 
     // The registration, found by its role rather than by its position: the

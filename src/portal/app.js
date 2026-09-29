@@ -9939,7 +9939,7 @@ async function doctorView() {
   });
 
   // What the table is a list of, said once above it rather than counted off
-  // the rows by the reader — the page is twenty-seven rows and two of them
+  // the rows by the reader — the page is eleven rows and two of them
   // matter.
   const rows = data.clients || [];
   const registered = rows.filter((c) => c.registered).length;
@@ -9954,7 +9954,7 @@ async function doctorView() {
     ),
     /* The rules first, then the table.
      *
-     * The clients table is twenty-seven rows and pages ten at a time, so the
+     * The clients table is eleven rows and pages ten at a time, so the
      * rules underneath it were below a screenful of table on every visit —
      * and they are the part that answers "is this machine set up correctly",
      * which is the question the page is for. The table is the detail.
@@ -10283,11 +10283,11 @@ async function agentsView() {
       ),
       // A client with no HTTP stanza of its own gets the generic one, which is
       // the shape most schemas take. A client with one gets its own: `httpUrl`
-      // for Gemini, `serverUrl` for Windsurf, TOML for Codex — a generic block
+      // for Gemini, `streamableHttp` for Cline, TOML for Codex — a generic block
       // beside those is a second, wrong answer.
       // One configuration block, not two. A client that can reach the
-      // endpoint is shown the endpoint; one that cannot — Zed, Claude Desktop,
-      // Amazon Q, which have nowhere to put a header — is shown the subprocess
+      // endpoint is shown the endpoint; one that cannot — Zed and Claude
+      // Desktop, which have nowhere to put a header — is shown the subprocess
       // it can run. Printing both left a reader choosing between two answers
       // with nothing to choose on.
       el("span", {
@@ -10418,7 +10418,7 @@ async function agentsView() {
     // Inline code as code, not as a pair of backtick characters. Every other
     // code reference on this page is styled; this one was printed verbatim.
     says(
-      "Ten of the twenty-seven cannot be asked to register themselves, so semlith would write their configuration file. Every path is listed before anything is written, each file is backed up beside itself, and one that does not parse is left alone. This is the terminal's ",
+      "Five of the eleven cannot be asked to register themselves, so semlith would write their configuration file. Every path is listed before anything is written, each file is backed up beside itself, and one that does not parse is left alone. This is the terminal's ",
       mono("semlith setup --register-all"),
       ".",
     ),
@@ -10516,7 +10516,7 @@ async function agentsView() {
   // ---- the clients somebody on this machine actually has
   /* `semlith doctor`, cut to the clients in use.
    *
-   * All twenty-seven rows are the Doctor page's job. The question here is
+   * All eleven rows are the Doctor page's job. The question here is
    * narrower — of the clients this machine has, is each one reaching the
    * endpoint — so the rows are the ones `doctor` itself calls in use and
    * nothing else. A client nobody has is not a finding.
@@ -10620,7 +10620,7 @@ async function agentsView() {
         inUseTable
           ? inUseTable.node
           : empty("No documented client is installed on this machine."),
-        says("All twenty-seven, including the ones nobody here has, are on the Doctor page."),
+        says("All eleven, including the ones nobody here has, are on the Doctor page."),
       )
     : null;
 

@@ -242,7 +242,7 @@ fn yes_completes_with_stdin_closed_and_writes_no_client_file() {
     // No client configuration file may appear under a home `--yes` was pointed
     // at. `--register-all` is the only path that writes one, and it confirms
     // first.
-    for name in [".cursor", ".codeium", ".continue", ".lmstudio", ".warp"] {
+    for name in [".cursor", ".cline", ".config/zed/settings.json"] {
         assert!(
             !machine.home.join(name).exists(),
             "`--yes` wrote {name}, which it may not do without --register-all"
@@ -477,11 +477,7 @@ fn a_rotation_never_loosens_a_config_file() {
     use std::os::unix::fs::PermissionsExt;
 
     let m = Machine::new();
-    let config = m
-        .home
-        .join(".codeium")
-        .join("windsurf")
-        .join("mcp_config.json");
+    let config = m.home.join(".cursor").join("mcp.json");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     let old = format!("sml_{}", "a".repeat(64));
     let fresh = format!("sml_{}", "b".repeat(64));
@@ -513,13 +509,13 @@ fn a_rotation_never_loosens_a_config_file() {
 
 // ------------------------------------------------- 0.18.0: --register-all
 
-/// The ten clients semlith writes a file for, with the user-level path each
+/// The five clients semlith writes a file for, with the user-level path each
 /// one's `config path=` fence names, relative to `HOME`.
 ///
 /// Taken from `docs/clients.md` through the library rather than retyped, so a
 /// path that moves in the documentation moves here too. The count is asserted
-/// because it is the release's own number: fourteen clients register by their
-/// own CLI, ten by a file, and three cannot be registered at all.
+/// because it is the release's own number: six clients register by their own
+/// CLI and five by a file.
 fn writable_clients() -> Vec<(String, String)> {
     let mut out = Vec::new();
     for client in semlith::clients::clients() {
@@ -558,7 +554,12 @@ fn writable_clients() -> Vec<(String, String)> {
 fn register_all_writes_every_file_only_client_and_is_idempotent() {
     let machine = Machine::new();
     let expected = writable_clients();
-    // Ten clients have no registration command, and that number is the same
+    // Setup writes only for a client that is installed, so each one's own
+    // directory is made first, as installing it would.
+    for (_, relative) in &expected {
+        std::fs::create_dir_all(machine.home.join(relative).parent().unwrap()).unwrap();
+    }
+    // Five clients have no global registration command, and that number is the same
     // everywhere. How many *paths* resolve is not: Claude Desktop documents a
     // macOS path and a Windows one and no Linux path at all, so this list is
     // one shorter there. Asserting the path count directly is what made this
@@ -567,9 +568,9 @@ fn register_all_writes_every_file_only_client_and_is_idempotent() {
         .iter()
         .filter(|client| client.needs_a_file_written())
         .count();
-    assert_eq!(writable, 10, "ten clients have no registration command");
+    assert_eq!(writable, 5, "five clients are registered by a file");
     assert!(
-        expected.len() >= 9,
+        expected.len() >= 4,
         "only {} writable client paths resolve on this platform: {expected:?}",
         expected.len()
     );
@@ -691,11 +692,114 @@ fn register_all_refuses_a_malformed_file_and_writes_the_others() {
         "a file that could not be parsed was written anyway"
     );
 
-    let warp = machine.home.join(".warp/.mcp.json");
+    let cline = machine
+        .home
+        .join(".cline/data/settings/cline_mcp_settings.json");
+    std::fs::create_dir_all(cline.parent().unwrap()).unwrap();
     assert!(
-        warp.exists(),
+        machine
+            .setup(&["--yes", "--airgap", "--register-all"])
+            .status
+            .success()
+    );
+    assert!(
+        cline.exists(),
         "the other clients were not written after one was refused"
     );
+}
+
+/// Zed allows comments and trailing commas in its settings, which strict JSON
+/// cannot merge into: the file is left as it was and the stanza printed with
+/// the reason. A plain file gets `context_servers.semlith`, beside its keys.
+#[test]
+fn register_all_merges_zed_and_cline_and_leaves_a_commented_zed_file_alone() {
+    let machine = Machine::new();
+    let zed = machine.home.join(".config/zed/settings.json");
+    let cline = machine
+        .home
+        .join(".cline/data/settings/cline_mcp_settings.json");
+    std::fs::create_dir_all(zed.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(cline.parent().unwrap()).unwrap();
+    std::fs::write(&zed, "{\"theme\": \"One Dark\"}\n").unwrap();
+    std::fs::write(&cline, "{\"mcpServers\": {}}").unwrap();
+
+    let run = machine.setup(&["--yes", "--airgap", "--register-all"]);
+    assert!(run.status.success(), "{}", Machine::said(&run));
+    let zed_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&zed).unwrap()).unwrap();
+    assert_eq!(zed_json["theme"], "One Dark");
+    assert!(
+        zed_json["context_servers"]["semlith"]["command"].is_string(),
+        "{zed_json}"
+    );
+    let cline_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cline).unwrap()).unwrap();
+    assert_eq!(
+        cline_json["mcpServers"]["semlith"]["args"][0], "mcp",
+        "{cline_json}"
+    );
+
+    // Idempotent.
+    let (zed_once, cline_once) = (
+        std::fs::read_to_string(&zed).unwrap(),
+        std::fs::read_to_string(&cline).unwrap(),
+    );
+    assert!(
+        machine
+            .setup(&["--yes", "--airgap", "--register-all"])
+            .status
+            .success()
+    );
+    assert_eq!(std::fs::read_to_string(&zed).unwrap(), zed_once);
+    assert_eq!(std::fs::read_to_string(&cline).unwrap(), cline_once);
+
+    // A commented file is not touched, and the reason is printed.
+    let commented = "// Zed settings\n{\n  \"theme\": \"One Dark\",\n}\n";
+    std::fs::write(&zed, commented).unwrap();
+    let run = machine.setup(&["--yes", "--airgap", "--register-all"]);
+    assert!(run.status.success());
+    assert_eq!(std::fs::read_to_string(&zed).unwrap(), commented);
+    let said = Machine::said(&run);
+    assert!(
+        said.contains("Zed") && said.contains("left alone"),
+        "{said}"
+    );
+    assert!(
+        said.contains("context_servers"),
+        "the stanza was not printed:\n{said}"
+    );
+}
+
+/// A machine with no client installed gets no client directory: no skill link,
+/// no rules file, no configuration file, not even under `--register-all`.
+#[test]
+fn setup_creates_no_directory_for_a_client_that_is_not_installed() {
+    let machine = Machine::new();
+    assert!(
+        machine
+            .setup(&["--yes", "--airgap", "--register-all"])
+            .status
+            .success()
+    );
+    for dir in [
+        ".claude",
+        ".codex",
+        ".gemini",
+        ".copilot",
+        ".cursor",
+        ".cline",
+        ".config/zed",
+        ".config/opencode",
+        ".kiro",
+        ".qwen",
+        ".codeium",
+        ".continue",
+    ] {
+        assert!(
+            !machine.home.join(dir).exists(),
+            "setup created {dir} for a client that is not installed"
+        );
+    }
 }
 
 /// Without `--register-all`, no file semlith does not own is created.
@@ -717,7 +821,7 @@ fn a_default_install_writes_no_client_configuration() {
 /// A directory of fake client CLIs, first on `PATH`, each recording the
 /// arguments it was called with.
 ///
-/// Thirteen of the sixteen clients with a registration command cannot be
+/// Most of the seven clients with a registration command cannot be
 /// installed here or in CI — `tests/clients.rs` has said so since it was
 /// written — so this is the check that is available, and it is the one that
 /// matters most anyway: that semlith invokes the command line
@@ -767,8 +871,7 @@ fn global_registrations() -> Vec<(String, String)> {
             client.register_command().and_then(|command| {
                 // The documented string is a command line; what the client
                 // is actually run with is its argv, and the two differ
-                // wherever a command quotes an argument — Droid's
-                // `"semlith mcp"` is one argument, not two. Split it the
+                // wherever a command quotes an argument. Split it the
                 // way semlith splits it rather than comparing the raw text,
                 // and a quoting change in the documentation is still caught
                 // because the split is the thing under test.
@@ -805,8 +908,8 @@ fn setup_invokes_each_client_with_the_documented_command_line() {
     let expected = global_registrations();
     assert_eq!(
         expected.len(),
-        14,
-        "fourteen clients register by their own CLI: {:?}",
+        6,
+        "six clients register by their own CLI: {:?}",
         expected.iter().map(|(n, _)| n).collect::<Vec<_>>()
     );
 
@@ -857,22 +960,21 @@ fn setup_invokes_each_client_with_the_documented_command_line() {
         );
     }
 
-    // And the two whose CLI registers only the directory it is run in are not
-    // invoked at all. Running them is the defect this release exists to end.
-    for name in ["OpenCode", "Kilo Code"] {
-        let client = semlith::clients::clients()
-            .iter()
-            .find(|c| c.name == name)
-            .expect("documented");
-        let program = client
-            .register_command()
-            .and_then(|c| c.split_whitespace().next().map(str::to_string))
-            .expect("has a command");
-        assert!(
-            !invoked.iter().any(|line| line.starts_with(&program)),
-            "{name} registers only the current directory and was invoked anyway"
-        );
-    }
+    // And the one whose CLI registers only the directory it is run in is not
+    // invoked at all. Running it is the defect this release exists to end.
+    let name = "OpenCode";
+    let client = semlith::clients::clients()
+        .iter()
+        .find(|c| c.name == name)
+        .expect("documented");
+    let program = client
+        .register_command()
+        .and_then(|c| c.split_whitespace().next().map(str::to_string))
+        .expect("has a command");
+    assert!(
+        !invoked.iter().any(|line| line.starts_with(&program)),
+        "{name} registers only the current directory and was invoked anyway"
+    );
 }
 
 /// A client CLI that refuses does not fail the install, and is told apart from
@@ -997,6 +1099,9 @@ fn an_older_blocks_key_export_is_removed_by_a_later_setup() {
 #[test]
 fn setup_links_the_skill_into_every_documented_directory_and_is_idempotent() {
     let machine = Machine::new();
+    // The installed clients whose skill directory is linked; an absent one is
+    // not (`setup_creates_no_directory_for_a_client_that_is_not_installed`).
+    std::fs::create_dir_all(machine.home.join(".claude")).unwrap();
     let run = machine.setup(&["--yes", "--airgap"]);
     assert!(run.status.success(), "{}", Machine::said(&run));
 
@@ -1007,12 +1112,7 @@ fn setup_links_the_skill_into_every_documented_directory_and_is_idempotent() {
         canonical.display()
     );
 
-    for dir in [
-        ".agents/skills",
-        ".claude/skills",
-        ".qwen/skills",
-        ".kiro/skills",
-    ] {
+    for dir in [".agents/skills", ".claude/skills"] {
         let at = machine.home.join(dir).join("semlith");
         assert!(
             at.exists(),
@@ -1040,6 +1140,7 @@ fn setup_links_the_skill_into_every_documented_directory_and_is_idempotent() {
 #[test]
 fn doctor_names_a_skill_link_that_has_been_removed() {
     let machine = Machine::new();
+    std::fs::create_dir_all(machine.home.join(".claude")).unwrap();
     assert!(machine.setup(&["--yes", "--airgap"]).status.success());
 
     let link = machine.home.join(".claude/skills/semlith");
@@ -1135,6 +1236,7 @@ fn no_hooks_removes_the_entry_and_leaves_the_rest_of_the_file_alone() {
 #[test]
 fn strict_writes_one_hook_rather_than_a_second_one() {
     let machine = Machine::new();
+    std::fs::create_dir_all(machine.home.join(".claude")).unwrap();
     assert!(machine.setup(&["--yes", "--airgap"]).status.success());
     assert!(
         machine
@@ -1216,7 +1318,7 @@ fn the_suite_leaves_the_developers_own_client_configuration_alone() {
     let watched = [
         real.join(".claude/settings.json"),
         real.join(".config/opencode/AGENTS.md"),
-        real.join(".codeium/windsurf/memories/global_rules.md"),
+        real.join(".gemini/GEMINI.md"),
     ];
     let before: Vec<Option<String>> = watched
         .iter()
