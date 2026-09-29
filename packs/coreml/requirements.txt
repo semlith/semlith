@@ -8,6 +8,6 @@ numpy==2.2.6
 tokenizers==0.23.2
 huggingface-hub==1.33.0
 safetensors==0.8.0
-protobuf==4.25.9
+protobuf==5.29.6
 sympy==1.14.0
 pyobjc-framework-CoreML==12.2.2
