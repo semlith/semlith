@@ -247,13 +247,19 @@ pub enum Status {
     Idle,
     Starting,
     /// Loading its models for the first time on this machine, which on the
-    /// Neural Engine is a compilation of minutes. The run goes on without it.
+    /// Neural Engine is a compilation of minutes. Runs wait for it.
     Compiling {
         percent: u8,
+        /// How long is left, from how far it has got in the time it has
+        /// taken; absent until it has got anywhere.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eta_ms: Option<u64>,
     },
     Active,
     Downloading {
         percent: u8,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eta_ms: Option<u64>,
     },
     Unavailable {
         reason: String,
@@ -285,6 +291,9 @@ pub struct Lane {
     samples: Mutex<std::collections::VecDeque<(Instant, u64)>>,
     chunks: AtomicU64,
     jobs: Mutex<Option<mpsc::Sender<Job>>>,
+    /// When the compile or download under way began, when its percentage
+    /// last moved, and to what: its time left counts down from these.
+    began: Mutex<Option<(Instant, Instant, u8)>>,
 }
 
 impl Lane {
@@ -298,6 +307,7 @@ impl Lane {
             samples: Mutex::new(std::collections::VecDeque::new()),
             chunks: AtomicU64::new(0),
             jobs: Mutex::new(None),
+            began: Mutex::new(None),
         }
     }
 
@@ -319,14 +329,76 @@ impl Lane {
     }
 
     pub fn status(&self) -> Status {
-        self.status
+        let status = self
+            .status
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .clone();
+        // The time left, read at the moment it is asked for: how long the
+        // phase has taken so far, scaled by how far it has got.
+        // A countdown rather than a fresh guess each read: the pace up to the
+        // last step, applied to what is left, less the time since that step.
+        // A compile moves in steps (a sixth at a time on the Neural Engine),
+        // and a guess from the total time so far climbed between steps.
+        let began = *self.began.lock().unwrap_or_else(|e| e.into_inner());
+        let left = || {
+            let (start, step, at) = began?;
+            if at == 0 || at >= 100 {
+                return None;
+            }
+            let per = step.duration_since(start).as_millis() as u64 / u64::from(at);
+            let whole = per * u64::from(100 - at);
+            Some(
+                whole
+                    .saturating_sub(step.elapsed().as_millis() as u64)
+                    .max(1_000),
+            )
+        };
+        match status {
+            Status::Compiling { percent, .. } => Status::Compiling {
+                percent,
+                eta_ms: left(),
+            },
+            Status::Downloading { percent, .. } => Status::Downloading {
+                percent,
+                eta_ms: left(),
+            },
+            other => other,
+        }
     }
 
     fn set(&self, status: Status) {
-        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
+        let mut current = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        let phase = |s: &Status| match s {
+            Status::Compiling { .. } => 1,
+            Status::Downloading { .. } => 2,
+            _ => 0,
+        };
+        let (was, now) = (phase(&current), phase(&status));
+        let percent = match &status {
+            Status::Compiling { percent, .. } | Status::Downloading { percent, .. } => *percent,
+            _ => 0,
+        };
+        let mut began = self.began.lock().unwrap_or_else(|e| e.into_inner());
+        if now != was {
+            *began = (now != 0).then(|| (Instant::now(), Instant::now(), percent));
+        } else if let Some((start, _, at)) = *began
+            && percent != at
+        {
+            *began = Some((start, Instant::now(), percent));
+        }
+        drop(began);
+        *current = status;
+    }
+
+    /// Whether the lane is on its way to taking batches: asked for, starting,
+    /// downloading its pack or compiling its models. A run waits for such a
+    /// lane rather than handing its work to the CPU.
+    pub fn coming(&self) -> bool {
+        matches!(
+            self.status(),
+            Status::Idle | Status::Starting | Status::Compiling { .. } | Status::Downloading { .. }
+        )
     }
 
     /// Whether the lane can be used at all: not failed, not unavailable.
@@ -342,8 +414,8 @@ impl Lane {
         self.status() == Status::Active
     }
 
-    /// Start the lane's worker in the background if it has none. A run keeps
-    /// going without the lane until it is ready.
+    /// Start the lane's worker in the background if it has none. A run that
+    /// has no ready lane and no CPU waits for it (see [`for_run`]).
     pub fn wake(self: &Arc<Self>) {
         {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -536,7 +608,8 @@ pub fn unavailable_here(id: &str) -> Option<String> {
 /// unless `gpu-beside-ane` is on. Elsewhere every accelerator that is on runs,
 /// with the CPU beside them — measured on the M1 before the Neural Engine
 /// existed, CPU beside WebGPU was 1.52x WebGPU alone. With no accelerator
-/// ready the CPU carries the run whatever its switch says.
+/// ready the CPU carries the run whatever its switch says only when none is on
+/// its way: a lane starting, downloading or compiling is waited for.
 pub fn for_run() -> (Vec<Arc<Lane>>, bool) {
     if !MANAGED.load(Ordering::Relaxed) {
         return (Vec::new(), true);
@@ -556,8 +629,54 @@ pub fn for_run() -> (Vec<Arc<Lane>>, bool) {
             chosen.retain(|lane| lane.id != "gpu");
         }
     }
+    // With no lane ready the CPU carries the run only when no lane is on its
+    // way either: a lane still downloading, starting or compiling is waited
+    // for, not raced — its first minutes on the CPU were slower than the wait
+    // and took the cores the lane's own start needed. A lane that fails is
+    // not on its way, and the CPU takes over then.
     let any_ready = chosen.iter().any(|lane| lane.ready());
-    (chosen, cpu || !any_ready)
+    let any_coming = chosen.iter().any(|lane| lane.coming());
+    (chosen, cpu || (!any_ready && !any_coming))
+}
+
+/// A time left as a person says it: seconds under a minute, minutes after.
+pub fn spell_left(ms: u64) -> String {
+    let secs = ms.div_ceil(1000);
+    if secs < 60 {
+        format!("about {secs} s left")
+    } else {
+        format!("about {} min left", secs.div_ceil(60))
+    }
+}
+
+/// What a run is waiting for, when it waits: no lane it may use is ready, one
+/// is on its way, and the CPU is not switched on beside them. The run card and
+/// the terminal say this instead of a rate.
+pub fn waiting_for() -> Option<String> {
+    if !MANAGED.load(Ordering::Relaxed) {
+        return None;
+    }
+    let (lanes, cpu) = for_run();
+    if cpu || lanes.iter().any(|lane| lane.ready()) {
+        return None;
+    }
+    let lane = lanes.iter().find(|lane| lane.coming())?;
+    let label = spec(lane.id).map_or(lane.id, |s| s.label);
+    let left = |eta: Option<u64>| {
+        eta.map(|ms| format!(", {}", spell_left(ms)))
+            .unwrap_or_default()
+    };
+    Some(match lane.status() {
+        Status::Compiling { percent, eta_ms } => format!(
+            "waiting for the {label} lane to compile its models: {percent} %{}",
+            left(eta_ms)
+        ),
+        Status::Downloading { percent, eta_ms } => format!(
+            "waiting for the {label} lane to download: {percent} %{}",
+            left(eta_ms)
+        ),
+        _ => format!("waiting for the {label} lane to start"),
+    })
 }
 
 /// The variants a cached vector may be for this process's runs, best first:
@@ -648,13 +767,19 @@ pub fn snapshot() -> serde_json::Value {
     let accel_ready = lanes()
         .iter()
         .any(|lane| lane.id != "worker" && on.lane(lane.id) && lane.ready());
+    let accel_coming = lanes().iter().any(|lane| {
+        lane.id != "worker"
+            && on.lane(lane.id)
+            && unavailable_here(lane.id).is_none()
+            && lane.coming()
+    });
     serde_json::json!({
         "lanes": rows,
         "source": on.source,
         "gpu_beside_ane": on.gpu_beside_ane,
         // Said, not implied: the CPU carries the run whatever its switch says
-        // while no worker lane can.
-        "cpu_fallback": !on.cpu && !accel_ready,
+        // while no worker lane can and none is on its way.
+        "cpu_fallback": !on.cpu && !accel_ready && !accel_coming,
     })
 }
 
@@ -762,12 +887,18 @@ pub fn set_in_background(lane_id: &str) -> Result<String> {
     let Some(found) = lane(lane_id) else {
         bail!("there is no lane called {lane_id}; the switches are {SWITCH_NAMES}");
     };
-    found.set(Status::Downloading { percent: 0 });
+    found.set(Status::Downloading {
+        percent: 0,
+        eta_ms: None,
+    });
     let id = lane_id.to_string();
     let lane = Arc::clone(found);
     std::thread::spawn(move || {
         let fetched = set_with_progress(&id, true, &mut |percent| {
-            lane.set(Status::Downloading { percent })
+            lane.set(Status::Downloading {
+                percent,
+                eta_ms: None,
+            })
         });
         match fetched {
             Ok(_) => lane.set(Status::Idle),
@@ -1129,7 +1260,12 @@ fn worker_args(lane: &Arc<Lane>) -> Result<Vec<String>> {
         bail!("unavailable — {why}");
     }
     let cache = crate::model_cache_dir()?;
-    let progress = |percent: u8| lane.set(Status::Downloading { percent });
+    let progress = |percent: u8| {
+        lane.set(Status::Downloading {
+            percent,
+            eta_ms: None,
+        })
+    };
     Ok(match lane.id {
         "ane" => {
             // Fetched by `setup` or `accel on ane`, never by a run: a run on a
@@ -1240,6 +1376,7 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
         if let (Some(done), Some(of)) = (value["loaded"].as_u64(), value["of"].as_u64()) {
             lane.set(Status::Compiling {
                 percent: (done * 100 / of.max(1)).min(100) as u8,
+                eta_ms: None,
             });
             continue;
         }
@@ -1628,6 +1765,36 @@ pub fn component_dir(cache: &Path, lane: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A compiling lane is on its way, a failed one is not, and the time left
+    /// counts down between steps rather than climbing.
+    #[test]
+    fn a_compiling_lane_is_waited_for_and_its_time_left_counts_down() {
+        let lane = Lane::new(spec("ane").unwrap());
+        lane.set(Status::Compiling {
+            percent: 0,
+            eta_ms: None,
+        });
+        assert!(lane.coming() && !lane.ready());
+        std::thread::sleep(Duration::from_millis(1100));
+        lane.set(Status::Compiling {
+            percent: 50,
+            eta_ms: None,
+        });
+        let eta = |lane: &Lane| match lane.status() {
+            Status::Compiling { eta_ms, .. } => eta_ms.unwrap(),
+            other => panic!("{other:?}"),
+        };
+        let first = eta(&lane);
+        assert!((1_000..=1_200).contains(&first), "{first}");
+        std::thread::sleep(Duration::from_millis(300));
+        // Floored at a second, and never above what it said before.
+        assert!(eta(&lane) <= first);
+        lane.set(Status::Failed { reason: "x".into() });
+        assert!(!lane.coming());
+        lane.set(Status::Active);
+        assert!(lane.ready() && !lane.coming());
+    }
 
     #[test]
     fn frames_round_trip_and_refuse_a_wrong_length() {

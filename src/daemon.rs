@@ -1306,7 +1306,13 @@ impl Store {
             "indexed": run.indexed,
             "chunks": run.chunks,
             "symbols": run.symbols,
-            "phase": run.phase,
+            // What the run is doing when it is not reading files — or, while
+            // no lane it may use is ready and one is on its way, what it is
+            // waiting for, with that lane's progress and time left.
+            "phase": (run.status == RunStatus::Running)
+                .then(crate::accel::waiting_for)
+                .flatten()
+                .or_else(|| run.phase.clone()),
             "summary": run.summary,
             // Walk, read+hash, extract+scan, parse+chunk, tokenize, the wait
             // on each lane, and write, summing to the run's wall time.

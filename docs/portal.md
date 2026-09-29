@@ -1290,9 +1290,13 @@ pack's size; the request answers at once and the row shows the download's
 percentage, then the lane's state.
 
 - **CPU** is the in-process session, running the int8 model. It can be turned
-  off only while a GPU lane is on and usable. With no GPU, or a failed one, the
-  CPU keeps indexing whatever its switch says, and the row says it is doing so
-  as the fallback.
+  off only while a GPU lane is on and usable. With no accelerator ready and
+  none on its way — none on, or every one failed or unavailable — the CPU
+  keeps indexing whatever its switch says, and the row says it is doing so as
+  the fallback. While an accelerator that is on is still downloading, starting
+  or compiling, a run waits for it rather than falling back to the CPU, and
+  its card says so: `waiting for the Neural Engine lane to compile its models:
+  33 %, about 2 min left`.
 - **GPU** is WebGPU (Metal, D3D12 or Vulkan), in a worker process running the
   fp16 model. It is on by default. On a machine with a hardware adapter, the
   first run downloads the plugin and the fp16 weights, about 103 to 111 MB
@@ -1303,7 +1307,8 @@ percentage, then the lane's state.
   is on by default once the pack is installed, and while it runs no CPU lane
   runs beside it. Its first start on a Mac compiles its models for that
   machine, which takes minutes once: the row reads `compiling` with a
-  percentage, and the run goes on without it until it is ready.
+  percentage and the time left, and runs wait for it unless the CPU or another
+  lane is on. A download shows its percentage and time left the same way.
 - **GPU beside the Neural Engine** is a chip under the Neural Engine's row,
   shown where there is a Neural Engine, and the `gpu-beside-ane` switch of
   `semlith accel`. Off, the GPU lane waits while the Neural Engine runs;

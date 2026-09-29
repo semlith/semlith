@@ -696,8 +696,8 @@ fn step_model(yes: bool, airgap: bool) -> Result<Step> {
 /// Step 3b. On Apple silicon, the Neural Engine's models: granite as Core ML,
 /// pinned by digest, fetched here so the lane is ready before the first index
 /// rather than a run's worth later. The lane compiles them for this Mac the
-/// first time it starts — minutes, once — and a run goes on without it
-/// meanwhile; the daemon starts that compilation when it starts.
+/// first time it starts — minutes, once — and a run with no other lane on
+/// waits for it; the daemon starts that compilation when it starts.
 fn step_neural_engine(yes: bool, airgap: bool) -> Result<Step> {
     let name = "neural engine";
     if let Some(why) = crate::accel::unavailable_here("ane") {

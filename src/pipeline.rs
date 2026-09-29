@@ -1234,12 +1234,18 @@ fn schedule(
                     lane.wake();
                 }
             }
-            // The CPU's switch is honoured only while a lane can carry the
-            // run; with none, the CPU is the fallback whatever it says. It also
-            // takes every vector a lane gave back unsound, whatever its switch.
+            // The CPU runs when its switch says so, and as the fallback when
+            // no lane is ready or on its way (`accel::for_run` decides both).
+            // A lane still starting, downloading or compiling is waited for.
+            // The CPU also takes every vector a lane gave back unsound,
+            // whatever its switch says.
             let guard = active.iter().any(|w| !w.cpu_only.is_empty());
-            if cpu_on || targets.is_empty() || guard {
+            if cpu_on || guard {
                 targets.push(Target::Cpu);
+            }
+            // Nothing can take a batch yet: wait for a lane rather than spin.
+            if targets.is_empty() && flying.is_empty() {
+                std::thread::sleep(Duration::from_millis(50));
             }
             for target in &targets {
                 let from_back = !matches!(target, Target::Cpu);

@@ -7493,7 +7493,16 @@ function binarySize(value) {
 function laneState(status) {
   const state = (status && status.state) || "idle";
   const percent = status && typeof status.percent === "number" ? ` ${status.percent} %` : "";
-  if (state === "compiling") return `compiling${percent} — its models compile for this machine, minutes the first time; the run goes on without it`;
+  // How long is left, from the daemon's reading of how far the compile or
+  // download has got in the time it has taken; nothing until it has one.
+  const left =
+    status && typeof status.eta_ms === "number"
+      ? ` · ${spellLeft(status.eta_ms)}`
+      : state === "compiling" || state === "downloading"
+        ? " · estimating…"
+        : "";
+  if (state === "compiling") return `compiling${percent}${left} — its models compile for this machine, minutes the first time; runs wait for it`;
+  if (state === "downloading") return `downloading${percent}${left}`;
   if (status && status.reason) return `${state} — ${status.reason}`;
   return `${state}${percent}`;
 }
@@ -7531,7 +7540,7 @@ function accelSection() {
   function switchRow(onClick) {
     const knob = el("span", { class: "knob", "aria-hidden": "true" });
     const name = document.createTextNode("");
-    const badge = el("span", { class: "pill warn", text: "experimental", hidden: "" });
+    const badge = el("span", { class: "pill warn lane-badge", text: "experimental", hidden: "" });
     const title = el("span", { class: "replay-state" }, name, " ", badge);
     const where = el("span", { class: "replay-switch-note" });
     const share = el("span", { class: "meta" });

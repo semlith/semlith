@@ -2387,12 +2387,25 @@ pre.code::-webkit-scrollbar-thumb {
 .run-card .run-plan {
   margin-top: var(--sp-2);
 }
+/* Fixed cells, so a figure growing a digit moves nothing beside it: every
+   figure has a column of its own width, and the two with the longest words —
+   the time and the devices — have two. */
 .run-card .run-stats {
-  align-items: flex-start;
-  gap: var(--sp-2) var(--sp-5);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+  align-items: start;
+  gap: var(--sp-2) var(--sp-4);
   margin-top: var(--sp-3);
   padding-top: var(--sp-3);
   border-top: 1px solid var(--line-soft);
+}
+.run-card .run-stat[data-label="devices"],
+.run-card .run-stat[data-label="time"],
+.run-card .run-stat[data-label="waiting"] {
+  grid-column: span 2;
+}
+.run-card .run-stat[hidden] {
+  display: none;
 }
 .run-card .run-stat {
   display: flex;
@@ -7280,4 +7293,14 @@ td.decide-col {
   .index-bar .select {
     max-width: 100%;
   }
+}
+
+/* The experimental badge on an accelerator's row: a small tag after its name,
+   not a second heading. */
+.pill.lane-badge {
+  margin-left: var(--sp-2);
+  padding: 0 var(--sp-2);
+  font-size: var(--t-micro);
+  line-height: 1.6;
+  vertical-align: 1px;
 }

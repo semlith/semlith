@@ -1130,8 +1130,9 @@ a model for the machine's Neural Engine the first time a process loads it —
 about three minutes for all six on the M1 — and caches the result for the
 program that loaded it: a binary at a new path compiles again, and a new binary
 at the same path sometimes does. So the daemon starts that compilation when it
-starts, the lane shows it as compiling with a percentage, and a run goes on
-without the lane until it is ready.
+starts, the lane shows it as compiling with a percentage and the time left,
+and a run with no other lane on and the CPU switched off waits for it: the
+run card reads what it is waiting for instead of a rate.
 
 ### The lane policy
 

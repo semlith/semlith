@@ -128,6 +128,9 @@ const ROW_COMMIT: std::time::Duration = std::time::Duration::from_millis(250);
 /// of a minute of a run card standing still; batches come back far oftener.
 const PROGRESS_TICK: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// How often a writer waiting with nothing moving says so anyway.
+const PROGRESS_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The last batch count a waiting writer reported, and when.
 struct Progress {
     seen: usize,
@@ -144,10 +147,13 @@ impl Default for Progress {
 }
 
 impl Progress {
-    /// The count, when it has moved and a tick has passed since the last.
+    /// The count, when it has moved and a tick has passed since the last, or
+    /// every [`PROGRESS_HEARTBEAT`] when it has not: a run waiting for a lane
+    /// to compile still says so, with the lane's time left, as it goes.
     fn due(&mut self, batched: &std::sync::atomic::AtomicUsize) -> Option<usize> {
         let n = batched.load(std::sync::atomic::Ordering::Relaxed);
-        if n == self.seen || self.at.elapsed() < PROGRESS_TICK {
+        let since = self.at.elapsed();
+        if since < PROGRESS_TICK || (n == self.seen && since < PROGRESS_HEARTBEAT) {
             return None;
         }
         self.seen = n;

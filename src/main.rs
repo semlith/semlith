@@ -1108,6 +1108,9 @@ fn run() -> Result<()> {
                         if let Some(percent) = state["percent"].as_u64() {
                             detail.push_str(&format!(" {percent} %"));
                         }
+                        if let Some(eta) = state["eta_ms"].as_u64() {
+                            detail.push_str(&format!(", {}", semlith::accel::spell_left(eta)));
+                        }
                         if let Some(reason) = state["reason"].as_str() {
                             detail.push_str(&format!(" — {reason}"));
                         }
@@ -3607,6 +3610,13 @@ const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2)
 /// walked — so it is printed as an approximation and never as a countdown. A
 /// wrong estimate is still worth far more than a silent hour.
 fn predict(p: semlith::IndexProgress, elapsed: std::time::Duration) -> String {
+    // A run waiting for a lane has no rate to give: it says what it waits for.
+    if let Some(waiting) = semlith::accel::waiting_for() {
+        return format!(
+            "{}/{} files, {} chunks, {waiting}",
+            p.scanned, p.total, p.chunks
+        );
+    }
     let secs = elapsed.as_secs_f32().max(0.001);
     let rate = p.chunks as f32 / secs;
     let left = p.total.saturating_sub(p.scanned);

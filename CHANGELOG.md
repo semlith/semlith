@@ -25,8 +25,11 @@ Neural Engine layout and converted to Core ML at fixed shapes places 3 375 of
 its 3 380 ops on the Neural Engine, and runs at 236.5 chunks/s on the M1 Air
 against the CPU's 30.7, with every vector at cosine ≥ 0.9999 against the fp32
 reference. `semlith setup` fetches the models (built in CI, pinned by digest);
-the first start compiles them for the Mac, about three minutes once, in the
-background with its progress on Machine limits. While the Neural Engine runs,
+the first start compiles them for the Mac, about three minutes once, with its
+progress and the time left on Machine limits. A run waits for a lane that is
+on and still downloading, starting or compiling, and its card says what it is
+waiting for; the CPU carries a run only when it is switched on or no lane is
+ready or on its way. While the Neural Engine runs,
 nothing else embeds beside it: two CPU threads cut it to a third, and the GPU
 beside it adds 4 % sustained on a fanless Air (`semlith accel on gpu-beside-ane`
 turns that back on). Without the Neural Engine the GPU runs through Core ML
