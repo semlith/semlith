@@ -6777,17 +6777,33 @@ function runCard(run, controls) {
   const bar = el("span", {});
   const track = el("div", { class: "bar", tabindex: "0" }, bar);
   const pct = el("span", { class: "pct" });
-  /* The run's reading, one line of text with its parts as their own nodes, so
-   * a poll moves the words that moved and nothing else — and a field the
-   * daemon adds is one more node here and one `setText` in `absorb`. */
-  const counts = document.createTextNode("");
-  // Each starts holding an empty text node, so its first words are an edit
-  // of that node rather than a child added under a card being watched.
+  /* The run's reading, a strip of small labelled figures, each its own node,
+   * so a poll moves the words that moved and nothing else — and a field the
+   * daemon adds is one more figure here and one `setText` in `absorb`.
+   *
+   * Each value starts holding an empty text node, so its first words are an
+   * edit of that node rather than a child added under a card being watched.
+   * The label is the figure's `data-label`, drawn by CSS, so the value is the
+   * figure's only text. The rate comes first: it is the first `.filters
+   * .meta` on the card, which is where the drive reads it (8.3). */
+  const counts = el("span", {}, "");
+  const chunksNode = el("span", {}, "");
   const rate = el("span", {}, "");
   const lanes = el("span", {}, "");
   const threads = el("span", {}, "");
-  const status = el("span", { class: "meta" }, counts, rate, lanes, threads);
-  const elapsed = el("span", { class: "meta" });
+  const pending = el("span", {}, "");
+  const elapsed = el("span", {}, "");
+  const figure = (label, value) => el("span", { class: "meta run-stat", "data-label": label }, value);
+  const rateFig = figure("rate", rate);
+  const filesFig = figure("files", counts);
+  const chunksFig = figure("chunks", chunksNode);
+  const clockFig = figure("time", elapsed);
+  const lanesFig = figure("devices", lanes);
+  const threadsFig = figure("threads", threads);
+  const pendingFig = figure("not yet embedded", pending);
+  // What the run is doing when it is not reading files, under the bar.
+  const phaseNote = el("div", { class: "meta run-phase", hidden: "" }, "");
+  const progressRow = el("div", { class: "run-progress" }, track, pct);
   const log = el("div", { class: "log", "aria-live": "polite" });
   // What a refused control said, on the card it was pressed on.
   const problem = el("div", { class: "note bad" }, "");
@@ -6806,21 +6822,30 @@ function runCard(run, controls) {
    * `semlith index --verbose` use. */
   const stagesLine = el("div", { class: "meta", hidden: "" }, "");
   const cacheLineNode = el("div", { class: "meta", hidden: "" }, "");
+  // Whether each detail line has anything to say; `paintFold` shows the ones
+  // that do while the details are open.
+  let hasStages = false;
+  let hasCache = false;
   function paintStages(next) {
     const st = next.stages;
-    stagesLine.hidden = !st;
+    hasStages = !!st;
     setText(stagesLine, st ? stagesText(st) : "");
-    const parts = [];
-    if (next.cache_hit_rate !== null && next.cache_hit_rate !== undefined) {
-      parts.push(
-        `vector cache: ${n(next.cache_hits)} of ${n(next.cache_lookups)} chunks were already embedded (${Number(next.cache_hit_rate).toFixed(1)} %)`,
-      );
-    }
-    if (next.pending_share !== null && next.pending_share !== undefined) {
-      parts.push(`still being embedded: ${Math.round(next.pending_share * 100)} % of the store — keyword and graph results cover all of it`);
-    }
-    cacheLineNode.hidden = !parts.length;
-    setText(cacheLineNode, parts.join(" · "));
+    const hit = next.cache_hit_rate !== null && next.cache_hit_rate !== undefined;
+    hasCache = hit;
+    setText(
+      cacheLineNode,
+      hit
+        ? `vector cache: ${n(next.cache_hits)} of ${n(next.cache_lookups)} chunks were already embedded (${Number(next.cache_hit_rate).toFixed(1)} %)`
+        : "",
+    );
+    // How much of the store search cannot rank by meaning yet. Keyword and
+    // graph results already cover all of it, and the figure says so.
+    const share = next.pending_share;
+    const showing = share !== null && share !== undefined && share > 0;
+    pendingFig.hidden = !showing;
+    setText(pending, showing ? `${Math.max(1, Math.round(share * 100))} %` : "");
+    const tip = showing ? "keyword and graph search already cover all of the store" : "";
+    if (pendingFig.title !== tip) pendingFig.title = tip;
   }
   function paintPlan(next) {
     const plan = next.plan;
@@ -6879,7 +6904,8 @@ function runCard(run, controls) {
     const next = last;
     let text = "";
     if (next.status === "queued") {
-      text = `waiting ${spellTook(ticking ? shown + since : shown)}`;
+      // Under the figure's "waiting" label, the wait alone.
+      text = spellTook(ticking ? shown + since : shown);
     } else if (next.status === "running") {
       text = next.eta_ms === null || next.eta_ms === undefined ? "estimating…" : spellLeft(next.eta_ms - since);
     } else if (next.finished_at && next.started_at) {
@@ -6891,7 +6917,9 @@ function runCard(run, controls) {
         .slice(0, 5)}${queued >= 1000 ? ` · queued ${spellTook(queued)}` : ""}`;
     }
     setText(elapsed, text);
-    elapsed.hidden = !text;
+    clockFig.hidden = !text;
+    const label = next.status === "queued" ? "waiting" : "time";
+    if (clockFig.dataset.label !== label) clockFig.dataset.label = label;
   }
 
   function absorb(next) {
@@ -6910,6 +6938,9 @@ function runCard(run, controls) {
     // A stopped run undid everything it embedded, so a full bar would say the
     // opposite of what happened.
     const width = finished ? 100 : next.status === "stopped" ? 0 : scanned;
+    // A run still in the line has nothing to show on a bar; its card is its
+    // name, its place in the line, its plan and how long it has waited.
+    progressRow.hidden = next.status === "queued";
     bar.style.width = `${width.toFixed(1)}%`;
     setText(pct, `${Math.round(width)}%`);
     // What the bar is a bar of. The card states files and chunks elsewhere;
@@ -6946,18 +6977,31 @@ function runCard(run, controls) {
     // A compaction reads no files: what it is doing, then what it gave back.
     const compacted = next.kind === "compact" ? next.summary?.compact : null;
     const disk = (f) => (f ? f.database + f.exact + f.vectors : 0);
+    const compacting = next.kind === "compact";
     setText(
       counts,
-      next.kind === "compact"
+      compacting
         ? compacted
-          ? `${bytes(disk(compacted.before))} → ${bytes(disk(compacted.after))} on disk · ${n(compacted.vectors_dropped)} vectors and ${n(compacted.history_dropped)} retired definitions dropped · `
-          : `rewriting vectors and vacuuming · `
-        : next.phase
-        ? `${n(next.scanned)}/${n(next.total)} files · ${next.phase} · `
+          ? `${bytes(disk(compacted.before))} → ${bytes(disk(compacted.after))}`
+          : "rewriting"
         : next.total
-          ? `${n(next.scanned)}/${n(next.total)} files · ${n(next.chunks)} chunks · `
-          : `${RUN_WORD[next.status] || next.status} · `,
+          ? `${n(next.scanned)} / ${n(next.total)}`
+          : RUN_WORD[next.status] || next.status,
     );
+    const filesLabel = compacting ? "on disk" : "files";
+    if (filesFig.dataset.label !== filesLabel) filesFig.dataset.label = filesLabel;
+    // Before the walk has a total there is nothing to count against, and the
+    // pill already says where the run is.
+    filesFig.hidden = !compacting && !next.total;
+    chunksFig.hidden = compacting || !next.total;
+    setText(chunksNode, compacting || !next.total ? "" : n(next.chunks || 0));
+    const phase = compacting
+      ? compacted
+        ? `${n(compacted.vectors_dropped)} vectors and ${n(compacted.history_dropped)} retired definitions dropped`
+        : "rewriting vectors and vacuuming"
+      : next.phase || "";
+    phaseNote.hidden = !phase;
+    setText(phaseNote, phase);
     /* The daemon's rolling rate, over the last ten seconds of work, on every
      * poll while the run is live — "—" until the first batch has given it one.
      * It used to be chunks over the whole elapsed clock, which counted the
@@ -6966,18 +7010,26 @@ function runCard(run, controls) {
     const reading = live ? next.rate : next.rate_average;
     // A run still in the line has read nothing, so it has no rate to show,
     // and a finished run that never embedded a batch has no average either.
-    rate.hidden = next.status === "queued" || (!live && (reading === null || reading === undefined));
-    setText(rate, `${reading === null || reading === undefined ? "—" : perSecond(reading)} chunks/s · `);
+    // Only a run that is reading has a rate now: paused, held or queued, the
+    // last figure it had is not what it is doing.
+    const reading_now = next.status === "running" || next.status === "stopping";
+    rate.hidden = (live && !reading_now) || (!live && (reading === null || reading === undefined));
+    rateFig.hidden = rate.hidden;
+    setText(rate, `${reading === null || reading === undefined ? "—" : perSecond(reading)} chunks/s`);
     const average = next.rate_average;
     const tip = average === null || average === undefined ? "" : `${perSecond(average)} chunks/s on average since the first batch`;
     if (rate.title !== tip) rate.title = tip;
     // Which device is doing what. One lane is named too: on a Mac with the
     // Neural Engine it is the only one, and which one is the question.
-    const split = Object.entries(next.lane_rates || {}).sort((a, b) => b[1] - a[1]);
-    lanes.hidden = !split.length;
-    setText(lanes, split.length ? `${split.map(([lane, r]) => `${LANE_NAMES[lane] || lane} ${perSecond(r)}/s`).join(" · ")} · ` : "");
-    threads.hidden = !next.threads;
-    setText(threads, next.threads ? `${n(next.threads)} thread${next.threads === 1 ? "" : "s"} · ` : "");
+    // A lane that has gone quiet is left out: with the Neural Engine running,
+    // "CPU 0.0/s · GPU 0.0/s" only says what they did while it compiled.
+    const split = Object.entries(next.lane_rates || {})
+      .filter(([, r]) => r > 0)
+      .sort((a, b) => b[1] - a[1]);
+    lanesFig.hidden = !split.length || !reading_now;
+    setText(lanes, split.length ? split.map(([lane, r]) => `${LANE_NAMES[lane] || lane} ${perSecond(r)}/s`).join(" · ") : "");
+    threadsFig.hidden = !next.threads || !live;
+    setText(threads, next.threads ? n(next.threads) : "");
     paintStages(next);
     setText(where, (next.paths || []).join(", "));
     const deleted = next.delete || "";
@@ -7006,10 +7058,11 @@ function runCard(run, controls) {
     // carrying a cancellation that killed the next run against it at 0%.
     remove.hidden = live;
 
-    // Finished cards start folded, live ones start open, and whatever the
-    // reader has chosen since is kept.
+    // Every card starts folded to its figures, live ones too: the log and
+    // the stages are a press away, and a running card used to be a screen of
+    // scrolling paths. Whatever the reader has chosen since is kept.
     if (touched === false) {
-      open = live;
+      open = false;
       touched = null;
     }
     paintFold();
@@ -7018,7 +7071,9 @@ function runCard(run, controls) {
   function paintFold() {
     log.hidden = !open;
     where.hidden = !open;
-    setText(expand, open ? "Hide the log" : "Show the log");
+    stagesLine.hidden = !open || !hasStages;
+    cacheLineNode.hidden = !open || !hasCache;
+    setText(expand, open ? "Hide details" : "Details");
     expand.setAttribute("aria-expanded", String(open));
   }
 
@@ -7042,34 +7097,34 @@ function runCard(run, controls) {
   const node = el(
     "div",
     { class: "card pad run-card" },
+    // The name, its state and what can be done to it, on one line: the
+    // buttons never wrap under a reading that has grown.
     el(
       "div",
-      { class: "head" },
+      { class: "head run-head" },
       el("span", { class: "card-title", text: run.store }),
       badge,
       el("span", { class: "spacer" }),
-      pct,
+      el("span", { class: "run-actions" }, expand, pause, stop, remove),
     ),
+    progressRow,
+    phaseNote,
     planLine,
-    track,
     el(
       "div",
-      { class: "filters" },
-      // The clock sits with the counts it belongs to. Files, chunks, rate and
-      // elapsed are one reading of one run; across the card from them the
-      // clock read as a property of the page rather than of the work.
-      status,
-      elapsed,
-      el("span", { class: "spacer" }),
-      expand,
-      pause,
-      stop,
-      remove,
+      { class: "filters run-stats" },
+      rateFig,
+      filesFig,
+      chunksFig,
+      clockFig,
+      lanesFig,
+      threadsFig,
+      pendingFig,
     ),
-    stagesLine,
-    cacheLineNode,
     problem,
     outcome,
+    stagesLine,
+    cacheLineNode,
     where,
     log,
   );
@@ -7584,9 +7639,13 @@ function accelSection() {
     setText(fallback, next.cpu_fallback ? "The CPU is carrying the work: no GPU lane can." : "");
 
     // A download, a start or a compile moves by itself and says how far it
-    // has got; the page asks again each second until none is moving, and
+    // has got, and a lane's share of the work moves with every batch and falls
+    // to 0 when its run pauses or stops, which moves no run. The page asks
+    // again each second until nothing is moving and every share reads 0, and
     // stops asking once the card has left the page.
-    const moving = (next.lanes || []).some((lane) => LANE_MOVING.has(lane.status?.state));
+    const moving = (next.lanes || []).some(
+      (lane) => LANE_MOVING.has(lane.status?.state) || (lane.share || 0) > 0,
+    );
     if (moving && !again) {
       again = setTimeout(() => {
         again = null;
@@ -7942,8 +8001,11 @@ async function indexView() {
     text: "Remove all finished",
     hidden: true,
   });
-  /* Whether the note is holding an answer to a button that time can falsify —
-   * "3 runs queued." stayed on screen long after the three had finished. */
+  /* Whether the note is holding an answer to a button that time can falsify,
+   * and which: "queued" for "3 runs queued.", which stops being true the
+   * moment nothing is waiting any more, and "scan" for a scan's plan, which
+   * stops being true once nothing is held for Start indexing. "3 runs queued."
+   * used to stay up through the whole run it announced. */
   let transient = false;
 
   /* One card per run, kept across repaints so a card's log and its scroll
@@ -8113,10 +8175,12 @@ async function indexView() {
     // threw every log back to its top.
     arrange(cards, order);
 
-    // "N runs queued." is an answer to a button, and it stopped being true the
-    // moment the last run finished. It sits in the button row, so its going
-    // moves nothing under it.
-    if (transient && !runs.some((run) => TICKING.has(run.status)) && !(data?.queue || []).length) {
+    // "N runs queued." is an answer to a button, and it stops being true the
+    // moment nothing is waiting: the cards say the rest. It sits in the button
+    // row, so its going moves nothing under it.
+    const queuing = runs.some((run) => run.status === "queued") || (data?.queue || []).length > 0;
+    const held = runs.some((run) => run.status === "review");
+    if ((transient === "queued" && !queuing) || (transient === "scan" && !held)) {
       transient = false;
       say("");
     }
@@ -8322,6 +8386,8 @@ async function indexView() {
       : "each";
   }
   field.addEventListener("input", paintTargets);
+  // New paths are a new request: the button offers to scan them.
+  field.addEventListener("input", () => paintStart(state.runs?.runs));
   paintTargets();
 
   fill(
@@ -8345,6 +8411,7 @@ async function indexView() {
       const already = field.value.split("\n").map((p) => p.trim()).filter(Boolean);
       field.value = [...new Set([...already, ...paths])].join("\n");
       field.rows = Math.min(8, Math.max(2, field.value.split("\n").length));
+      paintStart(state.runs?.runs);
     },
     onError: (message) => complain(message),
   });
@@ -8354,6 +8421,7 @@ async function indexView() {
       field.value = paths.join("\n");
       field.rows = Math.min(8, Math.max(2, paths.length));
       target.value = "each";
+      paintStart(state.runs?.runs);
     },
     onError: (message) => complain(message),
   });
@@ -8468,10 +8536,22 @@ async function indexView() {
   });
   const scan = scanPanel();
   let scanning = false;
+  /* The runs this form just started. Until they end, or somebody names
+   * something new to read, the button says the work is going rather than
+   * offering to scan paths the field no longer holds. */
+  let launched = new Set();
   function paintStart(runs) {
     const held = (runs || []).filter((run) => run.status === "review");
-    setText(start, scanning ? "Scanning…" : held.length ? "Start indexing" : "Scan");
-    start.disabled = scanning;
+    const going = (runs || []).some(
+      (run) => launched.has(run.id) && TICKING.has(run.status) && run.status !== "review",
+    );
+    if (!going || field.value.trim()) launched = new Set();
+    const indexing = going && !field.value.trim();
+    setText(
+      start,
+      scanning ? "Scanning…" : held.length ? "Start indexing" : indexing ? "Indexing…" : "Scan",
+    );
+    start.disabled = scanning || indexing;
     discard.hidden = !held.length || scanning;
     scan.paint(runs);
   }
@@ -8491,7 +8571,7 @@ async function indexView() {
       const answer = await post(route, body);
       const started = (answer.runs || []).filter((run) => run.run !== undefined);
       const refused = (answer.runs || []).filter((run) => run.error);
-      transient = true;
+      transient = body.review === "always" ? "scan" : "queued";
       const many = started.length === 1 ? "" : "s";
       const done =
         body.review === "always"
@@ -8522,8 +8602,13 @@ async function indexView() {
         for (const run of held) {
           await post("/api/index/control", { store: run.store, run: run.id, action: "start" });
         }
-        transient = true;
+        transient = "queued";
         say(`${held.length} run${held.length === 1 ? "" : "s"} queued.`);
+        // What was asked for is on its way; the field is ready for the next.
+        launched = new Set(held.map((run) => run.id));
+        field.value = "";
+        field.rows = 2;
+        paintTargets();
       } catch (e) {
         complain(e.message);
       }

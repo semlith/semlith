@@ -422,19 +422,43 @@ impl Lane {
         }
     }
 
-    /// Chunks per second over the last ten seconds.
+    /// Chunks per second over the last [`RATE_WINDOW`], and 0 once the lane
+    /// has not finished a batch for [`RATE_IDLE`]: a paused or stopped run,
+    /// or a lane switched off, reads 0 at once. The samples are pruned only
+    /// when the lane counts, so a lane that had stopped used to keep the rate
+    /// it had, fading over ten seconds, and its share of the machine with it.
     pub fn rate(&self) -> f64 {
         let samples = self.samples.lock().unwrap_or_else(|e| e.into_inner());
-        let (Some((first, from)), Some((_, to))) = (samples.front(), samples.back()) else {
+        let Some(&(last, to)) = samples.back() else {
             return 0.0;
         };
-        let span = first.elapsed().as_secs_f64();
+        if last.elapsed() > RATE_IDLE {
+            return 0.0;
+        }
+        // From the newest sample at least a window old, so the window holds
+        // whole batches rather than starting at the first one inside it.
+        let Some(&(since, from)) = samples
+            .iter()
+            .rev()
+            .find(|(at, _)| at.elapsed() >= RATE_WINDOW)
+            .or(samples.front())
+        else {
+            return 0.0;
+        };
+        let span = since.elapsed().as_secs_f64();
         if span < 0.5 {
             return 0.0;
         }
         (to - from) as f64 / span
     }
 }
+
+/// How far back a lane's rate looks.
+const RATE_WINDOW: Duration = Duration::from_secs(3);
+
+/// How long without a finished batch before a lane's rate reads 0: several
+/// of any lane's batches, which are sized to take a fifth of a second.
+const RATE_IDLE: Duration = Duration::from_millis(1500);
 
 /// The in-process CPU lane's own count, for the card's share.
 static CPU: OnceLock<Arc<Lane>> = OnceLock::new();
