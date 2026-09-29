@@ -3399,6 +3399,9 @@ impl Semlith {
         // The CPU session outlives the run, as the fastembed one always did:
         // a store indexing slice after slice loads it once.
         if let Ok(work) = cpu_returned.try_recv() {
+            if let pipeline::CpuWork::Ids { main, .. } = &work {
+                self.index_threads = main.threads();
+            }
             self.index_session = Some(work);
         }
         self.tx_commit()?;
@@ -4189,7 +4192,12 @@ impl Semlith {
 
     /// The intra-op thread count the index pass's CPU session was built with.
     fn index_threads(&self) -> usize {
-        self.index_threads
+        // The CPU lane's own count once it has embedded a batch: it follows a
+        // count saved mid-run, and the card shows what the lane runs with.
+        match pipeline::CPU_THREADS.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => self.index_threads,
+            live => live,
+        }
     }
 
     /// Open a transaction if none is open. An index pass writes a file's rows

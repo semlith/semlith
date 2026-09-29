@@ -131,6 +131,22 @@ impl CpuSession {
         self.variant
     }
 
+    /// Rebuilt with the thread count in force when it has changed since this
+    /// session was made: between batches is the one point a count saved on
+    /// Machine limits can reach a run already going. A failed rebuild keeps
+    /// the session it had.
+    pub fn follow_threads(&mut self) {
+        let wanted = crate::embed::threads_in_force().max(1);
+        if wanted == self.threads {
+            return;
+        }
+        if let Ok(cache) = crate::model_cache_dir()
+            && let Ok(fresh) = Self::open(&cache, self.variant, wanted, true)
+        {
+            *self = fresh;
+        }
+    }
+
     pub fn threads(&self) -> usize {
         self.threads
     }

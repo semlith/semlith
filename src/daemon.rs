@@ -2462,20 +2462,26 @@ impl State {
         if !review && !hold {
             let (ready, pinned) = mpsc::channel::<()>();
             let (give_run, run_id) = mpsc::channel::<u64>();
-            let for_plan = Arc::clone(store);
+            // Weak: the store's lock goes with its last strong reference, and
+            // a plan still reading must not keep a deleted store's lock held
+            // against the same folder indexed again at once.
+            let for_plan = Arc::downgrade(store);
+            let dir = store.dir.clone();
             let plan_paths = paths.clone();
             std::thread::Builder::new()
                 .name("semlith-plan".to_string())
                 .spawn(move || {
-                    let reader = crate::Semlith::open_existing(&for_plan.dir).and_then(|reader| {
+                    let reader = crate::Semlith::open_existing(&dir).and_then(|reader| {
                         reader.pin_snapshot()?;
                         Ok(reader)
                     });
                     let _ = ready.send(());
                     let Ok(mut reader) = reader else { return };
                     let Ok(run) = run_id.recv() else { return };
-                    if let Ok(plan) = reader.plan(&plan_paths) {
-                        for_plan.set_plan(run, &plan, false);
+                    if let Ok(plan) = reader.plan(&plan_paths)
+                        && let Some(store) = for_plan.upgrade()
+                    {
+                        store.set_plan(run, &plan, false);
                     }
                     reader.release_snapshot();
                 })

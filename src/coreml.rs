@@ -166,19 +166,26 @@ mod mac {
                 Kind::NeuralEngine => &manifest.ane,
                 Kind::Gpu => &manifest.gpu,
             };
-            let config = unsafe { MLModelConfiguration::new() };
-            unsafe {
-                config.setComputeUnits(match kind {
-                    Kind::NeuralEngine => MLComputeUnits::CPUAndNeuralEngine,
-                    Kind::Gpu => MLComputeUnits::CPUAndGPU,
-                })
-            };
             let mut buckets = Vec::new();
             for (n, bucket) in group.buckets.iter().enumerate() {
                 progress(n, group.buckets.len());
                 let path: PathBuf = pack.join(group.file.replace("{S}", &bucket.to_string()));
                 if !path.exists() {
                     bail!("the Core ML pack has no {}", path.display());
+                }
+                // One configuration per bucket: in a multifunction model the
+                // bucket is the function, named here, and without it every
+                // bucket would load the default function's shapes.
+                let config = unsafe { MLModelConfiguration::new() };
+                unsafe {
+                    config.setComputeUnits(match kind {
+                        Kind::NeuralEngine => MLComputeUnits::CPUAndNeuralEngine,
+                        Kind::Gpu => MLComputeUnits::CPUAndGPU,
+                    });
+                    if let Some(function) = &group.function {
+                        let name = function.replace("{S}", &bucket.to_string());
+                        config.setFunctionName(Some(&NSString::from_str(&name)));
+                    }
                 }
                 let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
                 // SAFETY: a file URL and a configuration this function made;

@@ -839,12 +839,21 @@ struct CpuJob {
 }
 
 /// Run the CPU lane until its channel closes, then hand the session back.
+/// The intra-op threads the CPU lane of the run going now embeds with, for
+/// the run card: a count saved mid-run changes it at the next batch.
+pub static CPU_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn cpu_lane(mut work: CpuWork, jobs: mpsc::Receiver<CpuJob>) -> CpuWork {
     let mut batches = 0u64;
     while let Ok(job) = jobs.recv() {
         batches += 1;
         let answer = match &mut work {
             CpuWork::Ids { main, alt } => {
+                main.follow_threads();
+                if let Some(alt) = alt.as_mut() {
+                    alt.follow_threads();
+                }
+                CPU_THREADS.store(main.threads(), Ordering::Relaxed);
                 let rows: Vec<&[u32]> = job
                     .batch
                     .iter()

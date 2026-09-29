@@ -1341,7 +1341,7 @@ What each lane claims is exactly what has been measured, and nothing else.
 | GPU through WebGPU | without the pack | Vulkan | D3D12 | M1: 43.7 chunks/s lane alone; not measured on Linux or Windows |
 | CUDA (experimental) | — | yes | — | built and checked without hardware |
 | TensorRT for RTX (experimental) | — | yes | yes | built and checked without hardware |
-| OpenVINO (experimental) | — | yes | yes | built and checked without hardware; known answer on its CPU device in CI |
+| OpenVINO (experimental) | — | yes, Intel hardware | yes, Intel hardware | built and checked without hardware; known answer on its CPU device in CI on an Intel runner. Intel's plugin offers Intel devices only: on an AMD CPU with no Intel GPU the lane says so and the run goes on without it |
 | llama.cpp (experimental) | Metal | Vulkan | Vulkan | M1 Metal known answer at cosine 0.9999995; not measured for throughput in this release |
 
 ## What a break would look like

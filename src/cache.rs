@@ -148,14 +148,7 @@ impl Cache {
     }
 
     fn rows(&self) -> Result<u64> {
-        Ok(self
-            .db
-            .query_row("SELECT v FROM counts WHERE k = 'rows'", [], |r| {
-                r.get::<_, i64>(0)
-            })
-            .optional()?
-            .unwrap_or(0)
-            .max(0) as u64)
+        count(&self.db, "rows")
     }
 
     /// The vector for one key, if the cache holds it.
@@ -244,25 +237,30 @@ impl Cache {
 
     /// Rows, bytes they are counted at, and the lifetime hit rate.
     pub fn stats(&self) -> Result<Stats> {
-        let rows = self.rows()?;
-        let count = |k: &str| -> u64 {
-            self.db
-                .query_row("SELECT v FROM counts WHERE k = ?1", params![k], |r| {
-                    r.get::<_, i64>(0)
-                })
-                .optional()
-                .ok()
-                .flatten()
-                .unwrap_or(0) as u64
-        };
-        Ok(Stats {
-            rows,
-            bytes: rows * ROW_BYTES,
-            cap: cap_bytes(),
-            hits: count("hits"),
-            lookups: count("lookups"),
-        })
+        stats_of(&self.db)
     }
+}
+
+/// One of the kept counts; zero before anything has counted it.
+fn count(db: &Connection, k: &str) -> Result<u64> {
+    Ok(db
+        .query_row("SELECT v FROM counts WHERE k = ?1", params![k], |r| {
+            r.get::<_, i64>(0)
+        })
+        .optional()?
+        .unwrap_or(0)
+        .max(0) as u64)
+}
+
+fn stats_of(db: &Connection) -> Result<Stats> {
+    let rows = count(db, "rows")?;
+    Ok(Stats {
+        rows,
+        bytes: rows * ROW_BYTES,
+        cap: cap_bytes(),
+        hits: count(db, "hits")?,
+        lookups: count(db, "lookups")?,
+    })
 }
 
 /// What `stats`, `semlith_stats` and Machine limits say about the cache.
@@ -298,15 +296,40 @@ impl Stats {
     }
 }
 
-/// The machine's cache, as `stats` shows it. Off, or unreadable, is zeros
+/// The machine's cache, as `stats` shows it. Off, or never written, is zeros
 /// with the cap in force.
+///
+/// Read-only and quick to give up: the portal asks every second while a run
+/// writes to the cache, and opening it for writing (its journal mode, its
+/// schema) waited on the run's locks for seconds at a time on Windows. A read
+/// that finds it busy answers with the last figures this process read.
 pub fn stats() -> Stats {
-    match Cache::open().map(|c| c.stats()) {
-        Some(Ok(stats)) => stats,
-        _ => Stats {
-            cap: cap_bytes(),
-            ..Stats::default()
-        },
+    static LAST: std::sync::Mutex<Option<Stats>> = std::sync::Mutex::new(None);
+    let cap = cap_bytes();
+    let off = Stats {
+        cap,
+        ..Stats::default()
+    };
+    if cap == 0 {
+        return off;
+    }
+    let Ok(path) = path() else { return off };
+    if !path.exists() {
+        return off;
+    }
+    let read = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(anyhow::Error::from)
+        .and_then(|db| {
+            db.busy_timeout(std::time::Duration::from_millis(200))?;
+            stats_of(&db)
+        });
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    match read {
+        Ok(stats) => {
+            *last = Some(stats.clone());
+            stats
+        }
+        Err(_) => last.clone().unwrap_or(off),
     }
 }
 

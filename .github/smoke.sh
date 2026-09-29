@@ -1339,7 +1339,10 @@ c_daemon_rate() {
   cli="" served="" ratios=""
   for i in 1 2 3; do
     t=$(now_ms)
-    SEMLITH_ACCEL=cpu semlith --store "$rc_dir/cli-store-$i" index "$(native_path "$rc_dir/cli-$i")" --quiet ||
+    # The cache off here as in the daemon beside it: the three runs index the
+    # same text, and the second and third would come from the cache.
+    SEMLITH_ACCEL=cpu SEMLITH_VECTOR_CACHE_MB=0 \
+      semlith --store "$rc_dir/cli-store-$i" index "$(native_path "$rc_dir/cli-$i")" --quiet ||
       { echo "the CLI index failed"; return 1; }
     ms=$(( $(now_ms) - t ))
     chunks=$(semlith --store "$rc_dir/cli-store-$i" stats | awk '$1 == "chunks" {print $2}' | tr -d '\r')
