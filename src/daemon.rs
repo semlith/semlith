@@ -84,6 +84,12 @@ pub struct Discovery {
     /// `semlith mcp` picks the new one up on its next call.
     pub token: String,
     pub version: String,
+    /// When this daemon's `run` began, as a unix second. The file's mtime was
+    /// the answer until 0.33.0, and every store open and key rotation rewrites
+    /// the file, so `doctor` said a three-day-old daemon had started that
+    /// evening. Zero in a file an older daemon wrote.
+    #[serde(default)]
+    pub started: u64,
 }
 
 impl Discovery {
@@ -2207,6 +2213,12 @@ pub struct State {
     /// daemon they only just started. Readers take a snapshot rather than hold
     /// the guard, so a slow search never blocks a store being opened.
     stores: RwLock<Vec<Arc<Store>>>,
+    /// The writer threads of stores opened after startup, joined at shutdown
+    /// with the startup ones. They were detached until 0.33.0, so a stop while
+    /// one was embedding let `main` return and tear ONNX Runtime down under a
+    /// session still running, which printed ORT's own error after `stopped`
+    /// (#163).
+    late_writers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// The one queue in front of every store's writer, and the only thing that
     /// decides how many runs are on at once.
     pub admission: Arc<Admission>,
@@ -2894,10 +2906,13 @@ impl State {
         let debounce = self.debounce;
         let report = Arc::clone(&self.report);
         let admission = Arc::clone(&self.admission);
-        std::thread::spawn(move || {
+        let writer = std::thread::spawn(move || {
             let _lock = lock;
             keep_writing(&watching, debounce, &*report, &admission);
         });
+        let mut late = self.late_writers.lock().unwrap_or_else(|e| e.into_inner());
+        late.retain(|handle| !handle.is_finished());
+        late.push(writer);
 
         (self.report)(&format!(
             "opened {name} at {} — now serving it",
@@ -2977,7 +2992,21 @@ fn discovery(port: u16, token: &str) -> Discovery {
         port,
         token: token.to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        started: started_at(),
     }
+}
+
+/// The unix second this process first wrote a discovery file, which is its
+/// start: the first write happens as `run` opens its stores, and every later
+/// one (a store added, a key rotated) must not move it.
+fn started_at() -> u64 {
+    static STARTED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *STARTED.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    })
 }
 
 /// The stores `semlith start` should open.
@@ -3250,6 +3279,7 @@ pub fn run(
         server: Arc::clone(&server),
         fleet: Mutex::new(fleet),
         stores: RwLock::new(stores),
+        late_writers: Mutex::new(Vec::new()),
         admission: Arc::new(Admission::new(limits.runs_at_once.value)),
         airgap,
         started: SystemTime::now(),
@@ -3380,6 +3410,11 @@ pub fn run(
         }
         for watcher in watchers {
             let _ = watcher.join();
+        }
+        let late =
+            std::mem::take(&mut *state.late_writers.lock().unwrap_or_else(|e| e.into_inner()));
+        for writer in late {
+            let _ = writer.join();
         }
         for store in state.stores() {
             Discovery::remove(&store.dir);
@@ -5029,6 +5064,7 @@ mod tests {
             debounce: Duration::from_millis(500),
             report: Arc::new(|_| {}),
             refusals: Mutex::new(BTreeMap::new()),
+            late_writers: Mutex::new(Vec::new()),
             awaiting: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),

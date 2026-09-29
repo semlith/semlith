@@ -2054,6 +2054,10 @@ mod tests {
             percent: 0,
             eta_ms: None,
         });
+        // The clock the lane reads, measured here rather than assumed from the
+        // nominal sleep: a slow macOS runner overshot 1 100 ms by 150 and failed
+        // a bound written around it (#166).
+        let began = std::time::Instant::now();
         assert!(lane.coming() && !lane.ready());
         // Before it has moved, the time the last compile took counts down.
         *lane.expected.lock().unwrap() = Some(Duration::from_secs(40));
@@ -2064,12 +2068,19 @@ mod tests {
         assert!((39_000..=40_000).contains(&eta(&lane)));
         std::thread::sleep(Duration::from_millis(1100));
         assert!(eta(&lane) <= 39_000);
+        // Half done after `taken`, so as much again is left, less the moment
+        // between the step and the read.
+        let taken = began.elapsed().as_millis() as u64;
         lane.set(Status::Compiling {
             percent: 50,
             eta_ms: None,
         });
         let first = eta(&lane);
-        assert!((1_000..=1_200).contains(&first), "{first}");
+        let slack = began.elapsed().as_millis() as u64 - taken + 50;
+        assert!(
+            (taken.saturating_sub(slack).max(1_000)..=taken + slack).contains(&first),
+            "{first} after {taken} ms"
+        );
         std::thread::sleep(Duration::from_millis(300));
         // Floored at a second, and never above what it said before.
         assert!(eta(&lane) <= first);
