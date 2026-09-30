@@ -20,10 +20,39 @@ use std::path::{Path, PathBuf};
 /// `client` is the name a ledger row carries — one of `docs/clients.md`'s, or
 /// the handshake name an older row was written with.
 pub fn read(client: &str, since: i64) -> Result<Log> {
+    // A row written before 0.33.0 may carry the MCP library's name — `mcp`,
+    // `rmcp` — instead of the app's. Its call is in one of the logs, so every
+    // reader is asked, and the matcher's tool, time and arguments decide.
+    if crate::clientid::generic(client) {
+        let mut calls = Vec::new();
+        for named in [
+            "Claude Code",
+            "OpenAI Codex",
+            "ChatGPT desktop (the Codex app)",
+            "OpenCode",
+            "Gemini CLI",
+            "GitHub Copilot CLI",
+            "GitHub Copilot in VS Code",
+            "Cline",
+            "Claude Desktop",
+            "IO CLI",
+        ] {
+            if let Ok(Log::Calls(found)) = read(named, since) {
+                calls.extend(found);
+            }
+        }
+        return Ok(Log::Calls(calls));
+    }
     let home = crate::home::user_home()?;
     let calls = match kind(client) {
         Some(Kind::ClaudeCode) => claude_code(&[claude_dir(&home)], since)?,
         Some(Kind::Codex { desktop }) => codex(&codex_dir(&home), since, desktop)?,
+        // The handshake name both apps sent before 0.33.0 told them apart.
+        Some(Kind::EitherCodex) => {
+            let mut calls = codex(&codex_dir(&home), since, false)?;
+            calls.extend(codex(&codex_dir(&home), since, true)?);
+            calls
+        }
         Some(Kind::OpenCode) => opencode(&opencode_db(&home), since)?,
         Some(Kind::Gemini) => gemini(&home.join(".gemini").join("tmp"), since)?,
         Some(Kind::CopilotCli) => copilot_cli(&copilot_dir(&home), since)?,
@@ -108,6 +137,7 @@ pub fn paths() -> Vec<(&'static str, Vec<PathBuf>)> {
 enum Kind {
     ClaudeCode,
     Codex { desktop: bool },
+    EitherCodex,
     OpenCode,
     Gemini,
     CopilotCli,
@@ -122,7 +152,8 @@ enum Kind {
 fn kind(client: &str) -> Option<Kind> {
     Some(match client.to_ascii_lowercase().as_str() {
         "claude code" | "claude-code" => Kind::ClaudeCode,
-        "openai codex" | "codex" | "codex-mcp-client" => Kind::Codex { desktop: false },
+        "openai codex" => Kind::Codex { desktop: false },
+        "codex" | "codex-mcp-client" => Kind::EitherCodex,
         "chatgpt desktop (the codex app)" => Kind::Codex { desktop: true },
         "opencode" => Kind::OpenCode,
         "github copilot cli" => Kind::CopilotCli,
@@ -319,6 +350,7 @@ fn tokens_incl_cache(
         cache_read,
         cache_write,
         reasoning,
+        cache_write_1h: 0,
     }
 }
 
@@ -373,6 +405,7 @@ fn claude_code_file(path: &Path) -> Result<Vec<Call>> {
             cache_read: int(&u, "/cache_read_input_tokens"),
             cache_write: int(&u, "/cache_creation_input_tokens"),
             reasoning: int(&u, "/output_tokens_details/thinking_tokens"),
+            cache_write_1h: int(&u, "/cache_creation/ephemeral_1h_input_tokens"),
         };
         let request = text(r, "/requestId").unwrap_or_else(|| id.clone());
         let entry = usage.entry(id.clone()).or_insert((None, tokens, request));
@@ -647,6 +680,7 @@ fn opencode(db: &Path, since: i64) -> Result<Vec<Call>> {
                     cache_read: int(&m, "/tokens/cache/read"),
                     cache_write: int(&m, "/tokens/cache/write"),
                     reasoning,
+                    cache_write_1h: 0,
                 }),
                 cost: m.get("cost").and_then(Value::as_f64),
                 source: source(db, &id),
@@ -939,6 +973,7 @@ fn cline(root: &Path, since: i64) -> Result<Vec<Call>> {
                     cache_read: read,
                     cache_write: write,
                     reasoning: 0,
+                    cache_write_1h: 0,
                 }
             } else {
                 tokens_incl_cache(input, int(m, "/metrics/outputTokens"), read, write, 0)
@@ -1093,7 +1128,8 @@ mod tests {
                 output: 95,
                 cache_read: 51_000,
                 cache_write: 420,
-                reasoning: 40
+                reasoning: 40,
+                cache_write_1h: 420,
             })
         );
         assert!(c.found.source.ends_with("#req_fixture0001"));
@@ -1115,7 +1151,8 @@ mod tests {
                 output: 150,
                 cache_read: 8_000,
                 cache_write: 0,
-                reasoning: 100
+                reasoning: 100,
+                cache_write_1h: 0,
             })
         );
         // The CLI's rollout is not the desktop app's.
@@ -1142,7 +1179,8 @@ mod tests {
                 output: 110,
                 cache_read: 37_000,
                 cache_write: 0,
-                reasoning: 30
+                reasoning: 30,
+                cache_write_1h: 0,
             })
         );
         assert!(
@@ -1173,7 +1211,8 @@ mod tests {
                 output: 230,
                 cache_read: 512,
                 cache_write: 0,
-                reasoning: 141
+                reasoning: 141,
+                cache_write_1h: 0,
             })
         );
         assert!(opencode(&db, FIXTURE_AT + 3_600).unwrap().is_empty());
@@ -1192,7 +1231,8 @@ mod tests {
                 output: 52,
                 cache_read: 16_000,
                 cache_write: 0,
-                reasoning: 12
+                reasoning: 12,
+                cache_write_1h: 0,
             })
         );
     }
@@ -1219,7 +1259,8 @@ mod tests {
                 output: 120,
                 cache_read: 30_000,
                 cache_write: 0,
-                reasoning: 50
+                reasoning: 50,
+                cache_write_1h: 0,
             })
         );
     }
@@ -1241,7 +1282,8 @@ mod tests {
                 output: 60,
                 cache_read: 20_000,
                 cache_write: 0,
-                reasoning: 0
+                reasoning: 0,
+                cache_write_1h: 0,
             })
         );
     }
@@ -1275,7 +1317,8 @@ mod tests {
                 output: 122,
                 cache_read: 0,
                 cache_write: 0,
-                reasoning: 44
+                reasoning: 44,
+                cache_write_1h: 0,
             })
         );
     }

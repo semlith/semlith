@@ -115,6 +115,11 @@ pub struct Tokens {
     pub cache_read: i64,
     pub cache_write: i64,
     pub reasoning: i64,
+    /// The part of `cache_write` written to Anthropic's one-hour cache, which
+    /// is billed at twice the input rate rather than the five-minute rate
+    /// models.dev lists. Claude Code writes to it.
+    #[serde(skip)]
+    pub cache_write_1h: i64,
 }
 
 /// The table in use: the downloaded one when it parses and is not older
@@ -217,10 +222,16 @@ pub fn cost(price: &Price, tokens: &Tokens) -> f64 {
         .max_by_key(|t| t.above)
         .map_or(price.rates, |t| t.rates);
     let per = |n: i64, rate: f64| n.max(0) as f64 * rate / 1_000_000.0;
+    // Anthropic's published rate for a one-hour cache write: 2x input.
+    let long = tokens.cache_write_1h.clamp(0, tokens.cache_write.max(0));
     per(tokens.input, rates.input)
         + per(tokens.output, rates.output)
         + per(tokens.cache_read, rates.cache_read.unwrap_or(rates.input))
-        + per(tokens.cache_write, rates.cache_write.unwrap_or(rates.input))
+        + per(
+            tokens.cache_write - long,
+            rates.cache_write.unwrap_or(rates.input),
+        )
+        + per(long, rates.input * 2.0)
 }
 
 /// models.dev's API, trimmed to [`PROVIDERS`] and to models with a price.
@@ -432,6 +443,7 @@ mod tests {
             cache_read: 100_000,
             cache_write: 10_000,
             reasoning: 0,
+            cache_write_1h: 0,
         };
         // 1k x 4 + 2k x 20 + 100k x 0.2 + 10k x 5, per million.
         let expected = (4_000.0 + 40_000.0 + 20_000.0 + 50_000.0) / 1e6;
@@ -444,6 +456,7 @@ mod tests {
             cache_read: 0,
             cache_write: 0,
             reasoning: 0,
+            cache_write_1h: 0,
         };
         assert!((cost(gpt, &small) - (500_000.0 + 30_000.0) / 1e6).abs() < 1e-12);
         let large = Tokens {
@@ -452,6 +465,7 @@ mod tests {
             cache_read: 100_000,
             cache_write: 0,
             reasoning: 0,
+            cache_write_1h: 0,
         };
         let tiered = (200_000.0 * 10.0 + 1_000.0 * 45.0 + 100_000.0 * 1.0) / 1e6;
         assert!((cost(gpt, &large) - tiered).abs() < 1e-12);
@@ -462,8 +476,16 @@ mod tests {
             cache_read: 0,
             cache_write: 100_000,
             reasoning: 0,
+            cache_write_1h: 0,
         };
         assert!((cost(gpt, &write) - 0.5).abs() < 1e-12);
+        // A one-hour cache write is twice the input rate: 10k at $8, not $5.
+        let hour = Tokens {
+            cache_write: 10_000,
+            cache_write_1h: 10_000,
+            ..Tokens::default()
+        };
+        assert!((cost(opus, &hour) - 0.08).abs() < 1e-12);
     }
 
     #[test]

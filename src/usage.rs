@@ -109,31 +109,47 @@ fn asked(args: &str, query: &str) -> bool {
 /// that nothing has taken yet, those whose arguments carry the row's query
 /// first, the nearest in time among them. A row with no call is left alone
 /// until it is older than [`GRACE`], then marked so it is not looked for again.
+///
+/// `taken` holds the calls rows have already claimed, across clients: a row
+/// that names only its MCP library is matched against every client's log, and
+/// must not take a call a row naming its app already has.
 pub fn assign(
     rows: &[Unfilled],
     calls: &[Call],
     client: &str,
     now: i64,
     table: &prices::Table,
+    taken: &mut std::collections::HashSet<String>,
 ) -> Vec<(Unfilled, Filled)> {
-    let mut taken = vec![false; calls.len()];
+    let key = |c: &Call| {
+        format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            c.found.source, c.tool, c.at, c.args
+        )
+    };
     let mut out = Vec::new();
     for row in rows {
         let best = calls
             .iter()
             .enumerate()
-            .filter(|(i, c)| !taken[*i] && c.tool == row.tool && (c.at - row.at).abs() <= WINDOW)
+            .filter(|(_, c)| {
+                c.tool == row.tool && (c.at - row.at).abs() <= WINDOW && !taken.contains(&key(c))
+            })
             .min_by_key(|(_, c)| (!asked(&c.args, &row.query), (c.at - row.at).abs()))
             .map(|(i, _)| i);
         match best {
             Some(i) => {
-                taken[i] = true;
+                taken.insert(key(&calls[i]));
                 out.push((row.clone(), priced(&calls[i].found, table)));
             }
             None if now - row.at > GRACE => out.push((
                 row.clone(),
                 Filled {
-                    usage_source: format!("no matching call in {client}'s log"),
+                    usage_source: if crate::clientid::generic(client) {
+                        format!("no matching call in any client's log (the row names {client:?}, not an app)")
+                    } else {
+                        format!("no matching call in {client}'s log")
+                    },
                     ..Default::default()
                 },
             )),
@@ -203,11 +219,16 @@ pub fn enrich(db: &rusqlite::Connection, now: i64) -> Result<usize> {
     for row in rows {
         by_client.entry(row.client.clone()).or_default().push(row);
     }
+    // Rows that name their app first, so a row naming only its MCP library
+    // takes what they leave.
+    let mut clients: Vec<(String, Vec<Unfilled>)> = by_client.into_iter().collect();
+    clients.sort_by_key(|(client, _)| crate::clientid::generic(client));
+    let mut taken = std::collections::HashSet::new();
     let mut written = 0;
-    for (client, rows) in by_client {
+    for (client, rows) in clients {
         let since = rows.iter().map(|r| r.at).min().unwrap_or(now) - WINDOW;
         let filled = match readers::read(&client, since) {
-            Ok(Log::Calls(calls)) => assign(&rows, &calls, &client, now, &table),
+            Ok(Log::Calls(calls)) => assign(&rows, &calls, &client, now, &table, &mut taken),
             Ok(Log::NotRecorded(why)) => rows
                 .into_iter()
                 .map(|row| {
@@ -259,6 +280,7 @@ mod tests {
                     cache_read: 1_000,
                     cache_write: 0,
                     reasoning: 0,
+                    cache_write_1h: 0,
                 }),
                 source: "log.jsonl".into(),
                 ..Default::default()
@@ -308,7 +330,14 @@ mod tests {
                 "claude-haiku-4-5",
             ),
         ];
-        let got = assign(&rows, &calls, "Claude Code", 1_010, &table);
+        let got = assign(
+            &rows,
+            &calls,
+            "Claude Code",
+            1_010,
+            &table,
+            &mut Default::default(),
+        );
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].1.model.as_deref(), Some("claude-sonnet-4-5"));
         assert_eq!(got[1].1.model.as_deref(), Some("claude-opus-4-5"));
@@ -324,16 +353,61 @@ mod tests {
     }
 
     #[test]
+    fn a_call_one_client_took_is_not_taken_again() {
+        let table = prices::built_in();
+        let calls = [call(1_000, "search", r#"{"query":"q"}"#, "claude-opus-4-5")];
+        let mut taken = Default::default();
+        let first = assign(
+            &[row(1, 1_000, "search", "q")],
+            &calls,
+            "Claude Code",
+            1_010,
+            &table,
+            &mut taken,
+        );
+        assert_eq!(first.len(), 1);
+        let second = assign(
+            &[row(2, 1_000, "search", "q")],
+            &calls,
+            "mcp",
+            1_010,
+            &table,
+            &mut taken,
+        );
+        assert!(second.is_empty(), "{second:?}");
+    }
+
+    #[test]
     fn a_row_waits_for_its_log_then_is_marked() {
         let table = prices::built_in();
         let rows = [row(1, 1_000, "search", "q")];
-        assert!(assign(&rows, &[], "Zed", 1_000 + GRACE, &table).is_empty());
-        let late = assign(&rows, &[], "Zed", 1_001 + GRACE, &table);
+        assert!(
+            assign(
+                &rows,
+                &[],
+                "Zed",
+                1_000 + GRACE,
+                &table,
+                &mut Default::default()
+            )
+            .is_empty()
+        );
+        let late = assign(
+            &rows,
+            &[],
+            "Zed",
+            1_001 + GRACE,
+            &table,
+            &mut Default::default(),
+        );
         assert_eq!(late[0].1.usage_source, "no matching call in Zed's log");
         assert_eq!(late[0].1.model, None);
         // Outside the window is not a match, however well the query fits.
         let far = [call(1_000 + WINDOW + 1, "search", r#"{"query":"q"}"#, "m")];
-        assert_eq!(assign(&rows, &far, "Zed", 1_000, &table).len(), 0);
+        assert_eq!(
+            assign(&rows, &far, "Zed", 1_000, &table, &mut Default::default()).len(),
+            0
+        );
     }
 
     #[test]

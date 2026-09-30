@@ -2510,13 +2510,16 @@ pub struct Unfilled {
 }
 
 /// Rows written by an AI client since `since` (unix seconds) with no usage
-/// yet, oldest first. `cli` and `portal` rows have no model behind them.
+/// yet, oldest first. `cli` and `portal` rows have no model behind them, and
+/// neither has a `raw-read` row, which the steering hook writes for a read
+/// the agent made without semlith.
 pub fn unfilled(db: &Connection, since: i64) -> Result<Vec<Unfilled>> {
     let mut q = db.prepare(
         "SELECT id, at, client, COALESCE(session, ''), COALESCE(tool, ''), query,
                 COALESCE(query_id, '')
            FROM retrievals
           WHERE usage_source IS NULL AND at >= ?1 AND client NOT IN ('cli', 'portal')
+            AND COALESCE(tool, '') != 'raw-read'
           ORDER BY at, id",
     )?;
     let rows = q.query_map(params![since], |r| {
