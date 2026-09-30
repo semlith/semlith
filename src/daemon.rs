@@ -2804,7 +2804,7 @@ impl State {
         if name.is_some() || (host.is_some() && entry.name == "unnamed client") {
             entry.name = crate::clientid::label(name, host);
         }
-        if let Some(version) = version {
+        if let Some(version) = version.filter(|_| !name.is_some_and(crate::clientid::generic)) {
             entry.version = version.chars().take(64).collect();
         }
         if let Some(revision) = revision {

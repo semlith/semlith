@@ -388,7 +388,12 @@ fn without_stores(
                 info.and_then(|c| c.get("name")).and_then(Value::as_str),
                 crate::clientid::host(),
             );
-            if let Some(version) = info.and_then(|c| c.get("version")).and_then(Value::as_str) {
+            let name = info.and_then(|c| c.get("name")).and_then(Value::as_str);
+            if let Some(version) = info
+                .and_then(|c| c.get("version"))
+                .and_then(Value::as_str)
+                .filter(|_| !name.is_some_and(crate::clientid::generic))
+            {
                 session.version = version.chars().take(64).collect();
             }
             let asked = params.get("protocolVersion").and_then(Value::as_str);

@@ -22,8 +22,9 @@ pub fn host() -> Option<&'static str> {
 }
 
 /// Whether a `clientInfo.name` says which app it is. The generic ones name
-/// the MCP library the app was built with instead.
-fn generic(name: &str) -> bool {
+/// the MCP library the app was built with instead — and then the version
+/// beside it is the library's, not the app's, so it is not recorded.
+pub fn generic(name: &str) -> bool {
     matches!(
         name.trim().to_ascii_lowercase().as_str(),
         "" | "mcp" | "rmcp" | "client" | "mcp-client" | "mcp client" | "unnamed client"
