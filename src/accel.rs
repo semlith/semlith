@@ -2050,14 +2050,17 @@ mod tests {
     #[test]
     fn a_compiling_lane_is_waited_for_and_its_time_left_counts_down() {
         let lane = Lane::new(spec("ane").unwrap());
+        // The clock the lane reads, measured here rather than assumed from the
+        // nominal sleep: a slow macOS runner overshot 1 100 ms by 150 and failed
+        // a bound written around it (#166). Started before the lane's own, so
+        // the lane can never have been compiling for longer than `taken` says:
+        // taken after it, a preempted Linux runner put 84 ms between the two
+        // and the lane's estimate overshot the bound.
+        let began = std::time::Instant::now();
         lane.set(Status::Compiling {
             percent: 0,
             eta_ms: None,
         });
-        // The clock the lane reads, measured here rather than assumed from the
-        // nominal sleep: a slow macOS runner overshot 1 100 ms by 150 and failed
-        // a bound written around it (#166).
-        let began = std::time::Instant::now();
         assert!(lane.coming() && !lane.ready());
         // Before it has moved, the time the last compile took counts down.
         *lane.expected.lock().unwrap() = Some(Duration::from_secs(40));
