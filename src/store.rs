@@ -498,7 +498,7 @@ const FTS_BUILT: &str = "fts_built";
 /// never sees them. That is the whole reason `format_version` does not move —
 /// the same reasoning `docs/compatibility.md` records for the graph tables.
 fn add_columns(db: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 9] = [
+    const ADDITIONS: [(&str, &str, &str); 10] = [
         ("edges", "hint", "TEXT"),
         // 0.16.0: the line the reference was written on.
         ("edges", "line", "INTEGER"),
@@ -527,6 +527,11 @@ fn add_columns(db: &Connection) -> Result<()> {
         // in the per-language coverage table, which is the one question that
         // table exists to answer.
         ("files", "graph", "TEXT"),
+        // 0.34.0: the file's units — PDF pages, slides, non-empty spreadsheet
+        // cells or notebook cells, by its format (`chunk::COUNTED`). NULL is
+        // "not counted": a format with no unit, or a file an older binary
+        // wrote, which the next index pass counts without re-embedding it.
+        ("files", "units", "INTEGER"),
     ];
     for (table, column, kind) in ADDITIONS {
         if has_column(db, table, column)? {
@@ -916,6 +921,40 @@ pub fn set_file_graph(db: &Connection, file_id: i64, state: &str) -> Result<()> 
         params![state, file_id],
     )?;
     Ok(())
+}
+
+/// Record a file's units (see `chunk::COUNTED`), by row id or, for a file
+/// whose row is already there, by path.
+pub fn set_file_units(db: &Connection, file_id: i64, units: i64) -> Result<()> {
+    db.execute(
+        "UPDATE files SET units = ?1 WHERE id = ?2",
+        params![units, file_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_units_by_path(db: &Connection, path: &str, units: i64) -> Result<()> {
+    db.execute(
+        "UPDATE files SET units = ?1 WHERE path = ?2",
+        params![units, path],
+    )?;
+    Ok(())
+}
+
+/// Stored files of a counted format whose units were never recorded — written
+/// by a binary older than 0.34.0. The index pass reads each one again for its
+/// count alone.
+pub fn uncounted(db: &Connection) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = db.prepare("SELECT path FROM files WHERE units IS NULL")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut out = std::collections::HashSet::new();
+    for path in rows {
+        let path = path?;
+        if crate::chunk::is_counted(std::path::Path::new(&path)) {
+            out.insert(path);
+        }
+    }
+    Ok(out)
 }
 
 /// What the graph covers, per language, read from the rows themselves.
@@ -3328,7 +3367,7 @@ pub struct Corpus {
     /// Per language, by line: the mix the page draws as a stacked bar.
     pub languages: Vec<LanguageLines>,
     /// Files by the kind of thing they are, for the prose panel.
-    pub kinds: Vec<KindCount>,
+    pub kinds: Vec<FileKind>,
     pub longest_file: Option<FileLines>,
     /// The most folders any indexed path descends through.
     pub deepest_path: i64,
@@ -3370,6 +3409,23 @@ pub struct LanguageLines {
 pub struct KindCount {
     pub name: String,
     pub count: i64,
+}
+
+/// One kind of file on the prose panel: how many there are and, for a kind
+/// with a unit, how many of that unit they hold.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct FileKind {
+    pub name: String,
+    /// Files of this kind.
+    pub count: i64,
+    /// `pages`, `slides` or `cells`; `None` for a kind counted in files only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<&'static str>,
+    /// The unit summed over the files that have a count.
+    pub units: i64,
+    /// Files of a counted kind with no count yet — stored by an older binary,
+    /// counted by the next index pass.
+    pub uncounted: i64,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -3488,21 +3544,42 @@ pub fn corpus(db: &Connection, language_of: impl Fn(&str) -> String) -> Result<C
     out.languages
         .sort_by_key(|row| std::cmp::Reverse(row.lines));
 
-    out.kinds = counted(
-        db,
-        "SELECT CASE
-                  WHEN lower(path) LIKE '%.pdf' THEN 'PDF'
-                  WHEN lower(path) LIKE '%.pptx' OR lower(path) LIKE '%.key' THEN 'Slide deck'
-                  WHEN lower(path) LIKE '%.xlsx' OR lower(path) LIKE '%.csv' THEN 'Spreadsheet'
-                  WHEN lower(path) LIKE '%.ipynb' THEN 'Notebook'
-                  WHEN lower(path) LIKE '%.docx' THEN 'Document'
-                  WHEN lower(path) LIKE '%.png' OR lower(path) LIKE '%.jpg'
-                    OR lower(path) LIKE '%.jpeg' OR lower(path) LIKE '%.webp' THEN 'Image'
-                  ELSE 'Text and code'
-                END AS k,
-                COUNT(*)
-           FROM files GROUP BY k ORDER BY COUNT(*) DESC",
-    )?;
+    // The kinds with a unit are exactly the formats `chunk::COUNTED` names,
+    // so every file under them either has a count or is waiting for one.
+    {
+        let mut q = db.prepare(
+            "SELECT CASE
+                      WHEN lower(path) LIKE '%.pdf' THEN 'PDF'
+                      WHEN lower(path) LIKE '%.pptx' OR lower(path) LIKE '%.odp' THEN 'Slide deck'
+                      WHEN lower(path) LIKE '%.xlsx' OR lower(path) LIKE '%.ods'
+                        OR lower(path) LIKE '%.csv' OR lower(path) LIKE '%.tsv' THEN 'Spreadsheet'
+                      WHEN lower(path) LIKE '%.ipynb' THEN 'Notebook'
+                      WHEN lower(path) LIKE '%.docx' OR lower(path) LIKE '%.odt' THEN 'Document'
+                      WHEN lower(path) LIKE '%.png' OR lower(path) LIKE '%.jpg'
+                        OR lower(path) LIKE '%.jpeg' OR lower(path) LIKE '%.webp' THEN 'Image'
+                      ELSE 'Text and code'
+                    END AS k,
+                    COUNT(*), COALESCE(SUM(units), 0), SUM(units IS NULL)
+               FROM files GROUP BY k ORDER BY COUNT(*) DESC",
+        )?;
+        let mut rows = q.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(0)?;
+            let unit = match name.as_str() {
+                "PDF" => Some("pages"),
+                "Slide deck" => Some("slides"),
+                "Spreadsheet" | "Notebook" => Some("cells"),
+                _ => None,
+            };
+            out.kinds.push(FileKind {
+                count: row.get(1)?,
+                units: row.get(2)?,
+                uncounted: if unit.is_some() { row.get(3)? } else { 0 },
+                unit,
+                name,
+            });
+        }
+    }
 
     let span: (i64, i64) = db.query_row(
         "SELECT COALESCE(MIN(indexed_at), 0), COALESCE(MAX(indexed_at), 0) FROM files",
