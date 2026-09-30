@@ -348,12 +348,12 @@ pub fn coreml() -> Pack {
     }
 }
 
-pub const COREML_VERSION: &str = "1";
+pub const COREML_VERSION: &str = "2";
 
 const COREML_ASSETS: &[Asset] = &[Asset {
-    url: "https://github.com/semlith/semlith/releases/download/pack-coreml-v1/semlith-coreml-1.zip",
-    sha256: "64343cbb2cc69465dda4ed914669995e4bea47df72c0c1da43d2dbb4b2f59ad0",
-    size: 147_881_077,
+    url: "https://github.com/semlith/semlith/releases/download/pack-coreml-v2/semlith-coreml-2.zip",
+    sha256: "799e4f7e8a4b1aab8335ab969bc385fcfb7baa8d62bfd14e02c8be9b0188a082",
+    size: 147_950_175,
     form: Form::Zip,
 }];
 

@@ -573,6 +573,93 @@ pub fn install(binary: Option<&Path>, port: Option<u16>) -> Result<Status> {
     Ok(status)
 }
 
+/// The commands that restart an installed login service in place, per
+/// mechanism.
+///
+/// Pure, so all three are pinned by a test on any runner: no CI runner can
+/// supervise a user service, so the command is what can be checked there.
+/// `enable --now` (systemd) and `bootstrap` (launchd) leave a running daemon
+/// running, which is how every client stayed on a 0.30.0 daemon through two
+/// upgrades. A logon task has no restart verb, so it is ended and run again.
+pub fn restart_commands(mechanism: &str, uid: u32) -> Vec<Vec<String>> {
+    let owned = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    match mechanism {
+        "launchd" => vec![owned(&[
+            "launchctl",
+            "kickstart",
+            "-k",
+            &format!("gui/{uid}/{LABEL}"),
+        ])],
+        "systemd" => vec![owned(&[
+            "systemctl",
+            "--user",
+            "restart",
+            "semlith.service",
+        ])],
+        "schtasks" => vec![
+            owned(&["schtasks", "/End", "/TN", "semlith"]),
+            owned(&["schtasks", "/Run", "/TN", "semlith"]),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a daemon serving `running` has to be restarted for this binary.
+/// A daemon at this binary's own version never is.
+pub fn is_stale(running: Option<&str>) -> bool {
+    running.is_some_and(|v| v != env!("CARGO_PKG_VERSION"))
+}
+
+/// Restart the login service when the daemon it runs serves another version.
+///
+/// `Ok(None)` when nothing had to happen: no daemon, or one at this version.
+/// `Ok(Some(previous))` once the new daemon answers at this version, within ten
+/// seconds. A daemon started by hand rather than by the service is not this
+/// function's to kill; that is an error naming what to do.
+pub fn restart_if_stale() -> Result<Option<String>> {
+    let running = running_version();
+    if !is_stale(running.as_deref()) {
+        return Ok(None);
+    }
+    let previous = running.unwrap_or_default();
+    let status = status();
+    if !status.installed {
+        anyhow::bail!(
+            "a semlith {previous} daemon is running, not started by the login service; \
+             stop it and run `semlith start` so clients reach {}",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+    #[cfg(unix)]
+    let uid = unsafe { libc::getuid() };
+    #[cfg(not(unix))]
+    let uid = 0;
+    for command in restart_commands(status.mechanism, uid) {
+        let args: Vec<&str> = command[1..].iter().map(String::as_str).collect();
+        // `/End` on a task that already stopped fails and is fine.
+        let result = run(&command[0], &args);
+        if command.get(1).map(String::as_str) != Some("/End") {
+            result.with_context(|| format!("restarting the {} service", status.mechanism))?;
+        }
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if running_version().as_deref() == Some(env!("CARGO_PKG_VERSION")) {
+            return Ok(Some(previous));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    anyhow::bail!(
+        "restarted the {} service, and no daemon answered at {} within 10 s; see {}",
+        status.mechanism,
+        env!("CARGO_PKG_VERSION"),
+        status
+            .log
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "the service log".into())
+    )
+}
+
 /// Whether a binary lives under the system's temporary directory.
 fn under_temp(exe: &Path) -> bool {
     let temp = std::env::temp_dir();
@@ -656,26 +743,77 @@ pub fn remove() -> Result<bool> {
 
 /// When the daemon last started, as a unix second.
 ///
-/// Read from the mtime of any store's discovery file, which the daemon writes
-/// as it comes up and removes as it goes down. No new state and no format
-/// change: the file that already answers "is a daemon running" also answers
-/// "since when".
+/// Read from the `started` field of any store's discovery file (0.33.0). A file
+/// an older daemon wrote has none, and its mtime is the fallback — which is
+/// what this function read until then, and which every store open and key
+/// rotation moves.
 pub fn last_started() -> Option<i64> {
     let registry = crate::home::Registry::load().ok()?;
     registry
         .stores
         .keys()
         .filter_map(|name| crate::home::Registry::dir_of(name).ok())
-        .filter_map(|dir| std::fs::metadata(dir.join(crate::daemon::DISCOVERY_FILE)).ok())
-        .filter_map(|meta| meta.modified().ok())
-        .filter_map(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|since| since.as_secs() as i64)
+        .filter_map(|dir| started_from(&dir.join(crate::daemon::DISCOVERY_FILE)))
         .max()
+}
+
+fn started_from(path: &Path) -> Option<i64> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let found: crate::daemon::Discovery = serde_json::from_str(&text).ok()?;
+    if found.started > 0 {
+        return Some(found.started as i64);
+    }
+    let at = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(at.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64)
+}
+
+/// The version the running daemon serves, when one is running.
+///
+/// Through `Discovery::read`, so only a live daemon this user wrote the file
+/// for counts. The upgrade path left every client on a 0.30.0 daemon through
+/// two releases because nothing compared this with the binary's own.
+pub fn running_version() -> Option<String> {
+    let registry = crate::home::Registry::load().ok()?;
+    registry
+        .stores
+        .keys()
+        .filter_map(|name| crate::home::Registry::dir_of(name).ok())
+        .find_map(|dir| crate::daemon::Discovery::read(&dir))
+        .map(|found| found.version)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F1: each mechanism's restart, as the exact argv. `enable --now` and
+    /// `bootstrap` would leave the old daemon running.
+    #[test]
+    fn a_restart_is_the_command_each_mechanism_restarts_with() {
+        assert_eq!(
+            restart_commands("launchd", 501),
+            [["launchctl", "kickstart", "-k", "gui/501/com.semlith.daemon"]]
+        );
+        assert_eq!(
+            restart_commands("systemd", 1000),
+            [["systemctl", "--user", "restart", "semlith.service"]]
+        );
+        assert_eq!(
+            restart_commands("schtasks", 0),
+            [
+                ["schtasks", "/End", "/TN", "semlith"],
+                ["schtasks", "/Run", "/TN", "semlith"]
+            ]
+        );
+        assert!(restart_commands("none", 0).is_empty());
+    }
+
+    #[test]
+    fn a_daemon_at_this_version_is_never_restarted() {
+        assert!(!is_stale(None));
+        assert!(!is_stale(Some(env!("CARGO_PKG_VERSION"))));
+        assert!(is_stale(Some("0.0.1")));
+    }
 
     /// A verbatim path in a service definition is a path a person cannot read
     /// and several tools refuse. Windows produces one from `canonicalize`.

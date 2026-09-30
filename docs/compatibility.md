@@ -720,7 +720,7 @@ This is a contract for exactly one kind of reader: a packager or a fork that
 patched the README's client section moves that patch to the new file. The
 stanzas themselves are unchanged — the same bytes, at the same heading levels,
 because `src/clients.rs` parses those headings — and `GET /api/agents` returns
-the same twenty-seven clients in the same three groups. `src/clients.rs`'s
+the same clients in the same three groups. `src/clients.rs`'s
 `include_str!` names the new path, so the file is part of the published crate;
 a build that excluded it would not compile.
 
@@ -764,18 +764,16 @@ withdrawn: a daemon on another machine still needs a header, `docs/clients.md`
 still documents the HTTP stanzas, and a user who pastes one exports the variable
 themselves. What changed is that nothing semlith writes depends on it.
 
-**An existing semlith registration is replaced, not added beside.** For the ten
-clients that document a remove verb, `semlith setup` runs it before the add, at
+**An existing semlith registration is replaced, not added beside.** For every
+client that documents a remove verb, `semlith setup` runs it before the add, at
 every scope that client has. Claude Code's `local` scope is included
 deliberately: an entry under `projects."…".mcpServers` in `~/.claude.json` is
 what made semlith invisible from every directory but one, and it is removed.
 
-**Two clients are no longer registered by their own CLI.** `opencode mcp add`
-on 1.18.11 and `kilo mcp add` have no flag that means every project, so running
-them would register the directory the user was standing in. They are registered
-by writing their user-level configuration file under `--register-all` instead.
-Three others — Crush, Zed and Roo Code — document no user-level path at all and
-semlith registers them nowhere; `semlith doctor` names all three with the reason.
+**OpenCode is registered by its file, not its CLI.** `opencode mcp add` on
+1.18.11 has no flag that means every project, so running it would register the
+directory the user was standing in. It is registered by writing its user-level
+configuration file under `--register-all` instead.
 
 **`semlith doctor` is added**, with `--json` and `--fix`. It reports, per client,
 whether it is installed, whether semlith is registered, at what scope, and what
@@ -793,8 +791,8 @@ is in the environment the daemon inherited.
 **`GET /api/setup`'s `claude_registered` is replaced by `registered_clients`.**
 The old field was a tri-state about one client, answered by spawning
 `claude mcp list`. The new one is a list of the clients whose own configuration
-file names semlith, read from disk, because asking sixteen client CLIs on a route
-the portal calls on every load is sixteen processes per page load.
+file names semlith, read from disk, because asking every client's CLI on a route
+the portal calls on every load is a process per client per page load.
 
 **An index is now a function of its corpus.** Indexing one corpus twice used to
 produce two different sets of vectors, because the checkpoint that makes a run
@@ -1344,6 +1342,36 @@ What each lane claims is exactly what has been measured, and nothing else.
 | TensorRT for RTX (experimental) | — | yes | yes | built and checked without hardware |
 | OpenVINO (experimental) | — | yes, Intel hardware | yes, Intel hardware | built and checked without hardware; known answer on its CPU device in CI on an Intel runner. Intel's plugin offers Intel devices only: on an AMD CPU with no Intel GPU the lane says so and the run goes on without it |
 | llama.cpp (experimental) | Metal | Vulkan | Vulkan | M1 Metal known answer at cosine 0.9999995; not measured for throughput in this release |
+
+## 0.33.0
+
+**The agent clients are these twelve**, in the same three groups: Claude Code,
+OpenAI Codex, OpenCode, IO CLI, GitHub Copilot CLI and Gemini CLI under
+Terminal; GitHub Copilot in VS Code, Cursor, Zed and Cline under Editors; Claude
+Desktop and ChatGPT desktop (the Codex app) under Desktop apps. `GET /api/agents`, `semlith doctor` and its `--json`
+report exactly these, and every one of them has a way in: its own registration
+CLI, or a user-level file `semlith setup --register-all` writes.
+
+**Zed and Cline are registered by their user-level file.** `--register-all`
+writes `~/.config/zed/settings.json` and
+`~/.cline/data/settings/cline_mcp_settings.json`, the latter under `CLINE_DIR`
+when that is set. A Zed settings file carrying comments or trailing commas is
+left untouched, and the stanza is printed with the reason.
+
+| Surface | Change |
+|---|---|
+| MCP `tools/list` | Every array parameter carries `"items": {"type": "string"}`. The values accepted are unchanged: they were always strings. |
+| `semlith setup` | A new step, `leftovers`, prints what it removed from clients' files; the `service` step restarts a login-service daemon serving another version and says so. Printed stanzas name `${SEMLITH_AGENT_KEY}`. |
+| `semlith doctor` | A `daemon version` row, which fails while the running daemon serves another version; the Gemini CLI row may carry a folder-trust note. `--json` gains `daemon`: `{version, binary, started, stale}`. `--brief` exits non-zero on a stale daemon. |
+| `GET /api/doctor` | No longer carries `unregisterable`. |
+| `daemon.json` | New field `started`, the unix second the daemon began. A 0.32.0 binary ignores it; a 0.33.0 binary reads a file without it. |
+| `docs/clients.md` fences | A `root=` attribute names an environment variable that, when set, replaces the path's first directory under `~`. `os=` takes a comma list (`macos,linux`), a `register`/`unregister` fence may carry it, and a path may start `%LOCALAPPDATA%\`. |
+| `semlith setup --register-all` | Appends a `[mcp_servers.semlith]` table to Codex's `config.toml` when it has none; writes a client's file when its CLI is not on `PATH` but the client is installed; on Windows runs a client CLI's `.cmd` shim. |
+| The model cache | The Core ML pack is `accel/coreml-2` and the worker copy `accel/coreml-worker-v2`; the first start after the upgrade downloads the pack (148 MB) and compiles its models once. `coreml-1` and `coreml-worker-v1` can be deleted. |
+| The ledger | `client` holds the documented client name (`Claude Code`, `Zed`, `ChatGPT desktop (the Codex app)`, …) where the app can be told, rather than the raw `clientInfo.name`; an unrecognised name inside a known app is `name (app)`. A new nullable column `client_version`, outside the hash chain as `query_id` is, so a 0.32.0 binary still verifies every row. |
+| `GET /api/agents` | `connections` is one entry per app and transport, with `sessions` and `version` (the versions seen, comma-separated); `queries` is summed across the sessions. |
+| `semlith mcp` ↔ daemon | The proxy sends a `Semlith-Host` header naming the app that started it, a `notifications/semlith/alive` heartbeat every 30 s and `notifications/semlith/closed` when its client hangs up; `DELETE /mcp` ends an HTTP session. A failed call is retried for up to 20 s while the discovery file names a live daemon. |
+| `semlith mcp` | The start line on stderr reads `semlith <version>: forwarding MCP to the semlith daemon at http://127.0.0.1:<port>`. |
 
 ## What a break would look like
 

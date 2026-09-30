@@ -178,6 +178,13 @@ mod mac {
                 Kind::NeuralEngine => MLComputeUnits::CPUAndNeuralEngine,
                 Kind::Gpu => MLComputeUnits::CPUAndGPU,
             });
+            // fp16 accumulation on the GPU. The model already computes in
+            // fp16; accumulating in it too took the M1's Neural-Engine-off
+            // indexing from 56.5 to 66.3 chunks/s p10 (#164), and the pack's
+            // 512-chunk fixture still meets fp32 at cosine 0.999999.
+            if kind == Kind::Gpu {
+                config.setAllowLowPrecisionAccumulationOnGPU(true);
+            }
             if let Some(function) = &group.function {
                 let name = function.replace("{S}", &bucket.to_string());
                 config.setFunctionName(Some(&NSString::from_str(&name)));

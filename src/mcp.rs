@@ -122,6 +122,8 @@ pub struct Session {
     /// sends no `clientInfo` and one that starts calling tools without
     /// initializing at all.
     pub client: String,
+    /// `clientInfo.version`, empty until the handshake gives one.
+    pub version: String,
     pub id: String,
 }
 
@@ -129,6 +131,7 @@ impl Session {
     pub fn new(id: impl Into<String>) -> Self {
         Session {
             client: "mcp".to_string(),
+            version: String::new(),
             id: id.into(),
         }
     }
@@ -137,6 +140,7 @@ impl Session {
         crate::ledger::Who {
             client: &self.client,
             session: &self.id,
+            version: &self.version,
         }
     }
 }
@@ -377,13 +381,20 @@ fn without_stores(
             // `codex` — the ledger records exactly this string rather than a
             // display name, so what the table says matches what the client
             // calls itself in its own configuration.
-            if let Some(name) = params
-                .get("clientInfo")
-                .and_then(|c| c.get("name"))
+            // Resolved against the app that started this process, since a
+            // stdio client may name only its MCP library (`mcp`, `rmcp`).
+            let info = params.get("clientInfo");
+            session.client = crate::clientid::label(
+                info.and_then(|c| c.get("name")).and_then(Value::as_str),
+                crate::clientid::host(),
+            );
+            let name = info.and_then(|c| c.get("name")).and_then(Value::as_str);
+            if let Some(version) = info
+                .and_then(|c| c.get("version"))
                 .and_then(Value::as_str)
-                .filter(|n| !n.trim().is_empty())
+                .filter(|_| !name.is_some_and(crate::clientid::generic))
             {
-                session.client = name.to_string();
+                session.version = version.chars().take(64).collect();
             }
             let asked = params.get("protocolVersion").and_then(Value::as_str);
             let version = negotiate(asked);
@@ -531,12 +542,12 @@ fn tool_defs(open: &str) -> Value {
                     "k": { "type": "integer", "description": "Default 8.", "minimum": 1, "maximum": 50 },
                     "format": { "type": "string", "enum": ["locate", "excerpt"], "description": "Default locate." },
                     "max_tokens": { "type": "integer", "description": "Default 1500.", "minimum": 200 },
-                    "path": { "type": "array", "description": "Globs; ! excludes (also on ext, lang)." },
-                    "ext": { "type": "array" },
-                    "lang": { "type": "array", "description": "See semlith_languages." },
+                    "path": { "type": "array", "items": { "type": "string" }, "description": "Globs; ! excludes (also on ext, lang)." },
+                    "ext": { "type": "array", "items": { "type": "string" } },
+                    "lang": { "type": "array", "items": { "type": "string" }, "description": "See semlith_languages." },
                     "prefer": { "type": "string", "enum": ["code", "docs", "any"], "description": "Default any." },
                     "exact": { "type": "boolean" },
-                    "store": { "type": "array", "description": store_arg }
+                    "store": { "type": "array", "items": { "type": "string" }, "description": store_arg }
                 },
                 "required": ["query"]
             },
@@ -563,7 +574,7 @@ fn tool_defs(open: &str) -> Value {
                 "type": "object",
                 "properties": {
                     "target": { "type": "string", "description": "path:start-end, path:line, or a symbol." },
-                    "store": { "type": "array" }
+                    "store": { "type": "array", "items": { "type": "string" } }
                 },
                 "required": ["target"]
             },
@@ -577,9 +588,9 @@ fn tool_defs(open: &str) -> Value {
                 "properties": {
                     "query": { "type": "string", "description": "(call_expression function: (identifier) @f)" },
                     "lang": { "type": "string" },
-                    "path": { "type": "array" },
+                    "path": { "type": "array", "items": { "type": "string" } },
                     "offset": { "type": "integer" },
-                    "store": { "type": "array" }
+                    "store": { "type": "array", "items": { "type": "string" } }
                 },
                 "required": ["query", "lang"]
             },
@@ -603,10 +614,10 @@ fn tool_defs(open: &str) -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "array" },
-                    "ext": { "type": "array" },
-                    "lang": { "type": "array" },
-                    "store": { "type": "array" },
+                    "path": { "type": "array", "items": { "type": "string" } },
+                    "ext": { "type": "array", "items": { "type": "string" } },
+                    "lang": { "type": "array", "items": { "type": "string" } },
+                    "store": { "type": "array", "items": { "type": "string" } },
                     "limit": { "type": "integer" },
                     "tree": { "type": "boolean", "description": "Directory view: counts, symbols, not indexed." },
                     "depth": { "type": "integer", "description": "Tree depth. Default 2." },
@@ -621,7 +632,7 @@ fn tool_defs(open: &str) -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "array" },
+                    "path": { "type": "array", "items": { "type": "string" } },
                     "store": { "type": "string", "description": write_store_arg }
                 },
                 "required": ["path"]
@@ -660,7 +671,7 @@ fn tool_defs(open: &str) -> Value {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
-                    "names": { "type": "array", "items": { "type": "string" }, "description": "Up to 20; a row each." },
+                    "names": { "type": "array", "items": { "type": "string" }, "items": { "type": "string" }, "description": "Up to 20; a row each." },
                     "k": { "type": "integer", "description": "Default 20." },
                     "history": { "type": "boolean", "description": "What it used to be." },
                     "store": { "type": "string" }
@@ -675,7 +686,7 @@ fn tool_defs(open: &str) -> Value {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
-                    "kind": { "type": "array" },
+                    "kind": { "type": "array", "items": { "type": "string" } },
                     "all": { "type": "boolean", "description": "Expand collapsed rows and missing targets." },
                     "store": { "type": "string" }
                 },
@@ -1766,7 +1777,15 @@ fn record(
             let Some(query) = args.get("query").and_then(Value::as_str) else {
                 return;
             };
-            crate::ledger::reply(stores, &who, "search", query, body, elapsed);
+            crate::ledger::reply(
+                stores,
+                &who,
+                "search",
+                query,
+                body,
+                &strings(args, "store"),
+                elapsed,
+            );
         }
         "semlith_brief" => {
             // Counted from the reply for the same reason `semlith_search` is:
@@ -1776,7 +1795,15 @@ fn record(
             let Some(question) = args.get("question").and_then(Value::as_str) else {
                 return;
             };
-            crate::ledger::reply(stores, &who, "brief", question, body, elapsed);
+            crate::ledger::reply(
+                stores,
+                &who,
+                "brief",
+                question,
+                body,
+                &strings(args, "store"),
+                elapsed,
+            );
         }
         "semlith_pattern" => {
             let subject = args.get("query").and_then(Value::as_str).unwrap_or("");
@@ -2539,6 +2566,35 @@ mod tests {
         assert!(cut.contains(&format!("offset: {shown} ")), "{cut}");
     }
 
+    /// Copilot in VS Code refuses a whole chat, not one tool, when any array
+    /// parameter lacks `items` (0.32.0: "tool parameters array type must have
+    /// items"). Every other client tolerated it, so nothing else would notice.
+    #[test]
+    fn every_array_parameter_says_what_it_holds() {
+        fn walk(at: &str, schema: &Value, bad: &mut Vec<String>) {
+            if schema["type"] == "array" && schema.get("items").is_none() {
+                bad.push(at.to_string());
+            }
+            if let Some(props) = schema["properties"].as_object() {
+                for (name, sub) in props {
+                    walk(&format!("{at}.{name}"), sub, bad);
+                }
+            }
+            if let Some(items) = schema.get("items") {
+                walk(&format!("{at}[]"), items, bad);
+            }
+        }
+        let mut bad = Vec::new();
+        for tool in tool_defs("default").as_array().unwrap() {
+            walk(
+                tool["name"].as_str().unwrap(),
+                &tool["inputSchema"],
+                &mut bad,
+            );
+        }
+        assert!(bad.is_empty(), "arrays without items: {bad:?}");
+    }
+
     #[test]
     fn the_tool_list_stays_small() {
         let size = serde_json::to_string(&tool_defs("default")).unwrap().len();
@@ -2565,9 +2621,12 @@ mod tests {
         // `semlith_report` — are three more graph and report surfaces an
         // agent can call instead of reading files. The gate is what the list
         // actually costs plus a little headroom, not a round number.
+        //
+        // 0.33.0 moved it by the 338 bytes `"items": {"type": "string"}` costs
+        // on thirteen array parameters, measured, and no more: 6 396 to 6 736.
         assert!(
-            size <= 6_396,
-            "tools/list is {size} bytes, over the 6 396 the 1 600-token gate allows: {}",
+            size <= 6_736,
+            "tools/list is {size} bytes, over the 6 736 the 1 685-token gate allows: {}",
             each.join(" ")
         );
     }

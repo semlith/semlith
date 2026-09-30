@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 ///
 /// In code rather than in a fence because `docs/clients.md` is a file of client
 /// facts, and this is a cross-client convention: it is not Claude Code's
-/// directory or Qwen's, it is the one anybody's agent may look in.
+/// directory or Gemini's, it is the one anybody's agent may look in.
 const SHARED_SKILLS: &str = ".agents/skills";
 
 /// The skill's name, which is its directory's name everywhere it is linked.
@@ -42,6 +42,10 @@ pub const SKILL_NAME: &str = "semlith";
 /// What surrounds the rule block in a file semlith does not own.
 const RULES_BEGIN: &str = "<!-- >>> semlith >>> -->";
 const RULES_END: &str = "<!-- <<< semlith <<< -->";
+
+/// Both markers, for the one other reader: `leftovers`, which takes the block
+/// back out of clients semlith no longer supports.
+pub(crate) const RULES_MARKERS: (&str, &str) = (RULES_BEGIN, RULES_END);
 
 /// Whether a thing semlith writes is there, absent, or there but out of date.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -97,9 +101,15 @@ pub fn install_skill() -> Result<Vec<PathBuf>> {
     }
 
     let mut linked = Vec::new();
+    let shared = home::user_home().ok().map(|h| h.join(SHARED_SKILLS));
     for dir in skill_dirs() {
         let at = dir.join(SKILL_NAME);
         if link_state(&at, &canonical) == State::Present {
+            continue;
+        }
+        // A client's skill directory only inside a client that is here. The
+        // shared one belongs to no client, so it is made where it is missing.
+        if Some(&dir) != shared.as_ref() && !clientfile::client_present(&dir) {
             continue;
         }
         if std::fs::create_dir_all(&dir).is_err() {
@@ -169,7 +179,7 @@ pub fn remove_skill() -> Result<Vec<PathBuf>> {
 /// to recognise its own copy. One file, whose text is the skill this binary
 /// carries: a directory somebody has added to is not semlith's to delete, and
 /// neither is one whose `SKILL.md` is somebody else's.
-fn ours_alone(at: &Path) -> bool {
+pub(crate) fn ours_alone(at: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(at) else {
         return false;
     };
@@ -358,6 +368,11 @@ const HOOK_EVENTS: [&str; 2] = ["PreToolUse", "PostToolUse"];
 pub fn install_hooks(mode: crate::hook::Mode) -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
     for (_, stanza, path) in hook_clients() {
+        // A hook for a client that is not installed is a directory made for
+        // nothing, the same as a skill link would be.
+        if !clientfile::client_present(&path) {
+            continue;
+        }
         let wanted = entry(stanza, mode)?;
         let existing = std::fs::read_to_string(&path).ok();
         let next = with_entry(existing.as_deref().unwrap_or(""), &wanted)?;
@@ -582,7 +597,7 @@ pub fn install_rules() -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
     for (_, path, state) in rules_state() {
         let Some(path) = path else { continue };
-        if state == State::Present {
+        if state == State::Present || !clientfile::client_present(&path) {
             continue;
         }
         let existing = std::fs::read_to_string(&path).ok();

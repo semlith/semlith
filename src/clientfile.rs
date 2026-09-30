@@ -15,23 +15,21 @@
 //!
 //! Reading needs none of that and is always allowed. `semlith doctor` and the
 //! portal's setup status both ask these files whether a client has semlith
-//! registered and at what scope, because asking sixteen client CLIs instead
-//! would be sixteen processes on a route the portal calls on every load.
+//! registered and at what scope, because asking every client's CLI instead
+//! would be a process per client on a route the portal calls on every load.
 //!
 //! ## Formats
 //!
-//! Nineteen of the twenty-one documented paths are JSON, and `serde_json` is
-//! already in the tree, so those are merged properly: parsed, the semlith entry
-//! set, re-serialized, every sibling key intact.
-//!
-//! The two that are not are YAML — Goose's `config.yaml` and Continue's
-//! per-server `semlith.yaml` — and semlith adds no YAML dependency for them.
-//! Continue needs none: its path is one file per server, so there is nothing to
-//! merge into and the file is written whole. Goose's is a shared file, so
-//! semlith writes it only when it does not exist yet; where one is already
-//! there, the block and the path are printed and the file is not touched. A
-//! hand-rolled YAML rewriter is exactly the thing that eventually corrupts
-//! somebody's configuration, and this release is not the place to find that out.
+//! Codex's `config.toml` — which the ChatGPT desktop app reads as well — is
+//! TOML, and semlith appends its `[mcp_servers.semlith]` table to it when the
+//! file has none: a table at the end of a TOML file stands on its own, so
+//! nothing already there is rewritten. Every other documented path is JSON,
+//! and `serde_json` is already in the tree, so each is merged properly: parsed, the semlith entry set, re-serialized, every
+//! sibling key intact. A file that strict JSON cannot parse — Zed allows
+//! comments and trailing commas — is refused and left exactly as it was, and
+//! its stanza is printed instead. The YAML arm below writes a new file whole
+//! and never rewrites an existing one: a hand-rolled YAML rewriter is exactly
+//! the thing that eventually corrupts somebody's configuration.
 
 use crate::clients::{Client, Stanza};
 use crate::home;
@@ -93,6 +91,9 @@ pub fn plan(clients: &[&Client]) -> Vec<Plan> {
             let Some(path) = resolve(stanza) else {
                 continue;
             };
+            if !client_present(&path) {
+                continue;
+            }
             let action = decide(stanza, &path);
             out.push(Plan {
                 client: client.name.clone(),
@@ -172,22 +173,67 @@ fn names_semlith(text: &str) -> bool {
 /// anywhere else.
 pub fn resolve(stanza: &Stanza) -> Option<PathBuf> {
     let raw = stanza.path.as_deref()?;
-    match stanza.os.as_deref() {
-        Some("windows") if !cfg!(windows) => return None,
-        Some("macos") if !cfg!(target_os = "macos") => return None,
-        Some("linux") if !cfg!(target_os = "linux") => return None,
-        _ => {}
+    if !stanza.applies_here() {
+        return None;
     }
     if let Some(rest) = raw.strip_prefix("~/") {
+        // A client whose whole directory an environment variable moves.
+        if let Some(moved) = stanza
+            .root
+            .as_deref()
+            .and_then(std::env::var_os)
+            .filter(|v| !v.is_empty())
+            && let Some((_, below)) = rest.split_once('/')
+        {
+            return Some(PathBuf::from(moved).join(below));
+        }
         return home::user_home().ok().map(|home| home.join(rest));
     }
-    if let Some(rest) = raw.strip_prefix("%APPDATA%\\") {
-        if !cfg!(windows) {
-            return None;
+    for var in ["APPDATA", "LOCALAPPDATA"] {
+        if let Some(rest) = raw.strip_prefix(&format!("%{var}%\\")) {
+            if !cfg!(windows) {
+                return None;
+            }
+            return std::env::var_os(var).map(|base| PathBuf::from(base).join(rest));
         }
-        return std::env::var_os("APPDATA").map(|base| PathBuf::from(base).join(rest));
     }
     Some(PathBuf::from(raw))
+}
+
+/// The directory a client makes for itself, above a file of its own: `~/.x`,
+/// `~/.config/x`, `~/Documents/x`, `~/Library/Application Support/x`, or
+/// `AppData\Roaming\x`. `None` for a path outside the home.
+pub fn client_home(path: &Path) -> Option<PathBuf> {
+    let home = home::user_home().ok()?;
+    let rest = path.strip_prefix(&home).ok()?;
+    let parts: Vec<_> = rest.components().collect();
+    let depth = match parts.first()?.as_os_str().to_str()? {
+        ".config" | "Documents" => 2,
+        // A Store (MSIX) app's own directory is one level further down:
+        // `AppData\Local\Packages\<app>`.
+        "AppData" if parts.get(2).and_then(|p| p.as_os_str().to_str()) == Some("Packages") => 4,
+        "Library" | "AppData" => 3,
+        _ => 1,
+    };
+    // The file itself is never its own client's home.
+    if parts.len() <= depth {
+        return None;
+    }
+    Some(parts[..depth].iter().fold(home, |at, part| at.join(part)))
+}
+
+/// Whether the client that owns `path` is on this machine: its own directory
+/// exists. Setup writes nothing, and links nothing, for a client that is not —
+/// a skill link used to create a client's directory on a machine that never
+/// had the client.
+///
+/// A path outside the home — one a `root=` variable moved — counts its own
+/// directory, since the variable names where the client lives.
+pub fn client_present(path: &Path) -> bool {
+    match client_home(path) {
+        Some(dir) => dir.is_dir(),
+        None => path.parent().is_some_and(Path::is_dir),
+    }
 }
 
 /// What would happen to this file, without touching it.
@@ -214,6 +260,11 @@ fn decide(stanza: &Stanza, path: &Path) -> Action {
                 reason: e.to_string(),
             },
         },
+        // TOML takes a table appended at the end as it stands, so semlith adds
+        // its own and rewrites nothing else. Codex's `config.toml`, which the
+        // ChatGPT desktop app reads too, is the one TOML file here.
+        "toml" if names_semlith(&text) => Action::AlreadyDone,
+        "toml" => Action::Merge,
         // A YAML file that is already there is one semlith will not rewrite;
         // see this module's header for why. The entry is printed instead.
         "yaml" if names_semlith(&text) => Action::AlreadyDone,
@@ -244,6 +295,16 @@ fn write_one(stanza: &Stanza, path: &Path) -> Result<()> {
             serialize(&value)
         }
         ("yaml", None) => stanza.text.clone(),
+        ("toml", None) => format!("{}\n", stanza.text.trim_end()),
+        ("toml", Some(text)) => {
+            let separator = match text.as_str() {
+                "" => "",
+                t if t.ends_with("\n\n") => "",
+                t if t.ends_with('\n') => "\n",
+                _ => "\n\n",
+            };
+            format!("{text}{separator}{}\n", stanza.text.trim_end())
+        }
         (format, _) => bail!("semlith does not write {format} configuration files"),
     };
 
@@ -283,8 +344,8 @@ pub fn back_up(path: &Path) -> Result<()> {
 /// `existing` with the documented stanza's keys set into it.
 ///
 /// A recursive merge of objects rather than a replace: the stanza names the
-/// path to the semlith entry — `mcpServers.semlith`, `mcp.servers.semlith`,
-/// `amp.mcpServers.semlith` — and everything alongside it at every level is
+/// path to the semlith entry — `mcpServers.semlith`, `mcp.semlith`,
+/// `context_servers.semlith` — and everything alongside it at every level is
 /// kept. That is what makes the write idempotent and what keeps somebody's
 /// other twelve servers.
 fn merged_json(stanza: &Stanza, existing: &str) -> Result<String> {
@@ -333,6 +394,107 @@ mod tests {
     use super::*;
     use crate::clients::Scope;
 
+    #[test]
+    fn a_toml_file_gains_the_table_once_and_keeps_every_other_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let toml = stanza(
+            "toml",
+            "[mcp_servers.semlith]\ncommand = \"/b/semlith\"\nargs = [\"mcp\"]",
+            "~/.codex/config.toml",
+        );
+        let theirs = "model = \"x\"\n\n[mcp_servers.other]\ncommand = \"o\"\n";
+        std::fs::write(&path, theirs).unwrap();
+        assert_eq!(decide(&toml, &path), Action::Merge);
+        write_one(&toml, &path).unwrap();
+        let once = std::fs::read_to_string(&path).unwrap();
+        assert!(once.starts_with(theirs), "{once}");
+        assert!(
+            once.ends_with("[mcp_servers.semlith]\ncommand = \"/b/semlith\"\nargs = [\"mcp\"]\n"),
+            "{once}"
+        );
+        assert_eq!(decide(&toml, &path), Action::AlreadyDone);
+        std::fs::remove_file(&path).unwrap();
+        write_one(&toml, &path).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .starts_with("[mcp_servers.semlith]")
+        );
+    }
+
+    /// Windows: every client registered by a file gets that system's file —
+    /// Zed and Claude Desktop under `%APPDATA%`, the rest under the home —
+    /// and one not installed gets nothing.
+    #[cfg(windows)]
+    #[test]
+    fn register_all_writes_each_clients_windows_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (home, appdata, local) = (
+            dir.path().join("home"),
+            dir.path().join("home").join("AppData").join("Roaming"),
+            dir.path().join("home").join("AppData").join("Local"),
+        );
+        for made in [
+            appdata.join("Zed"),
+            appdata.join("Claude"),
+            home.join(".cursor"),
+            home.join(".cline").join("data").join("settings"),
+            home.join(".config").join("opencode"),
+        ] {
+            std::fs::create_dir_all(made).unwrap();
+        }
+        std::fs::create_dir_all(&local).unwrap();
+        let vars = [
+            ("HOME", home.as_os_str()),
+            ("USERPROFILE", home.as_os_str()),
+            ("APPDATA", appdata.as_os_str()),
+            ("LOCALAPPDATA", local.as_os_str()),
+        ];
+        let written = crate::home::with_env_vars(&vars, || {
+            let file_clients: Vec<&Client> = crate::clients::clients()
+                .iter()
+                .filter(|c| {
+                    ["Zed", "Claude Desktop", "Cursor", "Cline", "OpenCode"]
+                        .contains(&c.name.as_str())
+                })
+                .collect();
+            let plans = plan(&file_clients);
+            let stanzas: Vec<(&str, &Stanza)> = file_clients
+                .iter()
+                .flat_map(|c| c.config_files().map(move |s| (c.name.as_str(), s)))
+                .collect();
+            apply(&plans, &stanzas).unwrap()
+        });
+        for expected in [
+            appdata.join("Zed").join("settings.json"),
+            appdata.join("Claude").join("claude_desktop_config.json"),
+            home.join(".cursor").join("mcp.json"),
+            home.join(".cline")
+                .join("data")
+                .join("settings")
+                .join("cline_mcp_settings.json"),
+            home.join(".config").join("opencode").join("opencode.json"),
+        ] {
+            assert!(
+                written.contains(&expected),
+                "{} not written: {written:?}",
+                expected.display()
+            );
+        }
+        // The Store build of Claude Desktop is not installed here.
+        assert!(!local.join("Packages").exists());
+    }
+
+    #[test]
+    fn an_os_list_applies_on_each_system_it_names() {
+        let mut both = stanza("json", "{}", "~/.config/zed/settings.json");
+        both.os = Some("macos,linux".into());
+        assert_eq!(both.applies_here(), !cfg!(windows));
+        both.os = Some("windows".into());
+        assert_eq!(both.applies_here(), cfg!(windows));
+    }
+
     fn stanza(format: &str, text: &str, path: &str) -> Stanza {
         Stanza {
             format: format.to_string(),
@@ -344,6 +506,7 @@ mod tests {
             rules: false,
             path: Some(path.to_string()),
             os: None,
+            root: None,
             scope: Scope::Global,
         }
     }

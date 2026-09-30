@@ -26,18 +26,20 @@ from granite_ane import NEG, Granite
 
 # Bump when the pack's bytes change for any reason (models, pins, layout): the
 # binary pins the archive by name and SHA-256, so a changed pack is a new pack.
-PACK_VERSION = 1
+PACK_VERSION = 2
 HF_REPO = 'ibm-granite/granite-embedding-small-english-r2'
 HF_REVISION = '2ab6fa8ea2d674564defd37171ae19079b864b33'
 MAX_TOKENS = 400  # semlith truncates chunks at 800 chars / 2 tokens per char
 MIN_MACOS = '15.0'  # ct.target.macOS15, the target the bench converted and measured at
 
 # (pack dir, layout, batch, buckets, compute units). The ANE runs batch 4 fastest
-# and wants fine buckets because it pays for every padded position; the GPU
-# prefers bigger batches and cares less about padding.
+# and wants fine buckets because it pays for every padded position. The GPU runs
+# batch 8 (16 measured slower), and from pack 2 on fine buckets too, topped at
+# MAX_TOKENS rather than 512 since no chunk is longer: on the M1 with the Neural
+# Engine off, 49.8 chunks/s p10 against 43.7 for [128, 256, 512] (2026-09-30).
 GROUPS = [
     ('ane', 'ane', 4, [128, 192, 256, 320, 384, 512], 'CPU_AND_NE'),
-    ('gpu', 'std', 8, [128, 256, 512], 'CPU_AND_GPU'),
+    ('gpu', 'std', 8, [128, 192, 256, 320, 400], 'CPU_AND_GPU'),
 ]
 
 

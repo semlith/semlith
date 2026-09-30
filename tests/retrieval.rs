@@ -502,8 +502,11 @@ fn the_retrieval_metrics_are_measured() {
     // can call. The gate is still a gate — it is what the list costs plus
     // headroom, and `mcp::tests::the_tool_list_stays_small` is the same
     // number as bytes so a list that fails here fails in seconds there.
+    // 0.33.0 moved it by exactly what `"items": {"type": "string"}` on
+    // thirteen array parameters costs — 338 bytes, 85 tokens — because Copilot
+    // in VS Code refuses a whole chat over an array without it.
     assert!(
-        tool_tokens < 1_600,
+        tool_tokens < 1_685,
         "tools/list is {tool_list} bytes, about {tool_tokens} tokens, and every agent \
          pays it once per session"
     );

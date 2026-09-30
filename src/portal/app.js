@@ -3685,7 +3685,9 @@ function agentsCard() {
           el(
             "div",
             { class: "kv" },
-            el("span", { text: client.name }),
+            el("span", {
+              text: client.sessions > 1 ? `${client.name} · ${n(client.sessions)} sessions` : client.name,
+            }),
             el("span", { class: "spacer" }),
             el("span", {
               class: "meta",
@@ -9939,7 +9941,7 @@ async function doctorView() {
   });
 
   // What the table is a list of, said once above it rather than counted off
-  // the rows by the reader — the page is twenty-seven rows and two of them
+  // the rows by the reader — the page is twelve rows and two of them
   // matter.
   const rows = data.clients || [];
   const registered = rows.filter((c) => c.registered).length;
@@ -9954,7 +9956,7 @@ async function doctorView() {
     ),
     /* The rules first, then the table.
      *
-     * The clients table is twenty-seven rows and pages ten at a time, so the
+     * The clients table is twelve rows and pages ten at a time, so the
      * rules underneath it were below a screenful of table on every visit —
      * and they are the part that answers "is this machine set up correctly",
      * which is the question the page is for. The table is the detail.
@@ -10159,8 +10161,16 @@ async function agentsView() {
         key: "name",
         label: "Connected",
         value: (c) => c.name,
-        render: (c) => el("div", { class: "who" }, el("span", { class: "dot good" }), c.name),
+        render: (c) =>
+          el(
+            "div",
+            { class: "who" },
+            el("span", { class: "dot good" }),
+            c.name,
+            c.sessions > 1 ? el("span", { class: "meta", text: ` · ${n(c.sessions)} sessions` }) : null,
+          ),
       },
+      { key: "version", label: "Version", className: "meta narrow-drop", value: (c) => c.version || "—" },
       { key: "transport", label: "Transport", className: "meta", value: (c) => c.transport },
       { key: "revision", label: "Revision", className: "meta narrow-drop", value: (c) => c.revision },
       {
@@ -10189,6 +10199,7 @@ async function agentsView() {
    * that opens the MCP endpoint. */
   const KEY_ENV = data.key_env || "SEMLITH_AGENT_KEY";
   const stanzas = { key: "${" + KEY_ENV + "}", revealed: false };
+  const OS_NAMES = { macos: "macOS", linux: "Linux", windows: "Windows" };
   let group = GROUPS.find(([id]) => clients.some((c) => c.group === id))[0];
   let chosen = clients.findIndex((c) => c.group === group);
   const tabs = el("div", { class: "tabs" });
@@ -10258,6 +10269,12 @@ async function agentsView() {
     const own = (client.stanzas || []).map((s) => ({
       format: s.format,
       text: s.text.trimEnd().replaceAll(KEY_SLOT, stanzas.key),
+      // Where the block goes, and on which system: one client can document a
+      // file per operating system, and two unlabelled blocks read as two
+      // answers to one question.
+      where: s.path
+        ? `${s.os ? s.os.split(",").map((os) => OS_NAMES[os.trim()] || os).join(" and ") : "macOS, Linux and Windows"}: ${s.path}`
+        : null,
     }));
     // A one-line command belongs in a field with a Copy beside it, not in a
     // slab of dark code: it is a thing you paste into a shell, not a file you
@@ -10283,11 +10300,11 @@ async function agentsView() {
       ),
       // A client with no HTTP stanza of its own gets the generic one, which is
       // the shape most schemas take. A client with one gets its own: `httpUrl`
-      // for Gemini, `serverUrl` for Windsurf, TOML for Codex — a generic block
+      // for Gemini, `streamableHttp` for Cline, TOML for Codex — a generic block
       // beside those is a second, wrong answer.
       // One configuration block, not two. A client that can reach the
-      // endpoint is shown the endpoint; one that cannot — Zed, Claude Desktop,
-      // Amazon Q, which have nowhere to put a header — is shown the subprocess
+      // endpoint is shown the endpoint; one that cannot — Zed and Claude
+      // Desktop, which have nowhere to put a header — is shown the subprocess
       // it can run. Printing both left a reader choosing between two answers
       // with nothing to choose on.
       el("span", {
@@ -10296,9 +10313,10 @@ async function agentsView() {
           ? "Over HTTP — one endpoint, one key, no subprocess"
           : "As a subprocess — no key needed",
       }),
-      (config.length ? config.map((s) => s.text) : [httpStanza()]).map((text) =>
-        codeBlock(text, "Copy stanza"),
-      ),
+      (config.length ? config : [{ text: httpStanza(), where: null }]).flatMap((s) => [
+        s.where ? el("span", { class: "meta", text: s.where }) : null,
+        codeBlock(s.text, "Copy stanza"),
+      ]),
       wired.length ? el("span", { class: "eyebrow", text: "Or from a terminal" }) : null,
       wired.map((s) => copyField(s.text, true)),
       spawned.length
@@ -10418,7 +10436,7 @@ async function agentsView() {
     // Inline code as code, not as a pair of backtick characters. Every other
     // code reference on this page is styled; this one was printed verbatim.
     says(
-      "Ten of the twenty-seven cannot be asked to register themselves, so semlith would write their configuration file. Every path is listed before anything is written, each file is backed up beside itself, and one that does not parse is left alone. This is the terminal's ",
+      "Six of the twelve cannot be asked to register themselves, so semlith would write their configuration file. Every path is listed before anything is written, each file is backed up beside itself, and one that does not parse is left alone. This is the terminal's ",
       mono("semlith setup --register-all"),
       ".",
     ),
@@ -10516,7 +10534,7 @@ async function agentsView() {
   // ---- the clients somebody on this machine actually has
   /* `semlith doctor`, cut to the clients in use.
    *
-   * All twenty-seven rows are the Doctor page's job. The question here is
+   * All twelve rows are the Doctor page's job. The question here is
    * narrower — of the clients this machine has, is each one reaching the
    * endpoint — so the rows are the ones `doctor` itself calls in use and
    * nothing else. A client nobody has is not a finding.
@@ -10620,7 +10638,7 @@ async function agentsView() {
         inUseTable
           ? inUseTable.node
           : empty("No documented client is installed on this machine."),
-        says("All twenty-seven, including the ones nobody here has, are on the Doctor page."),
+        says("All twelve, including the ones nobody here has, are on the Doctor page."),
       )
     : null;
 

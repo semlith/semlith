@@ -57,6 +57,28 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// `unwrap_or_else(into_inner)` so one panicking test does not poison every
 /// later one into failing for a reason that is not theirs.
 #[cfg(test)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn with_env_vars<T>(vars: &[(&str, &std::ffi::OsStr)], body: impl FnOnce() -> T) -> T {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let was: Vec<_> = vars
+        .iter()
+        .map(|(name, _)| std::env::var_os(name))
+        .collect();
+    for (name, value) in vars {
+        // SAFETY: the lock above makes this the only thread touching them.
+        unsafe { std::env::set_var(name, value) };
+    }
+    let out = body();
+    for ((name, _), previous) in vars.iter().zip(was) {
+        match previous {
+            Some(previous) => unsafe { std::env::set_var(name, previous) },
+            None => unsafe { std::env::remove_var(name) },
+        }
+    }
+    out
+}
+
+#[cfg(test)]
 pub(crate) fn with_env_var<T>(name: &str, value: &std::ffi::OsStr, body: impl FnOnce() -> T) -> T {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let was = std::env::var_os(name);

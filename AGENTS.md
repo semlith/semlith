@@ -40,8 +40,10 @@ makes. It runs a fixed set of 107 questions with ground-truth spans from
 multi-hop — and prints hit@1, hit@3, hit@8, bytes per answer, the graph list's
 marginal contribution, and from 0.23.0 calls and tokens per answered question for
 `brief` against the search-then-read path. It asserts two things: the wrong-yes
-count for `path` is zero, and `tools/list` costs under 1 600 tokens — sixteen
-tools from 0.26.0, where thirteen measured 4 441 bytes and about 1 111. The
+count for `path` is zero, and `tools/list` costs under 1 685 tokens — sixteen
+tools from 0.26.0, where thirteen measured 4 441 bytes and about 1 111, and from
+0.33.0 an `items` type on every array parameter, which Copilot in VS Code
+requires. The
 byte proxy in `mcp::tests::the_tool_list_stays_small` is the same number said
 in bytes, so a list that would fail the criterion fails in seconds rather than
 eight minutes into an indexing run.

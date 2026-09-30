@@ -857,7 +857,7 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
         // what this route hands it is JSON -- so every brief from this page was
         // recorded with no hits and no saving, exactly as every brief from the
         // command line was. The MCP tool still goes through `reply` because
-        // what it hands over really is the rendered text `paths_in` was written
+        // what it hands over really is the rendered text `reply` splits by store
         // for, and because a span whose text the budget dropped should be
         // counted at its locator rather than at its file.
         crate::ledger::brief(
@@ -865,6 +865,7 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
             &crate::ledger::Who {
                 client: "portal",
                 session: "portal",
+                version: env!("CARGO_PKG_VERSION"),
             },
             question,
             &brief,
@@ -1021,6 +1022,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
             &crate::ledger::Who {
                 client: "portal",
                 session: "portal",
+                version: env!("CARGO_PKG_VERSION"),
             },
             query,
             &hits,
@@ -1763,7 +1765,6 @@ fn doctor(state: &Arc<State>) -> Response {
     Response::json(&json!({
         "clients": crate::doctor::clients_report(),
         "rules": crate::doctor::privacy_findings(&open_stores(state)),
-        "unregisterable": crate::clients::UNREGISTERABLE,
     }))
 }
 
@@ -2006,8 +2007,45 @@ fn tool_list_tokens(state: &Arc<State>) -> (i64, &'static str) {
     (count * bytes / prose, counter.label())
 }
 
+/// The live connections, one row per app and transport. Every Claude Code
+/// window is a session of its own, and a list of sessions read as three
+/// Claude Codes connected; the row says one app with three sessions.
+fn grouped_clients(clients: Vec<crate::daemon::Client>) -> Vec<Value> {
+    let mut rows: Vec<(String, String, Vec<crate::daemon::Client>)> = Vec::new();
+    for client in clients {
+        match rows
+            .iter_mut()
+            .find(|(name, transport, _)| *name == client.name && *transport == client.transport)
+        {
+            Some((_, _, group)) => group.push(client),
+            None => rows.push((client.name.clone(), client.transport.clone(), vec![client])),
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    rows.into_iter()
+        .map(|(name, transport, group)| {
+            let mut versions: Vec<&str> = group
+                .iter()
+                .map(|c| c.version.as_str())
+                .filter(|v| !v.is_empty())
+                .collect();
+            versions.sort_unstable();
+            versions.dedup();
+            json!({
+                "name": name,
+                "transport": transport,
+                "sessions": group.len(),
+                "version": versions.join(", "),
+                "revision": group.iter().map(|c| c.revision.as_str()).max().unwrap_or("—"),
+                "queries": group.iter().map(|c| c.queries).sum::<u64>(),
+                "seen": group.iter().map(|c| c.seen).max().unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
 fn agents(state: &Arc<State>) -> Response {
-    let connections = state.clients();
+    let connections = grouped_clients(state.clients());
     let key = state.server.agent_key();
     Response::json(&json!({
         "forwarding": state.proxy_count() > 0,
@@ -3921,6 +3959,33 @@ fn adopt(state: &Arc<State>, request: &Request) -> Response {
 /// same through the proxy as it does in process.
 fn mcp(state: &Arc<State>, request: &Request) -> Response {
     let proxy = crate::proxy::proxy_pid(request.header("semlith-proxy"));
+    // The end of a session. MCP's HTTP transport says a client ends one with
+    // DELETE; a stdio proxy says so with its own notification when its
+    // client closes stdin. Either way the connection leaves the list now,
+    // rather than a closed window showing as connected for two minutes.
+    let closing = request.method == "DELETE"
+        || request
+            .json()
+            .ok()
+            .and_then(|b| b.get("method").and_then(Value::as_str).map(str::to_string))
+            .as_deref()
+            == Some(crate::proxy::CLOSED);
+    if closing {
+        let session = request
+            .header("mcp-session-id")
+            .filter(|id| is_session_id(id))
+            .map(str::to_string)
+            .or_else(|| proxy.map(|pid| pid.to_string()));
+        let transport = if proxy.is_some() {
+            "stdio proxy"
+        } else {
+            "http /mcp"
+        };
+        if let Some(session) = session {
+            state.forget_client(&session, transport, proxy);
+        }
+        return Response::new(200, "application/json; charset=utf-8", Vec::new());
+    }
     if let Some(pid) = proxy {
         state.saw_proxy(pid);
     }
@@ -3944,9 +4009,24 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
         .and_then(|p| p.get("clientInfo"))
         .and_then(|c| c.get("name"))
         .and_then(Value::as_str);
+    let version = params
+        .and_then(|p| p.get("clientInfo"))
+        .and_then(|c| c.get("version"))
+        .and_then(Value::as_str);
     let revision = params
         .and_then(|p| p.get("protocolVersion"))
         .and_then(Value::as_str);
+    // What the proxy read from its own ancestry: one of `clientid`'s names or
+    // a dash. Anything else is ignored rather than recorded, since the header
+    // comes from whatever holds the token.
+    let host = request
+        .header("semlith-host")
+        .filter(|h| {
+            h.len() <= 64
+                && h.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || " ().-".contains(c))
+        })
+        .filter(|h| *h != "-");
     // A session id arrives from a client and goes back out in a response
     // header, so what a client may send is exactly what `new_session` produces:
     // sixteen hex characters. Anything else — a header injection, a control
@@ -3965,7 +4045,15 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
                 String::from("anonymous")
             }
         });
-    state.note_client(&session, transport, name, revision, method == "tools/call");
+    state.note_client(
+        &session,
+        transport,
+        name,
+        version,
+        host,
+        revision,
+        method == "tools/call",
+    );
     // A method that is about the server rather than about a corpus is answered
     // whether or not anything is indexed: an agent connecting to a fresh
     // install should be told which tools exist, not that the daemon is broken.
@@ -3990,8 +4078,9 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     // ledger records comes from what was noted then. The transport's session id
     // is the conversation id, which is what it is for.
     let mut mcp_session = crate::mcp::Session::new(session.clone());
-    if let Some(named) = state.client_name(&session, transport) {
+    if let Some((named, version)) = state.client_name(&session, transport) {
         mcp_session.client = named;
+        mcp_session.version = version;
     }
     let response = match crate::mcp::answer(fleet, Some(&writer), &body, &mut mcp_session) {
         Some(value) => Response::json(&value),
@@ -4165,6 +4254,30 @@ fn named(state: &Arc<State>, name: &str) -> Option<Arc<Store>> {
 
 #[cfg(test)]
 mod tests {
+    /// Three Claude Code windows are one app with three sessions, not three
+    /// apps; versions seen are listed once each.
+    #[test]
+    fn connections_are_one_row_per_app() {
+        let client = |name: &str, version: &str, queries: u64| crate::daemon::Client {
+            name: name.into(),
+            version: version.into(),
+            transport: "stdio proxy".into(),
+            revision: "2025-06-18".into(),
+            queries,
+            seen: 1,
+        };
+        let rows = grouped_clients(vec![
+            client("Claude Code", "2.1.285", 3),
+            client("Zed", "0.1.0", 1),
+            client("Claude Code", "2.1.285", 2),
+            client("Claude Code", "2.1.286", 0),
+        ]);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0]["name"], "Claude Code");
+        assert_eq!(rows[0]["sessions"], 3);
+        assert_eq!(rows[0]["queries"], 5);
+        assert_eq!(rows[0]["version"], "2.1.285, 2.1.286");
+    }
     use super::*;
 
     #[test]
