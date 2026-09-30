@@ -184,12 +184,24 @@ pub fn priced(found: &Found, table: &prices::Table) -> Filled {
 /// Every place the readers would look on this machine, per client, for the
 /// Privacy page: what turning the setting on lets semlith open.
 pub fn log_paths() -> Vec<serde_json::Value> {
+    let home = crate::home::user_home()
+        .map(|h| crate::plain(&h.display().to_string()))
+        .unwrap_or_default();
+    // `~/.claude/projects` rather than the whole home, which is the same on
+    // every row and pushes the part that differs off the edge of the card.
+    let short = |p: &std::path::PathBuf| {
+        let full = crate::plain(&p.display().to_string());
+        match full.strip_prefix(&home) {
+            Some(rest) if !home.is_empty() => format!("~{rest}"),
+            _ => full,
+        }
+    };
     readers::paths()
         .into_iter()
         .map(|(client, paths)| {
             serde_json::json!({
                 "client": client,
-                "paths": paths.iter().map(|p| crate::plain(&p.display().to_string())).collect::<Vec<_>>(),
+                "paths": paths.iter().map(short).collect::<Vec<_>>(),
             })
         })
         .collect()
