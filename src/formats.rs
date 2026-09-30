@@ -44,22 +44,58 @@ pub(crate) fn handles(ext: &str) -> bool {
 
 /// Text from a file of one of the [`HANDLED`] formats, or `None` when it cannot
 /// be read: corrupt, encrypted, empty of text, or larger decompressed than
-/// [`MAX_ARCHIVE_TEXT`].
-pub(crate) fn extract(ext: &str, bytes: &[u8]) -> Option<String> {
-    let text = match ext {
-        "ipynb" => notebook(bytes),
-        "html" | "htm" => html(bytes),
-        "docx" => docx(bytes),
-        "pptx" => pptx(bytes),
-        "xlsx" => xlsx(bytes),
-        "odt" | "odp" | "ods" => odf(bytes),
-        "epub" => epub(bytes),
-        "rtf" => rtf(bytes),
-        "eml" => eml(bytes),
-        "mbox" => mbox(bytes),
-        _ => None,
-    }?;
-    (!text.trim().is_empty()).then_some(text)
+/// [`MAX_ARCHIVE_TEXT`]. With it, the file's units counted in the same pass: slides for a
+/// deck, non-empty cells for a workbook, cells for a notebook — what
+/// `Inside the index` shows in place of a file count. `None` for a format that
+/// has no such unit.
+pub(crate) fn extract_counted(ext: &str, bytes: &[u8]) -> Option<(String, Option<i64>)> {
+    let (text, units) = match ext {
+        "ipynb" => notebook(bytes).map(|(t, n)| (t, Some(n)))?,
+        "html" | "htm" => (html(bytes)?, None),
+        "docx" => (docx(bytes)?, None),
+        "pptx" => pptx(bytes).map(|(t, n)| (t, Some(n)))?,
+        "xlsx" => xlsx(bytes).map(|(t, n)| (t, Some(n)))?,
+        "odt" | "odp" | "ods" => {
+            let (text, pages, cells) = odf(bytes)?;
+            let units = match ext {
+                "odp" => Some(pages),
+                "ods" => Some(cells),
+                _ => None,
+            };
+            (text, units)
+        }
+        "epub" => (epub(bytes)?, None),
+        "rtf" => (rtf(bytes)?, None),
+        "eml" => (eml(bytes)?, None),
+        "mbox" => (mbox(bytes)?, None),
+        _ => return None,
+    };
+    (!text.trim().is_empty()).then_some((text, units))
+}
+
+/// Non-empty fields of a comma- or tab-separated file, quotes honoured: a
+/// comma inside `"a, b"` is text, and `""` is an empty field.
+pub(crate) fn delimited_cells(text: &str, delimiter: char) -> i64 {
+    let mut cells = 0;
+    let mut quoted = false;
+    let mut filled = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+                filled = true;
+            }
+            '"' => quoted = !quoted,
+            c if !quoted && (c == delimiter || c == '\n') => {
+                cells += i64::from(filled);
+                filled = false;
+            }
+            c if !c.is_whitespace() => filled = true,
+            _ => {}
+        }
+    }
+    cells + i64::from(filled)
 }
 
 // ---------------------------------------------------------------- notebooks
@@ -71,7 +107,7 @@ pub(crate) fn extract(ext: &str, bytes: &[u8]) -> Option<String> {
 /// `"outputs"` and escaped newlines. What a developer is searching for is the
 /// third line of the fourth cell, so that is what gets embedded, with the cell
 /// number kept as a marker because a notebook has cells where a file has lines.
-fn notebook(bytes: &[u8]) -> Option<String> {
+fn notebook(bytes: &[u8]) -> Option<(String, i64)> {
     let json: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let cells = json.get("cells")?.as_array()?;
     let mut out = String::new();
@@ -105,7 +141,7 @@ fn notebook(bytes: &[u8]) -> Option<String> {
         }
         out.push('\n');
     }
-    Some(out)
+    Some((out, cells.len() as i64))
 }
 
 /// nbformat writes a cell's source either as one string or as a list of lines.
@@ -350,8 +386,9 @@ fn docx_body(xml: &str) -> String {
     lines.finish()
 }
 
-/// A slide deck: each slide's text, under a marker naming its number.
-fn pptx(bytes: &[u8]) -> Option<String> {
+/// A slide deck: each slide's text, under a marker naming its number, and how
+/// many slides it has — the ones with no text included.
+fn pptx(bytes: &[u8]) -> Option<(String, i64)> {
     let mut zip = archive(bytes)?;
     let mut budget = MAX_ARCHIVE_TEXT;
 
@@ -363,6 +400,7 @@ fn pptx(bytes: &[u8]) -> Option<String> {
         .filter_map(|name| Some((slide_number(name)?, name.to_string())))
         .collect();
     slides.sort_unstable();
+    let count = slides.len() as i64;
 
     let mut out = String::new();
     for (number, name) in slides {
@@ -383,7 +421,7 @@ fn pptx(bytes: &[u8]) -> Option<String> {
         }
         out.push_str(&format!("# Slide {number}\n{}\n\n", text.trim_end()));
     }
-    Some(out)
+    Some((out, count))
 }
 
 /// `ppt/slides/slide7.xml` → `7`. Notes, layouts and masters are not slides.
@@ -395,8 +433,8 @@ fn slide_number(name: &str) -> Option<u32> {
 }
 
 /// A workbook: every sheet, in workbook order, under a marker naming it, with
-/// each row a line of tab-separated cells.
-fn xlsx(bytes: &[u8]) -> Option<String> {
+/// each row a line of tab-separated cells, and how many cells held a value.
+fn xlsx(bytes: &[u8]) -> Option<(String, i64)> {
     let mut zip = archive(bytes)?;
     let mut budget = MAX_ARCHIVE_TEXT;
 
@@ -412,6 +450,7 @@ fn xlsx(bytes: &[u8]) -> Option<String> {
     let targets = relationships(&rels);
 
     let mut out = String::new();
+    let mut cells = 0;
     for (name, id) in sheets(&workbook) {
         // The relationship is what ties a sheet's name to the part holding it.
         // sheet1.xml is usually the first sheet and is not required to be.
@@ -428,13 +467,14 @@ fn xlsx(bytes: &[u8]) -> Option<String> {
         let Some(xml) = entry(&mut zip, &path, &mut budget) else {
             break;
         };
-        let text = sheet_text(&xml, &shared);
+        let (text, filled) = sheet_text(&xml, &shared);
+        cells += filled;
         if text.trim().is_empty() {
             continue;
         }
         out.push_str(&format!("## Sheet: {name}\n{}\n\n", text.trim_end()));
     }
-    Some(out)
+    Some((out, cells))
 }
 
 /// The shared-string table, in index order.
@@ -489,13 +529,15 @@ fn sheets(xml: &str) -> Vec<(String, String)> {
     found
 }
 
-/// One worksheet: a line per row, a tab between cells.
-fn sheet_text(xml: &str, shared: &[String]) -> String {
+/// One worksheet: a line per row, a tab between cells; and the cells that held
+/// a value.
+fn sheet_text(xml: &str, shared: &[String]) -> (String, i64) {
     let mut out = String::new();
     let mut cell_kind = String::new();
     let mut value = String::new();
     let mut in_value = false;
     let mut cells_in_row = 0usize;
+    let mut filled = 0i64;
 
     scan(xml, |event| match event {
         Event::Open { name: "c", attrs } => {
@@ -528,6 +570,7 @@ fn sheet_text(xml: &str, shared: &[String]) -> String {
                 }
                 out.push_str(&text);
                 cells_in_row += 1;
+                filled += 1;
             }
         }
         Event::Close("row") => {
@@ -538,7 +581,7 @@ fn sheet_text(xml: &str, shared: &[String]) -> String {
         }
         _ => {}
     });
-    out
+    (out, filled)
 }
 
 /// An OpenDocument text, presentation or spreadsheet.
@@ -546,14 +589,24 @@ fn sheet_text(xml: &str, shared: &[String]) -> String {
 /// All three keep their content in one `content.xml` and all three mark a
 /// paragraph with `text:p`, so they are one reader with markers for the two
 /// divisions that are not paragraphs: a presentation's pages and a
-/// spreadsheet's tables.
-fn odf(bytes: &[u8]) -> Option<String> {
+/// spreadsheet's tables. Also counted: a presentation's pages and a
+/// spreadsheet's non-empty cells, repeats included — a sheet writes eight
+/// identical cells as one element with `table:number-columns-repeated="8"`.
+fn odf(bytes: &[u8]) -> Option<(String, i64, i64)> {
     let mut zip = archive(bytes)?;
     let mut budget = MAX_ARCHIVE_TEXT;
     let xml = entry(&mut zip, "content.xml", &mut budget)?;
 
     let mut lines = Lines::default();
     let mut page = 0u32;
+    let (mut cells, mut row_cells, mut row_repeat) = (0i64, 0i64, 1i64);
+    let (mut cell_repeat, mut in_cell, mut cell_filled) = (1i64, false, false);
+    let repeat = |attrs: &str, key: &str| {
+        attr(attrs, key)
+            .and_then(|n| n.parse::<i64>().ok())
+            .unwrap_or(1)
+            .max(1)
+    };
 
     scan(&xml, |event| match event {
         Event::Open {
@@ -577,19 +630,43 @@ fn odf(bytes: &[u8]) -> Option<String> {
             let named = attr(attrs, "table:name").unwrap_or_default();
             lines.marker(&format!("## Sheet: {named}"));
         }
-        Event::Text(text) => lines.text(text),
+        Event::Text(text) => {
+            cell_filled |= in_cell && !text.trim().is_empty();
+            lines.text(text)
+        }
         // A heading is a paragraph for these purposes; a cell holds paragraphs
         // and a row of cells is a line.
         Event::Close("text:p" | "text:h") => lines.end_line(),
         Event::Open {
             name: "table:table-row",
-            ..
-        } => lines.start_row(),
-        Event::Close("table:table-cell") => lines.end_cell(),
-        Event::Close("table:table-row") => lines.end_row(),
+            attrs,
+        } => {
+            row_cells = 0;
+            row_repeat = repeat(attrs, "table:number-rows-repeated");
+            lines.start_row()
+        }
+        Event::Open {
+            name: "table:table-cell",
+            attrs,
+        } => {
+            in_cell = true;
+            cell_filled = false;
+            cell_repeat = repeat(attrs, "table:number-columns-repeated");
+        }
+        Event::Close("table:table-cell") => {
+            if cell_filled {
+                row_cells += cell_repeat;
+            }
+            in_cell = false;
+            lines.end_cell()
+        }
+        Event::Close("table:table-row") => {
+            cells += row_cells * row_repeat;
+            lines.end_row()
+        }
         _ => {}
     });
-    Some(lines.finish())
+    Some((lines.finish(), i64::from(page), cells))
 }
 
 /// Text assembled the way a document is laid out: paragraphs are lines, and a
@@ -1729,8 +1806,9 @@ mod tests {
              "outputs":[{"output_type":"stream","name":"stdout","text":["converged\n"]},
                         {"output_type":"display_data","data":{"image/png":"AAAA"}}]}
         ],"nbformat":4}"##;
-        let text = notebook(nb).unwrap();
+        let (text, cells) = notebook(nb).unwrap();
 
+        assert_eq!(cells, 2);
         assert!(text.contains("prose here"));
         assert!(text.contains("def f(x):"));
         assert!(text.contains("converged"), "stream output missing: {text}");
@@ -1775,7 +1853,10 @@ mod tests {
             <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><v>42</v></c></row>
             <row r="2"><c r="A2" t="s"><v>1</v></c></row>
         </sheetData></worksheet>"#;
-        assert_eq!(sheet_text(sheet, &shared), "alpha\t42\nbeta & co\n");
+        assert_eq!(
+            sheet_text(sheet, &shared),
+            ("alpha\t42\nbeta & co\n".to_string(), 3)
+        );
     }
 
     /// A Word table has to come back as rows. Flattened, a two-column table is
@@ -1803,9 +1884,49 @@ mod tests {
             for bytes in rubbish {
                 // The contract is that this returns, without panicking, and
                 // that nonsense does not come back as text.
-                let _ = extract(ext, bytes);
+                let _ = extract_counted(ext, bytes);
             }
-            assert!(extract(ext, b"").is_none(), "{ext} read an empty file");
+            assert!(
+                extract_counted(ext, b"").is_none(),
+                "{ext} read an empty file"
+            );
         }
+    }
+
+    #[test]
+    fn delimited_cells_honour_quotes_and_skip_empties() {
+        assert_eq!(delimited_cells("a,b,c\n1,,3\n", ','), 5);
+        assert_eq!(
+            delimited_cells("\"x, y\",\"\"\n\"he said \"\"hi\"\"\",z", ','),
+            3
+        );
+        assert_eq!(delimited_cells("a\tb\n\t\n", '\t'), 2);
+        assert_eq!(delimited_cells("", ','), 0);
+        // A quoted newline is inside the field, not the end of a row.
+        assert_eq!(delimited_cells("\"line one\nline two\",b", ','), 2);
+    }
+
+    #[test]
+    fn a_spreadsheet_counts_repeated_cells_once_per_repeat() {
+        let xml = r#"<office:document-content><office:body><office:spreadsheet>
+            <table:table table:name="S">
+              <table:table-row table:number-rows-repeated="2">
+                <table:table-cell table:number-columns-repeated="3"><text:p>x</text:p></table:table-cell>
+                <table:table-cell table:number-columns-repeated="1000"/>
+              </table:table-row>
+              <table:table-row><table:table-cell><text:p>y</text:p></table:table-cell></table:table-row>
+            </table:table></office:spreadsheet></office:body></office:document-content>"#;
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut buf));
+            zip.start_file("content.xml", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut zip, xml.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        let (text, pages, cells) = odf(&buf).unwrap();
+        assert_eq!((pages, cells), (0, 7), "{text}");
+        assert_eq!(extract_counted("ods", &buf).unwrap().1, Some(7));
+        assert_eq!(extract_counted("odt", &buf).unwrap().1, None);
     }
 }

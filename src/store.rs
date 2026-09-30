@@ -498,7 +498,7 @@ const FTS_BUILT: &str = "fts_built";
 /// never sees them. That is the whole reason `format_version` does not move —
 /// the same reasoning `docs/compatibility.md` records for the graph tables.
 fn add_columns(db: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 9] = [
+    const ADDITIONS: [(&str, &str, &str); 19] = [
         ("edges", "hint", "TEXT"),
         // 0.16.0: the line the reference was written on.
         ("edges", "line", "INTEGER"),
@@ -521,12 +521,32 @@ fn add_columns(db: &Connection) -> Result<()> {
         ("retrievals", "query_id", "TEXT"),
         // 0.33.0: the client's own version, beside the name `clientid` resolved.
         ("retrievals", "client_version", "TEXT"),
+        // 0.34.0: the model request that made the call, read afterwards from
+        // the client's own session log (`crate::usage`), and what it cost.
+        // Outside the chain like `client_version`: they are filled in after
+        // the row is written, which a hashed column could never allow.
+        // `usage_source` is the log they came from, or why there is none;
+        // NULL means not looked for yet.
+        ("retrievals", "model", "TEXT"),
+        ("retrievals", "input_tokens", "INTEGER"),
+        ("retrievals", "output_tokens", "INTEGER"),
+        ("retrievals", "cache_read_tokens", "INTEGER"),
+        ("retrievals", "cache_write_tokens", "INTEGER"),
+        ("retrievals", "reasoning_tokens", "INTEGER"),
+        ("retrievals", "cost_usd", "REAL"),
+        ("retrievals", "cost_source", "TEXT"),
+        ("retrievals", "usage_source", "TEXT"),
         // 0.25.0: what the parser made of this file — "parsed", "timeout" or
         // "none" for a language that carries no grammar. Without it a file
         // with no definitions and a file the parser gave up on look the same
         // in the per-language coverage table, which is the one question that
         // table exists to answer.
         ("files", "graph", "TEXT"),
+        // 0.34.0: the file's units — PDF pages, slides, non-empty spreadsheet
+        // cells or notebook cells, by its format (`chunk::COUNTED`). NULL is
+        // "not counted": a format with no unit, or a file an older binary
+        // wrote, which the next index pass counts without re-embedding it.
+        ("files", "units", "INTEGER"),
     ];
     for (table, column, kind) in ADDITIONS {
         if has_column(db, table, column)? {
@@ -916,6 +936,40 @@ pub fn set_file_graph(db: &Connection, file_id: i64, state: &str) -> Result<()> 
         params![state, file_id],
     )?;
     Ok(())
+}
+
+/// Record a file's units (see `chunk::COUNTED`), by row id or, for a file
+/// whose row is already there, by path.
+pub fn set_file_units(db: &Connection, file_id: i64, units: i64) -> Result<()> {
+    db.execute(
+        "UPDATE files SET units = ?1 WHERE id = ?2",
+        params![units, file_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_units_by_path(db: &Connection, path: &str, units: i64) -> Result<()> {
+    db.execute(
+        "UPDATE files SET units = ?1 WHERE path = ?2",
+        params![units, path],
+    )?;
+    Ok(())
+}
+
+/// Stored files of a counted format whose units were never recorded — written
+/// by a binary older than 0.34.0. The index pass reads each one again for its
+/// count alone.
+pub fn uncounted(db: &Connection) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = db.prepare("SELECT path FROM files WHERE units IS NULL")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut out = std::collections::HashSet::new();
+    for path in rows {
+        let path = path?;
+        if crate::chunk::is_counted(std::path::Path::new(&path)) {
+            out.insert(path);
+        }
+    }
+    Ok(out)
 }
 
 /// What the graph covers, per language, read from the rows themselves.
@@ -2293,6 +2347,47 @@ pub struct Retrieval {
     /// as the one search they came from. Empty for a row written before
     /// 0.20.2, which was its own retrieval.
     pub query_id: String,
+    /// The model request behind the call, once a reader has looked for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<RowUsage>,
+}
+
+/// A row's usage columns as they are stored. Every figure is optional: a
+/// client that logs the model and not the tokens gets the model.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct RowUsage {
+    pub model: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+    pub cost_source: Option<String>,
+    /// The log the figures came from, or why there are none.
+    pub source: String,
+}
+
+/// The usage columns, from column `at` of a row onwards, in the order
+/// `USAGE_COLUMNS` lists them. `None` until a reader has looked.
+pub const USAGE_COLUMNS: &str = "model, input_tokens, output_tokens, cache_read_tokens, \
+     cache_write_tokens, reasoning_tokens, cost_usd, cost_source, usage_source";
+
+pub fn usage_at(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Option<RowUsage>> {
+    let Some(source) = r.get::<_, Option<String>>(at + 8)? else {
+        return Ok(None);
+    };
+    Ok(Some(RowUsage {
+        model: r.get(at)?,
+        input_tokens: r.get(at + 1)?,
+        output_tokens: r.get(at + 2)?,
+        cache_read_tokens: r.get(at + 3)?,
+        cache_write_tokens: r.get(at + 4)?,
+        reasoning_tokens: r.get(at + 5)?,
+        cost_usd: r.get(at + 6)?,
+        cost_source: r.get(at + 7)?,
+        source,
+    }))
 }
 
 /// Append one retrieval, chained to the row before it.
@@ -2399,6 +2494,109 @@ pub struct NewRetrieval<'a> {
     /// hits. This is what says those rows are one retrieval rather than
     /// several, and it is what "queries recorded" counts.
     pub query_id: &'a str,
+}
+
+/// A ledger row whose usage has not been looked for, as the readers in
+/// `crate::usage` need it to find the model request that made the call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unfilled {
+    pub id: i64,
+    pub at: i64,
+    pub client: String,
+    pub session: String,
+    pub tool: String,
+    pub query: String,
+    pub query_id: String,
+}
+
+/// Rows written by an AI client since `since` (unix seconds) with no usage
+/// yet, oldest first. `cli` and `portal` rows have no model behind them, and
+/// neither has a `raw-read` row, which the steering hook writes for a read
+/// the agent made without semlith.
+pub fn unfilled(db: &Connection, since: i64) -> Result<Vec<Unfilled>> {
+    let mut q = db.prepare(
+        "SELECT id, at, client, COALESCE(session, ''), COALESCE(tool, ''), query,
+                COALESCE(query_id, '')
+           FROM retrievals
+          WHERE usage_source IS NULL AND at >= ?1 AND client NOT IN ('cli', 'portal')
+            AND COALESCE(tool, '') != 'raw-read'
+          ORDER BY at, id",
+    )?;
+    let rows = q.query_map(params![since], |r| {
+        Ok(Unfilled {
+            id: r.get(0)?,
+            at: r.get(1)?,
+            client: r.get(2)?,
+            session: r.get(3)?,
+            tool: r.get(4)?,
+            query: r.get(5)?,
+            query_id: r.get(6)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// What a reader found for one row: the usage, or only why there is none.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Filled {
+    pub model: Option<String>,
+    pub tokens: Option<crate::prices::Tokens>,
+    pub cost_usd: Option<f64>,
+    pub cost_source: Option<String>,
+    /// The log it came from, or why nothing did (`not recorded by Zed`).
+    pub usage_source: String,
+}
+
+/// Write a row's usage. Every row sharing its `query_id` is the same call,
+/// written once per store that answered, so all of them are filled.
+pub fn fill_usage(db: &Connection, row: &Unfilled, filled: &Filled) -> Result<()> {
+    let _writing = Writing::begin(db)?;
+    let t = filled.tokens;
+    db.execute(
+        "UPDATE retrievals
+            SET model = ?1, input_tokens = ?2, output_tokens = ?3, cache_read_tokens = ?4,
+                cache_write_tokens = ?5, reasoning_tokens = ?6, cost_usd = ?7,
+                cost_source = ?8, usage_source = ?9
+          WHERE id = ?10 OR (?11 != '' AND query_id = ?11)",
+        params![
+            filled.model,
+            t.map(|t| t.input),
+            t.map(|t| t.output),
+            t.map(|t| t.cache_read),
+            t.map(|t| t.cache_write),
+            t.map(|t| t.reasoning),
+            filled.cost_usd,
+            filled.cost_source,
+            filled.usage_source,
+            row.id,
+            row.query_id,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Every row with usage, keyed as [`ledger_keys`] keys it, for totals per
+/// client and per model that count a cross-store call once.
+pub fn usage_rows(db: &Connection, store: &str) -> Result<Vec<(String, String, RowUsage)>> {
+    let mut q = db.prepare(&format!(
+        "SELECT id, COALESCE(query_id, ''), client, {USAGE_COLUMNS}
+           FROM retrievals WHERE model IS NOT NULL"
+    ))?;
+    let rows = q.query_map([], |r| {
+        let id: i64 = r.get(0)?;
+        let qid: String = r.get(1)?;
+        let key = if qid.is_empty() {
+            format!("{store}#{id}")
+        } else {
+            qid
+        };
+        Ok((
+            key,
+            r.get::<_, String>(2)?,
+            usage_at(r, 3)?.unwrap_or_default(),
+        ))
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
 }
 
 /// The hash covering one row and the one before it.
@@ -2557,11 +2755,11 @@ fn legacy_chain_hash(
 
 /// The most recent `limit` retrievals, newest first.
 pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
-    let mut stmt = db.prepare(
+    let mut stmt = db.prepare(&format!(
         "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, hash,
-                query_id
-         FROM retrievals ORDER BY id DESC LIMIT ?1",
-    )?;
+                query_id, {USAGE_COLUMNS}
+         FROM retrievals ORDER BY id DESC LIMIT ?1"
+    ))?;
     let rows = stmt.query_map(params![limit as i64], |r| {
         Ok(Retrieval {
             id: r.get(0)?,
@@ -2574,6 +2772,7 @@ pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
             whole_file_tokens: r.get(7)?,
             hash: r.get(8)?,
             query_id: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
+            usage: usage_at(r, 10)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -3328,7 +3527,7 @@ pub struct Corpus {
     /// Per language, by line: the mix the page draws as a stacked bar.
     pub languages: Vec<LanguageLines>,
     /// Files by the kind of thing they are, for the prose panel.
-    pub kinds: Vec<KindCount>,
+    pub kinds: Vec<FileKind>,
     pub longest_file: Option<FileLines>,
     /// The most folders any indexed path descends through.
     pub deepest_path: i64,
@@ -3370,6 +3569,23 @@ pub struct LanguageLines {
 pub struct KindCount {
     pub name: String,
     pub count: i64,
+}
+
+/// One kind of file on the prose panel: how many there are and, for a kind
+/// with a unit, how many of that unit they hold.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct FileKind {
+    pub name: String,
+    /// Files of this kind.
+    pub count: i64,
+    /// `pages`, `slides` or `cells`; `None` for a kind counted in files only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<&'static str>,
+    /// The unit summed over the files that have a count.
+    pub units: i64,
+    /// Files of a counted kind with no count yet — stored by an older binary,
+    /// counted by the next index pass.
+    pub uncounted: i64,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -3488,21 +3704,42 @@ pub fn corpus(db: &Connection, language_of: impl Fn(&str) -> String) -> Result<C
     out.languages
         .sort_by_key(|row| std::cmp::Reverse(row.lines));
 
-    out.kinds = counted(
-        db,
-        "SELECT CASE
-                  WHEN lower(path) LIKE '%.pdf' THEN 'PDF'
-                  WHEN lower(path) LIKE '%.pptx' OR lower(path) LIKE '%.key' THEN 'Slide deck'
-                  WHEN lower(path) LIKE '%.xlsx' OR lower(path) LIKE '%.csv' THEN 'Spreadsheet'
-                  WHEN lower(path) LIKE '%.ipynb' THEN 'Notebook'
-                  WHEN lower(path) LIKE '%.docx' THEN 'Document'
-                  WHEN lower(path) LIKE '%.png' OR lower(path) LIKE '%.jpg'
-                    OR lower(path) LIKE '%.jpeg' OR lower(path) LIKE '%.webp' THEN 'Image'
-                  ELSE 'Text and code'
-                END AS k,
-                COUNT(*)
-           FROM files GROUP BY k ORDER BY COUNT(*) DESC",
-    )?;
+    // The kinds with a unit are exactly the formats `chunk::COUNTED` names,
+    // so every file under them either has a count or is waiting for one.
+    {
+        let mut q = db.prepare(
+            "SELECT CASE
+                      WHEN lower(path) LIKE '%.pdf' THEN 'PDF'
+                      WHEN lower(path) LIKE '%.pptx' OR lower(path) LIKE '%.odp' THEN 'Slide deck'
+                      WHEN lower(path) LIKE '%.xlsx' OR lower(path) LIKE '%.ods'
+                        OR lower(path) LIKE '%.csv' OR lower(path) LIKE '%.tsv' THEN 'Spreadsheet'
+                      WHEN lower(path) LIKE '%.ipynb' THEN 'Notebook'
+                      WHEN lower(path) LIKE '%.docx' OR lower(path) LIKE '%.odt' THEN 'Document'
+                      WHEN lower(path) LIKE '%.png' OR lower(path) LIKE '%.jpg'
+                        OR lower(path) LIKE '%.jpeg' OR lower(path) LIKE '%.webp' THEN 'Image'
+                      ELSE 'Text and code'
+                    END AS k,
+                    COUNT(*), COALESCE(SUM(units), 0), SUM(units IS NULL)
+               FROM files GROUP BY k ORDER BY COUNT(*) DESC",
+        )?;
+        let mut rows = q.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(0)?;
+            let unit = match name.as_str() {
+                "PDF" => Some("pages"),
+                "Slide deck" => Some("slides"),
+                "Spreadsheet" | "Notebook" => Some("cells"),
+                _ => None,
+            };
+            out.kinds.push(FileKind {
+                count: row.get(1)?,
+                units: row.get(2)?,
+                uncounted: if unit.is_some() { row.get(3)? } else { 0 },
+                unit,
+                name,
+            });
+        }
+    }
 
     let span: (i64, i64) = db.query_row(
         "SELECT COALESCE(MIN(indexed_at), 0), COALESCE(MAX(indexed_at), 0) FROM files",

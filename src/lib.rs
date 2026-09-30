@@ -55,6 +55,7 @@ pub mod pattern;
 /// The daemon as a login service, so a client never finds nothing.
 pub mod pipeline;
 pub mod portal;
+pub mod prices;
 pub mod priority;
 pub mod proxy;
 pub mod replay;
@@ -70,6 +71,7 @@ pub mod system;
 pub mod tree;
 pub mod trt;
 pub mod upgrade;
+pub mod usage;
 pub mod watch;
 
 use anyhow::{Result, bail};
@@ -2599,6 +2601,7 @@ impl Semlith {
             regraph,
             allow_secrets: self.boundary.allow_secrets,
             hashes: store::all_hashes(&self.db)?,
+            uncounted: store::uncounted(&self.db)?,
             over_cap: store::acceptances(&self.db)?
                 .into_iter()
                 .filter(|a| a.class == store::class::POLICY)
@@ -2797,7 +2800,7 @@ impl Semlith {
                 // same silent `skipped`, and a person looking at two thousand of
                 // them could not tell an empty `__init__.py` from a file the
                 // operating system would not open.
-                let (hash, len, text, found, ready) = match prepared {
+                let (hash, len, text, units, found, ready) = match prepared {
                     pipeline::Prepared::Refused(_) => unreachable!("handled above"),
                     // Taken by the scan phase a moment ago and unchanged since:
                     // the store already holds these bytes, so they were not read
@@ -2867,9 +2870,16 @@ impl Semlith {
                         file_bytes,
                         rescan: rescanned,
                         regraph: regraphed,
+                        units,
                     } => {
                         report.bytes += file_bytes;
                         self.tx_begin()?;
+                        // A file an older binary stored, counted now: the
+                        // count only — its chunks and vectors are as current
+                        // as its bytes.
+                        if let Some(units) = units {
+                            store::set_units_by_path(&self.db, &key, units)?;
+                        }
                         // The upgrade pass (2.7): an unchanged file is scanned
                         // again under the new rules, and one they now refuse
                         // leaves the store.
@@ -3074,11 +3084,12 @@ impl Semlith {
                         hash,
                         file_bytes,
                         text,
+                        units,
                         found,
                         ready,
                     } => {
                         report.bytes += file_bytes;
-                        (hash, len, text, found, ready)
+                        (hash, len, text, units, found, ready)
                     }
                 };
                 let file_bytes = report.bytes - bytes_before;
@@ -3255,6 +3266,9 @@ impl Semlith {
                     (None, _) => "none",
                 };
                 store::set_file_graph(&self.db, file_id, parsed)?;
+                if let Some(units) = units {
+                    store::set_file_units(&self.db, file_id, units)?;
+                }
                 let mut spans: Vec<(u32, u32, i64)> = Vec::with_capacity(chunks.len());
                 let mut halted = false;
                 let count = chunks.len();

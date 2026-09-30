@@ -180,13 +180,39 @@ pub const PDF: &str = "pdf";
 /// The five formats, in the order a caller is offered them.
 pub const ALL_FORMATS: [&str; 5] = ["markdown", "csv", "json", "html", PDF];
 
-/// What a million tokens costs to read, by model. Input pricing, because a
-/// retrieval is something an agent reads.
-///
-/// Written down rather than fetched: a report must generate on a machine
-/// with no network, and a price whose source a reader cannot see is worse
-/// than one they can argue with.
-pub const PRICES: [(&str, f64); 3] = [("Sonnet 5", 3.0), ("Opus 5", 15.0), ("Haiku 4.5", 1.0)];
+/// The model a savings figure is priced at when nobody names one.
+pub const DEFAULT_MODEL: &str = "claude-sonnet-5-5";
+
+/// The models a savings figure is offered at, at least one per vendor the
+/// supported clients reach, from the same models.dev table the ledger's usage
+/// columns are priced by (`crate::prices`). Any model in that table can be
+/// asked for by name; these are the ones a picker lists first.
+pub const SAVINGS_MODELS: &[&str] = &[
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+    "claude-haiku-4-5",
+    "claude-fable-5-1",
+    "gpt-5.6",
+    "gpt-5.5",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gemini-3.1-pro-preview",
+    "gemini-3.5-flash",
+    "grok-4.7",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "kimi-k3",
+    "glm-5.3",
+    "mistral-large-latest",
+];
+
+/// The three names this binary priced by before 0.34.0, kept so a schedule or
+/// a script that saved one still runs — now at that model's table price.
+const ALIASES: [(&str, &str, &str); 3] = [
+    ("sonnet5", "Sonnet 5", "claude-sonnet-5"),
+    ("opus5", "Opus 5", "claude-opus-5"),
+    ("haiku45", "Haiku 4.5", "claude-haiku-4-5"),
+];
 
 /// A model name reduced to what is worth comparing: letters and digits only,
 /// folded to lower case. `Opus 5`, `opus-5` and `opus_5` are one model, and a
@@ -199,32 +225,54 @@ fn key_of(model: &str) -> String {
         .collect()
 }
 
-/// The price of a model by name, if it is one this binary prices.
+/// A model's name and what a million of its input tokens cost, if the price
+/// table carries it. Input pricing, because a retrieval is something an agent
+/// reads.
 ///
 /// Separate from [`price_of`] because a caller taking the name from a user has
 /// to be able to refuse an unknown one: this is a cost in money, and a
 /// spelling nobody prices must not quietly come back as the default's figure
 /// under the default's name.
-pub fn price_named(model: &str) -> Option<(&'static str, f64)> {
+pub fn price_named(model: &str) -> Option<(String, f64)> {
     let wanted = key_of(model);
-    PRICES
-        .iter()
-        .find(|(name, _)| key_of(name) == wanted)
-        .copied()
+    if wanted.is_empty() {
+        return None;
+    }
+    let table = crate::prices::table();
+    if let Some((_, label, id)) = ALIASES.iter().find(|(key, ..)| *key == wanted) {
+        return crate::prices::lookup(&table, None, id)
+            .map(|(_, p)| (label.to_string(), p.rates.input));
+    }
+    let (key, price) = crate::prices::lookup(&table, None, model)?;
+    let name = key
+        .split_once('/')
+        .map_or(key.as_str(), |(_, m)| m)
+        .to_string();
+    Some((name, price.rates.input))
 }
 
-/// The price of a model by name, or the first one.
-pub fn price_of(model: &str) -> (&'static str, f64) {
-    price_named(model).unwrap_or(PRICES[0])
+/// The price of a model by name, or the default's.
+pub fn price_of(model: &str) -> (String, f64) {
+    price_named(model)
+        .or_else(|| price_named(DEFAULT_MODEL))
+        .unwrap_or_else(|| (DEFAULT_MODEL.to_string(), 0.0))
 }
 
-/// The three names, for an error message that says what would have worked.
+/// What a refusal names as working instead.
 pub fn price_names() -> String {
-    PRICES
+    format!(
+        "any model in the price table (`semlith prices --model NAME`), such as {}",
+        SAVINGS_MODELS[..6].join(", ")
+    )
+}
+
+/// The picker's list: each of [`SAVINGS_MODELS`] the table carries, with its
+/// input price.
+pub fn savings_models() -> Vec<(String, f64)> {
+    SAVINGS_MODELS
         .iter()
-        .map(|(name, _)| *name)
-        .collect::<Vec<_>>()
-        .join(", ")
+        .filter_map(|m| price_named(m))
+        .collect()
 }
 
 /// Seconds since the epoch, for the one stamp a report carries.
@@ -1558,7 +1606,34 @@ mod tests {
         for spelling in ["Opus 5", "opus 5", "opus-5", "opus_5", "OPUS5"] {
             let (name, per_million) = price_of(spelling);
             assert_eq!(name, "Opus 5", "{spelling} priced as {name}");
-            assert_eq!(per_million, 15.0);
+            // The table's rate for claude-opus-5, not a number written here.
+            let table = crate::prices::built_in();
+            let opus = crate::prices::lookup(&table, None, "claude-opus-5")
+                .unwrap()
+                .1;
+            assert_eq!(per_million, opus.rates.input);
+        }
+        // And a model from another vendor, by the id its log names it by.
+        assert_eq!(price_of("gpt-5.5").0, "gpt-5.5");
+        assert_eq!(
+            price_of("Gemini-3.1-Pro-Preview").0,
+            "gemini-3.1-pro-preview"
+        );
+    }
+
+    #[test]
+    fn the_picker_offers_every_vendor() {
+        let names: Vec<String> = savings_models().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(
+            names.len(),
+            SAVINGS_MODELS.len(),
+            "a default model is missing from the table: {names:?}"
+        );
+        for vendor in ["claude", "gpt", "gemini", "grok", "deepseek"] {
+            assert!(
+                names.iter().any(|n| n.starts_with(vendor)),
+                "no {vendor} model in {names:?}"
+            );
         }
     }
 
@@ -1569,9 +1644,12 @@ mod tests {
         // asked for something else and nothing would tell them.
         assert!(price_named("gpt-9").is_none());
         assert!(price_named("").is_none());
-        assert_eq!(price_named("haiku 4.5").map(|(n, _)| n), Some("Haiku 4.5"));
+        assert_eq!(
+            price_named("haiku 4.5").map(|(n, _)| n).as_deref(),
+            Some("Haiku 4.5")
+        );
         let names = price_names();
-        for wanted in ["Sonnet 5", "Opus 5", "Haiku 4.5"] {
+        for wanted in ["semlith prices --model", DEFAULT_MODEL] {
             assert!(names.contains(wanted), "{names} does not name {wanted}");
         }
     }

@@ -86,6 +86,9 @@ const VIEWS: &[(&str, &str)] = &[
     // file the daemon owns rather than each keeping a list.
     ("schedule", "/api/schedules"),
     ("ledger", "/api/ledger"),
+    // The Agents page's Model prices card names the table and fetches a
+    // fresh one.
+    ("prices", "/api/prices"),
     // `semlith key` is the Agents page's Rotate button, which posts here.
     ("key", "/api/key"),
     // `semlith drop` is the Stores page's Delete, behind its second click.

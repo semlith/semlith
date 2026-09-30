@@ -289,7 +289,18 @@ is a field inside it. That file is per-checkout, so it is not tagged for
 by name — so `--scope user` is the one that means your own file everywhere.
 On Windows the installer puts `io.exe` in `%LOCALAPPDATA%\io\bin` and does not
 add it to `PATH`; add that directory before running `semlith setup`, or the CLI
-reads as not installed.
+reads as not installed. `io mcp add --scope user` writes the entry into
+`~/.io-cli/io.toml`, which is also where `semlith doctor` reads it from:
+
+```toml config path=~/.io-cli/io.toml
+[[mcp]]
+id = "semlith"
+transport = "stdio"
+command = "${SEMLITH_BIN}"
+args = ["mcp"]
+```
+
+Or against a daemon on another machine, over HTTP:
 
 ```toml
 [[mcp]]
@@ -794,3 +805,33 @@ session. For Claude Code, in `~/.claude/settings.json`:
 semlith does not write that for you. A hook runs on every session you open, and
 a tool that adds one to your settings without being asked is doing something
 you should have chosen.
+
+## Model, tokens and cost in the ledger
+
+MCP tells semlith which tool a client called and with what, and nothing about
+the model that decided to call it. With **Usage from client logs** on (the
+Privacy page, or `semlith ledger --usage on`; off by default), semlith reads
+each client's own session log for the model request that issued each call. It
+keeps that request's model, its input, output, cache-read and cache-write tokens,
+and the cost where the client records one. Logs are opened read-only and only
+those numbers are kept. Paths below are macOS; Linux and Windows follow each
+client's own home or application-data folder.
+
+| Client | Read from | Per request | Cost |
+|---|---|---|---|
+| Claude Code | `~/.claude/projects/**/*.jsonl` (`CLAUDE_CONFIG_DIR`) | yes | from the price table |
+| OpenAI Codex | `~/.codex/sessions/**/rollout-*.jsonl` (`CODEX_HOME`) | yes | from the price table |
+| ChatGPT desktop (the Codex app) | the same rollouts, told apart by `originator` | yes | from the price table |
+| OpenCode | `~/.local/share/opencode/opencode.db` | yes | OpenCode's own |
+| Gemini CLI | `~/.gemini/tmp/*/chats/session-*.jsonl` | yes | from the price table |
+| GitHub Copilot CLI | `~/.copilot/session-state/*/events.jsonl` and `session-store.db` | yes | from the price table, as the API price of the same tokens |
+| GitHub Copilot in VS Code | the agent debug log, `…/GitHub.copilot-chat/debug-logs/*/main.jsonl` | only with `chat.agentDebugLog.fileLogging.enabled` on; otherwise `not recorded` | from the price table |
+| Cline | `~/.cline/data/sessions/*/*.messages.json` | yes | Cline's own |
+| Claude Desktop | agent-mode sessions under `~/Library/Application Support/Claude/local-agent-mode-sessions` | agent mode only; chat keeps no usage on the machine and says `not recorded` | from the price table |
+| IO CLI | `~/.io-cli/runs.db` | yes | from the price table |
+| Zed | — | `not recorded`: Zed keeps a per-thread total, not the request behind each call | — |
+| Cursor | — | `not recorded`: Cursor stores no token counts on the machine | — |
+
+The price table is a models.dev snapshot built into the binary. `semlith prices
+update` refreshes it when you run it. A call that a subscription paid for, such
+as Copilot or Claude on a plan, is shown at the API price of the same tokens.

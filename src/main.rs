@@ -660,6 +660,29 @@ enum Command {
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
+
+        /// Turn reading each AI client's own session log for the model,
+        /// tokens and cost of its calls on or off. Off by default; the
+        /// Privacy page's toggle is the same setting.
+        #[arg(long, value_parser = ["on", "off"])]
+        usage: Option<String>,
+    },
+
+    /// The model price table the ledger's cost column uses.
+    ///
+    /// Prints which table is in use, where it came from and its date. `update`
+    /// fetches a fresh one from models.dev — the one network request this
+    /// command makes, and only when it is run.
+    Prices {
+        /// `update` to fetch models.dev now.
+        #[arg(value_parser = ["update"])]
+        action: Option<String>,
+        /// Print the price of one model, as a client's log names it.
+        #[arg(long)]
+        model: Option<String>,
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Find where a symbol is defined.
@@ -797,7 +820,7 @@ enum Command {
         format: String,
 
         /// Which model's prices the savings report costs tokens at.
-        #[arg(long, default_value = "Sonnet 5")]
+        #[arg(long, default_value = semlith::report::DEFAULT_MODEL)]
         model: String,
 
         /// Narrow the report to a period: all, day, week, month or quarter.
@@ -1869,7 +1892,28 @@ fn run() -> Result<()> {
             }
         }
 
-        Command::Ledger { last, verify, json } => {
+        Command::Ledger {
+            last,
+            verify,
+            json,
+            usage,
+        } => {
+            if let Some(usage) = usage {
+                let mut saved = semlith::home::Settings::load();
+                saved.ledger_usage = Some(usage == "on");
+                saved.save()?;
+                println!(
+                    "{}",
+                    if usage == "on" {
+                        "usage from client logs is on: the ledger reads each AI client's own \
+                         session log for the model, tokens and cost of its calls, read-only, \
+                         keeping the numbers and never the conversation"
+                    } else {
+                        "usage from client logs is off: no client log is opened"
+                    }
+                );
+                return Ok(());
+            }
             let fleet = read_fleet(&cli.store, &cwd, false)?;
             let many = fleet.len() > 1;
             if verify {
@@ -1896,7 +1940,12 @@ fn run() -> Result<()> {
                 return Ok(());
             }
             let mut any = false;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
             for (label, store) in fleet.each() {
+                // Nothing is opened while usage is off.
+                let _ = semlith::usage::enrich(store.db(), now);
                 let rows = semlith::store::retrievals(store.db(), last)?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -1921,6 +1970,9 @@ fn run() -> Result<()> {
                         row.micros / 1000,
                         row.query,
                     )?;
+                    if let Some(usage) = &row.usage {
+                        writeln!(out, "{:>22}{}", "", usage_line(usage))?;
+                    }
                 }
                 // A chain that does not verify is the one thing this table can
                 // say that a log file cannot, so it is said loudly.
@@ -1950,6 +2002,81 @@ fn run() -> Result<()> {
                      so on every start; `--no-ledger` or SEMLITH_LEDGER=0 stops it. Nothing \
                      recorded ever leaves this machine."
                 );
+            }
+        }
+
+        Command::Prices {
+            action,
+            model,
+            json,
+        } => {
+            let table = if action.as_deref() == Some("update") {
+                let table = semlith::prices::update()?;
+                if !json {
+                    println!(
+                        "fetched {}: {} models, written to {}",
+                        semlith::prices::SOURCE_URL,
+                        table.models.len(),
+                        semlith::home::prices_path()?.display()
+                    );
+                }
+                table
+            } else {
+                semlith::prices::table()
+            };
+            let built_in = semlith::prices::built_in();
+            let which = if table.fetched == built_in.fetched && table.models == built_in.models {
+                "built into this binary"
+            } else {
+                "downloaded by `semlith prices update`"
+            };
+            let priced = model.as_deref().map(|m| {
+                semlith::prices::lookup(&table, None, m).map(|(key, price)| (key, price.clone()))
+            });
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "source": table.source,
+                        "fetched": table.fetched,
+                        "models": table.models.len(),
+                        "from": which,
+                        "price": priced.map(|p| p.map(|(key, price)| serde_json::json!({ "key": key, "price": price }))),
+                    }))?
+                );
+                return Ok(());
+            }
+            println!(
+                "{} {} · {} models · {which}",
+                table.source,
+                table.fetched,
+                table.models.len()
+            );
+            if let (Some(name), Some(priced)) = (model, priced) {
+                match priced {
+                    Some((key, price)) => {
+                        let r = price.rates;
+                        let rate = |v: Option<f64>| {
+                            v.map_or("at the input rate".to_string(), |v| format!("${v}"))
+                        };
+                        println!(
+                            "{key}: input ${} · output ${} · cache read {} · cache write {} per million tokens",
+                            r.input,
+                            r.output,
+                            rate(r.cache_read),
+                            rate(r.cache_write)
+                        );
+                        for tier in &price.tiers {
+                            println!(
+                                "  above {} tokens of context: input ${} · output ${}",
+                                tier.above, tier.rates.input, tier.rates.output
+                            );
+                        }
+                    }
+                    None => {
+                        println!("{name}: not in this table, so its calls get tokens and no cost")
+                    }
+                }
             }
         }
 
@@ -3890,6 +4017,30 @@ fn print_ends(out: &mut impl Write, heading: &str, ends: &[semlith::store::EdgeE
 }
 
 /// A unix second as a local clock time, for the ledger's rows.
+/// A row's usage as one line: `claude-opus-5-5 · 1 204 in · 310 out ·
+/// 88 012 cache read · $0.0312 (models.dev 2026-09-30)`, or why there is none.
+fn usage_line(u: &semlith::store::RowUsage) -> String {
+    let Some(model) = &u.model else {
+        return u.source.clone();
+    };
+    let mut parts = vec![model.clone()];
+    for (n, what) in [
+        (u.input_tokens, "in"),
+        (u.output_tokens, "out"),
+        (u.cache_read_tokens, "cache read"),
+        (u.cache_write_tokens, "cache write"),
+    ] {
+        if let Some(n) = n.filter(|n| *n > 0) {
+            parts.push(format!("{n} {what}"));
+        }
+    }
+    parts.push(match (u.cost_usd, &u.cost_source) {
+        (Some(cost), Some(source)) => format!("${cost:.4} ({source})"),
+        _ => "no price".to_string(),
+    });
+    parts.join(" · ")
+}
+
 fn human_time(at: i64) -> String {
     // Local, with the offset. It used to be UTC arithmetic with a day number,
     // while the portal printed the browser's local clock, and neither said
@@ -4487,7 +4638,7 @@ enum ScheduleCommand {
         format: String,
 
         /// Which model's prices the savings report costs tokens at.
-        #[arg(long, default_value = "Sonnet 5")]
+        #[arg(long, default_value = semlith::report::DEFAULT_MODEL)]
         model: String,
 
         /// Narrow to a period: all, day, week, month or quarter.

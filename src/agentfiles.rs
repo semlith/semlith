@@ -408,8 +408,8 @@ pub fn hook_state(mode: crate::hook::Mode) -> Vec<(String, PathBuf, State)> {
         .into_iter()
         .map(|(client, stanza, path)| {
             let state = match (entry(stanza, mode), std::fs::read_to_string(&path)) {
-                (Ok(wanted), Ok(text)) => match with_entry(&text, &wanted) {
-                    Ok(next) if next == text => State::Present,
+                (Ok(wanted), Ok(text)) => match holds_entry(&text, &wanted) {
+                    Some(true) => State::Present,
                     // Present under a different command — the other strictness,
                     // or a path from a binary that has since moved.
                     _ if names_our_hook(&text) => State::Stale,
@@ -507,6 +507,30 @@ fn with_entry(text: &str, wanted: &serde_json::Value) -> Result<String> {
         list.push(ours);
     }
     Ok(serialize(&base))
+}
+
+/// Whether a settings file holds exactly semlith's `wanted` entries: for each
+/// hook event, the one entry that is ours and nothing else of ours. `None` for
+/// a file that is not a JSON object.
+///
+/// Compared as JSON, entry by entry. It used to be the whole file written back
+/// and compared as text, so another tool that keeps its own hooks in the same
+/// file, and writes it with its own key order or places its entries after
+/// ours, turned a correct semlith hook into `stale` on every read.
+fn holds_entry(text: &str, wanted: &serde_json::Value) -> Option<bool> {
+    let base: serde_json::Value = serde_json::from_str(text).ok()?;
+    base.as_object()?;
+    Some(HOOK_EVENTS.iter().all(|event| {
+        let ours: Vec<&serde_json::Value> = base
+            .pointer(&format!("/hooks/{event}"))
+            .and_then(|v| v.as_array())
+            .map(|list| list.iter().filter(|item| is_ours(item)).collect())
+            .unwrap_or_default();
+        match wanted["hooks"][event].get(0) {
+            Some(want) => ours.len() == 1 && ours[0] == want,
+            None => ours.is_empty(),
+        }
+    }))
 }
 
 /// `text` with semlith's entries taken out and nothing else changed.
