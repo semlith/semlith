@@ -55,6 +55,7 @@ pub mod pattern;
 /// The daemon as a login service, so a client never finds nothing.
 pub mod pipeline;
 pub mod portal;
+pub mod prices;
 pub mod priority;
 pub mod proxy;
 pub mod replay;

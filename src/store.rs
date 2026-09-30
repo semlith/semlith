@@ -498,7 +498,7 @@ const FTS_BUILT: &str = "fts_built";
 /// never sees them. That is the whole reason `format_version` does not move —
 /// the same reasoning `docs/compatibility.md` records for the graph tables.
 fn add_columns(db: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 10] = [
+    const ADDITIONS: [(&str, &str, &str); 19] = [
         ("edges", "hint", "TEXT"),
         // 0.16.0: the line the reference was written on.
         ("edges", "line", "INTEGER"),
@@ -521,6 +521,21 @@ fn add_columns(db: &Connection) -> Result<()> {
         ("retrievals", "query_id", "TEXT"),
         // 0.33.0: the client's own version, beside the name `clientid` resolved.
         ("retrievals", "client_version", "TEXT"),
+        // 0.34.0: the model request that made the call, read afterwards from
+        // the client's own session log (`crate::usage`), and what it cost.
+        // Outside the chain like `client_version`: they are filled in after
+        // the row is written, which a hashed column could never allow.
+        // `usage_source` is the log they came from, or why there is none;
+        // NULL means not looked for yet.
+        ("retrievals", "model", "TEXT"),
+        ("retrievals", "input_tokens", "INTEGER"),
+        ("retrievals", "output_tokens", "INTEGER"),
+        ("retrievals", "cache_read_tokens", "INTEGER"),
+        ("retrievals", "cache_write_tokens", "INTEGER"),
+        ("retrievals", "reasoning_tokens", "INTEGER"),
+        ("retrievals", "cost_usd", "REAL"),
+        ("retrievals", "cost_source", "TEXT"),
+        ("retrievals", "usage_source", "TEXT"),
         // 0.25.0: what the parser made of this file — "parsed", "timeout" or
         // "none" for a language that carries no grammar. Without it a file
         // with no definitions and a file the parser gave up on look the same
@@ -2332,6 +2347,47 @@ pub struct Retrieval {
     /// as the one search they came from. Empty for a row written before
     /// 0.20.2, which was its own retrieval.
     pub query_id: String,
+    /// The model request behind the call, once a reader has looked for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<RowUsage>,
+}
+
+/// A row's usage columns as they are stored. Every figure is optional: a
+/// client that logs the model and not the tokens gets the model.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct RowUsage {
+    pub model: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+    pub cost_source: Option<String>,
+    /// The log the figures came from, or why there are none.
+    pub source: String,
+}
+
+/// The usage columns, from column `at` of a row onwards, in the order
+/// `USAGE_COLUMNS` lists them. `None` until a reader has looked.
+pub const USAGE_COLUMNS: &str = "model, input_tokens, output_tokens, cache_read_tokens, \
+     cache_write_tokens, reasoning_tokens, cost_usd, cost_source, usage_source";
+
+pub fn usage_at(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Option<RowUsage>> {
+    let Some(source) = r.get::<_, Option<String>>(at + 8)? else {
+        return Ok(None);
+    };
+    Ok(Some(RowUsage {
+        model: r.get(at)?,
+        input_tokens: r.get(at + 1)?,
+        output_tokens: r.get(at + 2)?,
+        cache_read_tokens: r.get(at + 3)?,
+        cache_write_tokens: r.get(at + 4)?,
+        reasoning_tokens: r.get(at + 5)?,
+        cost_usd: r.get(at + 6)?,
+        cost_source: r.get(at + 7)?,
+        source,
+    }))
 }
 
 /// Append one retrieval, chained to the row before it.
@@ -2438,6 +2494,82 @@ pub struct NewRetrieval<'a> {
     /// hits. This is what says those rows are one retrieval rather than
     /// several, and it is what "queries recorded" counts.
     pub query_id: &'a str,
+}
+
+/// A ledger row whose usage has not been looked for, as the readers in
+/// `crate::usage` need it to find the model request that made the call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unfilled {
+    pub id: i64,
+    pub at: i64,
+    pub client: String,
+    pub session: String,
+    pub tool: String,
+    pub query: String,
+    pub query_id: String,
+}
+
+/// Rows written by an AI client since `since` (unix seconds) with no usage
+/// yet, oldest first. `cli` and `portal` rows have no model behind them.
+pub fn unfilled(db: &Connection, since: i64) -> Result<Vec<Unfilled>> {
+    let mut q = db.prepare(
+        "SELECT id, at, client, COALESCE(session, ''), COALESCE(tool, ''), query,
+                COALESCE(query_id, '')
+           FROM retrievals
+          WHERE usage_source IS NULL AND at >= ?1 AND client NOT IN ('cli', 'portal')
+          ORDER BY at, id",
+    )?;
+    let rows = q.query_map(params![since], |r| {
+        Ok(Unfilled {
+            id: r.get(0)?,
+            at: r.get(1)?,
+            client: r.get(2)?,
+            session: r.get(3)?,
+            tool: r.get(4)?,
+            query: r.get(5)?,
+            query_id: r.get(6)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// What a reader found for one row: the usage, or only why there is none.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Filled {
+    pub model: Option<String>,
+    pub tokens: Option<crate::prices::Tokens>,
+    pub cost_usd: Option<f64>,
+    pub cost_source: Option<String>,
+    /// The log it came from, or why nothing did (`not recorded by Zed`).
+    pub usage_source: String,
+}
+
+/// Write a row's usage. Every row sharing its `query_id` is the same call,
+/// written once per store that answered, so all of them are filled.
+pub fn fill_usage(db: &Connection, row: &Unfilled, filled: &Filled) -> Result<()> {
+    let _writing = Writing::begin(db)?;
+    let t = filled.tokens;
+    db.execute(
+        "UPDATE retrievals
+            SET model = ?1, input_tokens = ?2, output_tokens = ?3, cache_read_tokens = ?4,
+                cache_write_tokens = ?5, reasoning_tokens = ?6, cost_usd = ?7,
+                cost_source = ?8, usage_source = ?9
+          WHERE id = ?10 OR (?11 != '' AND query_id = ?11)",
+        params![
+            filled.model,
+            t.map(|t| t.input),
+            t.map(|t| t.output),
+            t.map(|t| t.cache_read),
+            t.map(|t| t.cache_write),
+            t.map(|t| t.reasoning),
+            filled.cost_usd,
+            filled.cost_source,
+            filled.usage_source,
+            row.id,
+            row.query_id,
+        ],
+    )?;
+    Ok(())
 }
 
 /// The hash covering one row and the one before it.
@@ -2596,11 +2728,11 @@ fn legacy_chain_hash(
 
 /// The most recent `limit` retrievals, newest first.
 pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
-    let mut stmt = db.prepare(
+    let mut stmt = db.prepare(&format!(
         "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, hash,
-                query_id
-         FROM retrievals ORDER BY id DESC LIMIT ?1",
-    )?;
+                query_id, {USAGE_COLUMNS}
+         FROM retrievals ORDER BY id DESC LIMIT ?1"
+    ))?;
     let rows = stmt.query_map(params![limit as i64], |r| {
         Ok(Retrieval {
             id: r.get(0)?,
@@ -2613,6 +2745,7 @@ pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
             whole_file_tokens: r.get(7)?,
             hash: r.get(8)?,
             query_id: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
+            usage: usage_at(r, 10)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)

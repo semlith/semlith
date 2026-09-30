@@ -660,6 +660,29 @@ enum Command {
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
+
+        /// Turn reading each AI client's own session log for the model,
+        /// tokens and cost of its calls on or off. Off by default; the
+        /// Privacy page's toggle is the same setting.
+        #[arg(long, value_parser = ["on", "off"])]
+        usage: Option<String>,
+    },
+
+    /// The model price table the ledger's cost column uses.
+    ///
+    /// Prints which table is in use, where it came from and its date. `update`
+    /// fetches a fresh one from models.dev — the one network request this
+    /// command makes, and only when it is run.
+    Prices {
+        /// `update` to fetch models.dev now.
+        #[arg(value_parser = ["update"])]
+        action: Option<String>,
+        /// Print the price of one model, as a client's log names it.
+        #[arg(long)]
+        model: Option<String>,
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Find where a symbol is defined.
@@ -1869,7 +1892,28 @@ fn run() -> Result<()> {
             }
         }
 
-        Command::Ledger { last, verify, json } => {
+        Command::Ledger {
+            last,
+            verify,
+            json,
+            usage,
+        } => {
+            if let Some(usage) = usage {
+                let mut saved = semlith::home::Settings::load();
+                saved.ledger_usage = Some(usage == "on");
+                saved.save()?;
+                println!(
+                    "{}",
+                    if usage == "on" {
+                        "usage from client logs is on: the ledger reads each AI client's own \
+                         session log for the model, tokens and cost of its calls, read-only, \
+                         keeping the numbers and never the conversation"
+                    } else {
+                        "usage from client logs is off: no client log is opened"
+                    }
+                );
+                return Ok(());
+            }
             let fleet = read_fleet(&cli.store, &cwd, false)?;
             let many = fleet.len() > 1;
             if verify {
@@ -1950,6 +1994,81 @@ fn run() -> Result<()> {
                      so on every start; `--no-ledger` or SEMLITH_LEDGER=0 stops it. Nothing \
                      recorded ever leaves this machine."
                 );
+            }
+        }
+
+        Command::Prices {
+            action,
+            model,
+            json,
+        } => {
+            let table = if action.as_deref() == Some("update") {
+                let table = semlith::prices::update()?;
+                if !json {
+                    println!(
+                        "fetched {}: {} models, written to {}",
+                        semlith::prices::SOURCE_URL,
+                        table.models.len(),
+                        semlith::home::prices_path()?.display()
+                    );
+                }
+                table
+            } else {
+                semlith::prices::table()
+            };
+            let built_in = semlith::prices::built_in();
+            let which = if table.fetched == built_in.fetched && table.models == built_in.models {
+                "built into this binary"
+            } else {
+                "downloaded by `semlith prices update`"
+            };
+            let priced = model.as_deref().map(|m| {
+                semlith::prices::lookup(&table, None, m).map(|(key, price)| (key, price.clone()))
+            });
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "source": table.source,
+                        "fetched": table.fetched,
+                        "models": table.models.len(),
+                        "from": which,
+                        "price": priced.map(|p| p.map(|(key, price)| serde_json::json!({ "key": key, "price": price }))),
+                    }))?
+                );
+                return Ok(());
+            }
+            println!(
+                "{} {} · {} models · {which}",
+                table.source,
+                table.fetched,
+                table.models.len()
+            );
+            if let (Some(name), Some(priced)) = (model, priced) {
+                match priced {
+                    Some((key, price)) => {
+                        let r = price.rates;
+                        let rate = |v: Option<f64>| {
+                            v.map_or("at the input rate".to_string(), |v| format!("${v}"))
+                        };
+                        println!(
+                            "{key}: input ${} · output ${} · cache read {} · cache write {} per million tokens",
+                            r.input,
+                            r.output,
+                            rate(r.cache_read),
+                            rate(r.cache_write)
+                        );
+                        for tier in &price.tiers {
+                            println!(
+                                "  above {} tokens of context: input ${} · output ${}",
+                                tier.above, tier.rates.input, tier.rates.output
+                            );
+                        }
+                    }
+                    None => {
+                        println!("{name}: not in this table, so its calls get tokens and no cost")
+                    }
+                }
             }
         }
 
