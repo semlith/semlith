@@ -2524,33 +2524,38 @@ fn replay(request: &Request) -> Response {
 /// unreadable store is left out and named, as everywhere else that reads
 /// across the fleet.
 fn corpus(state: &Arc<State>) -> Response {
-    if let Err(e) = state.open_fleet() {
-        return Response::error(500, &format!("{e:#}"));
-    }
-    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(fleet) = fleet.as_mut() else {
-        return Response::json(&json!({ "stores": [] }));
-    };
+    // Each store measured on a connection of its own, not through the shared
+    // fleet: the measure reads the text of every chunk, which on an 879k-chunk
+    // store takes minutes, and holding the fleet's lock for that long stalled
+    // every other read route behind it (found 2026-09-30, `/api/stores` held
+    // for about five minutes). The rows are the store's own, so a second
+    // reader answers exactly what the fleet's would.
     let mut stores = Vec::new();
-    for (label, opened) in fleet.each() {
-        match crate::store::corpus(opened.db(), |path| {
-            language_of(std::path::Path::new(path)).to_string()
-        }) {
+    // A store whose directory has gone is left out, as `open_fleet` leaves it.
+    for store in state
+        .stores()
+        .into_iter()
+        .filter(|s| s.dir.join("store.db").exists())
+    {
+        let measured = crate::store::open(&store.dir.join("store.db")).and_then(|db| {
+            crate::store::corpus(&db, |path| {
+                language_of(std::path::Path::new(path)).to_string()
+            })
+        });
+        match measured {
             Ok(measured) => {
                 let mut row = serde_json::to_value(&measured).unwrap_or_else(|_| json!({}));
                 if let Some(map) = row.as_object_mut() {
-                    map.insert("store".into(), json!(label));
+                    map.insert("store".into(), json!(store.name));
                 }
                 stores.push(row);
             }
             // One store that cannot be measured is not the whole page. It is
             // reported as itself, the way an unreadable store is.
-            Err(e) => stores.push(json!({ "store": label, "error": format!("{e:#}") })),
+            Err(e) => stores.push(json!({ "store": store.name, "error": format!("{e:#}") })),
         }
     }
-    let mut answer = json!({ "stores": stores });
-    failures_beside(fleet, &mut answer);
-    Response::json(&answer)
+    Response::json(&json!({ "stores": stores }))
 }
 
 /// One of the five reports, in one of the five formats, over a window and a

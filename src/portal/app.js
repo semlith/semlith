@@ -8812,12 +8812,10 @@ async function indexView() {
  * estimated", and a cached number under that sentence would make the page a
  * liar about itself.
  *
- * What the design draws and this does not: PDF pages, slides, spreadsheet
- * cells and notebook cells as *counts of pages and cells*. The store records
- * the text it extracted, not how many pages it came off, so those are counted
- * as files here and the panel says `files`. Adding the real figures is a
- * column in `files` and a change to every extractor, which is a release of its
- * own rather than a page.
+ * PDF pages, slides, spreadsheet cells and notebook cells are counted by the
+ * extractors as they read each file (0.34.0) and held in `files.units`; a
+ * store an older binary wrote gains them on its next index pass, and the
+ * prose panel names the files still waiting.
  */
 
 /** Words a printed page holds, and words a reader gets through in a minute.
@@ -8828,6 +8826,18 @@ async function indexView() {
  * settled on for prose. The word count they multiply is measured. */
 const WORDS_PER_PAGE = 500;
 const WORDS_PER_MINUTE = 250;
+
+/** What one kind of file holds: `412 pages · 9 PDFs`, or `31 files` for a
+ * kind with no unit. Counted files only; the uncounted ones are named apart. */
+const KIND_NOUNS = { PDF: "PDF", "Slide deck": "deck", Spreadsheet: "spreadsheet", Notebook: "notebook" };
+function kindFigure(k) {
+  const plural = (count, word) => `${n(count)} ${word}${count === 1 ? "" : "s"}`;
+  if (!k.unit) return plural(k.count, "file");
+  const counted = k.count - k.uncounted;
+  if (!counted) return plural(k.count, KIND_NOUNS[k.name] || "file");
+  const unit = k.units === 1 ? k.unit.replace(/s$/, "") : k.unit;
+  return `${n(k.units)} ${unit} · ${plural(counted, KIND_NOUNS[k.name] || "file")}`;
+}
 
 /** `26 days`, `4 hours`, `18 minutes` — one unit, the largest that fits. */
 function spellDuration(minutes) {
@@ -9161,7 +9171,20 @@ async function corpusView() {
     return [...into.entries()].sort((a, b) => b[1] - a[1]);
   };
   const languages = pile("languages", "language");
-  const kinds = pile("kinds", "name");
+  // Kinds merged with their units: a PDF's pages, a deck's slides, a sheet's
+  // or a notebook's cells, as `/api/corpus` counts them per store.
+  const kindTotals = new Map();
+  for (const store of stores) {
+    for (const k of store.kinds || []) {
+      const t = kindTotals.get(k.name) || { name: k.name, unit: k.unit, count: 0, units: 0, uncounted: 0 };
+      t.count += k.count || 0;
+      t.units += k.units || 0;
+      t.uncounted += k.uncounted || 0;
+      kindTotals.set(k.name, t);
+    }
+  }
+  const kinds = [...kindTotals.values()].sort((a, b) => b.count - a.count);
+  const uncounted = kinds.reduce((total, k) => total + k.uncounted, 0);
   const ambiguousWorst = pile("ambiguous_worst", "name");
   const languageTotal = languages.reduce((total, [, count]) => total + count, 0) || 1;
 
@@ -9344,11 +9367,18 @@ async function corpusView() {
         { class: "corpus-panels" },
         factPanel(
           "What is in the prose",
-          // Files, not pages and cells. The store keeps the text, not the page
-          // it came off — said in the panel rather than in a comment nobody
-          // reading the page can see.
+          // Pages, slides and cells where the format has them, counted as
+          // each file was read; files for everything else. A file an older
+          // binary stored has no count until the next index pass reads it
+          // again, and the panel says how many are waiting rather than
+          // printing a total that quietly leaves them out.
           kinds.length
-            ? kinds.map(([kind, count]) => factRow(kind, `${n(count)} file${count === 1 ? "" : "s"}`))
+            ? [
+                ...kinds.map((k) => factRow(k.name, kindFigure(k))),
+                uncounted
+                  ? factRow("Not counted yet", `${n(uncounted)} file${uncounted === 1 ? "" : "s"} · next index pass`)
+                  : null,
+              ]
             : [factRow("Nothing indexed", "—")],
         ),
         factPanel("Shape of the code", [
