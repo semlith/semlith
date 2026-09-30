@@ -3880,6 +3880,21 @@ impl Semlith {
         // Seeded from the best of each list rather than all of it. Expanding
         // from a chunk ranked fortieth is expansion from noise.
         const SEEDS: usize = 8;
+        // How many names the walk may ask about, heaviest first. 0.32.0 used
+        // the traversal budget of 2 000 in name order: 638 to 2 000 visits and
+        // 1.8 to 4.6 s on this repository's own store, and on the 879k-chunk
+        // benchmark corpus a visit is tens of milliseconds, so minutes. At 128
+        // the walk there took 513 ms at the median and 925 ms at worst over
+        // seven questions, and the retrieval harness's development set ranked
+        // every question exactly as the unbounded walk did; 256 doubled the
+        // walk, and 64 moved four questions' ranks.
+        const VISITS: usize = 128;
+        // More definitions than this and a name is a hub, not walked through
+        // and not walked into. On the corpus, 64 doubled the walk and 16 was
+        // no faster than 32.
+        const HUB: usize = 32;
+        // Names resolved to chunks per query, well under SQLite's variable cap.
+        const RESOLVE_BATCH: usize = 256;
 
         // The seed mass is the fusion contribution each chunk is about to
         // carry, so the walk starts out already knowing which hits the query
@@ -3925,9 +3940,17 @@ impl Semlith {
         // file with a hit, so the third list fills with neighbours-by-accident
         // and the two lists that answered the question get diluted.
         let kinds = graph::dependency_kinds();
-        let ranked = graph::expand(&personal, |name| {
+        let ranked = graph::expand(&personal, VISITS, |name| {
+            // A name defined in more places than this is many unrelated
+            // definitions wearing one label, the same reason an ambiguous edge
+            // is not crossed below. Walking through `get` on the benchmark
+            // corpus merged 712 functions' edges into one node and read 384k
+            // candidate rows out and 5.4M in, for one visit.
+            if store::defined_more_than(&self.db, name, HUB)? {
+                return Ok(Vec::new());
+            }
             let mut out = Vec::new();
-            for end in store::edges_out(&self.db, name, &kinds)?
+            for end in store::edges_out_short_of_hubs(&self.db, name, &kinds, HUB)?
                 .into_iter()
                 .chain(store::edges_in(&self.db, name, &kinds)?)
             {
@@ -3957,48 +3980,54 @@ impl Semlith {
             Ok(out)
         })?;
 
-        let names: Vec<String> = ranked.iter().map(|(name, _, _)| name.clone()).collect();
-        let place: std::collections::HashMap<&str, usize> = names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.as_str(), i))
-            .collect();
-
-        // The store answers in its own order; the walk's order is the answer,
-        // so the rows are put back into it before the budget is applied.
         let best = ranked.first().map(|(_, mass, _)| *mass);
-        let mut symbols = store::symbols_by_names(&self.db, &names, filter.groups())?;
-        symbols.sort_by_key(|s| place.get(s.name.as_str()).copied().unwrap_or(usize::MAX));
-
         let mut ids: Vec<Reached> = Vec::new();
-        for symbol in symbols {
-            let Some(chunk_id) = symbol.chunk_id else {
-                continue;
-            };
-            let id = chunk_id as u64;
-            let found = ranked.iter().find(|(name, _, _)| *name == symbol.name);
-            let tier = found
-                .map(|(_, _, tier)| tier.clone())
-                .unwrap_or_else(|| graph::INFERRED.to_string());
-            let weight = Self::expansion_weight(&tier);
-            // As a share of the best score the walk produced, so the number
-            // means the same thing whatever the absolute masses came out at.
-            let proximity = match (found, best) {
-                (Some((_, mass, _)), Some(best)) if best > 0.0 => mass / best,
-                _ => 0.0,
-            };
-            // A chunk the other two lists already ranked gains nothing from
-            // being re-ranked here; the fusion adds the contribution anyway.
-            if !ids.iter().any(|r| r.id == id) {
-                ids.push(Reached {
-                    id,
-                    weight,
-                    tier,
-                    proximity,
-                });
-            }
-            if ids.len() >= depth {
-                break;
+        // Best names first, a batch at a time, until `depth` chunks are found.
+        // Only the head of the walk is ever used, and resolving all of it cost
+        // a query over every name reached: thousands on the benchmark corpus.
+        'names: for batch in ranked.chunks(RESOLVE_BATCH) {
+            let names: Vec<String> = batch.iter().map(|(name, _, _)| name.clone()).collect();
+            let place: std::collections::HashMap<&str, usize> = names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.as_str(), i))
+                .collect();
+
+            // The store answers in its own order; the walk's order is the
+            // answer, so the rows are put back into it before the budget is
+            // applied.
+            let mut symbols = store::symbols_by_names(&self.db, &names, filter.groups())?;
+            symbols.sort_by_key(|s| place.get(s.name.as_str()).copied().unwrap_or(usize::MAX));
+
+            for symbol in symbols {
+                let Some(chunk_id) = symbol.chunk_id else {
+                    continue;
+                };
+                let id = chunk_id as u64;
+                let found = batch.iter().find(|(name, _, _)| *name == symbol.name);
+                let tier = found
+                    .map(|(_, _, tier)| tier.clone())
+                    .unwrap_or_else(|| graph::INFERRED.to_string());
+                let weight = Self::expansion_weight(&tier);
+                // As a share of the best score the walk produced, so the number
+                // means the same thing whatever the absolute masses came out at.
+                let proximity = match (found, best) {
+                    (Some((_, mass, _)), Some(best)) if best > 0.0 => mass / best,
+                    _ => 0.0,
+                };
+                // A chunk the other two lists already ranked gains nothing from
+                // being re-ranked here; the fusion adds the contribution anyway.
+                if !ids.iter().any(|r| r.id == id) {
+                    ids.push(Reached {
+                        id,
+                        weight,
+                        tier,
+                        proximity,
+                    });
+                }
+                if ids.len() >= depth {
+                    break 'names;
+                }
             }
         }
         Ok(ids)
@@ -4810,7 +4839,17 @@ impl Semlith {
         // hits, one hop out, and the chunks those neighbours live in. It costs
         // no embedding and no model call, and it is what pulls together a
         // concept spread across files that share no vocabulary.
-        let graph_ids = self.graph_expansion(&seeds, &keyword_ids, depth, filter)?;
+        //
+        // Contained, as the rescoring pass is: the two lists above already
+        // answered, and a third that failed makes a thinner answer, not none.
+        // 0.32.0 let it fail the whole search, which on the 70-repository
+        // benchmark corpus meant every search.
+        let graph_ids = self
+            .graph_expansion(&seeds, &keyword_ids, depth, filter)
+            .unwrap_or_else(|e| {
+                eprintln!("the graph list failed, searching without it: {e:#}");
+                Vec::new()
+            });
 
         // Two id spaces — a chunk id and an image id both count from one — so
         // the fusion is keyed by which space an id belongs to as well as by the

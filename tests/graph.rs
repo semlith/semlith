@@ -108,6 +108,44 @@ fn indexing_fills_the_graph_for_every_advertised_language() {
     assert_eq!(bad, 0, "an edge carries a confidence outside the two");
 }
 
+/// A graph list that fails leaves the search standing on the two lists that
+/// already answered. 0.32.0 let it fail the whole search, and on the
+/// 70-repository benchmark corpus it failed for every query.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_failing_graph_list_leaves_the_search_standing() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    polyglot(corpus.path());
+    index(store.path(), corpus.path());
+
+    let mut s = Semlith::open(store.path(), None).unwrap();
+    let before = s.search("acquire calls helper", 5).unwrap();
+    assert!(
+        !before.is_empty(),
+        "the fixture corpus answers the question"
+    );
+
+    // The walk reads `edges`; without it, every graph lookup is an error. On
+    // this handle, because opening the store again would recreate the table
+    // empty and the walk would succeed with nothing to walk.
+    semlith::store::read_only(s.db(), false).unwrap();
+    s.db()
+        .execute_batch("ALTER TABLE edges RENAME TO edges_gone")
+        .unwrap();
+    assert!(
+        semlith::store::edges_out(s.db(), "acquire", &[]).is_err(),
+        "the graph must actually be broken for this to test anything"
+    );
+    let after = s
+        .search("acquire calls helper", 5)
+        .expect("a failed graph list must not fail the search");
+    assert!(
+        !after.is_empty(),
+        "the vector and keyword lists still answer"
+    );
+}
+
 /// Re-indexing one changed file rewrites that file's rows and leaves every
 /// other file's alone — and leaves nothing behind pointing at a dead file id.
 #[test]
