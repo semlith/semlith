@@ -1487,6 +1487,14 @@ Claude on a plan, is shown at the API price of the same tokens, which is what th
 tokens would have cost and not what was paid. The table is named under the tab,
 and refreshed from the Agents page's **Model prices** card.
 
+**Sessions** is one row per agent conversation: its client, reads, net tokens,
+and **Saved**, which is those net tokens at the input price of the model that
+session actually ran on. The model comes from the client's own log (the model
+most of the session's rows name). A session whose model is not known, because
+usage is off or its client keeps no log, shows `not known` and no amount. Before
+0.34.0 a picker priced every session at one chosen model, whatever the session
+had run on (0.34.0).
+
 **This page reads live.** Every surface that records a retrieval writes through
 one function, and that is where the ledger domain is bumped, so a row lands here
 as an agent retrieves it — whichever window the agent is working in.
@@ -1560,8 +1568,7 @@ Claude, GPT, Gemini, Grok, DeepSeek, Kimi, GLM and Mistral. `--model` accepts
 any model in the price table. The prices come from the models.dev table built
 into the binary, the same table the ledger's usage columns use, so a report
 still generates on a machine with no network. The Agents page names the table
-and its date. The Ledger page's sessions picker also lists every model the
-ledger has seen. `Sonnet 5`, `Opus 5` and `Haiku 4.5`, the three names before
+and its date. `Sonnet 5`, `Opus 5` and `Haiku 4.5`, the three names before
 0.34.0, still work and are priced at the table's rate for those models.
 
 The equivalent command is not in this card. It has one of its own — *Same thing

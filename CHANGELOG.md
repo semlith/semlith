@@ -57,9 +57,11 @@ source and date, with the update button.
 **Savings figures are priced from the same table.** Before 0.34.0 the savings
 report, the Reports page and the Ledger's sessions table offered three
 hard-coded Anthropic prices. They now offer a model per vendor the supported
-clients use (Claude, GPT, Gemini, Grok, DeepSeek, Kimi, GLM, Mistral). The
-Ledger's picker adds every model the ledger has seen, and `--model` accepts any
-model in the table. The default is `claude-sonnet-5-5`. `Sonnet 5`, `Opus 5`
+clients use (Claude, GPT, Gemini, Grok, DeepSeek, Kimi, GLM, Mistral), and
+`--model` accepts any model in the table. The Ledger's Sessions table has no
+picker any more. Each session's saving is priced at the model that session ran
+on, from its client's log, and a session whose model is not known shows no
+amount. The default is `claude-sonnet-5-5`. `Sonnet 5`, `Opus 5`
 and `Haiku 4.5` still work, and are priced at the table's current rate for
 those models instead of the old fixed numbers. Reports that name them will show
 different amounts.

@@ -1214,6 +1214,13 @@ fn ledger(state: &Arc<State>) -> Response {
                     "whole_file_tokens": session.whole_file_tokens,
                     "net_tokens": session.net,
                     "tier": session.tier(),
+                    // The saving priced at the model this session actually
+                    // ran on, from its client's log; none when that is not
+                    // known, rather than a price for a model it never used.
+                    "model": session.model,
+                    "saved_usd": session.model.as_deref()
+                        .and_then(crate::report::price_named)
+                        .map(|(_, input)| session.net.max(0) as f64 * input / 1_000_000.0),
                 }));
             }
             for row in store::retrievals(store.db(), LEDGER_ROWS)? {
@@ -1246,9 +1253,7 @@ fn ledger(state: &Arc<State>) -> Response {
             credited * 100 / queries
         };
         let ratio = (excerpt > 0).then(|| whole as f64 / excerpt as f64);
-        let used_models: Vec<String> = usage_totals.keys().map(|(_, m)| m.clone()).collect();
         Ok(json!({
-            "savings_models": savings_models_json(&used_models),
             "recording": recording,
             "queries": queries,
             "clients": clients,
@@ -1382,27 +1387,13 @@ fn prices(request: &Request) -> Response {
         }
     }
     let mut info = prices_json();
-    info["savings_models"] = savings_models_json(&[]);
-    Response::json(&info)
-}
-
-/// The savings pickers' models: the defaults, then any other model `used`
-/// names that the table prices, each with its input rate.
-fn savings_models_json(used: &[String]) -> Value {
-    let mut models = crate::report::savings_models();
-    for name in used {
-        if let Some(priced) = crate::report::price_named(name)
-            && !models.iter().any(|(n, _)| *n == priced.0)
-        {
-            models.push(priced);
-        }
-    }
-    Value::Array(
-        models
+    info["savings_models"] = Value::Array(
+        crate::report::savings_models()
             .into_iter()
             .map(|(name, input)| json!({ "name": name, "input": input }))
             .collect(),
-    )
+    );
+    Response::json(&info)
 }
 
 /// Notes fastembed's catalogue gets wrong about its own models.
