@@ -3628,6 +3628,12 @@ fn tend(
             // which drops the events it queued for them meanwhile.
             let mut stopped = Vec::new();
             loop {
+                // A shutdown leaves what is queued queued: a run that yielded
+                // its slice requeues the rest, and without this the writer
+                // took it straight back and a shutdown joining it never ended.
+                if store.stop.load(Ordering::Relaxed) {
+                    return Ok(stopped);
+                }
                 let Some(next) = store
                     .queue
                     .lock()
@@ -3767,6 +3773,16 @@ fn perform(
                 move || {
                     if store.cancelled.load(Ordering::Relaxed) {
                         return crate::Flow::Stop;
+                    }
+                    // The daemon is shutting down: keep what is done and
+                    // step aside now, as the slice budget would in 45 s,
+                    // and before a pause or a hold, which would otherwise
+                    // wait for ever under a shutdown joining this writer.
+                    // Without it a stop mid-run returned from `main` under
+                    // an embedding pass still going, and ONNX Runtime was
+                    // torn down beneath it (#163).
+                    if store.stop.load(Ordering::Relaxed) {
+                        return crate::Flow::Yield;
                     }
                     // A lowered limit holds the newest runs at their next
                     // batch. Asked before the pause, because a held run that
