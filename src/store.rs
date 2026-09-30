@@ -86,6 +86,10 @@ CREATE TABLE IF NOT EXISTS symbols (
 
 CREATE INDEX IF NOT EXISTS symbols_file_id ON symbols(file_id);
 CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
+-- Search seeds its graph walk from the symbols inside its top chunks. Without
+-- this, each seed chunk was a scan of every symbol: on the 879k-chunk benchmark
+-- corpus, 1.25M rows read at random, once per seed, on every search.
+CREATE INDEX IF NOT EXISTS symbols_chunk_id ON symbols(chunk_id);
 
 -- What a symbol used to be, from 0.23.0. A re-index no longer simply deletes
 -- the definitions of a file it is about to rewrite: it copies them here first,
@@ -1668,20 +1672,41 @@ pub fn symbols_by_names(
     names: &[String],
     groups: &[Vec<String>],
 ) -> Result<Vec<SymbolRow>> {
-    if names.is_empty() {
-        return Ok(Vec::new());
+    // In batches, because SQLite refuses a statement with more than 32 766
+    // variables, and a walk over the 70-repository benchmark corpus reached more
+    // names than that: every search there failed with "too many SQL variables".
+    const BATCH: usize = 1000;
+    let (predicate, filter_binds) = glob_predicate(groups);
+    let mut out = Vec::new();
+    for batch in names.chunks(BATCH) {
+        let holes = vec!["?"; batch.len()].join(", ");
+        let sql = format!(
+            "SELECT {SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
+             WHERE {predicate} AND s.name IN ({holes})"
+        );
+        let mut stmt = db.prepare(&sql)?;
+        let args = filter_binds.iter().chain(batch).cloned().map(Value::Text);
+        let rows = stmt.query_map(rusqlite::params_from_iter(args), symbol_row)?;
+        for row in rows {
+            out.push(row?);
+        }
     }
-    let (predicate, mut binds) = glob_predicate(groups);
-    let holes = vec!["?"; names.len()].join(", ");
+    out.sort_by(|a, b| (&a.path, a.start_line, a.id).cmp(&(&b.path, b.start_line, b.id)));
+    Ok(out)
+}
+
+/// Whether more than `limit` definitions answer to `name`, not counting the
+/// navigational kinds, which nothing can point at.
+///
+/// Counts at most `limit + 1` rows, so asking about `get` in a store holding
+/// seven hundred of them costs what asking about a name with two does.
+pub fn defined_more_than(db: &Connection, name: &str, limit: usize) -> Result<bool> {
+    let target = crate::graph::not_navigational("s.kind");
     let sql = format!(
-        "SELECT {SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
-         WHERE {predicate} AND s.name IN ({holes}) ORDER BY f.path, s.start_line"
+        "SELECT COUNT(*) FROM (SELECT 1 FROM symbols s WHERE s.name = ?1 AND {target} LIMIT ?2)"
     );
-    binds.extend(names.iter().cloned());
-    let mut stmt = db.prepare(&sql)?;
-    let args = binds.into_iter().map(Value::Text);
-    let rows = stmt.query_map(rusqlite::params_from_iter(args), symbol_row)?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    let found: i64 = db.query_row(&sql, params![name, limit as i64 + 1], |r| r.get(0))?;
+    Ok(found as usize > limit)
 }
 
 /// What the symbols named `name` point at: callees, imports, references out.
@@ -1719,10 +1744,47 @@ pub fn symbols_by_names(
 /// rather than to a dependency that was never indexed — that is what the
 /// hidden-by-default unresolved targets are about, not this.
 pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<EdgeEnd>> {
+    edges_out_below(db, name, kinds, None)
+}
+
+/// [`edges_out`] without the edges whose target has more than `hub`
+/// definitions, dropped before their candidates are joined.
+///
+/// For search's graph walk, which crosses no ambiguous edge anyway. An edge to
+/// `get` in a store holding seven hundred of them joins seven hundred candidate
+/// rows and nearly always resolves to "ambiguous"; on the 879k-chunk benchmark
+/// corpus those rows were most of the walk's cost. `neighbors`, `impact` and
+/// `path` keep [`edges_out`], because an answer about one symbol can afford to
+/// settle every edge.
+pub fn edges_out_short_of_hubs(
+    db: &Connection,
+    name: &str,
+    kinds: &[String],
+    hub: usize,
+) -> Result<Vec<EdgeEnd>> {
+    edges_out_below(db, name, kinds, Some(hub))
+}
+
+fn edges_out_below(
+    db: &Connection,
+    name: &str,
+    kinds: &[String],
+    hub: Option<usize>,
+) -> Result<Vec<EdgeEnd>> {
     let filter = kind_predicate(kinds, "e.kind");
     // An edge's target is resolved by name, so without this a configuration key
     // named `path` is a candidate definition of every `path` any code calls.
     let target = crate::graph::not_navigational("s.kind");
+    // Written on `e` alone, so SQLite tests it per edge, before the join to
+    // the candidates it exists to avoid. The count stops at `hub + 1`.
+    let short_of_hub = match hub {
+        Some(hub) => format!(
+            "AND (SELECT COUNT(*) FROM (SELECT 1 FROM symbols h WHERE h.name = e.dst AND {} LIMIT {})) <= {hub}",
+            crate::graph::not_navigational("h.kind"),
+            hub + 1
+        ),
+        None => String::new(),
+    };
     let sql = format!(
         "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path, src.start_line, e.line
          FROM symbols src
@@ -1730,7 +1792,7 @@ pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Ed
          JOIN edges e ON e.src = src.id
          JOIN symbols s ON s.name = e.dst AND {target}
          JOIN files f ON f.id = s.file_id
-         WHERE src.name = ?1 AND {filter}
+         WHERE src.name = ?1 AND {filter} {short_of_hub}
          ORDER BY f.path, s.start_line"
     );
     let mut stmt = db.prepare(&sql)?;
@@ -3920,6 +3982,109 @@ mod tests {
         let file_id = insert_file(db, path, "h", 1, 0).unwrap();
         let chunk_id = insert_chunk(db, file_id, 0, 1, 2, name).unwrap();
         insert_symbol(db, file_id, Some(chunk_id), &sym(name)).unwrap()
+    }
+
+    /// More names than SQLite takes variables in one statement. 0.32.0 bound
+    /// them all into one `IN (...)`, and on the 70-repository benchmark corpus
+    /// every search failed with "too many SQL variables".
+    #[test]
+    fn symbols_by_names_takes_more_names_than_sqlite_takes_variables() {
+        let db = Connection::open_in_memory().unwrap();
+        one_symbol(&db, "b.rs", "wanted");
+        let a = insert_file(&db, "a.rs", "h", 1, 0).unwrap();
+        insert_symbol(&db, a, None, &at(sym("also_wanted"), 5, 6)).unwrap();
+        insert_symbol(&db, a, None, &at(sym("wanted"), 1, 2)).unwrap();
+
+        let mut names: Vec<String> = (0..40_000).map(|i| format!("absent_{i}")).collect();
+        names.push("wanted".to_string());
+        names.insert(0, "also_wanted".to_string());
+        let found = symbols_by_names(&db, &names, &[]).unwrap();
+
+        // One order across batches, as the single statement gave: path, then line.
+        let got: Vec<(&str, u32)> = found
+            .iter()
+            .map(|s| (s.path.as_str(), s.start_line))
+            .collect();
+        assert_eq!(got, [("a.rs", 1), ("a.rs", 5), ("b.rs", 1)]);
+    }
+
+    /// Seeding the walk looks symbols up by chunk. Without an index on
+    /// `chunk_id` that was a scan of every symbol per seed chunk, minutes per
+    /// search on the benchmark corpus.
+    #[test]
+    fn symbols_in_chunks_uses_the_chunk_index() {
+        let db = Connection::open_in_memory().unwrap();
+        one_symbol(&db, "a.rs", "seed");
+        let navigational = crate::graph::not_navigational("kind");
+        let plan: Vec<String> = db
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN SELECT DISTINCT name FROM symbols \
+                 WHERE chunk_id IN (?) AND {navigational}"
+            ))
+            .unwrap()
+            .query_map([1], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|step| step.contains("symbols_chunk_id")),
+            "the seed lookup does not use the chunk index: {plan:?}"
+        );
+        assert_eq!(symbols_in_chunks(&db, &[1]).unwrap(), ["seed"]);
+    }
+
+    /// The walk's variant drops an edge whose target is a hub, and only that
+    /// edge; `edges_out` itself still settles every edge.
+    #[test]
+    fn edges_out_short_of_hubs_drops_only_edges_into_hubs() {
+        let db = Connection::open_in_memory().unwrap();
+        let caller = one_symbol(&db, "a.rs", "caller");
+        insert_edge(&db, caller, "rare", "calls", "inferred", None, None).unwrap();
+        insert_edge(&db, caller, "common", "calls", "inferred", None, None).unwrap();
+        let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
+        insert_symbol(&db, b, None, &sym("rare")).unwrap();
+        for line in 1..=3 {
+            insert_symbol(&db, b, None, &at(sym("common"), line * 10, line * 10 + 1)).unwrap();
+        }
+
+        let targets = |ends: Vec<EdgeEnd>| {
+            let mut names: Vec<String> = ends.into_iter().map(|e| e.symbol.name).collect();
+            names.sort();
+            names.dedup();
+            names
+        };
+        assert_eq!(
+            targets(edges_out_short_of_hubs(&db, "caller", &[], 2).unwrap()),
+            ["rare"]
+        );
+        assert_eq!(
+            targets(edges_out_short_of_hubs(&db, "caller", &[], 3).unwrap()),
+            ["common", "rare"]
+        );
+        assert_eq!(
+            targets(edges_out(&db, "caller", &[]).unwrap()),
+            ["common", "rare"]
+        );
+    }
+
+    /// A configuration key or a heading that shares a name is not a definition
+    /// anything can call, so it does not make the name a hub.
+    #[test]
+    fn defined_more_than_counts_definitions_not_navigational_symbols() {
+        let db = Connection::open_in_memory().unwrap();
+        one_symbol(&db, "a.rs", "path");
+        let config = insert_file(&db, "config.toml", "h", 1, 0).unwrap();
+        for line in 1..=5 {
+            let mut key = at(sym("path"), line, line);
+            key.kind = "key".to_string();
+            insert_symbol(&db, config, None, &key).unwrap();
+        }
+        assert!(!defined_more_than(&db, "path", 1).unwrap());
+
+        let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
+        insert_symbol(&db, b, None, &sym("path")).unwrap();
+        assert!(defined_more_than(&db, "path", 1).unwrap());
+        assert!(!defined_more_than(&db, "path", 2).unwrap());
     }
 
     /// Forgetting a file takes its symbols and its outgoing edges with it.
