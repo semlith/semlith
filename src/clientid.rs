@@ -45,6 +45,10 @@ pub fn label(client_info: Option<&str>, host: Option<&str>) -> String {
     let named = match lower.as_str() {
         "claude-code" => Some("Claude Code"),
         "claude-ai" | "claude desktop" => Some("Claude Desktop"),
+        // Claude Desktop's local agent mode starts its own connection.
+        l if l.starts_with("local-agent-mode") && host == Some("Claude Desktop") => {
+            Some("Claude Desktop")
+        }
         "opencode" => Some("OpenCode"),
         "zed" => Some("Zed"),
         "cursor" | "cursor-vscode" => Some("Cursor"),
@@ -67,10 +71,22 @@ pub fn label(client_info: Option<&str>, host: Option<&str>) -> String {
         return named.to_string();
     }
     match (info, host) {
-        (Some(info), _) if !generic(info) => info.to_string(),
+        // A name this does not know, in an app it does: both, so the row says
+        // where it came from. VS Code's extension host runs more than Copilot.
+        (Some(info), Some(host)) if !generic(info) => format!("{info} ({})", app_of(host)),
+        (Some(info), None) if !generic(info) => info.to_string(),
         (_, Some(host)) => host.to_string(),
         (Some(info), None) => info.to_string(),
         (None, None) => "unnamed client".to_string(),
+    }
+}
+
+/// The app a host label names, for an unknown client running inside it.
+fn app_of(host: &str) -> &str {
+    match host {
+        "GitHub Copilot in VS Code" => "VS Code",
+        "ChatGPT desktop (the Codex app)" => "ChatGPT desktop",
+        other => other,
     }
 }
 
@@ -135,7 +151,10 @@ pub fn classify_host(ancestors: &[String]) -> Option<String> {
         let mut words = l.split_whitespace();
         let mut base = name_of(words.next().unwrap_or(""));
         // A CLI npm installed runs as `node <script>`: the script names it.
-        if matches!(base.as_str(), "node" | "bun" | "deno" | "npx" | "python" | "python3") {
+        if matches!(
+            base.as_str(),
+            "node" | "bun" | "deno" | "npx" | "python" | "python3"
+        ) {
             base = name_of(words.next().unwrap_or(""));
         }
         let base = base.as_str();
@@ -381,7 +400,19 @@ mod tests {
             // Nothing to go on is said as such, not invented.
             (Some("mcp"), None, "mcp"),
             (None, None, "unnamed client"),
-            (Some("some-new-agent"), Some("Zed"), "some-new-agent"),
+            (Some("some-new-agent"), Some("Zed"), "some-new-agent (Zed)"),
+            (
+                Some("some-extension"),
+                Some("GitHub Copilot in VS Code"),
+                "some-extension (VS Code)",
+            ),
+            (Some("some-new-agent"), None, "some-new-agent"),
+            (
+                Some("local-agent-mode-semlith"),
+                Some("Claude Desktop"),
+                "Claude Desktop",
+            ),
+            (Some("Cline"), Some("GitHub Copilot in VS Code"), "Cline"),
         ];
         for (info, host, want) in cases {
             assert_eq!(label(info, host), want, "{info:?} under {host:?}");

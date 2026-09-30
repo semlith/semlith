@@ -224,7 +224,18 @@ impl Upstream {
 /// server does. A call that fails after the daemon was found alive is answered
 /// with a JSON-RPC error naming it rather than by silently closing, because a
 /// client that loses its server mid-conversation reports a hung tool.
+/// The notification a proxy sends when its client has hung up.
+pub const CLOSED: &str = "notifications/semlith/closed";
+
 pub fn serve(upstream: &Upstream, input: impl BufRead, mut output: impl Write) -> Result<()> {
+    let result = forward(upstream, input, &mut output);
+    // The client closed stdin: say so, so the daemon stops listing it. Best
+    // effort — a daemon that has gone away has nothing to list.
+    let _ = upstream.call(&format!(r#"{{"jsonrpc":"2.0","method":"{CLOSED}"}}"#));
+    result
+}
+
+fn forward(upstream: &Upstream, input: impl BufRead, output: &mut impl Write) -> Result<()> {
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {

@@ -2815,6 +2815,12 @@ impl State {
         }
         entry.seen = now;
         clients.retain(|_, client| now.saturating_sub(client.seen) <= PROXY_FRESH);
+        drop(clients);
+        Self::clients_changed();
+    }
+
+    /// The one place the clients domain is bumped, for both of its writers.
+    fn clients_changed() {
         changes::bump(changes::Domain::Clients);
     }
 
@@ -2836,6 +2842,21 @@ impl State {
         let now = now();
         proxies.insert(pid, now);
         proxies.retain(|_, seen| now.saturating_sub(*seen) <= PROXY_FRESH);
+    }
+
+    /// A session that has ended: its row and, for a proxy, its pid go now.
+    pub fn forget_client(&self, session: &str, transport: &str, proxy: Option<u32>) {
+        self.clients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&format!("{transport}:{session}"));
+        if let Some(pid) = proxy {
+            self.proxies
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&pid);
+        }
+        Self::clients_changed();
     }
 
     /// How many `semlith mcp` processes are currently forwarding here.

@@ -3685,7 +3685,9 @@ function agentsCard() {
           el(
             "div",
             { class: "kv" },
-            el("span", { text: client.name }),
+            el("span", {
+              text: client.sessions > 1 ? `${client.name} · ${n(client.sessions)} sessions` : client.name,
+            }),
             el("span", { class: "spacer" }),
             el("span", {
               class: "meta",
@@ -10159,8 +10161,16 @@ async function agentsView() {
         key: "name",
         label: "Connected",
         value: (c) => c.name,
-        render: (c) => el("div", { class: "who" }, el("span", { class: "dot good" }), c.name),
+        render: (c) =>
+          el(
+            "div",
+            { class: "who" },
+            el("span", { class: "dot good" }),
+            c.name,
+            c.sessions > 1 ? el("span", { class: "meta", text: ` · ${n(c.sessions)} sessions` }) : null,
+          ),
       },
+      { key: "version", label: "Version", className: "meta narrow-drop", value: (c) => c.version || "—" },
       { key: "transport", label: "Transport", className: "meta", value: (c) => c.transport },
       { key: "revision", label: "Revision", className: "meta narrow-drop", value: (c) => c.revision },
       {
