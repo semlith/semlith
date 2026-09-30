@@ -7,12 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Eleven clients, each tested every release
+### Twelve clients, each tested every release
 
-**`semlith setup` supports eleven clients:** Claude Code, OpenAI Codex,
+**`semlith setup` supports twelve clients:** Claude Code, OpenAI Codex,
 OpenCode, IO CLI, GitHub Copilot CLI, GitHub Copilot in VS Code, Gemini CLI,
-Claude Desktop, Zed, Cline and Cursor (Cursor's connection is tested, its tool
-calls are not). Sixteen clients are no longer supported, because one maintainer
+Claude Desktop, ChatGPT desktop (the Codex app), Zed, Cline and Cursor
+(Cursor's connection is tested, its tool calls are not). Sixteen clients are no longer supported, because one maintainer
 cannot verify twenty-seven vendors each release and three of them had been
 renamed or shut down unnoticed: Kiro, Qwen Code, Amp, Crush, Droid, Goose,
 Amazon Q Developer CLI, OpenClaw, DeepSeek-TUI / Codewhale, Warp, Windsurf /
@@ -33,6 +33,20 @@ Zed's `~/.config/zed/settings.json` (`context_servers`) and Cline's
 `~/.cline/data/settings/cline_mcp_settings.json` (honouring `CLINE_DIR`). A Zed
 settings file with comments or trailing commas is left untouched and its stanza
 printed with the reason.
+
+**ChatGPT desktop (the Codex app) is registered by setup**, into the
+`~/.codex/config.toml` it shares with the Codex CLI: by the CLI's own
+registration where the CLI is installed, and by `--register-all` otherwise.
+
+**Every client on macOS, Linux and Windows.** `docs/clients.md` gives each client's
+file for each system — Zed's `%APPDATA%\Zed` on Windows, Claude Desktop's Linux
+beta and its Microsoft Store copy, VS Code's profile `mcp.json` per system — and
+a fence's `os=` takes a list. On Windows `semlith setup` finds a CLI through
+`PATHEXT`, so the `.cmd` shims npm installs (Gemini CLI, Copilot CLI, Codex,
+VS Code's `code`) register instead of reading as not installed. A client whose
+CLI is missing but which is installed is written through its file, and Codex's
+`config.toml` gains the semlith table the same way, which is how the ChatGPT
+desktop app is registered without the Codex CLI.
 
 **Nothing is created for a client that is not installed.** A skill link, a rules
 file or a configuration file is written only where that client's own directory

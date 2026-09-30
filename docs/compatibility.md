@@ -1345,10 +1345,10 @@ What each lane claims is exactly what has been measured, and nothing else.
 
 ## 0.33.0
 
-**The agent clients are these eleven**, in the same three groups: Claude Code,
+**The agent clients are these twelve**, in the same three groups: Claude Code,
 OpenAI Codex, OpenCode, IO CLI, GitHub Copilot CLI and Gemini CLI under
 Terminal; GitHub Copilot in VS Code, Cursor, Zed and Cline under Editors; Claude
-Desktop under Desktop apps. `GET /api/agents`, `semlith doctor` and its `--json`
+Desktop and ChatGPT desktop (the Codex app) under Desktop apps. `GET /api/agents`, `semlith doctor` and its `--json`
 report exactly these, and every one of them has a way in: its own registration
 CLI, or a user-level file `semlith setup --register-all` writes.
 
@@ -1357,6 +1357,17 @@ writes `~/.config/zed/settings.json` and
 `~/.cline/data/settings/cline_mcp_settings.json`, the latter under `CLINE_DIR`
 when that is set. A Zed settings file carrying comments or trailing commas is
 left untouched, and the stanza is printed with the reason.
+
+| Surface | Change |
+|---|---|
+| MCP `tools/list` | Every array parameter carries `"items": {"type": "string"}`. The values accepted are unchanged: they were always strings. |
+| `semlith setup` | A new step, `leftovers`, prints what it removed from clients' files; the `service` step restarts a login-service daemon serving another version and says so. Printed stanzas name `${SEMLITH_AGENT_KEY}`. |
+| `semlith doctor` | A `daemon version` row, which fails while the running daemon serves another version; the Gemini CLI row may carry a folder-trust note. `--json` gains `daemon`: `{version, binary, started, stale}`. `--brief` exits non-zero on a stale daemon. |
+| `GET /api/doctor` | No longer carries `unregisterable`. |
+| `daemon.json` | New field `started`, the unix second the daemon began. A 0.32.0 binary ignores it; a 0.33.0 binary reads a file without it. |
+| `docs/clients.md` fences | A `root=` attribute names an environment variable that, when set, replaces the path's first directory under `~`. `os=` takes a comma list (`macos,linux`), a `register`/`unregister` fence may carry it, and a path may start `%LOCALAPPDATA%\`. |
+| `semlith setup --register-all` | Appends a `[mcp_servers.semlith]` table to Codex's `config.toml` when it has none; writes a client's file when its CLI is not on `PATH` but the client is installed; on Windows runs a client CLI's `.cmd` shim. |
+| `semlith mcp` | The start line on stderr reads `semlith <version>: forwarding MCP to the semlith daemon at http://127.0.0.1:<port>`. |
 
 ## What a break would look like
 

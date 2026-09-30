@@ -509,13 +509,13 @@ fn a_rotation_never_loosens_a_config_file() {
 
 // ------------------------------------------------- 0.18.0: --register-all
 
-/// The five clients semlith writes a file for, with the user-level path each
+/// The six clients semlith writes a file for, with the user-level path each
 /// one's `config path=` fence names, relative to `HOME`.
 ///
 /// Taken from `docs/clients.md` through the library rather than retyped, so a
 /// path that moves in the documentation moves here too. The count is asserted
 /// because it is the release's own number: six clients register by their own
-/// CLI and five by a file.
+/// CLI and six by a file.
 fn writable_clients() -> Vec<(String, String)> {
     let mut out = Vec::new();
     for client in semlith::clients::clients() {
@@ -529,12 +529,7 @@ fn writable_clients() -> Vec<(String, String)> {
             // Only the paths that resolve on this platform. Claude Desktop's
             // Windows path is in the document and is not a file this test can
             // write on macOS or Linux.
-            let applies = match stanza.os.as_deref() {
-                Some("windows") => cfg!(windows),
-                Some("macos") => cfg!(target_os = "macos"),
-                Some("linux") => cfg!(target_os = "linux"),
-                _ => true,
-            };
+            let applies = stanza.applies_here();
             if applies && let Some(rest) = path.strip_prefix("~/") {
                 out.push((client.name.clone(), rest.to_string()));
             }
@@ -559,7 +554,7 @@ fn register_all_writes_every_file_only_client_and_is_idempotent() {
     for (_, relative) in &expected {
         std::fs::create_dir_all(machine.home.join(relative).parent().unwrap()).unwrap();
     }
-    // Five clients have no global registration command, and that number is the same
+    // Six clients have no global registration command, and that number is the same
     // everywhere. How many *paths* resolve is not: Claude Desktop documents a
     // macOS path and a Windows one and no Linux path at all, so this list is
     // one shorter there. Asserting the path count directly is what made this
@@ -568,7 +563,7 @@ fn register_all_writes_every_file_only_client_and_is_idempotent() {
         .iter()
         .filter(|client| client.needs_a_file_written())
         .count();
-    assert_eq!(writable, 5, "five clients are registered by a file");
+    assert_eq!(writable, 6, "six clients are registered by a file");
     assert!(
         expected.len() >= 4,
         "only {} writable client paths resolve on this platform: {expected:?}",

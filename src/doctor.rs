@@ -319,7 +319,7 @@ pub fn privacy_findings(stores: &[(String, PathBuf)]) -> Vec<Finding> {
 /// Every `semlith` on `PATH`, and which one a bare command reaches.
 ///
 /// Reported here rather than beside the clients because it is a reading of the
-/// machine and not of a client: it is the same answer for all eleven, and
+/// machine and not of a client: it is the same answer for all twelve, and
 /// it is the shape `Finding` already has — an id, what was measured, and the
 /// command a person would type. The Privacy page renders the rules it names by
 /// id and so does not show this one, which is right: it is not a privacy rule
@@ -517,6 +517,25 @@ fn shell_quote(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    /// Windows: an npm CLI is a `.cmd` shim, and setup must spawn the shim
+    /// rather than a bare name that `Command` would only try as `.exe`.
+    #[cfg(windows)]
+    #[test]
+    fn a_cmd_shim_on_path_is_what_gets_spawned() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("fakecli.cmd");
+        std::fs::write(&shim, "@echo off\r\nexit /b 0\r\n").unwrap();
+        let found =
+            crate::home::with_env_var("PATH", dir.path().as_os_str(), || program_path("fakecli"));
+        assert_eq!(
+            found.to_string_lossy().to_lowercase(),
+            shim.to_string_lossy().to_lowercase()
+        );
+        let ran = std::process::Command::new(&found).output().unwrap();
+        assert!(ran.status.success());
+        assert_eq!(program_path(r"C:\x\y.exe"), PathBuf::from(r"C:\x\y.exe"));
+    }
+
     /// Unix only: the repair is a `chmod`, and Windows has no mode to set.
     /// `privacy_findings` reports those two rules as not applicable there,
     /// which `the_mode_rules_are_not_applicable_where_there_is_no_mode` covers.
@@ -681,7 +700,7 @@ pub struct ClientReport {
     ///
     /// The distinction is what makes the exit code usable in a script. A client
     /// that is not installed is not a fault — most people have two or three of
-    /// the eleven. Nor is a file-only client the user has never opted into
+    /// the twelve. Nor is a file-only client the user has never opted into
     /// writing: `--register-all` is an offer, and a report that went red because
     /// the user had not taken it would be red on almost every machine, which is
     /// the same as not reporting at all. A fault is a client that is on this
@@ -1100,7 +1119,7 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
             // setup --register-all` beside it, and the Agents page's dry run
             // then proposed writing a configuration file for a client semlith
             // had just said was not there. Most people have two or three of
-            // the eleven; a report that offered a remedy for the other
+            // the twelve; a report that offered a remedy for the other
             // twenty-four is a report nobody reads twice.
             let repair = if note.is_some() || !in_use {
                 None
@@ -1406,6 +1425,25 @@ fn every_on_path(program: &str) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// What to spawn for a client's CLI: the file `PATH` resolves `program` to,
+/// `PATHEXT` included, or `program` itself when it is already a path or is not
+/// found (so the spawn fails as not-found, which is how absence is told).
+///
+/// Windows needs this and nothing else does. `Command::new("gemini")` appends
+/// only `.exe` there, and every CLI npm installs — Gemini, Copilot, Codex, and
+/// VS Code's own `code` — is a `.cmd` shim, so each read as not installed on a
+/// machine that had it. Given the shim's full path, `Command` runs it through
+/// `cmd.exe` with batch-file argument escaping.
+pub fn program_path(program: &str) -> PathBuf {
+    if !cfg!(windows) || program.contains('/') || program.contains('\\') {
+        return PathBuf::from(program);
+    }
+    path_dirs()
+        .iter()
+        .find_map(|dir| candidate_in(dir, program))
+        .unwrap_or_else(|| PathBuf::from(program))
 }
 
 /// The directories on `PATH`, empty when there is no `PATH` at all.
@@ -1717,7 +1755,7 @@ fn claude_verdict() -> Option<ClientVerdict> {
         return None;
     }
     let neutral = std::env::temp_dir();
-    let out = std::process::Command::new("claude")
+    let out = std::process::Command::new(program_path("claude"))
         .args(["mcp", "get", "semlith"])
         .current_dir(neutral)
         .output()

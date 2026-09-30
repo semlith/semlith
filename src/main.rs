@@ -1080,7 +1080,7 @@ fn run() -> Result<()> {
 
             // Non-zero when something on this machine is not as it should be,
             // so a script can gate on it. A client that is simply not installed
-            // is not a fault: most people have two or three of the eleven.
+            // is not a fault: most people have two or three of the twelve.
             let faults = report.iter().filter(|c| c.fault).count()
                 + rules.iter().filter(|r| !r.ok).count()
                 + usize::from(stale.is_some())

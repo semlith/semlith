@@ -130,6 +130,25 @@ pub enum Scope {
     Project,
 }
 
+impl Stanza {
+    /// Whether this fence is for the system this binary runs on. `os=` takes
+    /// one name or a comma list — `macos,linux` for a client whose file sits
+    /// under `~/.config` on both and under `%APPDATA%` on Windows. No `os=`
+    /// means every system.
+    pub fn applies_here(&self) -> bool {
+        let here = if cfg!(windows) {
+            "windows"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "linux"
+        };
+        self.os
+            .as_deref()
+            .is_none_or(|list| list.split(',').any(|os| os.trim() == here))
+    }
+}
+
 /// What a fence's info string says beyond its language.
 ///
 /// `sh register`, `json config path=~/.cursor/mcp.json`, and
@@ -243,7 +262,7 @@ impl Client {
     pub fn register_command(&self) -> Option<String> {
         self.stanzas
             .iter()
-            .find(|stanza| stanza.register)
+            .find(|stanza| stanza.register && stanza.applies_here())
             .map(|stanza| stanza.text.split_whitespace().collect::<Vec<_>>().join(" "))
     }
 
@@ -258,7 +277,7 @@ impl Client {
     pub fn unregister_commands(&self) -> Vec<String> {
         self.stanzas
             .iter()
-            .filter(|stanza| stanza.unregister)
+            .filter(|stanza| stanza.unregister && stanza.applies_here())
             .map(|stanza| stanza.text.split_whitespace().collect::<Vec<_>>().join(" "))
             .collect()
     }
@@ -273,7 +292,7 @@ impl Client {
     pub fn registers_globally(&self) -> bool {
         self.stanzas
             .iter()
-            .any(|stanza| stanza.register && stanza.scope == Scope::Global)
+            .any(|stanza| stanza.register && stanza.scope == Scope::Global && stanza.applies_here())
     }
 
     /// The user-level configuration files for this client.
@@ -283,9 +302,9 @@ impl Client {
     /// for a client with no global registration CLI: a client semlith can ask
     /// to register itself is not a file semlith writes.
     pub fn config_files(&self) -> impl Iterator<Item = &Stanza> {
-        self.stanzas
-            .iter()
-            .filter(|stanza| stanza.path.is_some() && !stanza.hook && !stanza.rules)
+        self.stanzas.iter().filter(|stanza| {
+            stanza.path.is_some() && !stanza.hook && !stanza.rules && !stanza.skills
+        })
     }
 
     /// The `PreToolUse` block for this client, if it documents one.
@@ -295,7 +314,7 @@ impl Client {
     pub fn hook_stanza(&self) -> Option<&Stanza> {
         self.stanzas
             .iter()
-            .find(|stanza| stanza.hook && stanza.path.is_some())
+            .find(|stanza| stanza.hook && stanza.path.is_some() && stanza.applies_here())
     }
 
     /// The user-level skill directories this client reads.
@@ -312,7 +331,7 @@ impl Client {
     pub fn rules_file(&self) -> Option<&Stanza> {
         self.stanzas
             .iter()
-            .find(|stanza| stanza.rules && stanza.path.is_some())
+            .find(|stanza| stanza.rules && stanza.path.is_some() && stanza.applies_here())
     }
 
     /// Whether `semlith setup --register-all` would write this client's file.
@@ -553,7 +572,7 @@ mod tests {
     fn every_documented_client_is_parsed_with_at_least_one_stanza() {
         let parsed = clients();
         assert!(
-            parsed.len() == 11,
+            parsed.len() == 12,
             "only {} clients parsed out of the CLIENTS_DOC",
             parsed.len()
         );
@@ -634,7 +653,7 @@ mod tests {
         }
     }
 
-    /// Seven of the eleven clients have a registration CLI; six of them register
+    /// Seven of the twelve clients have a registration CLI; six of them register
     /// every project, and those six are exactly the set `semlith setup`
     /// registers without being asked. The number is asserted rather than counted at runtime because a
     /// client silently losing its `sh register` fence is a client that goes

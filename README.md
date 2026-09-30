@@ -403,7 +403,7 @@ with a session in `tests/mcp.rs` proving it.
 **`semlith setup` registers semlith in every client that has a registration
 command, at the scope that means every project**; `semlith doctor` says which it
 could not and what to run for them. [docs/clients.md](docs/clients.md) holds the
-stanzas for all 11 and the HTTP transport, and `tests/clients.rs` launches each.
+stanzas for all 12 and the HTTP transport, and `tests/clients.rs` launches each.
 
 **A server that is silently absent does not exist.** `setup` installs the daemon
 as a login service — launchd agent, systemd user unit, logon task — so it answers
@@ -471,7 +471,7 @@ of these drifts from its source:
 | image types | **5** |
 | MCP tools | **16** |
 | CLI commands | **34** |
-| agent clients, each launched and answered in `tests/clients.rs` | **11** |
+| agent clients, each launched and answered in `tests/clients.rs` | **12** |
 | prebuilt targets | **4** |
 
 **Measured**, on a 4P+4E Apple Silicon laptop, with what reproduces each one:
@@ -529,7 +529,7 @@ at. Query latency does grow: the index scan is linear.
 
 [docs/portal.md](docs/portal.md) covers every page of the portal, every control,
 and the concepts behind the graph and the search list.
-[docs/clients.md](docs/clients.md) holds the configuration stanzas for 11 agent
+[docs/clients.md](docs/clients.md) holds the configuration stanzas for 12 agent
 clients and the HTTP transport.
 [docs/architecture.md](docs/architecture.md) is how the pieces fit together and
 why, [docs/performance.md](docs/performance.md) every measured number with its

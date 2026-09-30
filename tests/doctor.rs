@@ -144,8 +144,8 @@ fn mode_of(path: &Path) -> u32 {
 
 /// A machine with nothing installed is not a machine with something wrong.
 ///
-/// Most people have two or three of the eleven clients. A report that
-/// called the other eight faults would be a report nobody reads twice,
+/// Most people have two or three of the twelve clients. A report that
+/// called the other nine faults would be a report nobody reads twice,
 /// and an exit code that went non-zero for them would be useless in a script.
 #[test]
 fn a_machine_with_no_client_installed_reports_no_fault_and_exits_zero() {
@@ -172,7 +172,7 @@ fn every_client_is_reported_and_none_is_left_without_a_route_in() {
     let run = machine.doctor(&["--json"]);
     let report: serde_json::Value = serde_json::from_slice(&run.stdout).expect("--json emits JSON");
     let clients = report["clients"].as_array().expect("clients");
-    assert_eq!(clients.len(), 11, "every documented client is reported");
+    assert_eq!(clients.len(), 12, "every documented client is reported");
     for client in clients {
         assert!(client["note"].is_null(), "{client}");
     }

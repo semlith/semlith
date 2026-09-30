@@ -26,9 +26,16 @@ language when it renders, so both are invisible on the page and in the portal.
 From 0.18.0 you do not paste any of this by hand for a client that has a
 registration CLI. `semlith setup` runs that CLI itself, at the scope that means
 every project rather than this directory, and always in the form where the
-client launches `semlith mcp` as a subprocess. Six of the eleven clients below
-register that way; the rest are a file you edit once, and `semlith setup
---register-all` will write the user-level one for you.
+client launches `semlith mcp` as a subprocess. Six of the twelve clients below
+register that way; the rest are a file you edit once, and `semlith setup --register-all` will write the user-level one for
+you. A client whose CLI is not on `PATH` but which is installed is written the
+same way, where it documents a file.
+
+Every client below runs on macOS, Linux and Windows. `~` is your home directory
+on each — `%USERPROFILE%` on Windows — and where a client keeps its file
+somewhere else on one system, the stanza is marked with the system it is for.
+On Windows a CLI npm installed is a `.cmd` shim (`gemini.cmd`, `copilot.cmd`,
+and VS Code's `code.cmd`), and `semlith setup` runs the shim.
 
 A subprocess registration carries no credential, so there is nothing in it to
 rotate and nothing on disk to leak. `semlith mcp` reads the agent key from
@@ -230,7 +237,9 @@ v2's documentation adds a `--global` flag
 (<https://opencode.ai/v2/docs/mcp-servers>), and once your build accepts it,
 `opencode mcp add semlith --global -- semlith mcp` is the form to use; until
 then the user-level file below is the thing that covers every project, and
-`semlith setup --register-all` writes it.
+`semlith setup --register-all` writes it. The same path holds on Windows —
+`%USERPROFILE%\.config\opencode\opencode.json`, not `%APPDATA%` — and an
+`opencode.jsonc` that already exists there is read in its place.
 
 ```json config path=~/.config/opencode/opencode.json
 {
@@ -278,6 +287,9 @@ is a field inside it. That file is per-checkout, so it is not tagged for
 `--register-all`; the CLI is what reaches every project. Its scopes are `user`,
 `project` and `local` — there is no `global`, and `--scope global` is rejected
 by name — so `--scope user` is the one that means your own file everywhere.
+On Windows the installer puts `io.exe` in `%LOCALAPPDATA%\io\bin` and does not
+add it to `PATH`; add that directory before running `semlith setup`, or the CLI
+reads as not installed.
 
 ```toml
 [[mcp]]
@@ -448,6 +460,47 @@ code --add-mcp '{"name":"semlith","type":"http","url":"http://127.0.0.1:7365/mcp
 code --add-mcp '{"name":"semlith","command":"${SEMLITH_BIN}","args":["mcp"]}'
 ```
 
+`code` is on `PATH` after a Linux or Windows install (on Windows it is
+`code.cmd`), and on macOS only after *Shell Command: Install 'code' command in
+PATH*. Without it, `semlith setup --register-all` writes the profile's
+`mcp.json` directly, at the path for your system:
+
+```json config os=macos path="~/Library/Application Support/Code/User/mcp.json"
+{
+  "servers": {
+    "semlith": {
+      "type": "stdio",
+      "command": "${SEMLITH_BIN}",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+```json config os=linux path=~/.config/Code/User/mcp.json
+{
+  "servers": {
+    "semlith": {
+      "type": "stdio",
+      "command": "${SEMLITH_BIN}",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+```json config os=windows path=%APPDATA%\Code\User\mcp.json
+{
+  "servers": {
+    "semlith": {
+      "type": "stdio",
+      "command": "${SEMLITH_BIN}",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
 With your own model key (BYOK) and no GitHub sign-in, Copilot Chat also needs
 the `chat.utilitySmallModel` setting pointed at one of your own models; the
 registration above is not enough on its own.
@@ -484,8 +537,10 @@ Or against a daemon on another machine, over HTTP:
 }
 ```
 
-**Zed** — `~/.config/zed/settings.json`, which the `zed: open settings file`
-command opens. Zed calls MCP servers context servers and keys them under
+**Zed** — `~/.config/zed/settings.json` on macOS and Linux (`$XDG_CONFIG_HOME/zed`
+when that is set, and `~/.var/app/dev.zed.Zed/config/zed` for the Flatpak), and
+`%APPDATA%\Zed\settings.json` on Windows; the `zed: open settings file` command
+opens whichever it is. Zed calls MCP servers context servers and keys them under
 `context_servers`. Its remote support has moved between versions and older
 builds start local processes only, so this is the stdio form, which needs no
 key: `semlith mcp` proxies to the running daemon. Zed has no registration CLI,
@@ -496,7 +551,19 @@ parser rejects. When the file has either, semlith leaves it untouched rather
 than rewrite it without them, and prints the stanza below with the reason so
 you can paste it in.
 
-```json config path=~/.config/zed/settings.json
+```json config os=macos,linux path=~/.config/zed/settings.json
+{
+  "context_servers": {
+    "semlith": {
+      "source": "custom",
+      "command": "${SEMLITH_BIN}",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+```json config os=windows path=%APPDATA%\Zed\settings.json
 {
   "context_servers": {
     "semlith": {
@@ -511,14 +578,21 @@ you can paste it in.
 Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
 <https://github.com/zed-industries/zed/blob/main/docs/src/ai/rules.md>.
 
-```md rules path=~/.config/zed/AGENTS.md
+```md rules os=macos,linux path=~/.config/zed/AGENTS.md
+${SEMLITH_RULES}
+```
+
+```md rules os=windows path=%APPDATA%\Zed\AGENTS.md
 ${SEMLITH_RULES}
 ```
 
 **Cline** — `~/.cline/data/settings/cline_mcp_settings.json`, the one file
 both the VS Code extension (4.x) and the CLI (3.x) read, and the one the MCP
-Servers panel's Configure button opens. It moves with `CLINE_DIR` when that is
-set, and Cline creates it as `{"mcpServers": {}}` on first activation.
+Servers panel's Configure button opens. It is the same path under your home on
+macOS, Linux and Windows, it moves with `CLINE_DIR` when that is set, and Cline
+creates it as `{"mcpServers": {}}` on first activation. `CLINE_DATA_DIR` and
+`CLINE_MCP_SETTINGS_PATH` move it too, and take precedence; with either set,
+paste the stanza into the file they name.
 `semlith setup --register-all` writes the entry below into it, which covers the
 extension and the CLI at once
 (<https://docs.cline.bot/mcp/mcp-overview>).
@@ -562,8 +636,12 @@ ${SEMLITH_RULES}
 #### Desktop apps
 
 **Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json`
-on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows. Settings →
-Developer → Edit Config opens it. Desktop starts local processes only and has
+on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows (the Microsoft
+Store build reads its own copy under
+`%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude`, so
+semlith writes both where each exists), and
+`~/.config/Claude/claude_desktop_config.json` on Linux, where Anthropic's build
+is a beta for Debian and Ubuntu. Settings → Developer → Edit Config opens it. Desktop starts local processes only and has
 nowhere to put a header, so this is the stdio form and needs no key: `semlith
 mcp` proxies to the running daemon. Quit and reopen the app after editing.
 
@@ -587,6 +665,44 @@ mcp` proxies to the running daemon. Quit and reopen the app after editing.
     }
   }
 }
+```
+
+```json config os=windows path=%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json
+{
+  "mcpServers": {
+    "semlith": {
+      "command": "${SEMLITH_BIN}",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+```json config os=linux path=~/.config/Claude/claude_desktop_config.json
+{
+  "mcpServers": {
+    "semlith": {
+      "command": "${SEMLITH_BIN}",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**ChatGPT desktop (the Codex app)** — OpenAI's desktop app for macOS, Windows
+(Microsoft Store) and Linux (a preview for Ubuntu, Debian, Fedora and Arch). Its
+Codex reads the same `~/.codex/config.toml` as the Codex CLI and IDE extension —
+`%USERPROFILE%\.codex\config.toml` on Windows — so one registration serves all
+three: a server added from the CLI appears in the app, and the other way round.
+With the Codex CLI installed, its own registration covers the app; without it,
+`semlith setup --register-all` appends the table below to that file on every
+system. Quit and reopen the app after registering; `/mcp` in a Codex thread
+lists the servers it started.
+
+```toml config path=~/.codex/config.toml
+[mcp_servers.semlith]
+command = "${SEMLITH_BIN}"
+args = ["mcp"]
 ```
 
 ### Connecting over HTTP

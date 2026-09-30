@@ -1879,14 +1879,14 @@ unregistered client reads the answer instead of bisecting a configuration file.
 
 **Rules first, then the clients.** The rules answer the question the page exists
 for — is this machine set up the way it claims — and the client table is
-eleven rows that page ten at a time, so under the table the rules were below a
+twelve rows that page ten at a time, so under the table the rules were below a
 screenful on every visit.
 
 **Clients** is one row per documented client: its name, whether semlith is
 registered in it and at what scope, and the command that fixes the row when it
 needs fixing. Three states are kept apart on purpose. *Not installed* is a
 client whose CLI is not on this machine, which is not a fault — most people have
-two or three of the eleven. *Installed, not registered* is one that would
+two or three of the twelve. *Installed, not registered* is one that would
 register if asked. And *One project only* is the defect this page exists to end:
 semlith registered for the directory somebody was standing in.
 

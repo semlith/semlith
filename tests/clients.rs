@@ -22,7 +22,7 @@ const CLIENTS_DOC: &str = include_str!("../docs/clients.md");
 const SECTION: &str = "### Setting it up in your client";
 
 /// Every client the release promises a stanza for.
-const CLIENTS: [&str; 11] = [
+const CLIENTS: [&str; 12] = [
     "Claude Code",
     "OpenAI Codex",
     "OpenCode",
@@ -34,6 +34,7 @@ const CLIENTS: [&str; 11] = [
     "Zed",
     "Cline",
     "Claude Desktop",
+    "ChatGPT desktop (the Codex app)",
 ];
 
 /// Since 0.9.0 a stanza carries no path at all: the server resolves its own

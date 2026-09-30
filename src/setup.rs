@@ -811,6 +811,17 @@ fn step_agents(register_all: bool, yes: bool) -> Result<Step> {
                 wired.push(&client.name);
                 replaced.extend(was);
             }
+            // No CLI, but the client is here and documents its file: VS Code
+            // with `code` not on `PATH` (the macOS default), the ChatGPT
+            // desktop app with no Codex CLI. The file is the way in.
+            Registration::Absent
+                if client.config_files().any(|stanza| {
+                    crate::clientfile::resolve(stanza)
+                        .is_some_and(|path| crate::clientfile::client_present(&path))
+                }) =>
+            {
+                by_file.push(client)
+            }
             Registration::Absent => absent += 1,
             Registration::Failed { reason } => failed.push((&client.name, reason)),
             Registration::ProjectScoped => by_file.push(client),
@@ -1033,7 +1044,7 @@ pub enum Registration {
     /// Registered, naming whatever was replaced to get there.
     Registered { replaced: Vec<String> },
     /// The client's CLI is not on this machine. Not a failure: most people have
-    /// two or three of the eleven.
+    /// two or three of the twelve.
     Absent,
     /// The CLI is here and did not accept the registration. The stanza is
     /// printed instead and the install continues.
@@ -1089,7 +1100,10 @@ pub fn register(client: &clients::Client) -> Registration {
         let Some((program, args)) = argv(&undo) else {
             continue;
         };
-        match Command::new(&program).args(&args).output() {
+        match Command::new(crate::doctor::program_path(&program))
+            .args(&args)
+            .output()
+        {
             // An exit of zero means there was something there to remove, which
             // is what the user is told. A non-zero exit is the ordinary case of
             // nothing being registered, and says nothing.
@@ -1102,7 +1116,10 @@ pub fn register(client: &clients::Client) -> Registration {
         }
     }
 
-    match Command::new(&program).args(&args).output() {
+    match Command::new(crate::doctor::program_path(&program))
+        .args(&args)
+        .output()
+    {
         Ok(out) if out.status.success() => Registration::Registered { replaced },
         Ok(out) => Registration::Failed {
             reason: first_line(&out.stderr, &out.stdout)
@@ -1680,6 +1697,39 @@ fn client_configs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod rotation_tests {
     use super::*;
+
+    /// Windows: an npm-installed client CLI is a `.cmd` shim, and it is
+    /// invoked — remove, then add — rather than read as not installed.
+    #[cfg(windows)]
+    #[test]
+    fn a_client_cli_that_is_a_cmd_shim_is_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls.txt");
+        std::fs::write(
+            dir.path().join("gemini.cmd"),
+            format!(
+                "@echo off\r\necho %*>> \"{}\"\r\nexit /b 0\r\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let path = std::ffi::OsString::from(format!("{};{system}\\System32", dir.path().display()));
+        let gemini = crate::clients::clients()
+            .iter()
+            .find(|c| c.name == "Gemini CLI")
+            .expect("documented");
+        let outcome = home::with_env_var("PATH", &path, || register(gemini));
+        assert!(
+            matches!(outcome, Registration::Registered { .. }),
+            "{outcome:?}"
+        );
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains("mcp add") && calls.contains("semlith"),
+            "{calls}"
+        );
+    }
 
     /// F2: a printed stanza names the variable, never the key.
     #[test]
