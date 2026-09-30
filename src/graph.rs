@@ -1624,8 +1624,16 @@ const ROUNDS: usize = 3;
 /// denominator the harness reports — moved as well. An ordered map costs a
 /// `log n` lookup over a set already bounded by `MAX_NODES` and buys a walk
 /// that answers the same thing twice.
+///
+/// `max_nodes` is how many names may be asked about. When it binds, the
+/// heaviest names of each round are the ones asked, ties by name. Until
+/// the fix for the 879k-chunk corpus it was `MAX_NODES` taken in name order,
+/// so the names a search could not afford to visit were the ones late in the
+/// alphabet rather than the ones the seeds cared least about. Below the budget
+/// the same names are visited either way and the result is unchanged.
 pub fn expand(
     personal: &std::collections::BTreeMap<String, f32>,
+    max_nodes: usize,
     mut neighbours: impl FnMut(&str) -> Result<Vec<(String, f32, String)>>,
 ) -> Result<Vec<(String, f32, String)>> {
     if personal.is_empty() {
@@ -1640,6 +1648,19 @@ pub fn expand(
     let mut score = personal.clone();
 
     for _ in 0..ROUNDS {
+        // The budget is on names visited, not on rows read, because that is
+        // what bounds both the queries and the memory.
+        let mut frontier: Vec<(&String, f32)> = score
+            .iter()
+            .filter(|(name, mass)| **mass > 0.0 && !edges.contains_key(*name))
+            .map(|(name, mass)| (name, *mass))
+            .collect();
+        frontier.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        let room = max_nodes.saturating_sub(edges.len());
+        for (name, _) in frontier.into_iter().take(room) {
+            edges.insert(name.clone(), neighbours(name)?);
+        }
+
         let mut next: std::collections::BTreeMap<String, f32> = personal
             .iter()
             .map(|(name, mass)| (name.clone(), (1.0 - DAMPING) * mass))
@@ -1649,15 +1670,9 @@ pub fn expand(
             if *mass <= 0.0 {
                 continue;
             }
-            if !edges.contains_key(name) {
-                // The budget is on names visited, not on rows read, because
-                // that is what bounds both the queries and the memory.
-                if edges.len() >= MAX_NODES {
-                    continue;
-                }
-                edges.insert(name.clone(), neighbours(name)?);
-            }
-            let out = &edges[name];
+            let Some(out) = edges.get(name) else {
+                continue;
+            };
             let total: f32 = out.iter().map(|(_, weight, _)| *weight).sum();
             if total <= 0.0 {
                 continue;
@@ -4823,7 +4838,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let ranked = expand(&personal, |name| {
+        let ranked = expand(&personal, MAX_NODES, |name| {
             Ok(adjacency
                 .get(name)
                 .into_iter()
@@ -4859,7 +4874,7 @@ mod tests {
             [("knead".to_string(), 1.0), ("autolyse".to_string(), 1.0)]
                 .into_iter()
                 .collect();
-        let ranked = expand(&personal, |name| {
+        let ranked = expand(&personal, MAX_NODES, |name| {
             Ok(match name {
                 "knead" => vec![("autolyse".to_string(), 1.0, EXTRACTED.to_string())],
                 _ => Vec::new(),
@@ -4884,7 +4899,7 @@ mod tests {
         let mut asked: Vec<String> = Vec::new();
         let personal: std::collections::BTreeMap<String, f32> =
             [("a".to_string(), 1.0)].into_iter().collect();
-        expand(&personal, |name| {
+        expand(&personal, MAX_NODES, |name| {
             asked.push(name.to_string());
             Ok(match name {
                 "a" => vec![("b".to_string(), 1.0, EXTRACTED.to_string())],
@@ -4899,6 +4914,28 @@ mod tests {
         assert_eq!(asked.len(), unique.len(), "asked twice: {asked:?}");
     }
 
+    /// Under a budget the heaviest names are the ones asked about. Name order
+    /// would ask about `aardvark`, the weakest seed, and skip `zebra`, the
+    /// strongest, which is what 0.32.0 did on a store big enough for the budget
+    /// to bind.
+    #[test]
+    fn a_budget_spends_its_visits_on_the_heaviest_names() {
+        let personal: std::collections::BTreeMap<String, f32> = [
+            ("aardvark".to_string(), 0.1),
+            ("middle".to_string(), 0.5),
+            ("zebra".to_string(), 1.0),
+        ]
+        .into_iter()
+        .collect();
+        let mut asked: Vec<String> = Vec::new();
+        expand(&personal, 2, |name| {
+            asked.push(name.to_string());
+            Ok(Vec::new())
+        })
+        .unwrap();
+        assert_eq!(asked, ["zebra", "middle"]);
+    }
+
     /// The label on a reached name is the best edge that reached it, not the
     /// last one read.
     #[test]
@@ -4907,7 +4944,7 @@ mod tests {
             [("weak".to_string(), 1.0), ("strong".to_string(), 1.0)]
                 .into_iter()
                 .collect();
-        let ranked = expand(&personal, |name| {
+        let ranked = expand(&personal, MAX_NODES, |name| {
             Ok(match name {
                 "weak" => vec![("target".to_string(), 0.5, INFERRED.to_string())],
                 "strong" => vec![("target".to_string(), 1.0, EXTRACTED.to_string())],

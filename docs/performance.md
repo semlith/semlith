@@ -61,6 +61,51 @@ linear: budget a few milliseconds for a repository and a few tens for a very
 large corpus. The recipe for rebuilding the fixture is in
 [CONTRIBUTING.md](../CONTRIBUTING.md).
 
+## A large multi-repository store
+
+Taken for 0.33.1 on 2026-09-30 on the reference machine, an M1 Air with 8 GB,
+over 70 well-known public repositories pinned to release tags: 879 439 chunks
+from 66 333 files, 521.7 MB of indexed text. Every search went through the login
+service: a stdlib Python harness called the daemon's `/mcp` endpoint, dropped
+the first three calls, and ran three sessions. Each range is the lowest and
+highest figure of the three sessions.
+
+| search | p50 | p95 |
+|---|---|---|
+| concept | **257–363 ms** | 500–920 ms, max 1.6 s |
+| identifier | **96–111 ms** | 294–346 ms |
+| scoped to one repository | **574–597 ms** | 803–910 ms |
+| concept, `excerpt` format | **335–372 ms** | 532–545 ms |
+
+Where a search's time goes, measured with temporary stage timers in a
+measurement-only build that did not ship: one session through the daemon, 72
+warm searches.
+
+| stage | p50 | p95 | max |
+|---|---|---|---|
+| query embed | **3.1 ms** | 3.8 ms | 4.1 ms |
+| vector scan, 879 439 vectors in 14 shards | **5.1 ms** | 6.1 ms | 15.1 ms |
+| full-precision rescoring | **11.2 ms** | 23.0 ms | 35.6 ms |
+| keyword list (FTS5) | **92.0 ms** | 335.7 ms | 414.4 ms |
+| image list | **6.2 ms** | 7.6 ms | 8.0 ms |
+| graph list | **112.3 ms** | 438.3 ms | 2 120.1 ms |
+| everything inside the store | **328.3 ms** | 748.5 ms | 2 267.4 ms |
+
+The linear scan is not where the time goes at this size, so an
+approximate-nearest-neighbour index would save a few milliseconds; the keyword
+list and the graph list are the cost. The first search after a start paid 3.4 s
+once in the image list to load CLIP, because the corpus holds two PNG images.
+
+The daemon's RSS was 525–727 MB. Before 0.33.1 every search on this store ran
+for 31 to 244 s and then failed; the changelog has what changed.
+
+**A search scoped to one repository is about twice as slow as an unscoped
+one**, because the path filter does not reach the graph's edge lookups.
+
+The first index of the corpus took 70.7 min for 879 439 chunks, a mean of 207
+chunks/s on the Neural Engine lane. It was taken with the 0.32.0 daemon on
+2026-09-29, mostly on battery, with low power mode off.
+
 ## Keeping it current
 
 | what | measured |

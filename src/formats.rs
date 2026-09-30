@@ -167,6 +167,20 @@ fn html_text(source: &str) -> String {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
 
+        // Markup starts only where a tag name, `/`, `!` or `?` follows the
+        // `<`, which is how a browser reads it. Anything else is text: the
+        // zstd manual's `input.pos < input.size` was taken for a tag running
+        // to the next `>`, and thirteen lines of it were never indexed.
+        let opens = rest[1..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?'));
+        if !opens {
+            out.push('<');
+            rest = &rest[1..];
+            continue;
+        }
+
         // A comment ends at `-->`, not at the first `>` inside it.
         let skipped = if rest.starts_with("<!--") {
             skip_to(rest, "-->")
@@ -1647,6 +1661,33 @@ mod tests {
         let line = text.lines().position(|l| l.contains("Wombats")).unwrap() + 1;
         let source_line = page.lines().position(|l| l.contains("Wombats")).unwrap() + 1;
         assert_eq!(line, source_line, "line numbers drifted:\n{text}");
+    }
+
+    /// A `<` that no tag name follows is text, as a browser reads it. The
+    /// zstd manual's `input.pos < input.size` was read as the start of a tag
+    /// that ran to the next `>`, thirteen lines on, and those lines were never
+    /// indexed.
+    #[test]
+    fn a_bare_less_than_is_text_not_a_tag() {
+        let page = "<pre>\nwhile (input.pos < input.size) {\n  x <= y; 1 <3\n}\n\
+                    output-&gt;pos is updated</pre>\n<p>after</p>\n";
+        let text = html(page.as_bytes()).unwrap();
+
+        assert!(
+            text.contains("while (input.pos < input.size) {"),
+            "{text:?}"
+        );
+        assert!(text.contains("x <= y; 1 <3"), "{text:?}");
+        assert!(text.contains("output->pos is updated"), "{text:?}");
+        assert!(
+            !text.contains("<pre>") && !text.contains("<p>"),
+            "a tag survived: {text:?}"
+        );
+        assert_eq!(
+            text.lines().count(),
+            page.lines().count(),
+            "line numbers drifted:\n{text}"
+        );
     }
 
     #[test]
