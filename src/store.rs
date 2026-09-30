@@ -2572,6 +2572,30 @@ pub fn fill_usage(db: &Connection, row: &Unfilled, filled: &Filled) -> Result<()
     Ok(())
 }
 
+/// Every row with usage, keyed as [`ledger_keys`] keys it, for totals per
+/// client and per model that count a cross-store call once.
+pub fn usage_rows(db: &Connection, store: &str) -> Result<Vec<(String, String, RowUsage)>> {
+    let mut q = db.prepare(&format!(
+        "SELECT id, COALESCE(query_id, ''), client, {USAGE_COLUMNS}
+           FROM retrievals WHERE model IS NOT NULL"
+    ))?;
+    let rows = q.query_map([], |r| {
+        let id: i64 = r.get(0)?;
+        let qid: String = r.get(1)?;
+        let key = if qid.is_empty() {
+            format!("{store}#{id}")
+        } else {
+            qid
+        };
+        Ok((
+            key,
+            r.get::<_, String>(2)?,
+            usage_at(r, 3)?.unwrap_or_default(),
+        ))
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// The hash covering one row and the one before it.
 ///
 /// # Two formulas

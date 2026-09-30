@@ -71,6 +71,7 @@ pub mod system;
 pub mod tree;
 pub mod trt;
 pub mod upgrade;
+pub mod usage;
 pub mod watch;
 
 use anyhow::{Result, bail};
