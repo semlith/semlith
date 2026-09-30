@@ -52,6 +52,15 @@ desktop app is registered without the Codex CLI.
 file or a configuration file is written only where that client's own directory
 already exists.
 
+### Faster with the Neural Engine off
+
+Indexing on the CPU and the Core ML GPU, with the Neural Engine switched off,
+measured 66.3 chunks/s p10 on the M1 Air against 37.7 for 0.32.0, the same day
+through the same harness (#164). The GPU models accumulate in fp16, the Core ML
+pack moves to version 2 with GPU buckets at 128/192/256/320/400 tokens, and the
+Core ML worker copy is renewed (`accel/coreml-worker-v2`). The first start after
+the upgrade downloads the new pack (148 MB) and compiles it once.
+
 ### Fixed
 
 - **Copilot in VS Code refused every chat with semlith enabled** ("tool
@@ -77,8 +86,9 @@ already exists.
   names an arbitrary store.
 - **`semlith doctor` explains Gemini CLI's folder trust**, which disables
   user-level MCP servers in folders not in `~/.gemini/trustedFolders.json`.
-- **Stopping the daemon mid-index printed an ONNX Runtime error** (#163). Writers
-  for stores opened after startup are now joined at shutdown.
+- **Stopping the daemon mid-index printed an ONNX Runtime error** (#163). A
+  shutdown now ends a run's slice at once and keeps what it embedded, and the
+  daemon waits for every store's writer before it exits.
 - A test of the Neural Engine compile countdown no longer fails on a slow runner
   (#166).
 

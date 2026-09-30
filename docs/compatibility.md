@@ -1367,6 +1367,7 @@ left untouched, and the stanza is printed with the reason.
 | `daemon.json` | New field `started`, the unix second the daemon began. A 0.32.0 binary ignores it; a 0.33.0 binary reads a file without it. |
 | `docs/clients.md` fences | A `root=` attribute names an environment variable that, when set, replaces the path's first directory under `~`. `os=` takes a comma list (`macos,linux`), a `register`/`unregister` fence may carry it, and a path may start `%LOCALAPPDATA%\`. |
 | `semlith setup --register-all` | Appends a `[mcp_servers.semlith]` table to Codex's `config.toml` when it has none; writes a client's file when its CLI is not on `PATH` but the client is installed; on Windows runs a client CLI's `.cmd` shim. |
+| The model cache | The Core ML pack is `accel/coreml-2` and the worker copy `accel/coreml-worker-v2`; the first start after the upgrade downloads the pack (148 MB) and compiles its models once. `coreml-1` and `coreml-worker-v1` can be deleted. |
 | `semlith mcp` | The start line on stderr reads `semlith <version>: forwarding MCP to the semlith daemon at http://127.0.0.1:<port>`. |
 
 ## What a break would look like
