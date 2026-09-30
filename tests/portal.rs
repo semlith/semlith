@@ -86,6 +86,8 @@ const VIEWS: &[(&str, &str)] = &[
     // file the daemon owns rather than each keeping a list.
     ("schedule", "/api/schedules"),
     ("ledger", "/api/ledger"),
+    // The Ledger page's Usage tab names the table and fetches a fresh one.
+    ("prices", "/api/ledger/usage"),
     // `semlith key` is the Agents page's Rotate button, which posts here.
     ("key", "/api/key"),
     // `semlith drop` is the Stores page's Delete, behind its second click.

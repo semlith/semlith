@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### What the documents hold, counted
+
+**Inside the index counts pages, slides and cells.** The prose panel showed a
+file count for every kind of document. It now shows what they hold: PDF pages,
+the slides of `.pptx` and `.odp` decks, the non-empty cells of `.xlsx`, `.ods`,
+`.csv` and `.tsv` sheets, and notebook cells, as `412 pages · 9 PDFs`. Each
+reader counts in the same pass that extracts the text, and the count is kept in
+a new nullable `files.units` column. A PDF's text is unchanged byte for byte:
+the document is parsed once for both its text and its page count.
+
+**Older stores are counted on their next index pass without re-embedding.** A
+store written before 0.34.0 opens as it is. The page says how many files are
+not counted yet, and the next run or start-up catch-up reads only those files
+again, for their counts. No chunk, vector, symbol or search row changes.
+
+**Inside the index no longer stalls other reads.** A cold measure of a very
+large store read every chunk while holding the lock every read route shares.
+On the 879k-chunk corpus this held the Stores list for about five minutes. Each
+store is now measured on its own connection.
+
+### Model, tokens and cost in the ledger
+
+**Each ledger row can show the model, tokens and cost of the call that made
+it.** MCP does not carry any of the three, but each client's own session log
+does. With **Usage from client logs** on (Privacy page, or `semlith ledger
+--usage on`), semlith matches each of its rows to the tool call in that
+client's log by tool, time and arguments. It takes the model and the input,
+output, cache-read and cache-write tokens of the request that issued the call.
+The Ledger page gains a Usage tab with totals per client and model, and
+`semlith ledger` prints a usage line under each row. The setting is off by
+default. Off, no client log is opened. On, logs are opened read-only and only
+the model id and the numbers are kept. A client that keeps no readable log says
+`not recorded` rather than being estimated.
+
+**Cost comes from a models.dev price table built into the binary.** Where the
+client records its own cost, that figure is used. Otherwise cost is the tokens
+at the model's price, with context tiers and cache rates, in a trimmed snapshot
+of [models.dev](https://models.dev) (MIT): 1,110 models across the vendors and
+the gateways the supported clients use. `semlith prices` shows the table in use
+and one model's rates. `semlith prices update`, or **Update prices** on the
+Ledger page, fetches a fresh table from models.dev. It runs only when asked and
+is refused under `--airgap`. Every priced row names the table and date it was
+priced with.
+
 ## [0.33.1] - 2026-09-30
 
 ### Search answers on a large multi-repository store
