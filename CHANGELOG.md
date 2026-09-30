@@ -49,7 +49,34 @@ the gateways the supported clients use. `semlith prices` shows the table in use
 and one model's rates. `semlith prices update`, or **Update prices** on the
 Ledger page, fetches a fresh table from models.dev. It runs only when asked and
 is refused under `--airgap`. Every priced row names the table and date it was
-priced with.
+priced with. The Agents page has a **Model prices** card showing the table's
+source and date, with the update button.
+
+**Savings figures are priced from the same table.** Before 0.34.0 the savings
+report, the Reports page and the Ledger's sessions table offered three
+hard-coded Anthropic prices. They now offer a model per vendor the supported
+clients use (Claude, GPT, Gemini, Grok, DeepSeek, Kimi, GLM, Mistral). The
+Ledger's picker adds every model the ledger has seen, and `--model` accepts any
+model in the table. The default is `claude-sonnet-5-5`. `Sonnet 5`, `Opus 5`
+and `Haiku 4.5` still work, and are priced at the table's current rate for
+those models instead of the old fixed numbers. Reports that name them will show
+different amounts.
+
+### Fixed
+
+**Doctor reads IO CLI's user-scope registration.** `io mcp add --scope user`
+writes `~/.io-cli/io.toml`, which doctor never read, so a registered IO CLI
+showed as `installed, not registered`.
+
+**A correct steering hook no longer reads as stale** when another tool keeps
+its own hooks in the same Claude Code `settings.json`. The hook was checked by
+writing the whole file back and comparing it as text. It is now compared entry
+by entry.
+
+**The Doctor page colours each Skill & hook part by its state.** `hook present
+(soft)`, `always loaded` and `research agent` were amber even when healthy. A
+stale skill or hook now puts `semlith setup` in the To-fix column, and the
+header's count includes it.
 
 ## [0.33.1] - 2026-09-30
 

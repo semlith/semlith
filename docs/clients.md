@@ -289,7 +289,18 @@ is a field inside it. That file is per-checkout, so it is not tagged for
 by name — so `--scope user` is the one that means your own file everywhere.
 On Windows the installer puts `io.exe` in `%LOCALAPPDATA%\io\bin` and does not
 add it to `PATH`; add that directory before running `semlith setup`, or the CLI
-reads as not installed.
+reads as not installed. `io mcp add --scope user` writes the entry into
+`~/.io-cli/io.toml`, which is also where `semlith doctor` reads it from:
+
+```toml config path=~/.io-cli/io.toml
+[[mcp]]
+id = "semlith"
+transport = "stdio"
+command = "${SEMLITH_BIN}"
+args = ["mcp"]
+```
+
+Or against a daemon on another machine, over HTTP:
 
 ```toml
 [[mcp]]

@@ -102,6 +102,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         // is, what the transcripts say; a POST is the toggle itself.
         (_, _, "/api/ledger/replay") if get || post => replay(request),
         (_, _, "/api/ledger/usage") if get || post => usage(request),
+        (_, _, "/api/prices") if get || post => prices(request),
         (true, _, "/api/graph") => graph(state, request),
         (true, _, "/api/corpus") => corpus(state),
         (true, _, "/api/ledger") => ledger(state),
@@ -223,7 +224,7 @@ fn schedule_write(state: &Arc<State>, request: &Request) -> Response {
             let model = body
                 .get("model")
                 .and_then(|v| v.as_str())
-                .unwrap_or("Sonnet 5");
+                .unwrap_or(crate::report::DEFAULT_MODEL);
             let mut schedule = crate::schedule::Schedule::new(
                 kind,
                 format,
@@ -1245,7 +1246,9 @@ fn ledger(state: &Arc<State>) -> Response {
             credited * 100 / queries
         };
         let ratio = (excerpt > 0).then(|| whole as f64 / excerpt as f64);
+        let used_models: Vec<String> = usage_totals.keys().map(|(_, m)| m.clone()).collect();
         Ok(json!({
+            "savings_models": savings_models_json(&used_models),
             "recording": recording,
             "queries": queries,
             "clients": clients,
@@ -1335,22 +1338,14 @@ fn prices_json() -> Value {
     })
 }
 
-/// The ledger's usage setting and price table: a GET reports them, a POST
-/// with `{"on": bool}` sets the setting, and a POST with `{"update": true}`
-/// runs `semlith prices update` — the one request that reaches models.dev,
-/// made because somebody pressed the button.
+/// The ledger's usage setting: a GET reports it with the logs it would read,
+/// a POST with `{"on": bool}` sets it.
 fn usage(request: &Request) -> Response {
     if request.method == "POST" {
         let body = match request.json() {
             Ok(b) => b,
             Err(e) => return Response::error(400, &e.to_string()),
         };
-        if body.get("update").and_then(Value::as_bool) == Some(true) {
-            return match crate::prices::update() {
-                Ok(_) => Response::json(&json!({ "prices": prices_json() })),
-                Err(e) => Response::error(502, &format!("{e:#}")),
-            };
-        }
         let Some(on) = body.get("on").and_then(Value::as_bool) else {
             return Response::error(400, "missing on");
         };
@@ -1366,6 +1361,48 @@ fn usage(request: &Request) -> Response {
         "prices": prices_json(),
         "logs": crate::usage::log_paths(),
     }))
+}
+
+/// The model price table, for the Agents page's card and every savings
+/// picker: a GET names the table and lists the models a savings figure is
+/// offered at; a POST with `{"update": true}` runs `semlith prices update` —
+/// the one request that reaches models.dev, made because somebody pressed the
+/// button.
+fn prices(request: &Request) -> Response {
+    if request.method == "POST" {
+        let body = match request.json() {
+            Ok(b) => b,
+            Err(e) => return Response::error(400, &e.to_string()),
+        };
+        if body.get("update").and_then(Value::as_bool) != Some(true) {
+            return Response::error(400, "missing update");
+        }
+        if let Err(e) = crate::prices::update() {
+            return Response::error(502, &format!("{e:#}"));
+        }
+    }
+    let mut info = prices_json();
+    info["savings_models"] = savings_models_json(&[]);
+    Response::json(&info)
+}
+
+/// The savings pickers' models: the defaults, then any other model `used`
+/// names that the table prices, each with its input rate.
+fn savings_models_json(used: &[String]) -> Value {
+    let mut models = crate::report::savings_models();
+    for name in used {
+        if let Some(priced) = crate::report::price_named(name)
+            && !models.iter().any(|(n, _)| *n == priced.0)
+        {
+            models.push(priced);
+        }
+    }
+    Value::Array(
+        models
+            .into_iter()
+            .map(|(name, input)| json!({ "name": name, "input": input }))
+            .collect(),
+    )
 }
 
 /// Notes fastembed's catalogue gets wrong about its own models.
@@ -2710,7 +2747,10 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
         Ok(window) => window,
         Err(e) => return Response::error(400, &e.to_string()),
     };
-    let model = request.query("model").unwrap_or("Sonnet 5").to_string();
+    let model = request
+        .query("model")
+        .unwrap_or(crate::report::DEFAULT_MODEL)
+        .to_string();
     // Refused rather than defaulted. The savings report is a figure in money,
     // and a model nobody prices used to come back priced at Sonnet 5 under
     // Sonnet 5's name, so the caller could not tell it had been ignored.

@@ -1653,7 +1653,7 @@ fn call_tool(
             let model = args
                 .get("model")
                 .and_then(Value::as_str)
-                .unwrap_or("Sonnet 5");
+                .unwrap_or(crate::report::DEFAULT_MODEL);
             match crate::report::generate(stores, kind, model).and_then(|r| r.render(format)) {
                 Ok(text) => text,
                 Err(e) => return Ok(tool_error(&e.to_string())),

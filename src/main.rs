@@ -820,7 +820,7 @@ enum Command {
         format: String,
 
         /// Which model's prices the savings report costs tokens at.
-        #[arg(long, default_value = "Sonnet 5")]
+        #[arg(long, default_value = semlith::report::DEFAULT_MODEL)]
         model: String,
 
         /// Narrow the report to a period: all, day, week, month or quarter.
@@ -4638,7 +4638,7 @@ enum ScheduleCommand {
         format: String,
 
         /// Which model's prices the savings report costs tokens at.
-        #[arg(long, default_value = "Sonnet 5")]
+        #[arg(long, default_value = semlith::report::DEFAULT_MODEL)]
         model: String,
 
         /// Narrow to a period: all, day, week, month or quarter.

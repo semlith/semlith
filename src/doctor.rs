@@ -1121,6 +1121,8 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
             // had just said was not there. Most people have two or three of
             // the twelve; a report that offered a remedy for the other
             // twenty-four is a report nobody reads twice.
+            let (skill, hook) = (skill_state_for(client), hook_state_for(client));
+            let stale = [skill, hook].contains(&crate::agentfiles::State::Stale);
             let repair = if note.is_some() || !in_use {
                 None
             } else if disabled_here {
@@ -1159,6 +1161,11 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
                 Some("semlith setup".to_string())
             } else if client.name == "Claude Code" && claude_always_load() == Some(false) {
                 Some("semlith setup  # adds alwaysLoad, so the tools load on the first turn".to_string())
+            } else if stale {
+                // Stale, not absent: an absent hook or skill may be a
+                // `--no-hooks` the user chose, and a row that nags about a
+                // choice teaches people to ignore the column.
+                Some("semlith setup  # rewrites the semlith skill link and steering hook for this binary".to_string())
             } else {
                 None
             };
@@ -1173,8 +1180,8 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
                     .and_then(|text| crate::agentfiles::installed_mode(&text))
                     .map(|m| m.as_str().to_string()),
                 explorer: claude.then(crate::agentfiles::explorer_installed),
-                skill: skill_state_for(client),
-                hook: hook_state_for(client),
+                skill,
+                hook,
                 rules: rules_state_for(client),
                 name: client.name.clone(),
                 command,
