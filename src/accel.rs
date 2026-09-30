@@ -1403,7 +1403,7 @@ fn worker_args(lane: &Arc<Lane>) -> Result<Vec<String>> {
 /// The Core ML worker's protocol: bump it whenever the `__embed-worker ane`
 /// or `gpu-coreml` code, its arguments or its frames change, and a fresh copy
 /// of the binary becomes the worker (see [`coreml_worker`]).
-pub const COREML_WORKER: u32 = 1;
+pub const COREML_WORKER: u32 = 2;
 
 /// Run the Core ML lanes' worker from the binary that is running now rather
 /// than the stable copy: for developing the worker itself.

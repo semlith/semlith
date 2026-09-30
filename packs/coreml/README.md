@@ -12,7 +12,7 @@ One top-level directory, `semlith-coreml-<PACK_VERSION>/`, holding:
 | Path | Layout | Batch | Buckets (tokens) | Compute units |
 |---|---|---|---|---|
 | `ane/ane_b4.mlmodelc`, function `s<S>` per bucket | ANE (B,C,1,S), 1x1 conv | 4 | 128, 192, 256, 320, 384, 512 | CPU_AND_NE |
-| `gpu/std_b8.mlmodelc`, function `s<S>` per bucket | standard (B,S,C) | 8 | 128, 256, 512 | CPU_AND_GPU |
+| `gpu/std_b8.mlmodelc`, function `s<S>` per bucket | standard (B,S,C) | 8 | 128, 192, 256, 320, 400 | CPU_AND_GPU |
 | `manifest.json` | `pack_version`, `minimum_macos`, `ane`/`gpu` {`batch`, `buckets`, `file`, `function` with a literal `{S}`} (what `src/coreml.rs` reads), plus HF repo + revision, `max_length`, input/output names and dtypes, pad token, `neg` | | | |
 
 Every model: `ids` int32 (B,S), `kmask` fp16 (B,S) additive (0 keep, -1e4 pad)
