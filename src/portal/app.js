@@ -3064,6 +3064,85 @@ function sessionReplayToggle() {
   );
 }
 
+/* The Privacy page's second switch: model, tokens and cost per ledger row.
+ *
+ * The same row as session replay, for the same reason — what it reads belongs
+ * to other programs — and it lists every log it would open on this machine,
+ * per client, so the reader knows the whole of what they are allowing before
+ * they allow it. */
+function ledgerUsageToggle() {
+  const state_ = { enabled: false, logs: [] };
+  const knob = el("span", { class: "knob", "aria-hidden": "true" });
+  const status = el("span", { class: "replay-state" });
+  const row = el(
+    "button",
+    { class: "replay-switch", type: "button", role: "switch", "aria-checked": "false", disabled: true },
+    knob,
+    el(
+      "span",
+      { class: "replay-switch-text" },
+      status,
+      el("span", {
+        class: "replay-switch-note",
+        text: "Usage from client logs reads each AI client's own session log for the model, tokens and cost of every call it made to semlith. Read-only; only the model and the numbers are kept, never the conversation. Off by default. Local only. Nothing is uploaded.",
+      }),
+    ),
+  );
+  const logs = el("div", { class: "kv-list usage-logs" });
+  const failure = el("p", { class: "note" });
+
+  function paint() {
+    row.disabled = false;
+    row.classList.toggle("on", state_.enabled);
+    row.setAttribute("aria-checked", String(state_.enabled));
+    status.textContent = state_.enabled ? "On · reading the client logs below" : "Off · no client log is opened";
+    fill(
+      logs,
+      state_.logs.map((entry) =>
+        factRow(entry.client, entry.paths.length ? entry.paths.join(" · ") : "keeps no local log semlith can read"),
+      ),
+    );
+  }
+
+  row.addEventListener("click", async () => {
+    row.disabled = true;
+    failure.textContent = "";
+    try {
+      const answer = await api("/api/ledger/usage", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ on: !state_.enabled }),
+      });
+      state_.enabled = !!answer.enabled;
+    } catch (e) {
+      failure.textContent = e.message;
+      row.disabled = false;
+      return;
+    }
+    paint();
+  });
+
+  (async () => {
+    try {
+      const data = await api("/api/ledger/usage");
+      state_.enabled = !!data.enabled;
+      state_.logs = data.logs || [];
+    } catch (_) {
+      /* the row still renders, saying it is off */
+    }
+    paint();
+  })();
+
+  return el(
+    "div",
+    { class: "card pad" },
+    el("div", { class: "card-head" }, el("h2", { text: "Usage from client logs" })),
+    row,
+    logs,
+    failure,
+  );
+}
+
 /* Session replay: what the agent did after each answer.
  *
  * Reads this machine's Claude Code transcripts, and only when the Privacy
@@ -3075,6 +3154,7 @@ function ledgerTabs(data) {
   const panel = el("div", { class: "tab-panel" });
   const views = [
     ["Retrievals", () => ledgerRows(data)],
+    ["Usage", () => ledgerUsage(data)],
     ["Session replay", () => sessionReplay(data)],
   ];
   const buttons = views.map(([label], i) =>
@@ -3531,6 +3611,22 @@ function ledgerRows(data) {
         className: "num narrow-drop",
         render: (r) => n(r.ms),
       },
+      // The request that made the call, from the client's own log — only
+      // with usage on, and only once the client has written it.
+      {
+        key: "model",
+        label: "Model",
+        className: "meta narrow-drop",
+        value: (r) => (r.usage && r.usage.model) || "",
+        render: (r) => usageModel(r.usage),
+      },
+      {
+        key: "cost",
+        label: "Cost",
+        className: "num narrow-drop",
+        value: (r) => (r.usage && r.usage.cost_usd) || 0,
+        render: (r) => usageCost(r.usage),
+      },
     ],
   });
   table.update(rows, rows.length);
@@ -3551,6 +3647,114 @@ function ledgerRows(data) {
           text: "Some rows here are older than the query id, and were written once per open store — figures that include them may count one search several times. They are left as they are: the chain is never rewritten.",
         })
       : null,
+  );
+}
+
+/** Dollars to the precision a single call needs: `$0.0031`, `$1.24`. */
+function dollars(value) {
+  if (value == null) return "—";
+  return `$${value < 1 ? value.toFixed(4) : value.toFixed(2)}`;
+}
+
+/** A row's model, with its tokens and where they came from in the hover. */
+function usageModel(usage) {
+  if (!usage) return el("span", { class: "meta", text: "—" });
+  if (!usage.model) return el("span", { class: "meta one-line", title: usage.source, text: "not recorded" });
+  const tokens = [
+    ["in", usage.input_tokens],
+    ["out", usage.output_tokens],
+    ["cache read", usage.cache_read_tokens],
+    ["cache write", usage.cache_write_tokens],
+  ]
+    .filter(([, count]) => count)
+    .map(([what, count]) => `${n(count)} ${what}`)
+    .join(" · ");
+  return el("span", {
+    class: "one-line",
+    title: `${tokens || "no token figures"}\nfrom ${usage.source}`,
+    text: usage.model,
+  });
+}
+
+function usageCost(usage) {
+  if (!usage || !usage.model) return "—";
+  if (usage.cost_usd == null) return el("span", { class: "meta", title: "this model is not in the price table", text: "no price" });
+  return el("span", {
+    title: usage.cost_source === "client" ? "as the client recorded it" : `priced by ${usage.cost_source}`,
+    text: dollars(usage.cost_usd),
+  });
+}
+
+/* Model, tokens and cost per client and model, from the clients' own logs.
+ *
+ * Off until the Privacy page's switch is on, and said so here with the way
+ * to it. With it on: one row per client and model, the price table's source
+ * and date under it, and the button that fetches a fresh table — the one
+ * request semlith makes to models.dev, made because somebody pressed it. */
+function ledgerUsage(data) {
+  const usage = data.usage || {};
+  const prices = usage.prices || {};
+  if (!usage.enabled) {
+    return el(
+      "div",
+      { class: "replay-off" },
+      el("p", {
+        text: "Usage from client logs is off. No client log is read until you turn it on.",
+      }),
+      el("button", { class: "button secondary small", type: "button", text: "Open Privacy", onclick: () => go("privacy") }),
+    );
+  }
+  const totals = usage.totals || [];
+  const table = dataTable({
+    className: "w-usage",
+    sort: "cost_usd",
+    dir: "desc",
+    rows: totals,
+    caption: "Calls to semlith by client and model, with the tokens and cost of the requests that made them.",
+    columns: [
+      { key: "client", label: "Client", className: "meta", render: (r) => r.client },
+      { key: "model", label: "Model", className: "path", render: (r) => r.model || "—" },
+      { key: "calls", label: "Calls", className: "num", render: (r) => n(r.calls) },
+      { key: "input_tokens", label: "In", className: "num narrow-drop", render: (r) => n(r.input_tokens) },
+      { key: "output_tokens", label: "Out", className: "num narrow-drop", render: (r) => n(r.output_tokens) },
+      { key: "cache_read_tokens", label: "Cache read", className: "num narrow-drop", render: (r) => n(r.cache_read_tokens) },
+      { key: "cache_write_tokens", label: "Cache write", className: "num narrow-drop", render: (r) => n(r.cache_write_tokens) },
+      {
+        key: "cost_usd",
+        label: "Cost",
+        className: "num",
+        render: (r) => (r.unpriced && r.unpriced === r.calls ? "no price" : dollars(r.cost_usd)),
+      },
+    ],
+  });
+  table.update(totals, totals.length);
+  const note = el("p", { class: "note" });
+  const update = el("button", { class: "button secondary small", type: "button", text: "Update prices" });
+  function paintPrices(p) {
+    note.textContent = `Priced by ${p.source} ${p.fetched}, ${n(p.models)} models, ${p.downloaded ? "downloaded by semlith prices update" : "built into this binary"}. A subscription client is shown at the API price of the same tokens.`;
+  }
+  paintPrices(prices);
+  update.addEventListener("click", async () => {
+    update.disabled = true;
+    try {
+      const answer = await api("/api/ledger/usage", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ update: true }),
+      });
+      paintPrices(answer.prices);
+    } catch (e) {
+      note.textContent = e.message;
+    }
+    update.disabled = false;
+  });
+  return el(
+    "div",
+    { class: "rows tight" },
+    totals.length
+      ? table.node
+      : empty("On, and no call has usage yet. A client writes its log when a reply finishes; the rows fill in on the next visit."),
+    el("div", { class: "filters" }, note, el("span", { class: "spacer" }), update),
   );
 }
 
@@ -11251,6 +11455,7 @@ async function privacyView() {
          * the one switch on the page sat above the cards that explain what
          * the page promises rather than among them. */
         sessionReplayToggle(),
+        ledgerUsageToggle(),
         el(
           "div",
           { class: "card pad" },
