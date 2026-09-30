@@ -1368,6 +1368,9 @@ left untouched, and the stanza is printed with the reason.
 | `docs/clients.md` fences | A `root=` attribute names an environment variable that, when set, replaces the path's first directory under `~`. `os=` takes a comma list (`macos,linux`), a `register`/`unregister` fence may carry it, and a path may start `%LOCALAPPDATA%\`. |
 | `semlith setup --register-all` | Appends a `[mcp_servers.semlith]` table to Codex's `config.toml` when it has none; writes a client's file when its CLI is not on `PATH` but the client is installed; on Windows runs a client CLI's `.cmd` shim. |
 | The model cache | The Core ML pack is `accel/coreml-2` and the worker copy `accel/coreml-worker-v2`; the first start after the upgrade downloads the pack (148 MB) and compiles its models once. `coreml-1` and `coreml-worker-v1` can be deleted. |
+| The ledger | `client` holds the documented client name (`Claude Code`, `Zed`, `ChatGPT desktop (the Codex app)`, …) where the app can be told, rather than the raw `clientInfo.name`; an unrecognised name inside a known app is `name (app)`. A new nullable column `client_version`, outside the hash chain as `query_id` is, so a 0.32.0 binary still verifies every row. |
+| `GET /api/agents` | `connections` is one entry per app and transport, with `sessions` and `version` (the versions seen, comma-separated); `queries` is summed across the sessions. |
+| `semlith mcp` ↔ daemon | The proxy sends a `Semlith-Host` header naming the app that started it, a `notifications/semlith/alive` heartbeat every 30 s and `notifications/semlith/closed` when its client hangs up; `DELETE /mcp` ends an HTTP session. A failed call is retried for up to 20 s while the discovery file names a live daemon. |
 | `semlith mcp` | The start line on stderr reads `semlith <version>: forwarding MCP to the semlith daemon at http://127.0.0.1:<port>`. |
 
 ## What a break would look like

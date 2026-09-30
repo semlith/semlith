@@ -50,6 +50,20 @@ CLI is missing but which is installed is written through its file, and Codex's
 `config.toml` gains the semlith table the same way, which is how the ChatGPT
 desktop app is registered without the Codex CLI.
 
+**Every retrieval is filed under the app that made it.** Several clients name
+themselves only by their MCP library — Claude Desktop, Zed, Copilot in VS Code
+and Copilot CLI all say `mcp`, IO CLI says `rmcp` — and the Codex CLI and the
+ChatGPT app share one name, so the ledger and the access report filed them
+together. `semlith mcp` now reads which app started it and tells the daemon, and
+each ledger row and each Connected row carries the documented client name and
+the client's own version. The Agents page lists one row per app with its
+session count, a closed client leaves the list at once, and an idle one stays.
+
+**A daemon restart no longer breaks connected clients.** A client's `semlith
+mcp` held the daemon's token from its first call, so any restart of the daemon —
+including the one `semlith setup` now does on upgrade — failed every later call
+until the app was restarted. A call now follows the daemon through a restart.
+
 **Nothing is created for a client that is not installed.** A skill link, a rules
 file or a configuration file is written only where that client's own directory
 already exists.
