@@ -3740,6 +3740,7 @@ fn resolve_for_add(
 const CLI_LEDGER: semlith::ledger::Who<'static> = semlith::ledger::Who {
     client: "cli",
     session: "cli",
+    version: env!("CARGO_PKG_VERSION"),
 };
 
 /// Exit quietly when whoever was reading our output goes away.

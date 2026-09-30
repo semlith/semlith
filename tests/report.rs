@@ -72,6 +72,7 @@ fn every_report_generates_in_every_format_and_the_cli_matches() {
         semlith::store::record_retrieval(
             s.db(),
             &semlith::store::NewRetrieval {
+                client_version: "",
                 client: "claude-code",
                 session: "s1",
                 tool: "search",
@@ -125,6 +126,7 @@ fn the_savings_report_states_coverage_tier_and_the_trust_strip() {
             semlith::store::record_retrieval(
                 s.db(),
                 &semlith::store::NewRetrieval {
+                    client_version: "",
                     client: "claude-code",
                     session: "s1",
                     tool: "search",
@@ -219,6 +221,7 @@ fn ledger_store(dir: &Path, session: &str, days_ago: i64) {
     semlith::store::record_retrieval(
         s.db(),
         &semlith::store::NewRetrieval {
+            client_version: "",
             client: "claude-code",
             session,
             tool: "search",
@@ -287,6 +290,7 @@ fn each_window_changes_the_report() {
         semlith::store::record_retrieval(
             s.db(),
             &semlith::store::NewRetrieval {
+                client_version: "",
                 client: "cursor",
                 session: "ancient",
                 tool: "search",
@@ -543,6 +547,7 @@ fn the_two_content_toggles_each_change_the_generated_document() {
         semlith::store::record_retrieval(
             s.db(),
             &semlith::store::NewRetrieval {
+                client_version: "",
                 client: "claude-code",
                 session: "sess-1",
                 tool: "search",
@@ -617,6 +622,7 @@ fn the_two_content_toggles_each_change_the_generated_document() {
         semlith::store::record_retrieval(
             s.db(),
             &semlith::store::NewRetrieval {
+                client_version: "",
                 client: "claude-code",
                 session: "s",
                 tool: "search",

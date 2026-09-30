@@ -865,6 +865,7 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
             &crate::ledger::Who {
                 client: "portal",
                 session: "portal",
+                version: env!("CARGO_PKG_VERSION"),
             },
             question,
             &brief,
@@ -1021,6 +1022,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
             &crate::ledger::Who {
                 client: "portal",
                 session: "portal",
+                version: env!("CARGO_PKG_VERSION"),
             },
             query,
             &hits,
@@ -3943,9 +3945,24 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
         .and_then(|p| p.get("clientInfo"))
         .and_then(|c| c.get("name"))
         .and_then(Value::as_str);
+    let version = params
+        .and_then(|p| p.get("clientInfo"))
+        .and_then(|c| c.get("version"))
+        .and_then(Value::as_str);
     let revision = params
         .and_then(|p| p.get("protocolVersion"))
         .and_then(Value::as_str);
+    // What the proxy read from its own ancestry: one of `clientid`'s names or
+    // a dash. Anything else is ignored rather than recorded, since the header
+    // comes from whatever holds the token.
+    let host = request
+        .header("semlith-host")
+        .filter(|h| {
+            h.len() <= 64
+                && h.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || " ().-".contains(c))
+        })
+        .filter(|h| *h != "-");
     // A session id arrives from a client and goes back out in a response
     // header, so what a client may send is exactly what `new_session` produces:
     // sixteen hex characters. Anything else — a header injection, a control
@@ -3964,7 +3981,15 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
                 String::from("anonymous")
             }
         });
-    state.note_client(&session, transport, name, revision, method == "tools/call");
+    state.note_client(
+        &session,
+        transport,
+        name,
+        version,
+        host,
+        revision,
+        method == "tools/call",
+    );
     // A method that is about the server rather than about a corpus is answered
     // whether or not anything is indexed: an agent connecting to a fresh
     // install should be told which tools exist, not that the daemon is broken.
@@ -3989,8 +4014,9 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     // ledger records comes from what was noted then. The transport's session id
     // is the conversation id, which is what it is for.
     let mut mcp_session = crate::mcp::Session::new(session.clone());
-    if let Some(named) = state.client_name(&session, transport) {
+    if let Some((named, version)) = state.client_name(&session, transport) {
         mcp_session.client = named;
+        mcp_session.version = version;
     }
     let response = match crate::mcp::answer(fleet, Some(&writer), &body, &mut mcp_session) {
         Some(value) => Response::json(&value),

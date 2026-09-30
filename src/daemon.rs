@@ -2302,9 +2302,13 @@ fn named(stores: &[Arc<Store>]) -> Vec<(PathBuf, String)> {
 /// One MCP client, as the Agents page shows it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Client {
-    /// What the client called itself in `initialize`, or the transport when it
-    /// never said. Invented names are worse than an honest "unnamed client".
+    /// Which client this is: one of the documented names where `clientid`
+    /// can tell (from what the client called itself in `initialize` and the
+    /// app that started its proxy), else what it called itself, else
+    /// "unnamed client". Invented names are worse than an honest one.
     pub name: String,
+    /// `clientInfo.version`, empty when the client gave none.
+    pub version: String,
     pub transport: String,
     /// The protocol revision that was negotiated, as the client asked for it.
     pub revision: String,
@@ -2762,19 +2766,23 @@ impl State {
     /// that session carries none — so the name the ledger records has to come
     /// from what was noted at the handshake rather than from the request in
     /// hand.
-    pub fn client_name(&self, session: &str, transport: &str) -> Option<String> {
+    /// The name and version a session's rows are recorded under.
+    pub fn client_name(&self, session: &str, transport: &str) -> Option<(String, String)> {
         let clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         clients
             .get(&format!("{transport}:{session}"))
-            .map(|client| client.name.clone())
-            .filter(|name| name != "unnamed client")
+            .map(|client| (client.name.clone(), client.version.clone()))
+            .filter(|(name, _)| name != "unnamed client")
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn note_client(
         &self,
         session: &str,
         transport: &str,
         name: Option<&str>,
+        version: Option<&str>,
+        host: Option<&str>,
         revision: Option<&str>,
         query: bool,
     ) {
@@ -2783,14 +2791,21 @@ impl State {
         let entry = clients
             .entry(format!("{transport}:{session}"))
             .or_insert_with(|| Client {
-                name: name.unwrap_or("unnamed client").to_string(),
+                name: "unnamed client".to_string(),
+                version: String::new(),
                 transport: transport.to_string(),
                 revision: revision.unwrap_or("—").to_string(),
                 queries: 0,
                 seen: now,
             });
-        if let Some(name) = name {
-            entry.name = name.to_string();
+        // The handshake names the client once; the host arrives on every
+        // proxied request, so a session first heard mid-conversation (a
+        // daemon restarted under it) is still told apart.
+        if name.is_some() || (host.is_some() && entry.name == "unnamed client") {
+            entry.name = crate::clientid::label(name, host);
+        }
+        if let Some(version) = version {
+            entry.version = version.chars().take(64).collect();
         }
         if let Some(revision) = revision {
             entry.revision = revision.to_string();

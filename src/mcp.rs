@@ -122,6 +122,8 @@ pub struct Session {
     /// sends no `clientInfo` and one that starts calling tools without
     /// initializing at all.
     pub client: String,
+    /// `clientInfo.version`, empty until the handshake gives one.
+    pub version: String,
     pub id: String,
 }
 
@@ -129,6 +131,7 @@ impl Session {
     pub fn new(id: impl Into<String>) -> Self {
         Session {
             client: "mcp".to_string(),
+            version: String::new(),
             id: id.into(),
         }
     }
@@ -137,6 +140,7 @@ impl Session {
         crate::ledger::Who {
             client: &self.client,
             session: &self.id,
+            version: &self.version,
         }
     }
 }
@@ -377,13 +381,15 @@ fn without_stores(
             // `codex` — the ledger records exactly this string rather than a
             // display name, so what the table says matches what the client
             // calls itself in its own configuration.
-            if let Some(name) = params
-                .get("clientInfo")
-                .and_then(|c| c.get("name"))
-                .and_then(Value::as_str)
-                .filter(|n| !n.trim().is_empty())
-            {
-                session.client = name.to_string();
+            // Resolved against the app that started this process, since a
+            // stdio client may name only its MCP library (`mcp`, `rmcp`).
+            let info = params.get("clientInfo");
+            session.client = crate::clientid::label(
+                info.and_then(|c| c.get("name")).and_then(Value::as_str),
+                crate::clientid::host(),
+            );
+            if let Some(version) = info.and_then(|c| c.get("version")).and_then(Value::as_str) {
+                session.version = version.chars().take(64).collect();
             }
             let asked = params.get("protocolVersion").and_then(Value::as_str);
             let version = negotiate(asked);

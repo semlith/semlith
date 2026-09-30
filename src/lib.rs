@@ -22,6 +22,7 @@ pub mod brief;
 pub mod cache;
 pub mod chunk;
 pub mod clientfile;
+pub mod clientid;
 pub mod clients;
 pub mod clock;
 pub mod compact;

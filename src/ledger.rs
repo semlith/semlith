@@ -185,6 +185,7 @@ pub fn search(
             &store::NewRetrieval {
                 client: who.client,
                 session: who.session,
+                client_version: who.version,
                 tool: "search",
                 query,
                 hits: mine.len() as i64,
@@ -246,6 +247,7 @@ pub fn reply(
             &store::NewRetrieval {
                 client: who.client,
                 session: who.session,
+                client_version: who.version,
                 tool,
                 query,
                 hits: paths.len() as i64,
@@ -455,6 +457,7 @@ pub fn graph(
             &store::NewRetrieval {
                 client: who.client,
                 session: who.session,
+                client_version: who.version,
                 tool,
                 query: name,
                 hits: i64::from(found),
@@ -510,6 +513,7 @@ pub fn brief(
             &store::NewRetrieval {
                 client: who.client,
                 session: who.session,
+                client_version: who.version,
                 tool: "brief",
                 query: question,
                 hits: paths.len() as i64,
@@ -559,6 +563,7 @@ pub fn raw_read(fleet: &Fleet, client: &str, session: &str, path: &str) -> bool 
         let recorded = store::record_retrieval(
             store.db(),
             &store::NewRetrieval {
+                client_version: "",
                 client,
                 session,
                 tool: RAW_READ,
@@ -606,6 +611,7 @@ pub fn acceptance(
     store::record_retrieval(
         db,
         &store::NewRetrieval {
+            client_version: "",
             client: &a.source,
             session: "",
             tool: action,
@@ -630,6 +636,10 @@ pub struct Who<'a> {
     pub client: &'a str,
     /// One conversation. Lets a session be read, and credited, as a unit.
     pub session: &'a str,
+    /// The client's version, from `clientInfo.version`; empty where none was
+    /// given. Kept beside the row, outside the hash chain (see
+    /// `store::NewRetrieval::client_version`).
+    pub version: &'a str,
 }
 
 #[cfg(test)]
@@ -794,6 +804,7 @@ mod tests {
         let who = Who {
             client: "harness",
             session: "s",
+            version: "",
         };
         reply(
             &fleet,
@@ -831,6 +842,7 @@ mod tests {
         let who = Who {
             client: "harness",
             session: "s",
+            version: "",
         };
         let nothing = "No match for that query.";
         let at = std::time::Duration::from_millis(1);

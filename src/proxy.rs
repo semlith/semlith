@@ -171,6 +171,7 @@ impl Upstream {
              Host: 127.0.0.1:{}\r\n\
              {}: {}\r\n\
              Semlith-Proxy: {}\r\n\
+             {}: {}\r\n\
              Content-Type: application/json\r\n\
              Content-Length: {}\r\n\
              Connection: close\r\n\r\n",
@@ -178,6 +179,10 @@ impl Upstream {
             crate::http::TOKEN_HEADER,
             self.token,
             std::process::id(),
+            crate::clientid::HEADER,
+            // The app that started this proxy, so a client that names only
+            // its MCP library is still filed under its own name.
+            crate::clientid::host().unwrap_or("-"),
             body.len(),
         );
         stream.write_all(head.as_bytes())?;

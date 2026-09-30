@@ -494,7 +494,7 @@ const FTS_BUILT: &str = "fts_built";
 /// never sees them. That is the whole reason `format_version` does not move —
 /// the same reasoning `docs/compatibility.md` records for the graph tables.
 fn add_columns(db: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 8] = [
+    const ADDITIONS: [(&str, &str, &str); 9] = [
         ("edges", "hint", "TEXT"),
         // 0.16.0: the line the reference was written on.
         ("edges", "line", "INTEGER"),
@@ -515,6 +515,8 @@ fn add_columns(db: &Connection) -> Result<()> {
         // token counts its own — and this is what makes them one retrieval
         // again when they are counted.
         ("retrievals", "query_id", "TEXT"),
+        // 0.33.0: the client's own version, beside the name `clientid` resolved.
+        ("retrievals", "client_version", "TEXT"),
         // 0.25.0: what the parser made of this file — "parsed", "timeout" or
         // "none" for a language that carries no grammar. Without it a file
         // with no definitions and a file the parser gave up on look the same
@@ -2272,8 +2274,8 @@ pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
         db.execute(
             "INSERT INTO retrievals
              (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
-              session, tool, stale_hits, tokenizer, query_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+              session, tool, stale_hits, tokenizer, query_id, client_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 at,
                 client,
@@ -2288,7 +2290,8 @@ pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
                 row.tool,
                 row.stale_hits,
                 row.tokenizer,
-                row.query_id
+                row.query_id,
+                (!row.client_version.is_empty()).then_some(row.client_version)
             ],
         )?;
         Ok(())
@@ -2305,8 +2308,13 @@ pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
 /// `i64`s that mean different things are a bug waiting for a refactor.
 #[derive(Debug, Clone)]
 pub struct NewRetrieval<'a> {
-    /// Who asked: `claude-code`, `cursor`, `cli`, `portal`.
+    /// Who asked: one of the documented clients (`Claude Code`, `Zed`, …, see
+    /// `clientid::label`), or `cli`, `portal`.
     pub client: &'a str,
+    /// The client's own version string. Deliberately not in the chain, for the
+    /// reason `query_id` is not: a rolled-back binary recomputes the formula it
+    /// knows, and a verify that fails every row written since cries wolf.
+    pub client_version: &'a str,
     /// Which conversation, so one agent's session can be read as a unit.
     pub session: &'a str,
     /// Which tool: `search`, `neighbors`, `path`, `symbol`.
@@ -2751,6 +2759,7 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
                     &prev,
                     at,
                     &NewRetrieval {
+                        client_version: "",
                         client: &client,
                         session: &session,
                         tool: &tool,
@@ -4593,6 +4602,7 @@ mod tests {
             record_retrieval(
                 &db,
                 &NewRetrieval {
+                    client_version: "",
                     client: "cli",
                     session: "s",
                     tool: "search",
@@ -4631,6 +4641,7 @@ mod tests {
     fn two_connections_recording_at_once_leave_a_chain_that_verifies() {
         fn row(query: &str) -> NewRetrieval<'_> {
             NewRetrieval {
+                client_version: "",
                 client: "cli",
                 session: "s",
                 tool: "search",
