@@ -184,6 +184,13 @@ pub fn settings_path() -> Result<PathBuf> {
     Ok(home_or_error()?.join("settings.json"))
 }
 
+/// The price table `semlith prices update` downloaded, when it has been run.
+/// Tool-written state like `settings.json`; delete it to go back to the
+/// table built into the binary.
+pub fn prices_path() -> Result<PathBuf> {
+    Ok(home_or_error()?.join("prices.json"))
+}
+
 /// Where the schedules the daemon runs are kept.
 ///
 /// Beside `registry.json` and deliberately not inside it. The registry is what
@@ -252,6 +259,11 @@ pub struct Settings {
     /// so nothing reads them until somebody says so on the Privacy page.
     #[serde(default)]
     pub session_replay: Option<bool>,
+    /// Whether the ledger may read each AI client's own session log for the
+    /// model, tokens and cost of the calls it made. Absent means off, for the
+    /// same reason as `session_replay`.
+    #[serde(default)]
+    pub ledger_usage: Option<bool>,
     /// The lane switches. Absent means CPU, GPU and the Neural Engine on and
     /// the experimental lanes off.
     #[serde(default)]

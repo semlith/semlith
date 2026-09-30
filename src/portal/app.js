@@ -3064,6 +3064,85 @@ function sessionReplayToggle() {
   );
 }
 
+/* The Privacy page's second switch: model, tokens and cost per ledger row.
+ *
+ * The same row as session replay, for the same reason — what it reads belongs
+ * to other programs — and it lists every log it would open on this machine,
+ * per client, so the reader knows the whole of what they are allowing before
+ * they allow it. */
+function ledgerUsageToggle() {
+  const state_ = { enabled: false, logs: [] };
+  const knob = el("span", { class: "knob", "aria-hidden": "true" });
+  const status = el("span", { class: "replay-state" });
+  const row = el(
+    "button",
+    { class: "replay-switch", type: "button", role: "switch", "aria-checked": "false", disabled: true },
+    knob,
+    el(
+      "span",
+      { class: "replay-switch-text" },
+      status,
+      el("span", {
+        class: "replay-switch-note",
+        text: "Usage from client logs reads each AI client's own session log for the model, tokens and cost of every call it made to semlith. Read-only; only the model and the numbers are kept, never the conversation. Off by default. Local only. Nothing is uploaded.",
+      }),
+    ),
+  );
+  const logs = el("div", { class: "kv-list usage-logs" });
+  const failure = el("p", { class: "note" });
+
+  function paint() {
+    row.disabled = false;
+    row.classList.toggle("on", state_.enabled);
+    row.setAttribute("aria-checked", String(state_.enabled));
+    status.textContent = state_.enabled ? "On · reading the client logs below" : "Off · no client log is opened";
+    fill(
+      logs,
+      state_.logs.map((entry) =>
+        factRow(entry.client, entry.paths.length ? entry.paths.join(" · ") : "keeps no local log semlith can read"),
+      ),
+    );
+  }
+
+  row.addEventListener("click", async () => {
+    row.disabled = true;
+    failure.textContent = "";
+    try {
+      const answer = await api("/api/ledger/usage", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ on: !state_.enabled }),
+      });
+      state_.enabled = !!answer.enabled;
+    } catch (e) {
+      failure.textContent = e.message;
+      row.disabled = false;
+      return;
+    }
+    paint();
+  });
+
+  (async () => {
+    try {
+      const data = await api("/api/ledger/usage");
+      state_.enabled = !!data.enabled;
+      state_.logs = data.logs || [];
+    } catch (_) {
+      /* the row still renders, saying it is off */
+    }
+    paint();
+  })();
+
+  return el(
+    "div",
+    { class: "card pad" },
+    el("div", { class: "card-head" }, el("h2", { text: "Usage from client logs" })),
+    row,
+    logs,
+    failure,
+  );
+}
+
 /* Session replay: what the agent did after each answer.
  *
  * Reads this machine's Claude Code transcripts, and only when the Privacy
@@ -3075,6 +3154,7 @@ function ledgerTabs(data) {
   const panel = el("div", { class: "tab-panel" });
   const views = [
     ["Retrievals", () => ledgerRows(data)],
+    ["Usage", () => ledgerUsage(data)],
     ["Session replay", () => sessionReplay(data)],
   ];
   const buttons = views.map(([label], i) =>
@@ -3279,16 +3359,20 @@ function sessionReplay(ledger) {
   );
 }
 
-/* Cost per million tokens, for the one place the ledger turns tokens into
- * money. Input pricing, because a retrieval is what an agent reads.
+/* What a million input tokens cost, per model, for the savings figures.
+ * Input pricing, because a retrieval is what an agent reads.
  *
- * Listed here rather than fetched: the page must work with no network, and a
- * price nobody can see the source of is worse than one written down. */
-const MODEL_PRICES = [
-  ["Sonnet 5", 3, "sonnet_5"],
-  ["Opus 5", 15, "opus_5"],
-  ["Haiku 4.5", 1, "haiku_4_5"],
-];
+ * From the binary's own models.dev table (`/api/prices`, `semlith prices`),
+ * the one the ledger's usage columns are priced by: a default list spanning
+ * the vendors, and on the Ledger page every model the ledger has seen. Until
+ * it loads, the default model alone. */
+let MODEL_PRICES = [["claude-sonnet-5-5", 2, "claude_sonnet_5_5"]];
+
+/** `[{name, input}]` from the server, as the pickers use it. */
+function modelPrices(list) {
+  if (!list || !list.length) return MODEL_PRICES;
+  return list.map(({ name, input }) => [name, input, name.toLowerCase().replace(/[^a-z0-9]+/g, "_")]);
+}
 
 /** Hand the viewer a file the page built, without a server round trip. */
 function offerDownload(name, text, type) {
@@ -3346,7 +3430,14 @@ function ledgerSessions(data) {
   const all = data.sessions || [];
   let client = "";
   let tier = "";
-  let price = MODEL_PRICES[0];
+  /* What a session's saving was worth, at the model that session actually
+   * ran on, as its client's own log recorded it. A picker used to price every
+   * session at one model somebody chose, which put a Sonnet price on a
+   * DeepSeek session: a number with nothing behind it. A session whose model
+   * is not known says so. */
+  const unknownModel = data.usage && data.usage.enabled
+    ? "its client keeps no log semlith can read, or it predates the log"
+    : "turn on Usage from client logs on the Privacy page to price it at its own model";
 
   const table = dataTable({
     className: "w-sessions",
@@ -3384,11 +3475,24 @@ function ledgerSessions(data) {
         render: (r) => n(r.net_tokens),
       },
       {
+        key: "model",
+        label: "Model",
+        className: "meta narrow-drop",
+        value: (r) => r.model || "",
+        render: (r) =>
+          r.model
+            ? el("span", { class: "one-line", title: r.model, text: r.model })
+            : el("span", { class: "meta", title: unknownModel, text: "not known" }),
+      },
+      {
         key: "cost",
-        label: "Cost",
+        label: "Saved",
         className: "num",
-        value: (r) => r.net_tokens,
-        render: (r) => `$${((r.net_tokens / 1e6) * price[1]).toFixed(2)}`,
+        value: (r) => (r.saved_usd == null ? -1 : r.saved_usd),
+        render: (r) =>
+          r.saved_usd == null
+            ? el("span", { class: "meta", title: unknownModel, text: "—" })
+            : el("span", { title: `${n(r.net_tokens)} net tokens at ${r.model}'s input price`, text: dollars(r.saved_usd) }),
       },
       { key: "tier", label: "Tier", className: "meta", render: (r) => r.tier },
     ],
@@ -3436,21 +3540,6 @@ function ledgerSessions(data) {
     el("option", { value: "measured", text: "measured" }),
     el("option", { value: "modelled", text: "modelled" }),
   );
-  const modelPick = el(
-    "select",
-    {
-      class: "chip",
-      "aria-label": "Cost at",
-      onchange: (e) => {
-        price = MODEL_PRICES[Number(e.currentTarget.value)] || MODEL_PRICES[0];
-        repaint();
-      },
-    },
-    MODEL_PRICES.map(([name], i) =>
-      el("option", { value: String(i), text: `cost at ${name}` }),
-    ),
-  );
-
   // The columns the export writes are the columns on screen, read through the
   // same functions, so a file and the page can never disagree about a row.
   const columns = () => [
@@ -3461,7 +3550,8 @@ function ledgerSessions(data) {
     ["reads", (r) => r.retrievals],
     ["zero_hit", (r) => r.zero_hit],
     ["net_tokens", (r) => r.net_tokens],
-    [`cost_usd_at_${price[2]}`, (r) => ((r.net_tokens / 1e6) * price[1]).toFixed(2)],
+    ["model", (r) => r.model || ""],
+    ["saved_usd", (r) => (r.saved_usd == null ? "" : r.saved_usd.toFixed(4))],
     ["tier", (r) => r.tier],
   ];
 
@@ -3485,13 +3575,13 @@ function ledgerSessions(data) {
     "div",
     { class: "card pad" },
     el("span", { class: "card-title", text: "Sessions" }),
-    el("div", { class: "filters" }, clientPick, tierPick, modelPick, count, el("span", { class: "spacer" }), exports),
+    el("div", { class: "filters" }, clientPick, tierPick, count, el("span", { class: "spacer" }), exports),
     all.length
       ? table.node
       : empty("No session has recorded a retrieval yet."),
     el("p", {
       class: "subtitle",
-      text: "Net tokens are whole-file less excerpt, over the reads that found something. A session counted by the four-character fallback is modelled, not measured, and says so in its own row.",
+      text: "A session is one agent conversation. Net tokens are what reading the answered files whole would have cost less the excerpts actually sent, over the reads that found something; Saved is those tokens at the input price of the model that session ran on, from its client's own log. A session counted by the four-character fallback is modelled, not measured, and says so in its own row.",
     }),
   );
 }
@@ -3531,6 +3621,22 @@ function ledgerRows(data) {
         className: "num narrow-drop",
         render: (r) => n(r.ms),
       },
+      // The request that made the call, from the client's own log — only
+      // with usage on, and only once the client has written it.
+      {
+        key: "model",
+        label: "Model",
+        className: "meta narrow-drop",
+        value: (r) => (r.usage && r.usage.model) || "",
+        render: (r) => usageModel(r.usage),
+      },
+      {
+        key: "cost",
+        label: "Cost",
+        className: "num narrow-drop",
+        value: (r) => (r.usage && r.usage.cost_usd) || 0,
+        render: (r) => usageCost(r.usage),
+      },
     ],
   });
   table.update(rows, rows.length);
@@ -3551,6 +3657,104 @@ function ledgerRows(data) {
           text: "Some rows here are older than the query id, and were written once per open store — figures that include them may count one search several times. They are left as they are: the chain is never rewritten.",
         })
       : null,
+  );
+}
+
+/** Dollars to the precision a single call needs: `$0.0031`, `$1.24`. */
+function dollars(value) {
+  if (value == null) return "—";
+  return `$${value < 1 ? value.toFixed(4) : value.toFixed(2)}`;
+}
+
+/** A row's model, with its tokens and where they came from in the hover. */
+function usageModel(usage) {
+  if (!usage) return el("span", { class: "meta", text: "—" });
+  if (!usage.model) return el("span", { class: "meta one-line", title: usage.source, text: "not recorded" });
+  const tokens = [
+    ["in", usage.input_tokens],
+    ["out", usage.output_tokens],
+    ["cache read", usage.cache_read_tokens],
+    ["cache write", usage.cache_write_tokens],
+  ]
+    .filter(([, count]) => count)
+    .map(([what, count]) => `${n(count)} ${what}`)
+    .join(" · ");
+  return el("span", {
+    class: "one-line",
+    title: `${tokens || "no token figures"}\nfrom ${usage.source}`,
+    text: usage.model,
+  });
+}
+
+function usageCost(usage) {
+  if (!usage || !usage.model) return "—";
+  if (usage.cost_usd == null) return el("span", { class: "meta", title: "this model is not in the price table", text: "no price" });
+  return el("span", {
+    title: usage.cost_source === "client" ? "as the client recorded it" : `priced by ${usage.cost_source}`,
+    text: dollars(usage.cost_usd),
+  });
+}
+
+/* Model, tokens and cost per client and model, from the clients' own logs.
+ *
+ * Off until the Privacy page's switch is on, and said so here with the way
+ * to it. With it on: one row per client and model, the price table's source
+ * and date under it, and the button that fetches a fresh table — the one
+ * request semlith makes to models.dev, made because somebody pressed it. */
+function ledgerUsage(data) {
+  const usage = data.usage || {};
+  const prices = usage.prices || {};
+  if (!usage.enabled) {
+    return el(
+      "div",
+      { class: "replay-off" },
+      el("p", {
+        text: "Usage from client logs is off. No client log is read until you turn it on.",
+      }),
+      el("button", { class: "button secondary small", type: "button", text: "Open Privacy", onclick: () => go("privacy") }),
+    );
+  }
+  const totals = usage.totals || [];
+  const table = dataTable({
+    className: "w-usage",
+    sort: "cost_usd",
+    dir: "desc",
+    rows: totals,
+    caption: "Calls to semlith by client and model, with the tokens and cost of the requests that made them.",
+    columns: [
+      { key: "client", label: "Client", className: "meta", value: (r) => r.client || "", render: (r) => r.client },
+      { key: "model", label: "Model", className: "path", value: (r) => r.model || "", render: (r) => r.model || "—" },
+      { key: "calls", label: "Calls", className: "num", value: (r) => r.calls || 0, render: (r) => n(r.calls) },
+      { key: "input_tokens", label: "In", className: "num narrow-drop", value: (r) => r.input_tokens || 0, render: (r) => n(r.input_tokens) },
+      { key: "output_tokens", label: "Out", className: "num narrow-drop", value: (r) => r.output_tokens || 0, render: (r) => n(r.output_tokens) },
+      { key: "cache_read_tokens", label: "Cache read", className: "num narrow-drop", value: (r) => r.cache_read_tokens || 0, render: (r) => n(r.cache_read_tokens) },
+      { key: "cache_write_tokens", label: "Cache write", className: "num narrow-drop", value: (r) => r.cache_write_tokens || 0, render: (r) => n(r.cache_write_tokens) },
+      {
+        key: "cost_usd",
+        label: "Cost",
+        className: "num",
+        value: (r) => r.cost_usd || 0,
+        render: (r) => (r.unpriced && r.unpriced === r.calls ? "no price" : dollars(r.cost_usd)),
+      },
+    ],
+  });
+  table.update(totals, totals.length);
+  const note = el(
+    "p",
+    { class: "note" },
+    `Priced by ${prices.source} ${prices.fetched}, ${n(prices.models)} models, ${prices.downloaded ? "downloaded by semlith prices update" : "built into this binary"}. A subscription client is shown at the API price of the same tokens. `,
+    el("a", { href: "#agents", text: "Update prices on the Agents page" }),
+    ".",
+  );
+  // `rows`, not `rows tight`: the note under the table is its own line of
+  // prose and read as stuck to the card with a 2px gap.
+  return el(
+    "div",
+    { class: "rows" },
+    totals.length
+      ? table.node
+      : empty("On, and no call has usage yet. A client writes its log when a reply finishes; the rows fill in on the next visit."),
+    note,
   );
 }
 
@@ -8812,12 +9016,10 @@ async function indexView() {
  * estimated", and a cached number under that sentence would make the page a
  * liar about itself.
  *
- * What the design draws and this does not: PDF pages, slides, spreadsheet
- * cells and notebook cells as *counts of pages and cells*. The store records
- * the text it extracted, not how many pages it came off, so those are counted
- * as files here and the panel says `files`. Adding the real figures is a
- * column in `files` and a change to every extractor, which is a release of its
- * own rather than a page.
+ * PDF pages, slides, spreadsheet cells and notebook cells are counted by the
+ * extractors as they read each file (0.34.0) and held in `files.units`; a
+ * store an older binary wrote gains them on its next index pass, and the
+ * prose panel names the files still waiting.
  */
 
 /** Words a printed page holds, and words a reader gets through in a minute.
@@ -8828,6 +9030,18 @@ async function indexView() {
  * settled on for prose. The word count they multiply is measured. */
 const WORDS_PER_PAGE = 500;
 const WORDS_PER_MINUTE = 250;
+
+/** What one kind of file holds: `412 pages · 9 PDFs`, or `31 files` for a
+ * kind with no unit. Counted files only; the uncounted ones are named apart. */
+const KIND_NOUNS = { PDF: "PDF", "Slide deck": "deck", Spreadsheet: "spreadsheet", Notebook: "notebook" };
+function kindFigure(k) {
+  const plural = (count, word) => `${n(count)} ${word}${count === 1 ? "" : "s"}`;
+  if (!k.unit) return plural(k.count, "file");
+  const counted = k.count - k.uncounted;
+  if (!counted) return plural(k.count, KIND_NOUNS[k.name] || "file");
+  const unit = k.units === 1 ? k.unit.replace(/s$/, "") : k.unit;
+  return `${n(k.units)} ${unit} · ${plural(counted, KIND_NOUNS[k.name] || "file")}`;
+}
 
 /** `26 days`, `4 hours`, `18 minutes` — one unit, the largest that fits. */
 function spellDuration(minutes) {
@@ -9161,7 +9375,20 @@ async function corpusView() {
     return [...into.entries()].sort((a, b) => b[1] - a[1]);
   };
   const languages = pile("languages", "language");
-  const kinds = pile("kinds", "name");
+  // Kinds merged with their units: a PDF's pages, a deck's slides, a sheet's
+  // or a notebook's cells, as `/api/corpus` counts them per store.
+  const kindTotals = new Map();
+  for (const store of stores) {
+    for (const k of store.kinds || []) {
+      const t = kindTotals.get(k.name) || { name: k.name, unit: k.unit, count: 0, units: 0, uncounted: 0 };
+      t.count += k.count || 0;
+      t.units += k.units || 0;
+      t.uncounted += k.uncounted || 0;
+      kindTotals.set(k.name, t);
+    }
+  }
+  const kinds = [...kindTotals.values()].sort((a, b) => b.count - a.count);
+  const uncounted = kinds.reduce((total, k) => total + k.uncounted, 0);
   const ambiguousWorst = pile("ambiguous_worst", "name");
   const languageTotal = languages.reduce((total, [, count]) => total + count, 0) || 1;
 
@@ -9344,11 +9571,18 @@ async function corpusView() {
         { class: "corpus-panels" },
         factPanel(
           "What is in the prose",
-          // Files, not pages and cells. The store keeps the text, not the page
-          // it came off — said in the panel rather than in a comment nobody
-          // reading the page can see.
+          // Pages, slides and cells where the format has them, counted as
+          // each file was read; files for everything else. A file an older
+          // binary stored has no count until the next index pass reads it
+          // again, and the panel says how many are waiting rather than
+          // printing a total that quietly leaves them out.
           kinds.length
-            ? kinds.map(([kind, count]) => factRow(kind, `${n(count)} file${count === 1 ? "" : "s"}`))
+            ? [
+                ...kinds.map((k) => factRow(k.name, kindFigure(k))),
+                uncounted
+                  ? factRow("Not counted yet", `${n(uncounted)} file${uncounted === 1 ? "" : "s"} · next index pass`)
+                  : null,
+              ]
             : [factRow("Nothing indexed", "—")],
         ),
         factPanel("Shape of the code", [
@@ -9758,13 +9992,18 @@ async function doctorView() {
   /* What this client has beyond its registration, in the words the terminal
    * uses. A client that documents none of the three says nothing rather than
    * three columns of "paste needed" on twenty rows that never asked for one. */
+  /* Each part with whether it is healthy, decided from the state rather than
+   * from the words: `hook present (soft)`, `always loaded` and `research
+   * agent` are all healthy, and a tone read off the text's last word painted
+   * every one of them amber. */
   const steering = (r) => {
     const parts = [];
-    if (r.skill && r.skill !== "paste") parts.push(`skill ${r.skill === "present" ? "linked" : r.skill}`);
-    if (r.hook && r.hook !== "paste") parts.push(`hook ${r.hook}${r.hook_mode ? ` (${r.hook_mode})` : ""}`);
-    if (r.always_load !== undefined) parts.push(r.always_load ? "always loaded" : "alwaysLoad missing");
-    if (r.explorer !== undefined) parts.push(r.explorer ? "research agent" : "no research agent");
-    if (r.rules && r.rules !== "paste") parts.push(`rule ${r.rules}`);
+    if (r.skill && r.skill !== "paste") parts.push([`skill ${r.skill === "present" ? "linked" : r.skill}`, r.skill === "present"]);
+    if (r.hook && r.hook !== "paste")
+      parts.push([`hook ${r.hook}${r.hook_mode ? ` (${r.hook_mode})` : ""}`, r.hook === "present"]);
+    if (r.always_load != null) parts.push([r.always_load ? "always loaded" : "alwaysLoad missing", !!r.always_load]);
+    if (r.explorer != null) parts.push([r.explorer ? "research agent" : "no research agent", !!r.explorer]);
+    if (r.rules && r.rules !== "paste") parts.push([`rule ${r.rules}`, r.rules === "present"]);
     return parts;
   };
 
@@ -9792,17 +10031,11 @@ async function doctorView() {
         key: "steering",
         label: "Skill & hook",
         sortable: true,
-        value: (r) => steering(r).join(", "),
+        value: (r) => steering(r).map(([text]) => text).join(", "),
         render: (r) => {
           const parts = steering(r);
           if (!parts.length) return el("span", { class: "sub", text: "—" });
-          return el(
-            "span",
-            { class: "pills" },
-            ...parts.map((part) =>
-              pill(part, part.endsWith("present") || part.endsWith("linked") ? "good" : "warn"),
-            ),
-          );
+          return el("span", { class: "pills" }, ...parts.map(([text, good]) => pill(text, good ? "good" : "warn")));
         },
       },
       {
@@ -9945,7 +10178,10 @@ async function doctorView() {
   // matter.
   const rows = data.clients || [];
   const registered = rows.filter((c) => c.registered).length;
-  const fixable = rows.filter((c) => !c.registered && c.repair).length;
+  // Every row with a command in its To-fix cell, registered or not: a stale
+  // hook on a registered client is a fix like any other, and a header that
+  // said "0 to fix" above one read as the page contradicting itself.
+  const fixable = rows.filter((c) => c.repair).length;
 
   return el(
     "div",
@@ -10758,8 +10994,63 @@ async function agentsView() {
     ),
     ),
     keyNote,
+    pricesCard(),
     registerAll,
     inUseCard,
+  );
+}
+
+/* The model price table: what the ledger's usage cost and every savings
+ * figure are priced by, where it came from, and the one button on this page
+ * that reaches the network — `semlith prices update`, run because somebody
+ * pressed it. On the Agents page because the prices are the prices of the
+ * agents' models. */
+function pricesCard() {
+  const facts = el("div", { class: "kv-list" });
+  const note = el("p", { class: "note" });
+  const update = el("button", { class: "button secondary small", type: "button", text: "Update prices" });
+  function paint(p) {
+    fill(
+      facts,
+      factRow("Source", `${p.source} · ${p.url}`),
+      factRow("Fetched", p.fetched),
+      factRow("Models", n(p.models)),
+      factRow("In use", p.downloaded ? "downloaded by semlith prices update" : "built into this binary"),
+    );
+  }
+  update.addEventListener("click", async () => {
+    update.disabled = true;
+    note.textContent = "Fetching models.dev…";
+    try {
+      paint(await api("/api/prices", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ update: true }),
+      }));
+      note.textContent = "Updated. New ledger rows are priced by this table; rows already priced keep the table and date they name.";
+    } catch (e) {
+      note.textContent = e.message;
+    }
+    update.disabled = false;
+  });
+  (async () => {
+    try {
+      paint(await api("/api/prices"));
+    } catch (e) {
+      note.textContent = e.message;
+    }
+  })();
+  return el(
+    "div",
+    { class: "card pad dense" },
+    el("div", { class: "card-head" }, el("span", { class: "card-title", text: "Model prices" }), el("span", { class: "spacer" }), update),
+    says(
+      "What the ledger's usage cost and every savings figure are priced by: models.dev's table of input, output, cache-read and cache-write rates, per vendor and gateway. A snapshot is built into the binary; ",
+      mono("semlith prices update"),
+      " or the button fetches a fresh one, and nothing else here reaches the network. A subscription client is shown at the API price of the same tokens.",
+    ),
+    facts,
+    note,
   );
 }
 
@@ -11184,43 +11475,9 @@ async function privacyView() {
           scanBox,
           scanNote,
         ),
-      ),
-      el(
-        "div",
-        { class: "rows" },
-        /* The rules this release added, each with what the daemon found when it
-         * looked. A page that states a policy is a page; a page that states a
-         * policy and the reading behind it is something a reader can disagree
-         * with, which is the only version worth putting on a Privacy page. */
-        el(
-          "div",
-          { class: "card pad" },
-          el("span", { class: "card-title", text: "The one outbound connection that exists" }),
-          says(
-            "The embedding model is downloaded once, on first index, and cached. ",
-            mono("semlith upgrade"),
-            " and ",
-            mono("semlith add"),
-            " reach the network only in the second you ask them to. ",
-            mono("--airgap"),
-            " refuses all three and exits naming what it refused.",
-          ),
-          copyField("SEMLITH_MODEL_CACHE=/media/usb/models semlith index ."),
-          el(
-            "div",
-            { class: "chips" },
-            pill(data.model_cached ? "model cached" : "model not downloaded", data.model_cached ? "good" : "warn"),
-            el("span", {
-              class: "meta",
-              text: "granite-embedding-small-english-r2 · int8 · Apache-2.0",
-            }),
-          ),
-        ),
-        /* Fifth, between the outbound card and the session token, which is
-         * where the design has it. It stood outside this grid entirely, so
-         * the one switch on the page sat above the cards that explain what
-         * the page promises rather than among them. */
-        sessionReplayToggle(),
+        /* Under the stored-files card, in the left column: the right one
+         * holds the outbound card and the two switches, and with the token
+         * there too it ran a screen longer than the left. */
         el(
           "div",
           { class: "card pad" },
@@ -11242,6 +11499,46 @@ async function privacyView() {
             text: `Host headers answered: ${(data.host_allowed || []).join(", ")}. Everything else gets 400.`,
           }),
         ),
+      ),
+      el(
+        "div",
+        { class: "rows" },
+        /* The rules this release added, each with what the daemon found when it
+         * looked. A page that states a policy is a page; a page that states a
+         * policy and the reading behind it is something a reader can disagree
+         * with, which is the only version worth putting on a Privacy page. */
+        el(
+          "div",
+          { class: "card pad" },
+          el("span", { class: "card-title", text: "The one outbound connection that exists" }),
+          says(
+            "The embedding model is downloaded once, on first index, and cached. ",
+            mono("semlith upgrade"),
+            ", ",
+            mono("semlith add"),
+            " and ",
+            mono("semlith prices update"),
+            " reach the network only in the second you ask them to. ",
+            mono("--airgap"),
+            " refuses all four and exits naming what it refused.",
+          ),
+          copyField("SEMLITH_MODEL_CACHE=/media/usb/models semlith index ."),
+          el(
+            "div",
+            { class: "chips" },
+            pill(data.model_cached ? "model cached" : "model not downloaded", data.model_cached ? "good" : "warn"),
+            el("span", {
+              class: "meta",
+              text: "granite-embedding-small-english-r2 · int8 · Apache-2.0",
+            }),
+          ),
+        ),
+        /* Fifth, between the outbound card and the session token, which is
+         * where the design has it. It stood outside this grid entirely, so
+         * the one switch on the page sat above the cards that explain what
+         * the page promises rather than among them. */
+        sessionReplayToggle(),
+        ledgerUsageToggle(),
       ),
     ),
     /* After the grid, at the page's full width. Inside either column it is a
@@ -12569,9 +12866,15 @@ async function reportsView() {
   const reportDir = home ? `${home}/reports/` : "the store home's reports/ directory";
   const schedulesFile = home ? `${home}/schedules.json` : "schedules.json in the store home";
 
+  let prices = MODEL_PRICES;
+  try {
+    prices = modelPrices((await api("/api/prices")).savings_models);
+  } catch (_) {
+    /* The default model still prices the report. */
+  }
   let kind = REPORTS[0][0];
   let format = REPORT_FORMATS[0][0];
-  let model = MODEL_PRICES[0];
+  let model = prices[0];
   let span = "month";
   /* Empty is every open store, which is exactly what `/api/report` means by no
    * `scope` — so "all stores" is the absence of a narrowing, not a value. */
@@ -12946,20 +13249,22 @@ async function reportsView() {
         el("span", { class: "spacer" }),
         /* The design puts the model chips here, in this card's header, rather
          * than in the builder — they price one report, not all five. */
-        chipGroup(
-          "Model",
-          MODEL_PRICES.map((price) =>
-            chip(price[0], price[0] === model[0], () => {
-              model = price;
+        /* A select rather than the design's chips: the table offers a
+         * model per vendor, which is too many chips for one header. */
+        el(
+          "select",
+          {
+            class: "chip",
+            "aria-label": "Model",
+            onchange: (e) => {
+              model = prices[Number(e.currentTarget.value)] || prices[0];
               generate();
-            }),
-          ),
-          { inline: true },
+            },
+          },
+          prices.map(([name], i) => el("option", { value: String(i), text: name, selected: name === model[0] })),
         ),
-        /* The design prints `prices as of 2026-09-01`. This binary's prices
-         * are `report::PRICES`, written into the source with no date on them,
-         * so what is stated here is the rate itself — a number the reader can
-         * check against the arithmetic above it. */
+        /* The rate itself, a number the reader can check against the
+         * arithmetic below; the table and its date are on the Agents page. */
         el("span", { class: "mono-chip", text: `$${model[1].toFixed(2)} per Mtok, input` }),
         el("span", { class: "rule" }),
         chipGroup(
@@ -13010,9 +13315,8 @@ async function reportsView() {
       ),
       /* The design's footnote says the baseline is priced at the cache-write
        * rate and that a reconciliation states a drift against Claude's own
-       * counter. Neither is true of this binary: `report::PRICES` is input
-       * pricing, said so in its own doc comment, and nothing reconciles
-       * anything. What is written here is what the numbers above actually are. */
+       * counter. Neither is true of this binary: the savings figure is input
+       * pricing from the models.dev table, and nothing reconciles anything. What is written here is what the numbers above actually are. */
       el("p", {
         class: "subtitle",
         text:

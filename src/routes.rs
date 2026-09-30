@@ -101,6 +101,8 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         // Both verbs: a GET reports whether the toggle is on and, when it
         // is, what the transcripts say; a POST is the toggle itself.
         (_, _, "/api/ledger/replay") if get || post => replay(request),
+        (_, _, "/api/ledger/usage") if get || post => usage(request),
+        (_, _, "/api/prices") if get || post => prices(request),
         (true, _, "/api/graph") => graph(state, request),
         (true, _, "/api/corpus") => corpus(state),
         (true, _, "/api/ledger") => ledger(state),
@@ -222,7 +224,7 @@ fn schedule_write(state: &Arc<State>, request: &Request) -> Response {
             let model = body
                 .get("model")
                 .and_then(|v| v.as_str())
-                .unwrap_or("Sonnet 5");
+                .unwrap_or(crate::report::DEFAULT_MODEL);
             let mut schedule = crate::schedule::Schedule::new(
                 kind,
                 format,
@@ -1106,7 +1108,18 @@ fn ledger(state: &Arc<State>) -> Response {
         "intact": true,
     });
     let recording = state.ledger;
+    let usage_on = crate::usage::enabled();
     with_fleet(state, empty, move |fleet| {
+        // Usage filled in before the rows are read, so the page shows what the
+        // clients' logs say about the calls it lists. Opens nothing while the
+        // setting is off; a log that fails to read leaves its rows for next
+        // time rather than failing the page.
+        if usage_on {
+            let now = crate::daemon::now() as i64;
+            for (_, store) in fleet.each() {
+                let _ = crate::usage::enrich(store.db(), now);
+            }
+        }
         let (mut clients, mut excerpt, mut whole) = (0, 0, 0);
         let mut intact = true;
         // Unioned rather than summed: one search over six stores writes a row
@@ -1143,7 +1156,24 @@ fn ledger(state: &Arc<State>) -> Response {
         let mut refunds = 0;
         let mut zero_hit = 0;
         let mut refunds_measured = false;
+        let mut usage_seen: std::collections::BTreeSet<String> = Default::default();
+        // One model request can issue several calls; its tokens and cost are
+        // counted once, under the first of them.
+        let mut requests_seen: std::collections::BTreeSet<String> = Default::default();
+        let mut usage_totals: std::collections::BTreeMap<(String, String), UsageTotal> =
+            Default::default();
         for (label, store) in fleet.each() {
+            for (key, client, usage) in store::usage_rows(store.db(), label)? {
+                if !usage_seen.insert(key) {
+                    continue;
+                }
+                let model = usage.model.clone().unwrap_or_default();
+                let first = requests_seen.insert(usage.source.clone());
+                usage_totals
+                    .entry((client, model))
+                    .or_default()
+                    .add(&usage, first);
+            }
             let savings = store::ledger_savings(store.db())?;
             net += savings.net;
             measured = measured && savings.measured;
@@ -1184,6 +1214,13 @@ fn ledger(state: &Arc<State>) -> Response {
                     "whole_file_tokens": session.whole_file_tokens,
                     "net_tokens": session.net,
                     "tier": session.tier(),
+                    // The saving priced at the model this session actually
+                    // ran on, from its client's log; none when that is not
+                    // known, rather than a price for a model it never used.
+                    "model": session.model,
+                    "saved_usd": session.model.as_deref()
+                        .and_then(crate::report::price_named)
+                        .map(|(_, input)| session.net.max(0) as f64 * input / 1_000_000.0),
                 }));
             }
             for row in store::retrievals(store.db(), LEDGER_ROWS)? {
@@ -1200,6 +1237,7 @@ fn ledger(state: &Arc<State>) -> Response {
                     "excerpt_tokens": row.excerpt_tokens,
                     "whole_file_tokens": row.whole_file_tokens,
                     "query_id": row.query_id,
+                    "usage": row.usage,
                 }));
             }
         }
@@ -1235,6 +1273,21 @@ fn ledger(state: &Arc<State>) -> Response {
             "refunds_measured": refunds_measured,
             "zero_hit": zero_hit,
             "by_client": by_client,
+            "usage": {
+                "enabled": usage_on,
+                "prices": prices_json(),
+                "totals": usage_totals.into_iter().map(|((client, model), t)| json!({
+                    "client": client,
+                    "model": model,
+                    "calls": t.calls,
+                    "input_tokens": t.input,
+                    "output_tokens": t.output,
+                    "cache_read_tokens": t.cache_read,
+                    "cache_write_tokens": t.cache_write,
+                    "cost_usd": t.cost,
+                    "unpriced": t.unpriced,
+                })).collect::<Vec<_>>(),
+            },
             "rows": rows,
             "sessions": sessions,
             // Rows written before this version were one per open store, so the
@@ -1245,6 +1298,102 @@ fn ledger(state: &Arc<State>) -> Response {
             }),
         }))
     })
+}
+
+/// One client and model's calls, summed for the Ledger page.
+#[derive(Default)]
+struct UsageTotal {
+    calls: i64,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    cost: f64,
+    /// Calls with tokens but no price: a model the table does not carry.
+    unpriced: i64,
+}
+
+impl UsageTotal {
+    fn add(&mut self, u: &store::RowUsage, first_of_its_request: bool) {
+        self.calls += 1;
+        if !first_of_its_request {
+            return;
+        }
+        self.input += u.input_tokens.unwrap_or(0);
+        self.output += u.output_tokens.unwrap_or(0);
+        self.cache_read += u.cache_read_tokens.unwrap_or(0);
+        self.cache_write += u.cache_write_tokens.unwrap_or(0);
+        match u.cost_usd {
+            Some(cost) => self.cost += cost,
+            None => self.unpriced += 1,
+        }
+    }
+}
+
+/// The price table in use, for the Ledger page's line under its usage table.
+fn prices_json() -> Value {
+    let table = crate::prices::table();
+    let built_in = crate::prices::built_in();
+    json!({
+        "source": table.source,
+        "fetched": table.fetched,
+        "models": table.models.len(),
+        "downloaded": !(table.fetched == built_in.fetched && table.models == built_in.models),
+        "url": crate::prices::SOURCE_URL,
+    })
+}
+
+/// The ledger's usage setting: a GET reports it with the logs it would read,
+/// a POST with `{"on": bool}` sets it.
+fn usage(request: &Request) -> Response {
+    if request.method == "POST" {
+        let body = match request.json() {
+            Ok(b) => b,
+            Err(e) => return Response::error(400, &e.to_string()),
+        };
+        let Some(on) = body.get("on").and_then(Value::as_bool) else {
+            return Response::error(400, "missing on");
+        };
+        let mut saved = home::Settings::load();
+        saved.ledger_usage = Some(on);
+        if let Err(e) = saved.save() {
+            return Response::error(500, &e.to_string());
+        }
+        return Response::json(&json!({ "enabled": on }));
+    }
+    Response::json(&json!({
+        "enabled": crate::usage::enabled(),
+        "prices": prices_json(),
+        "logs": crate::usage::log_paths(),
+    }))
+}
+
+/// The model price table, for the Agents page's card and every savings
+/// picker: a GET names the table and lists the models a savings figure is
+/// offered at; a POST with `{"update": true}` runs `semlith prices update` —
+/// the one request that reaches models.dev, made because somebody pressed the
+/// button.
+fn prices(request: &Request) -> Response {
+    if request.method == "POST" {
+        let body = match request.json() {
+            Ok(b) => b,
+            Err(e) => return Response::error(400, &e.to_string()),
+        };
+        if body.get("update").and_then(Value::as_bool) != Some(true) {
+            return Response::error(400, "missing update");
+        }
+        if let Err(e) = crate::prices::update() {
+            return Response::error(502, &format!("{e:#}"));
+        }
+    }
+    let mut info = prices_json();
+    info["savings_models"] = Value::Array(
+        crate::report::savings_models()
+            .into_iter()
+            .map(|(name, input)| json!({ "name": name, "input": input }))
+            .collect(),
+    );
+    Response::json(&info)
 }
 
 /// Notes fastembed's catalogue gets wrong about its own models.
@@ -2524,33 +2673,38 @@ fn replay(request: &Request) -> Response {
 /// unreadable store is left out and named, as everywhere else that reads
 /// across the fleet.
 fn corpus(state: &Arc<State>) -> Response {
-    if let Err(e) = state.open_fleet() {
-        return Response::error(500, &format!("{e:#}"));
-    }
-    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(fleet) = fleet.as_mut() else {
-        return Response::json(&json!({ "stores": [] }));
-    };
+    // Each store measured on a connection of its own, not through the shared
+    // fleet: the measure reads the text of every chunk, which on an 879k-chunk
+    // store takes minutes, and holding the fleet's lock for that long stalled
+    // every other read route behind it (found 2026-09-30, `/api/stores` held
+    // for about five minutes). The rows are the store's own, so a second
+    // reader answers exactly what the fleet's would.
     let mut stores = Vec::new();
-    for (label, opened) in fleet.each() {
-        match crate::store::corpus(opened.db(), |path| {
-            language_of(std::path::Path::new(path)).to_string()
-        }) {
+    // A store whose directory has gone is left out, as `open_fleet` leaves it.
+    for store in state
+        .stores()
+        .into_iter()
+        .filter(|s| s.dir.join("store.db").exists())
+    {
+        let measured = crate::store::open(&store.dir.join("store.db")).and_then(|db| {
+            crate::store::corpus(&db, |path| {
+                language_of(std::path::Path::new(path)).to_string()
+            })
+        });
+        match measured {
             Ok(measured) => {
                 let mut row = serde_json::to_value(&measured).unwrap_or_else(|_| json!({}));
                 if let Some(map) = row.as_object_mut() {
-                    map.insert("store".into(), json!(label));
+                    map.insert("store".into(), json!(store.name));
                 }
                 stores.push(row);
             }
             // One store that cannot be measured is not the whole page. It is
             // reported as itself, the way an unreadable store is.
-            Err(e) => stores.push(json!({ "store": label, "error": format!("{e:#}") })),
+            Err(e) => stores.push(json!({ "store": store.name, "error": format!("{e:#}") })),
         }
     }
-    let mut answer = json!({ "stores": stores });
-    failures_beside(fleet, &mut answer);
-    Response::json(&answer)
+    Response::json(&json!({ "stores": stores }))
 }
 
 /// One of the five reports, in one of the five formats, over a window and a
@@ -2584,7 +2738,10 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
         Ok(window) => window,
         Err(e) => return Response::error(400, &e.to_string()),
     };
-    let model = request.query("model").unwrap_or("Sonnet 5").to_string();
+    let model = request
+        .query("model")
+        .unwrap_or(crate::report::DEFAULT_MODEL)
+        .to_string();
     // Refused rather than defaulted. The savings report is a figure in money,
     // and a model nobody prices used to come back priced at Sonnet 5 under
     // Sonnet 5's name, so the caller could not tell it had been ignored.

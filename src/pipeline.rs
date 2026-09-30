@@ -299,6 +299,9 @@ pub struct Context {
     pub allow_secrets: bool,
     /// Hash recorded per stored path.
     pub hashes: HashMap<String, String>,
+    /// Stored paths of a counted format with no count yet: read again, even
+    /// when unchanged, so their count can be written (never re-embedded).
+    pub uncounted: HashSet<String>,
     /// Paths a person accepted over the size cap.
     pub over_cap: HashSet<String>,
     /// Size, mtime and hash the scan phase read.
@@ -344,6 +347,8 @@ pub enum Prepared {
         rescan: Option<(String, Vec<keyscan::Match>)>,
         /// A fresh extraction, when the graph rules moved.
         regraph: Option<graph::Extraction>,
+        /// The file's units, when the store has none for it yet.
+        units: Option<i64>,
     },
     /// An image, for the writer to embed with CLIP.
     Image {
@@ -365,6 +370,8 @@ pub enum Prepared {
         hash: String,
         file_bytes: u64,
         text: String,
+        /// Pages, slides or cells, for a counted format.
+        units: Option<i64>,
         found: Vec<keyscan::Match>,
         /// `None` when the writer must decide the text first; an error when
         /// the parse or the chunking failed on this file's own content, which
@@ -410,6 +417,7 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
         && meta.len() == *size
         && mtime_of(meta) == *mtime
         && ctx.hashes.get(key.as_ref()) == Some(hash)
+        && !ctx.uncounted.contains(key.as_ref())
     {
         Clocks::tick(&ctx.clocks.read, started);
         return Prepared::Unchanged {
@@ -472,10 +480,20 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
     let same = !ctx.rechunk && ctx.hashes.get(key.as_ref()) == Some(&hash);
     if same {
         let is_image = image::is_image(path);
-        let rescan = (ctx.rescan && !ctx.allow_secrets && !is_image)
-            .then(|| chunk::extract(path, &bytes).ok())
-            .flatten()
-            .map(|text| {
+        let counting = ctx.uncounted.contains(key.as_ref());
+        let extracted = ((ctx.rescan && !ctx.allow_secrets && !is_image) || counting)
+            .then(|| {
+                crate::contained(|| chunk::extract_counted(path, &bytes))
+                    .ok()?
+                    .ok()
+            })
+            .flatten();
+        // A file that will not give a count still gets one, zero, so it is not
+        // read again on every pass.
+        let units = counting.then(|| extracted.as_ref().and_then(|(_, n)| *n).unwrap_or(0));
+        let rescan = extracted
+            .filter(|_| ctx.rescan && !ctx.allow_secrets && !is_image)
+            .map(|(text, _)| {
                 let found = keyscan::scan(&key, &text);
                 (text, found)
             });
@@ -499,6 +517,7 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
             file_bytes,
             rescan,
             regraph,
+            units,
         };
     }
 
@@ -512,7 +531,7 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
 
     let text = match crate::contained(|| {
         crate::fault_panic(path);
-        chunk::extract(path, &bytes)
+        chunk::extract_counted(path, &bytes)
     }) {
         Err(error) => {
             Clocks::tick(&ctx.clocks.extract, now);
@@ -522,8 +541,9 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
             Clocks::tick(&ctx.clocks.extract, now);
             return Prepared::Skipped { why, file_bytes };
         }
-        Ok(Ok(text)) => text,
+        Ok(Ok(extracted)) => extracted,
     };
+    let (text, units) = text;
     drop(bytes);
     let found = keyscan::scan(&key, &text);
     let now = Clocks::tick(&ctx.clocks.extract, now);
@@ -536,6 +556,7 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
         hash,
         file_bytes,
         text,
+        units,
         found,
         ready,
     }

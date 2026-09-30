@@ -153,7 +153,7 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 | `semlith symbol <NAME>...` | The definition, its callers and callees, and the ring two hops out, in one answer; several names give one row per definition. From the parsed syntax tree rather than a grep for `fn name`. `--history` gives what the name used to be: the definitions a re-index replaced, each with the content hash of the file version it was true for. |
 | `semlith neighbors <NAME>` | What calls it and what it calls, one hop each way. `--kind` to follow one edge kind, `--all` to expand collapsed rows. |
 | `semlith path <FROM> <TO>` | The shortest chain of edges between two symbols, or nothing if they are unconnected. `--depth` to search further. |
-| `semlith ledger` | Print what agents retrieved from this store, newest first. `--last N`, `--verify`. Needs no key. |
+| `semlith ledger` | Print what agents retrieved from this store, newest first. `--last N`, `--verify`. `--usage on\|off` turns on reading each AI client's own session log for the model, tokens and cost of its calls (off by default; read-only, numbers only), priced by `semlith prices`: a models.dev snapshot built in, which `semlith prices update` refreshes only when run. Needs no key. |
 | `semlith start [PATHS...]` | Own every registered store, keep them current, serve the portal on `127.0.0.1:7365` and answer MCP at `/mcp`. `--port`, `--debounce`, `--airgap`, `--no-ledger`, `--no-mcp-http`. |
 | `semlith key show` \| `rotate` | Print the agent key that opens the HTTP MCP endpoint, and the stanza around it, or mint a new one. `--now` on `rotate` drops the previous key immediately. |
 | `semlith adopt <DIR>` | Move an existing store directory into the store home and register it. `--root` re-points one whose corpus moved. |
@@ -234,9 +234,9 @@ rotate a token, adopt a store or start an upgrade. Every response carries a
 `Content-Security-Policy` allowing only `'self'`, no CORS header is sent, and
 every byte the page loads is compiled into the binary. The only downloads are
 pinned by digest: model weights, the WebGPU plugin on a machine with a hardware
-GPU, and the CUDA pack after you turn CUDA on. `--airgap` makes that
-falsifiable: it refuses all of them unless they are already cached, and exits
-naming the cache path. [docs/security.md](docs/security.md) is the full account, and the
+GPU, the CUDA pack after you turn CUDA on, and models.dev's price table when you
+run `semlith prices update`. `--airgap` makes that falsifiable: it refuses all of
+them unless they are already cached, and exits naming the cache path. [docs/security.md](docs/security.md) is the full account, and the
 Privacy page checks each claim on the running daemon rather than restating it.
 
 The Index page is the daemon's control room. Every run, watcher catch-up and
@@ -470,7 +470,7 @@ of these drifts from its source:
 | document formats with a reader | **13** |
 | image types | **5** |
 | MCP tools | **16** |
-| CLI commands | **34** |
+| CLI commands | **35** |
 | agent clients, each launched and answered in `tests/clients.rs` | **12** |
 | prebuilt targets | **4** |
 

@@ -1,0 +1,6 @@
+{"sessionId":"00000000-0000-4000-8000-00000000gem1","projectHash":"0000000000000000000000000000000000000000000000000000000000000000","startTime":"2026-09-30T10:00:00.000Z","lastUpdated":"2026-09-30T10:00:00.000Z","kind":"main"}
+{"id":"m-user-1","timestamp":"2026-09-30T10:00:00.100Z","type":"user","content":[{"text":"find the parser"}]}
+{"$set":{"lastUpdated":"2026-09-30T10:00:00.100Z"}}
+{"id":"m-gem-1","timestamp":"2026-09-30T10:00:02.000Z","type":"gemini","content":"","thoughts":[],"tokens":{"input":18800,"output":40,"cached":16000,"thoughts":12,"tool":0,"total":18852},"model":"gemini-3.5-flash-lite"}
+{"id":"m-gem-1","timestamp":"2026-09-30T10:00:02.000Z","type":"gemini","content":"","thoughts":[],"tokens":{"input":18800,"output":40,"cached":16000,"thoughts":12,"tool":0,"total":18852},"model":"gemini-3.5-flash-lite","toolCalls":[{"id":"mcp_semlith_semlith_search__call_000001","name":"mcp_semlith_semlith_search","args":{"query":"parser"},"status":"success","timestamp":"2026-09-30T10:00:02.050Z","result":[{"functionResponse":{"id":"mcp_semlith_semlith_search__call_000001","name":"mcp_semlith_semlith_search","response":{"output":"2 matches"}}}],"resultDisplay":"2 matches","displayName":"semlith_search (semlith MCP Server)","description":"{\"query\":\"parser\"}","renderOutputAsMarkdown":true}]}
+{"$set":{"lastUpdated":"2026-09-30T10:00:02.100Z"}}

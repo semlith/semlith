@@ -3091,9 +3091,18 @@ def _(d):
     for wanted in ["Markdown", "CSV", "JSON"]:
         if wanted not in body:
             fail("the sessions table cannot export %s" % wanted)
+    # Two filters, client and tier. From 0.34.0 there is no model picker: a
+    # session's saving is priced at the model that session ran on, read from
+    # its client's own log, rather than at one model chosen for every row.
     selects = d.eval("document.querySelectorAll('.card.pad .filters select').length")
-    if selects < 3:
-        fail("the sessions table has %d filter controls, expected client, tier and model" % selects)
+    if selects != 2:
+        fail("the sessions table has %d filter controls, expected client and tier" % selects)
+    if d.eval("!!document.querySelector('select[aria-label=\"Cost at\"]')"):
+        fail("the sessions table still prices every session at one chosen model")
+    heads = d.eval("[...document.querySelectorAll('.w-sessions th')].map(t => t.textContent.trim().toUpperCase()).join('|')")
+    for wanted in ["MODEL", "SAVED"]:
+        if wanted not in heads:
+            fail("the sessions table has no %s column: %s" % (wanted, heads))
 
 
 @finding("5.7", "Session replay is off until Privacy turns it on")

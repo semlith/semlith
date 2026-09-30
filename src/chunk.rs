@@ -64,6 +64,27 @@ impl Chunk {
 /// `path` is only consulted for its extension; the caller has the bytes
 /// already because it needs them to hash the file anyway.
 pub fn extract(path: &Path, bytes: &[u8]) -> Result<String, crate::SkipReason> {
+    extract_counted(path, bytes).map(|(text, _)| text)
+}
+
+/// Extensions whose files have units `Inside the index` counts: PDF pages,
+/// slides, spreadsheet cells, notebook cells. A stored file of one of these
+/// with no count yet is read again for its count by the next index pass.
+pub const COUNTED: &[&str] = &["pdf", "pptx", "odp", "xlsx", "ods", "csv", "tsv", "ipynb"];
+
+/// Whether `path` is of a format in [`COUNTED`].
+pub fn is_counted(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| COUNTED.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// [`extract`], and the file's units counted in the same pass — `None` for a
+/// format with no unit. The text is exactly what [`extract`] returns.
+pub fn extract_counted(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(String, Option<i64>), crate::SkipReason> {
     use crate::SkipReason;
     if bytes.is_empty() {
         return Err(SkipReason::Empty);
@@ -77,15 +98,23 @@ pub fn extract(path: &Path, bytes: &[u8]) -> Result<String, crate::SkipReason> {
     // nothing out" and "these bytes are not text" are different answers and
     // the person chasing a missing file needs to be told which.
     match ext.as_deref() {
-        Some("pdf") => extract_pdf(bytes).ok_or(SkipReason::NoText),
+        Some("pdf") => extract_pdf(bytes)
+            .map(|(text, pages)| (text, Some(pages)))
+            .ok_or(SkipReason::NoText),
         Some(ext) if formats::handles(ext) => {
-            guard(|| formats::extract(ext, bytes)).ok_or(SkipReason::NoText)
+            guard(|| formats::extract_counted(ext, bytes)).ok_or(SkipReason::NoText)
         }
-        _ => {
+        other => {
             if is_binary(bytes) {
                 return Err(SkipReason::Binary);
             }
-            Ok(String::from_utf8_lossy(bytes).into_owned())
+            let text = String::from_utf8_lossy(bytes).into_owned();
+            let units = match other {
+                Some("csv") => Some(formats::delimited_cells(&text, ',')),
+                Some("tsv") => Some(formats::delimited_cells(&text, '\t')),
+                _ => None,
+            };
+            Ok((text, units))
         }
     }
 }
@@ -123,9 +152,23 @@ pub fn reader_of(path: &Path) -> &'static str {
 
 /// pdf-extract can panic on malformed input, and one bad PDF should not take
 /// down a whole indexing run.
-fn extract_pdf(bytes: &[u8]) -> Option<String> {
-    let text = guard(|| pdf_extract::extract_text_from_mem(bytes).ok())?;
-    (!text.trim().is_empty()).then_some(text)
+///
+/// The document is loaded once and asked for both its page count and its
+/// text. The steps are `pdf_extract::extract_text_from_mem`'s own — load,
+/// decrypt with the empty password if encrypted, write every page as plain
+/// text — so the text is byte for byte what that function returns.
+fn extract_pdf(bytes: &[u8]) -> Option<(String, i64)> {
+    let (text, pages) = guard(|| {
+        let mut doc = pdf_extract::Document::load_mem(bytes).ok()?;
+        if doc.is_encrypted() {
+            doc.decrypt("").ok()?;
+        }
+        let pages = doc.get_pages().len() as i64;
+        let mut text = String::new();
+        pdf_extract::output_doc(&doc, &mut pdf_extract::PlainTextOutput::new(&mut text)).ok()?;
+        Some((text, pages))
+    })?;
+    (!text.trim().is_empty()).then_some((text, pages))
 }
 
 /// Run an extractor so that a panic inside it is a skipped file rather than a
@@ -136,7 +179,7 @@ fn extract_pdf(bytes: &[u8]) -> Option<String> {
 /// decompressor and a document somebody else wrote. A panic here would take out
 /// an indexing run that is otherwise minutes from finishing, so the cheap
 /// insurance is worth its one line.
-fn guard(extract: impl FnOnce() -> Option<String>) -> Option<String> {
+fn guard<T>(extract: impl FnOnce() -> Option<T>) -> Option<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(extract)).ok()?
 }
 

@@ -1,0 +1,6 @@
+{"version":1,"sessionId":"1790762400000_abcde","agent":"lead","updated_at":"2026-09-30T10:00:08.000Z","messages":[
+{"id":"u-0001","role":"user","content":[{"type":"text","text":"find the parser"}],"ts":1790762400100},
+{"id":"msg_fixture01","role":"assistant","content":[{"type":"thinking","thinking":"..."},{"type":"tool_use","id":"call_fixture0001","name":"semlith__semlith_search","input":{"query":"parser"}}],"ts":1790762403000,"modelInfo":{"id":"deepseek/deepseek-v4-flash-0731","provider":"openrouter","family":"deepseek-flash"},"metrics":{"inputTokens":23800,"outputTokens":120,"cacheReadTokens":0,"cacheWriteTokens":0,"cost":0.00103}},
+{"id":"msg_fixture02","role":"user","content":[{"type":"tool_result","tool_use_id":"call_fixture0001","name":"semlith__semlith_search","content":"2 matches"}],"ts":1790762404000},
+{"id":"msg_fixture03","role":"assistant","content":[{"type":"text","text":"src/parser.rs:10"}],"ts":1790762407000,"modelInfo":{"id":"deepseek/deepseek-v4-flash-0731","provider":"openrouter","family":"deepseek-flash"},"metrics":{"inputTokens":24000,"outputTokens":30,"cacheReadTokens":23700,"cacheWriteTokens":0,"cost":0.00040}}
+]}
