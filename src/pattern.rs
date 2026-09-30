@@ -261,13 +261,19 @@ fn file_text(db: &rusqlite::Connection, path: &str) -> Result<Option<String>> {
         }
     }
 
-    // The stitched text has to start at line 1 for the parser's row numbers to
-    // mean what they say. A store that never held the head of the file cannot
-    // be parsed into line numbers a reader can use.
-    if lines.keys().next() != Some(&1) {
+    // A line no chunk holds -- a blank first line, a gap -- is kept as an empty
+    // line, so every row the parser and the grep report is the file's own line
+    // number. Dropping such a file instead hid twelve Markdown files on the
+    // benchmark corpus from every exact search, and joining around a gap would
+    // have shifted every line after it.
+    let Some(&last) = lines.keys().next_back() else {
         return Ok(None);
-    }
-    Ok(Some(lines.into_values().collect::<Vec<_>>().join("\n")))
+    };
+    let text = (1..=last)
+        .map(|n| lines.get(&n).map_or("", String::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(Some(text))
 }
 
 /// The first line of a captured node, trimmed.
@@ -313,6 +319,27 @@ mod tests {
         let literal = grep(&db, "Row {", &Filter::default(), 0).unwrap();
         assert_eq!(literal.matches.len(), 1, "{:?}", literal.matches);
         assert_eq!(literal.matches[0].start_line, 4);
+    }
+
+    /// A file whose stored chunks start past line 1, or leave a gap, is still
+    /// searched, and every line keeps its own number. On the benchmark corpus
+    /// twelve Markdown files whose first line held nothing were never searched,
+    /// and a gap would have shifted every line number after it.
+    #[test]
+    fn grep_searches_a_file_that_does_not_start_at_line_one() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(store::SCHEMA).unwrap();
+        db.execute_batch(
+            "INSERT INTO files (id, path, hash, bytes, indexed_at) VALUES (1, '/r/a.md', 'h', 1, 0);
+             INSERT INTO chunks (id, file_id, ord, start_line, end_line, text)
+               VALUES (1, 1, 0, 3, 4, '# Title\nNEEDLE on four');
+             INSERT INTO chunks (id, file_id, ord, start_line, end_line, text)
+               VALUES (2, 1, 1, 7, 8, 'text\nNEEDLE on eight');",
+        )
+        .unwrap();
+        let found = grep(&db, "NEEDLE", &Filter::default(), 0).unwrap();
+        let lines: Vec<u32> = found.matches.iter().map(|m| m.start_line).collect();
+        assert_eq!(lines, [4, 8], "{:?}", found.matches);
     }
 
     /// A pattern that does not compile is the caller's mistake and has to be
