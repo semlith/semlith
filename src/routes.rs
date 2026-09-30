@@ -1156,6 +1156,9 @@ fn ledger(state: &Arc<State>) -> Response {
         let mut zero_hit = 0;
         let mut refunds_measured = false;
         let mut usage_seen: std::collections::BTreeSet<String> = Default::default();
+        // One model request can issue several calls; its tokens and cost are
+        // counted once, under the first of them.
+        let mut requests_seen: std::collections::BTreeSet<String> = Default::default();
         let mut usage_totals: std::collections::BTreeMap<(String, String), UsageTotal> =
             Default::default();
         for (label, store) in fleet.each() {
@@ -1164,7 +1167,11 @@ fn ledger(state: &Arc<State>) -> Response {
                     continue;
                 }
                 let model = usage.model.clone().unwrap_or_default();
-                usage_totals.entry((client, model)).or_default().add(&usage);
+                let first = requests_seen.insert(usage.source.clone());
+                usage_totals
+                    .entry((client, model))
+                    .or_default()
+                    .add(&usage, first);
             }
             let savings = store::ledger_savings(store.db())?;
             net += savings.net;
@@ -1299,8 +1306,11 @@ struct UsageTotal {
 }
 
 impl UsageTotal {
-    fn add(&mut self, u: &store::RowUsage) {
+    fn add(&mut self, u: &store::RowUsage, first_of_its_request: bool) {
         self.calls += 1;
+        if !first_of_its_request {
+            return;
+        }
         self.input += u.input_tokens.unwrap_or(0);
         self.output += u.output_tokens.unwrap_or(0);
         self.cache_read += u.cache_read_tokens.unwrap_or(0);
