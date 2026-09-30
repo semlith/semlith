@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Search answers on a large multi-repository store
+
+Found searching the 70-repository benchmark corpus (879,439 chunks, 66,333
+files) through the daemon: every search ran for 31 to 244 seconds and then
+failed with "too many SQL variables", and other searches queued behind it.
+
+**The graph list's walk is bounded.** The walk resolved every name it reached
+in one SQL `IN` list, past SQLite's limit of 32,766 variables;
+`symbols_by_names` now queries in batches. It visited up to 2,000 names in
+alphabetical order, and now visits at most 128, heaviest first. It also walked
+through and into names with hundreds of definitions — `get` has 712 — and
+joined every candidate definition. A name with more than 32 definitions is no
+longer walked through or into by search; `semlith_neighbors`, `semlith_impact`
+and `semlith_path` still resolve every edge.
+
+**Seeding the walk uses an index.** The walk's seeds were looked up by chunk
+with no index on `symbols.chunk_id`, a scan of 1.25 million rows per seed
+chunk. An existing store builds the new index on its next open. The change is
+additive: nothing is re-indexed and the store format is unchanged.
+
+**A failed graph list no longer fails the search.** It is logged, and the
+vector and keyword lists answer.
+
+Measured through the daemon at 879,439 chunks on the M1 (8 GB), over three
+sessions: a concept search p50 257 to 363 ms and p95 500 to 920 ms, an
+identifier search p50 about 100 ms, and no errors. Retrieval is unchanged: the
+development set scores 56/61/67 of 77 at hit@1/3/8 with every question's rank
+identical to 0.33.0, and the sealed set 25/27/28 of 30 on both 0.33.0 and
+0.33.1. The full table is in `docs/performance.md`.
+
+### Exact search finds every line ripgrep finds
+
+Found comparing exact search against ripgrep over the same 66,333 files on the
+benchmark corpus, where one pattern counted 67 lines against rg's 68.
+
+**A `<` in HTML text no longer hides the lines after it.** The HTML reader read
+every `<` as the start of a tag and skipped to the next `>`, so text such as
+`input.pos < input.size` in the zstd manual dropped the thirteen lines up to the
+next `>` from the index. A `<` now starts markup only when a letter, `/`, `!` or
+`?` follows it, as a browser reads it. EPUB chapters use the same reader.
+Already-indexed HTML and EPUB files pick this up when they are next re-read.
+
+**Every file is searched, and every line keeps its number.** Exact search skipped
+any file whose stored chunks did not start at line 1, so twelve Markdown files on
+the corpus were never searched, and it could shift line numbers after a gap
+between chunks. A line no chunk holds is now an empty line.
+
 ## [0.33.0] - 2026-09-30
 
 ### Twelve clients, each tested every release
