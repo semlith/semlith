@@ -3430,8 +3430,14 @@ function ledgerSessions(data) {
   const all = data.sessions || [];
   let client = "";
   let tier = "";
-  const prices = modelPrices(data.savings_models);
-  let price = prices[0];
+  /* What a session's saving was worth, at the model that session actually
+   * ran on, as its client's own log recorded it. A picker used to price every
+   * session at one model somebody chose, which put a Sonnet price on a
+   * DeepSeek session: a number with nothing behind it. A session whose model
+   * is not known says so. */
+  const unknownModel = data.usage && data.usage.enabled
+    ? "its client keeps no log semlith can read, or it predates the log"
+    : "turn on Usage from client logs on the Privacy page to price it at its own model";
 
   const table = dataTable({
     className: "w-sessions",
@@ -3469,11 +3475,24 @@ function ledgerSessions(data) {
         render: (r) => n(r.net_tokens),
       },
       {
+        key: "model",
+        label: "Model",
+        className: "meta narrow-drop",
+        value: (r) => r.model || "",
+        render: (r) =>
+          r.model
+            ? el("span", { class: "one-line", title: r.model, text: r.model })
+            : el("span", { class: "meta", title: unknownModel, text: "not known" }),
+      },
+      {
         key: "cost",
-        label: "Cost",
+        label: "Saved",
         className: "num",
-        value: (r) => r.net_tokens,
-        render: (r) => `$${((r.net_tokens / 1e6) * price[1]).toFixed(2)}`,
+        value: (r) => (r.saved_usd == null ? -1 : r.saved_usd),
+        render: (r) =>
+          r.saved_usd == null
+            ? el("span", { class: "meta", title: unknownModel, text: "—" })
+            : el("span", { title: `${n(r.net_tokens)} net tokens at ${r.model}'s input price`, text: dollars(r.saved_usd) }),
       },
       { key: "tier", label: "Tier", className: "meta", render: (r) => r.tier },
     ],
@@ -3521,21 +3540,6 @@ function ledgerSessions(data) {
     el("option", { value: "measured", text: "measured" }),
     el("option", { value: "modelled", text: "modelled" }),
   );
-  const modelPick = el(
-    "select",
-    {
-      class: "chip",
-      "aria-label": "Cost at",
-      onchange: (e) => {
-        price = prices[Number(e.currentTarget.value)] || prices[0];
-        repaint();
-      },
-    },
-    prices.map(([name], i) =>
-      el("option", { value: String(i), text: `cost at ${name}` }),
-    ),
-  );
-
   // The columns the export writes are the columns on screen, read through the
   // same functions, so a file and the page can never disagree about a row.
   const columns = () => [
@@ -3546,7 +3550,8 @@ function ledgerSessions(data) {
     ["reads", (r) => r.retrievals],
     ["zero_hit", (r) => r.zero_hit],
     ["net_tokens", (r) => r.net_tokens],
-    [`cost_usd_at_${price[2]}`, (r) => ((r.net_tokens / 1e6) * price[1]).toFixed(2)],
+    ["model", (r) => r.model || ""],
+    ["saved_usd", (r) => (r.saved_usd == null ? "" : r.saved_usd.toFixed(4))],
     ["tier", (r) => r.tier],
   ];
 
@@ -3570,13 +3575,13 @@ function ledgerSessions(data) {
     "div",
     { class: "card pad" },
     el("span", { class: "card-title", text: "Sessions" }),
-    el("div", { class: "filters" }, clientPick, tierPick, modelPick, count, el("span", { class: "spacer" }), exports),
+    el("div", { class: "filters" }, clientPick, tierPick, count, el("span", { class: "spacer" }), exports),
     all.length
       ? table.node
       : empty("No session has recorded a retrieval yet."),
     el("p", {
       class: "subtitle",
-      text: "Net tokens are whole-file less excerpt, over the reads that found something. A session counted by the four-character fallback is modelled, not measured, and says so in its own row.",
+      text: "A session is one agent conversation. Net tokens are what reading the answered files whole would have cost less the excerpts actually sent, over the reads that found something; Saved is those tokens at the input price of the model that session ran on, from its client's own log. A session counted by the four-character fallback is modelled, not measured, and says so in its own row.",
     }),
   );
 }
@@ -3741,9 +3746,11 @@ function ledgerUsage(data) {
     el("a", { href: "#agents", text: "Update prices on the Agents page" }),
     ".",
   );
+  // `rows`, not `rows tight`: the note under the table is its own line of
+  // prose and read as stuck to the card with a 2px gap.
   return el(
     "div",
-    { class: "rows tight" },
+    { class: "rows" },
     totals.length
       ? table.node
       : empty("On, and no call has usage yet. A client writes its log when a reply finishes; the rows fill in on the next visit."),
@@ -11468,6 +11475,30 @@ async function privacyView() {
           scanBox,
           scanNote,
         ),
+        /* Under the stored-files card, in the left column: the right one
+         * holds the outbound card and the two switches, and with the token
+         * there too it ran a screen longer than the left. */
+        el(
+          "div",
+          { class: "card pad" },
+          el("span", { class: "card-title", text: "Session token" }),
+          el("div", { class: "copyfield" }, tokenBox, el("div", { class: "actions" }, rotate)),
+          rotateNote,
+          says(
+            "Generated at start, handed to this page once by the printed URL, and sent back as a ",
+            mono(data.token_header),
+            " header on every ",
+            mono("/api"),
+            " route. It is in no cookie: every port on localhost is the same site, so a cookie would travel to a page served by anything else on this machine, and a header will not. Shown truncated — no response carries it in full except the one that rotates it.",
+          ),
+          el("hr", { class: "rule" }),
+          el("span", { class: "card-title", text: "Content-Security-Policy" }),
+          codeBlock(data.csp),
+          el("p", {
+            class: "subtitle",
+            text: `Host headers answered: ${(data.host_allowed || []).join(", ")}. Everything else gets 400.`,
+          }),
+        ),
       ),
       el(
         "div",
@@ -11508,27 +11539,6 @@ async function privacyView() {
          * the page promises rather than among them. */
         sessionReplayToggle(),
         ledgerUsageToggle(),
-        el(
-          "div",
-          { class: "card pad" },
-          el("span", { class: "card-title", text: "Session token" }),
-          el("div", { class: "copyfield" }, tokenBox, el("div", { class: "actions" }, rotate)),
-          rotateNote,
-          says(
-            "Generated at start, handed to this page once by the printed URL, and sent back as a ",
-            mono(data.token_header),
-            " header on every ",
-            mono("/api"),
-            " route. It is in no cookie: every port on localhost is the same site, so a cookie would travel to a page served by anything else on this machine, and a header will not. Shown truncated — no response carries it in full except the one that rotates it.",
-          ),
-          el("hr", { class: "rule" }),
-          el("span", { class: "card-title", text: "Content-Security-Policy" }),
-          codeBlock(data.csp),
-          el("p", {
-            class: "subtitle",
-            text: `Host headers answered: ${(data.host_allowed || []).join(", ")}. Everything else gets 400.`,
-          }),
-        ),
       ),
     ),
     /* After the grid, at the page's full width. Inside either column it is a

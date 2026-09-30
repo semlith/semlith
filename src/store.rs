@@ -3866,6 +3866,11 @@ pub struct SessionRow {
     /// Rows counted with the store's own tokenizer rather than by the
     /// four-characters fallback. The tier of this row's figures.
     pub measured: i64,
+    /// The model the session's calls were made by, as its client's own log
+    /// recorded it — the one most of its rows name. `None` while usage is off
+    /// or the client keeps no log: a session's saving is priced at the model
+    /// it ran on, or not at all.
+    pub model: Option<String>,
 }
 
 impl SessionRow {
@@ -3893,7 +3898,11 @@ pub fn ledger_sessions(db: &Connection, limit: usize) -> Result<Vec<SessionRow>>
                 SUM(CASE WHEN hits = 0 THEN 1 ELSE 0 END),
                 SUM(excerpt_tokens), SUM(whole_file_tokens),
                 SUM(CASE WHEN hits > 0 THEN whole_file_tokens - excerpt_tokens ELSE 0 END),
-                SUM(CASE WHEN tokenizer IS NOT NULL AND tokenizer <> 'chars4' THEN 1 ELSE 0 END)
+                SUM(CASE WHEN tokenizer IS NOT NULL AND tokenizer <> 'chars4' THEN 1 ELSE 0 END),
+                (SELECT r2.model FROM retrievals r2
+                  WHERE COALESCE(r2.session, '') = COALESCE(retrievals.session, '')
+                    AND r2.client = retrievals.client AND r2.model IS NOT NULL
+                  GROUP BY r2.model ORDER BY COUNT(*) DESC LIMIT 1)
          FROM retrievals
          GROUP BY COALESCE(session, ''), client
          ORDER BY MAX(at) DESC
@@ -3911,6 +3920,7 @@ pub fn ledger_sessions(db: &Connection, limit: usize) -> Result<Vec<SessionRow>>
             whole_file_tokens: r.get(7)?,
             net: r.get(8)?,
             measured: r.get(9)?,
+            model: r.get(10)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
