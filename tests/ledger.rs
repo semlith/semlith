@@ -17,6 +17,7 @@ fn row<'a>(
     whole: i64,
 ) -> semlith::store::NewRetrieval<'a> {
     semlith::store::NewRetrieval {
+        client_version: "",
         client,
         session: "test",
         tool: "search",
@@ -291,6 +292,7 @@ fn a_recorded_retrieval_says_the_model_counted_it() {
         &semlith::ledger::Who {
             client: "harness",
             session: "harness",
+            version: "",
         },
         "sourdough",
         &hits,

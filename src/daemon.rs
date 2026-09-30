@@ -84,6 +84,12 @@ pub struct Discovery {
     /// `semlith mcp` picks the new one up on its next call.
     pub token: String,
     pub version: String,
+    /// When this daemon's `run` began, as a unix second. The file's mtime was
+    /// the answer until 0.33.0, and every store open and key rotation rewrites
+    /// the file, so `doctor` said a three-day-old daemon had started that
+    /// evening. Zero in a file an older daemon wrote.
+    #[serde(default)]
+    pub started: u64,
 }
 
 impl Discovery {
@@ -2207,6 +2213,12 @@ pub struct State {
     /// daemon they only just started. Readers take a snapshot rather than hold
     /// the guard, so a slow search never blocks a store being opened.
     stores: RwLock<Vec<Arc<Store>>>,
+    /// The writer threads of stores opened after startup, joined at shutdown
+    /// with the startup ones. They were detached until 0.33.0, so a stop while
+    /// one was embedding let `main` return and tear ONNX Runtime down under a
+    /// session still running, which printed ORT's own error after `stopped`
+    /// (#163).
+    late_writers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// The one queue in front of every store's writer, and the only thing that
     /// decides how many runs are on at once.
     pub admission: Arc<Admission>,
@@ -2290,9 +2302,13 @@ fn named(stores: &[Arc<Store>]) -> Vec<(PathBuf, String)> {
 /// One MCP client, as the Agents page shows it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Client {
-    /// What the client called itself in `initialize`, or the transport when it
-    /// never said. Invented names are worse than an honest "unnamed client".
+    /// Which client this is: one of the documented names where `clientid`
+    /// can tell (from what the client called itself in `initialize` and the
+    /// app that started its proxy), else what it called itself, else
+    /// "unnamed client". Invented names are worse than an honest one.
     pub name: String,
+    /// `clientInfo.version`, empty when the client gave none.
+    pub version: String,
     pub transport: String,
     /// The protocol revision that was negotiated, as the client asked for it.
     pub revision: String,
@@ -2750,19 +2766,23 @@ impl State {
     /// that session carries none — so the name the ledger records has to come
     /// from what was noted at the handshake rather than from the request in
     /// hand.
-    pub fn client_name(&self, session: &str, transport: &str) -> Option<String> {
+    /// The name and version a session's rows are recorded under.
+    pub fn client_name(&self, session: &str, transport: &str) -> Option<(String, String)> {
         let clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         clients
             .get(&format!("{transport}:{session}"))
-            .map(|client| client.name.clone())
-            .filter(|name| name != "unnamed client")
+            .map(|client| (client.name.clone(), client.version.clone()))
+            .filter(|(name, _)| name != "unnamed client")
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn note_client(
         &self,
         session: &str,
         transport: &str,
         name: Option<&str>,
+        version: Option<&str>,
+        host: Option<&str>,
         revision: Option<&str>,
         query: bool,
     ) {
@@ -2771,14 +2791,21 @@ impl State {
         let entry = clients
             .entry(format!("{transport}:{session}"))
             .or_insert_with(|| Client {
-                name: name.unwrap_or("unnamed client").to_string(),
+                name: "unnamed client".to_string(),
+                version: String::new(),
                 transport: transport.to_string(),
                 revision: revision.unwrap_or("—").to_string(),
                 queries: 0,
                 seen: now,
             });
-        if let Some(name) = name {
-            entry.name = name.to_string();
+        // The handshake names the client once; the host arrives on every
+        // proxied request, so a session first heard mid-conversation (a
+        // daemon restarted under it) is still told apart.
+        if name.is_some() || (host.is_some() && entry.name == "unnamed client") {
+            entry.name = crate::clientid::label(name, host);
+        }
+        if let Some(version) = version.filter(|_| !name.is_some_and(crate::clientid::generic)) {
+            entry.version = version.chars().take(64).collect();
         }
         if let Some(revision) = revision {
             entry.revision = revision.to_string();
@@ -2788,6 +2815,12 @@ impl State {
         }
         entry.seen = now;
         clients.retain(|_, client| now.saturating_sub(client.seen) <= PROXY_FRESH);
+        drop(clients);
+        Self::clients_changed();
+    }
+
+    /// The one place the clients domain is bumped, for both of its writers.
+    fn clients_changed() {
         changes::bump(changes::Domain::Clients);
     }
 
@@ -2809,6 +2842,21 @@ impl State {
         let now = now();
         proxies.insert(pid, now);
         proxies.retain(|_, seen| now.saturating_sub(*seen) <= PROXY_FRESH);
+    }
+
+    /// A session that has ended: its row and, for a proxy, its pid go now.
+    pub fn forget_client(&self, session: &str, transport: &str, proxy: Option<u32>) {
+        self.clients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&format!("{transport}:{session}"));
+        if let Some(pid) = proxy {
+            self.proxies
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&pid);
+        }
+        Self::clients_changed();
     }
 
     /// How many `semlith mcp` processes are currently forwarding here.
@@ -2894,10 +2942,13 @@ impl State {
         let debounce = self.debounce;
         let report = Arc::clone(&self.report);
         let admission = Arc::clone(&self.admission);
-        std::thread::spawn(move || {
+        let writer = std::thread::spawn(move || {
             let _lock = lock;
             keep_writing(&watching, debounce, &*report, &admission);
         });
+        let mut late = self.late_writers.lock().unwrap_or_else(|e| e.into_inner());
+        late.retain(|handle| !handle.is_finished());
+        late.push(writer);
 
         (self.report)(&format!(
             "opened {name} at {} — now serving it",
@@ -2977,7 +3028,21 @@ fn discovery(port: u16, token: &str) -> Discovery {
         port,
         token: token.to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        started: started_at(),
     }
+}
+
+/// The unix second this process first wrote a discovery file, which is its
+/// start: the first write happens as `run` opens its stores, and every later
+/// one (a store added, a key rotated) must not move it.
+fn started_at() -> u64 {
+    static STARTED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *STARTED.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    })
 }
 
 /// The stores `semlith start` should open.
@@ -3250,6 +3315,7 @@ pub fn run(
         server: Arc::clone(&server),
         fleet: Mutex::new(fleet),
         stores: RwLock::new(stores),
+        late_writers: Mutex::new(Vec::new()),
         admission: Arc::new(Admission::new(limits.runs_at_once.value)),
         airgap,
         started: SystemTime::now(),
@@ -3380,6 +3446,11 @@ pub fn run(
         }
         for watcher in watchers {
             let _ = watcher.join();
+        }
+        let late =
+            std::mem::take(&mut *state.late_writers.lock().unwrap_or_else(|e| e.into_inner()));
+        for writer in late {
+            let _ = writer.join();
         }
         for store in state.stores() {
             Discovery::remove(&store.dir);
@@ -3593,6 +3664,12 @@ fn tend(
             // which drops the events it queued for them meanwhile.
             let mut stopped = Vec::new();
             loop {
+                // A shutdown leaves what is queued queued: a run that yielded
+                // its slice requeues the rest, and without this the writer
+                // took it straight back and a shutdown joining it never ended.
+                if store.stop.load(Ordering::Relaxed) {
+                    return Ok(stopped);
+                }
                 let Some(next) = store
                     .queue
                     .lock()
@@ -3732,6 +3809,16 @@ fn perform(
                 move || {
                     if store.cancelled.load(Ordering::Relaxed) {
                         return crate::Flow::Stop;
+                    }
+                    // The daemon is shutting down: keep what is done and
+                    // step aside now, as the slice budget would in 45 s,
+                    // and before a pause or a hold, which would otherwise
+                    // wait for ever under a shutdown joining this writer.
+                    // Without it a stop mid-run returned from `main` under
+                    // an embedding pass still going, and ONNX Runtime was
+                    // torn down beneath it (#163).
+                    if store.stop.load(Ordering::Relaxed) {
+                        return crate::Flow::Yield;
                     }
                     // A lowered limit holds the newest runs at their next
                     // batch. Asked before the pause, because a held run that
@@ -5029,6 +5116,7 @@ mod tests {
             debounce: Duration::from_millis(500),
             report: Arc::new(|_| {}),
             refusals: Mutex::new(BTreeMap::new()),
+            late_writers: Mutex::new(Vec::new()),
             awaiting: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),

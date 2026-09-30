@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-09-30
+
+### Twelve clients, each tested every release
+
+**`semlith setup` supports twelve clients:** Claude Code, OpenAI Codex,
+OpenCode, IO CLI, GitHub Copilot CLI, GitHub Copilot in VS Code, Gemini CLI,
+Claude Desktop, ChatGPT desktop (the Codex app), Zed, Cline and Cursor
+(Cursor's connection is tested, its tool calls are not). Sixteen clients are no longer supported, because one maintainer
+cannot verify twenty-seven vendors each release and three of them had been
+renamed or shut down unnoticed: Kiro, Qwen Code, Amp, Crush, Droid, Goose,
+Amazon Q Developer CLI, OpenClaw, DeepSeek-TUI / Codewhale, Warp, Windsurf /
+Devin Desktop, JetBrains Junie, Roo Code, Kilo Code, Continue and LM Studio.
+
+**Upgrading cleans up after them, once.** The first `semlith setup` on 0.33.0
+removes from those clients only what semlith wrote there — the `semlith` server
+entry (when it launches or points at semlith), the rule block between semlith's
+markers, and a skill link into semlith's own skill directory — keeps every other
+byte of each file, backs each edited file up beside itself as
+`<name>.semlith-backup`, and lists every removal. A second run removes nothing.
+To keep using semlith in one of them, add it back by hand from that client's own
+MCP documentation: the command is the absolute path of `semlith` with the one
+argument `mcp`.
+
+**Zed and Cline are registered by setup.** `semlith setup --register-all` writes
+Zed's `~/.config/zed/settings.json` (`context_servers`) and Cline's
+`~/.cline/data/settings/cline_mcp_settings.json` (honouring `CLINE_DIR`). A Zed
+settings file with comments or trailing commas is left untouched and its stanza
+printed with the reason.
+
+**ChatGPT desktop (the Codex app) is registered by setup**, into the
+`~/.codex/config.toml` it shares with the Codex CLI: by the CLI's own
+registration where the CLI is installed, and by `--register-all` otherwise.
+
+**Every client on macOS, Linux and Windows.** `docs/clients.md` gives each client's
+file for each system — Zed's `%APPDATA%\Zed` on Windows, Claude Desktop's Linux
+beta and its Microsoft Store copy, VS Code's profile `mcp.json` per system — and
+a fence's `os=` takes a list. On Windows `semlith setup` finds a CLI through
+`PATHEXT`, so the `.cmd` shims npm installs (Gemini CLI, Copilot CLI, Codex,
+VS Code's `code`) register instead of reading as not installed. A client whose
+CLI is missing but which is installed is written through its file, and Codex's
+`config.toml` gains the semlith table the same way, which is how the ChatGPT
+desktop app is registered without the Codex CLI.
+
+**Every retrieval is filed under the app that made it.** Several clients name
+themselves only by their MCP library — Claude Desktop, Zed, Copilot in VS Code
+and Copilot CLI all say `mcp`, IO CLI says `rmcp` — and the Codex CLI and the
+ChatGPT app share one name, so the ledger and the access report filed them
+together. `semlith mcp` now reads which app started it and tells the daemon, and
+each ledger row and each Connected row carries the documented client name and
+the client's own version. The Agents page lists one row per app with its
+session count, a closed client leaves the list at once, and an idle one stays.
+
+**A daemon restart no longer breaks connected clients.** A client's `semlith
+mcp` held the daemon's token from its first call, so any restart of the daemon —
+including the one `semlith setup` now does on upgrade — failed every later call
+until the app was restarted. A call now follows the daemon through a restart.
+
+**Nothing is created for a client that is not installed.** A skill link, a rules
+file or a configuration file is written only where that client's own directory
+already exists.
+
+### Faster with the Neural Engine off
+
+Indexing on the CPU and the Core ML GPU, with the Neural Engine switched off,
+measured 66.3 chunks/s p10 on the M1 Air against 37.7 for 0.32.0, the same day
+through the same harness (#164). The GPU models accumulate in fp16, the Core ML
+pack moves to version 2 with GPU buckets at 128/192/256/320/400 tokens, and the
+Core ML worker copy is renewed (`accel/coreml-worker-v2`). The first start after
+the upgrade downloads the new pack (148 MB) and compiles it once.
+
+### Fixed
+
+- **Copilot in VS Code refused every chat with semlith enabled** ("tool
+  parameters array type must have items"). Every array parameter in the tool
+  schemas now says it holds strings, and a test walks every tool's schema.
+- **An upgrade left every client on the old daemon.** `semlith setup` and
+  `semlith upgrade` now restart the login service when the running daemon serves
+  another version (`launchctl kickstart -k`, `systemctl --user restart`, or the
+  logon task ended and run again), and `semlith doctor` fails, naming the fix,
+  while they differ.
+- **`semlith doctor` reported the wrong start time for the daemon.** It read the
+  discovery file's modification time, which every store open and key rotation
+  moves; `daemon.json` now records when the daemon started.
+- **Setup printed the agent key.** Printed stanzas name `${SEMLITH_AGENT_KEY}`;
+  `semlith key show` is the one command that prints the key.
+- **The access report filed every proxied session under one store with zero
+  hits.** A reply is recorded against each store that answered it, with that
+  store's hits.
+- **The ledger chain could fork** when the daemon and a terminal search recorded
+  at the same moment; reading the chain's tail and appending to it is now one
+  transaction.
+- **The stdio proxy's start line** names the daemon it forwards to, and no longer
+  names an arbitrary store.
+- **`semlith doctor` explains Gemini CLI's folder trust**, which disables
+  user-level MCP servers in folders not in `~/.gemini/trustedFolders.json`.
+- **Stopping the daemon mid-index printed an ONNX Runtime error** (#163). A
+  shutdown now ends a run's slice at once and keeps what it embedded, and the
+  daemon waits for every store's writer before it exits.
+- A test of the Neural Engine compile countdown no longer fails on a slow runner
+  (#166).
+
 ## [0.32.0] - 2026-09-29
 
 ### Indexing, several times faster on the machine you already have
@@ -3888,7 +3989,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.32.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.33.0...HEAD
+[0.33.0]: https://github.com/semlith/semlith/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/semlith/semlith/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/semlith/semlith/compare/v0.30.1...v0.31.0
 [0.30.1]: https://github.com/semlith/semlith/compare/v0.30.0...v0.30.1

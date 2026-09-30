@@ -136,17 +136,18 @@ Software License Agreement do not apply to it.
 
 Apple silicon only, for the Neural Engine lane and the Core ML GPU lane. semlith
 builds it: `.github/workflows/packs.yml` runs `packs/coreml/convert.py` on a
-macOS runner and publishes the zip to this repository's `pack-coreml-v1`
+macOS runner and publishes the zip to this repository's `pack-coreml-v2`
 release, and `src/packs.rs` pins it by URL, SHA-256 and size. granite at
 `ibm-granite/granite-embedding-small-english-r2@2ab6fa8e` is converted twice:
 once in the Neural Engine's layout (batch 4; sequence buckets 128, 192, 256,
-320, 384, 512) and once in the standard layout for the GPU (batch 8; 128, 256,
-512). Each layout is one multifunction model with a function per bucket, so the
+320, 384, 512) and once in the standard layout for the GPU (batch 8; 128, 192,
+256, 320, 400 — no chunk is longer than 400 tokens). The GPU models run with
+fp16 accumulation, which leaves the fixture's cosine against fp32 at 0.999999. Each layout is one multifunction model with a function per bucket, so the
 weights are stored once per layout.
 
 | Asset | SHA-256 | Bytes |
 |---|---|---|
-| [`semlith-coreml-1.zip`](https://github.com/semlith/semlith/releases/download/pack-coreml-v1/semlith-coreml-1.zip) | `64343cbb2cc69465dda4ed914669995e4bea47df72c0c1da43d2dbb4b2f59ad0` | 147 881 077 |
+| [`semlith-coreml-2.zip`](https://github.com/semlith/semlith/releases/download/pack-coreml-v2/semlith-coreml-2.zip) | `799e4f7e8a4b1aab8335ab969bc385fcfb7baa8d62bfd14e02c8be9b0188a082` | 147 950 175 |
 
 On the M1 Air, every Neural Engine function places 99.85 % of its operations on
 the Neural Engine, and its vectors agree with the fp32 reference at cosine
