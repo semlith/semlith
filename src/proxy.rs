@@ -36,11 +36,20 @@ const LONG_CALL_TIMEOUT: Duration = Duration::from_secs(3600);
 /// a dead port must not make every `semlith mcp` start slowly.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long a call waits for a restarting daemon before it reports failure.
+const RESTART_WAIT: Duration = Duration::from_secs(20);
+
 /// A daemon this process should forward to.
 pub struct Upstream {
+    /// The port the daemon was found on at start.
     pub port: u16,
-    token: String,
-    /// The store directory whose discovery file named it, for the stderr line.
+    /// The port and token in use now. A daemon restarted under a connected
+    /// client — `semlith setup` restarts a stale one on upgrade — comes back
+    /// with a new token and possibly a new port, and a proxy holding the old
+    /// pair would fail every call until its app was restarted.
+    current: std::sync::Mutex<(u16, String)>,
+    /// The store directory whose discovery file named it, where the new pair
+    /// is read from.
     pub via: PathBuf,
 }
 
@@ -56,7 +65,7 @@ pub fn find(dirs: &[PathBuf]) -> Option<Upstream> {
         };
         let upstream = Upstream {
             port: discovery.port,
-            token: discovery.token,
+            current: std::sync::Mutex::new((discovery.port, discovery.token)),
             via: dir.clone(),
         };
         if upstream.alive() {
@@ -82,8 +91,35 @@ impl Upstream {
     }
 
     /// Forward one JSON-RPC request and return the daemon's answer.
+    ///
+    /// A call that fails is tried again, for as long as [`RESTART_WAIT`],
+    /// against whatever the discovery file names at each try: that is how a
+    /// proxy survives its daemon restarting under it (new token, new port, and
+    /// a few seconds opening its stores). A discovery file that names no live
+    /// daemon ends the wait at once, so a daemon that is gone still fails fast.
     pub fn call(&self, request: &str) -> Result<String> {
-        self.request("POST", "/api/mcp", Some(request), CALL_TIMEOUT)
+        let deadline = std::time::Instant::now() + RESTART_WAIT;
+        loop {
+            match self.request("POST", "/api/mcp", Some(request), CALL_TIMEOUT) {
+                Ok(answer) => return Ok(answer),
+                Err(e) => {
+                    if std::time::Instant::now() >= deadline || !self.rediscover() {
+                        return Err(e);
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+        }
+    }
+
+    /// Take up the port and token the discovery file names now. `false` when
+    /// it names no live daemon.
+    fn rediscover(&self) -> bool {
+        let Some(found) = Discovery::read(&self.via) else {
+            return false;
+        };
+        *self.current.lock().unwrap_or_else(|e| e.into_inner()) = (found.port, found.token);
+        true
     }
 
     /// Tell a running daemon to take up a key that has just been written.
@@ -159,9 +195,14 @@ impl Upstream {
         body: Option<&str>,
         timeout: Duration,
     ) -> Result<String> {
-        let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, self.port));
+        let (port, token) = self
+            .current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
         let mut stream = TcpStream::connect_timeout(&address, timeout)
-            .with_context(|| format!("connecting to the daemon on 127.0.0.1:{}", self.port))?;
+            .with_context(|| format!("connecting to the daemon on 127.0.0.1:{port}"))?;
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
 
@@ -175,9 +216,9 @@ impl Upstream {
              Content-Type: application/json\r\n\
              Content-Length: {}\r\n\
              Connection: close\r\n\r\n",
-            self.port,
+            port,
             crate::http::TOKEN_HEADER,
-            self.token,
+            token,
             std::process::id(),
             crate::clientid::HEADER,
             // The app that started this proxy, so a client that names only
@@ -227,19 +268,64 @@ impl Upstream {
 /// The notification a proxy sends when its client has hung up.
 pub const CLOSED: &str = "notifications/semlith/closed";
 
+/// The notification a proxy sends while its client stays connected, carrying
+/// the `clientInfo` the client gave at `initialize`.
+pub const ALIVE: &str = "notifications/semlith/alive";
+
+/// How often a connected proxy says so. Well inside the daemon's two-minute
+/// freshness window, so an app that is open and idle stays listed, and a
+/// daemon restarted under it learns of it again within half a minute.
+const HEARTBEAT: Duration = Duration::from_secs(30);
+
 pub fn serve(upstream: &Upstream, input: impl BufRead, mut output: impl Write) -> Result<()> {
-    let result = forward(upstream, input, &mut output);
+    let client_info = std::sync::Mutex::new(serde_json::Value::Null);
+    let (done, stopped) = std::sync::mpsc::channel::<()>();
+    let result = std::thread::scope(|scope| {
+        let client_info = &client_info;
+        scope.spawn(move || {
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                stopped.recv_timeout(HEARTBEAT)
+            {
+                let info = client_info
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let beat = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": ALIVE,
+                    "params": { "clientInfo": info },
+                });
+                let _ = upstream.call(&beat.to_string());
+            }
+        });
+        let result = forward(upstream, input, &mut output, client_info);
+        drop(done);
+        result
+    });
     // The client closed stdin: say so, so the daemon stops listing it. Best
     // effort — a daemon that has gone away has nothing to list.
     let _ = upstream.call(&format!(r#"{{"jsonrpc":"2.0","method":"{CLOSED}"}}"#));
     result
 }
 
-fn forward(upstream: &Upstream, input: impl BufRead, output: &mut impl Write) -> Result<()> {
+fn forward(
+    upstream: &Upstream,
+    input: impl BufRead,
+    output: &mut impl Write,
+    client_info: &std::sync::Mutex<serde_json::Value>,
+) -> Result<()> {
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
+        }
+        // Kept for the heartbeat, so the daemon still knows this client's
+        // name after it restarts.
+        if let Ok(message) = serde_json::from_str::<serde_json::Value>(&line)
+            && message.get("method").and_then(serde_json::Value::as_str) == Some("initialize")
+            && let Some(info) = message.pointer("/params/clientInfo")
+        {
+            *client_info.lock().unwrap_or_else(|e| e.into_inner()) = info.clone();
         }
 
         // Notifications carry no id and must not be answered — including not
