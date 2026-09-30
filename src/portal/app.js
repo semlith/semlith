@@ -11433,11 +11433,13 @@ async function privacyView() {
           says(
             "The embedding model is downloaded once, on first index, and cached. ",
             mono("semlith upgrade"),
-            " and ",
+            ", ",
             mono("semlith add"),
+            " and ",
+            mono("semlith prices update"),
             " reach the network only in the second you ask them to. ",
             mono("--airgap"),
-            " refuses all three and exits naming what it refused.",
+            " refuses all four and exits naming what it refused.",
           ),
           copyField("SEMLITH_MODEL_CACHE=/media/usb/models semlith index ."),
           el(

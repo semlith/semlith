@@ -1346,6 +1346,26 @@ still queued never started at all, which would otherwise leave no trace anywhere
 The next `semlith start` says both on the store's own event feed, once, on the
 Stores page.
 
+**What is in the prose** counts what the documents hold, not only how many
+there are (0.34.0): PDF pages, the slides of `.pptx` and `.odp` decks, the
+non-empty cells of `.xlsx`, `.ods`, `.csv` and `.tsv` sheets (ODF's repeated
+cells counted once per repeat), and notebook cells, each shown beside its file
+count — `412 pages · 9 PDFs`. Each reader counts as it reads the file, in the
+same pass that extracts its text, and the count is kept in the store beside the
+file. Word documents, e-books, mail, web pages, images, and code have no such
+unit and stay counted in files; a `.docx` has no pages until something lays it
+out.
+
+A store written before 0.34.0 has no counts. The page says how many files are
+**Not counted yet**, and the next index pass, whether a run or the catch-up on
+`semlith start`, reads each of those files again for its count alone. Nothing is
+chunked or embedded again, and the store's vectors and search rows are untouched.
+
+The page measures each store on a connection of its own. A cold measure of a
+very large store reads every chunk's text and can take minutes. Before 0.34.0 it
+held the lock every other read went through, so the Stores list and every search
+waited behind it.
+
 ## Retrieval ledger
 
 **What it is for.** What your agents actually retrieved, recorded locally, so the
@@ -1442,6 +1462,31 @@ readings of one ledger — what was retrieved, and what the agent did afterwards
 so a tab says they are alternatives, where stacking them made the second one
 something you found by scrolling past the first. The sessions table keeps its
 own card above both, because it is the summary the two tabs are of.
+
+**Usage** is a third tab (0.34.0): the model, tokens and cost of the calls each
+client made to semlith, read from that client's own session log on this machine.
+It is off until **Usage from client logs** is turned on on the Privacy page or
+with `semlith ledger --usage on`. Off, no client log is opened. On, each row the
+Retrievals tab shows gains the model that made the call and its cost, with the
+tokens and the log it came from on hover. The tab totals calls, input, output,
+cache-read and cache-write tokens and cost per client and model. MCP carries
+none of these; the client's log does, so semlith matches each of its rows to the
+tool call in that log by tool, time and arguments, and takes the usage of the
+model request that issued the call. The rows fill in when the page is read,
+because a client writes its log after semlith has answered. A client whose app
+keeps no log semlith can read says `not recorded` on its rows, and nothing is
+estimated for it. `docs/clients.md` lists which log each client is read from.
+
+Cost is the client's own figure where it records one (OpenCode, Cline).
+Otherwise it is the tokens at the price in semlith's table, which is a models.dev
+snapshot built into the binary. The rate is chosen by the model's context tier
+where it has one, and a cache rate the table does not carry is billed at the
+input rate. Each row says which table and date priced it. A model the table does
+not carry gets its tokens and no cost. A subscription client, such as Copilot or
+Claude on a plan, is shown at the API price of the same tokens, which is what the
+tokens would have cost and not what was paid. **Update prices** runs `semlith
+prices update`, which fetches models.dev once because someone pressed the
+button. It is the one request semlith makes there.
 
 **This page reads live.** Every surface that records a retrieval writes through
 one function, and that is where the ledger domain is bumped, so a row lands here
@@ -1851,10 +1896,18 @@ embedding model comes from Hugging Face, once, on the first index or search.
 The WebGPU plugin and the fp16 model come from PyPI and Hugging Face, on the
 first run on a machine that has a hardware GPU with the GPU lane on. The CUDA
 pack comes from GitHub and PyPI, only after CUDA has been turned on. `semlith
-upgrade` and `semlith add` reach the network only when you ask them to.
+upgrade`, `semlith add` and `semlith prices update` (models.dev's price
+table, for the ledger's cost column) reach the network only when you ask them to.
 `--airgap` refuses all of these unless the files are already in the model
 cache, and exits naming what it refused. On a machine with no GPU and CUDA off,
 nothing past the model is ever fetched.
+
+**Usage from client logs** is the second switch (0.34.0), built like Session
+replay. It lets the ledger read each AI client's session log for the model, tokens
+and cost of its calls, and the card lists every path it would open on this
+machine, per client, before it is turned on. The logs are opened read-only, and
+only the model id and the numbers are kept. No prompt, reply, or file text is
+kept. `semlith ledger --usage on|off` is the same setting.
 
 **Session token.** Shown truncated, with a **Rotate** button. See below for what
 rotation does; the short version is on the page itself, including the sentence
