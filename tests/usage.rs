@@ -28,16 +28,16 @@ fn row<'a>(client: &'a str, query: &'a str, query_id: &'a str) -> NewRetrieval<'
     }
 }
 
-fn usage_of(
-    db: &rusqlite::Connection,
-    query_id: &str,
-) -> (
+/// Model, cache-read tokens, cost, cost source and usage source.
+type Usage = (
     Option<String>,
     Option<i64>,
     Option<f64>,
     Option<String>,
     Option<String>,
-) {
+);
+
+fn usage_of(db: &rusqlite::Connection, query_id: &str) -> Usage {
     db.query_row(
         "SELECT model, cache_read_tokens, cost_usd, cost_source, usage_source FROM retrievals WHERE query_id = ?1",
         [query_id],
