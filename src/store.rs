@@ -86,6 +86,10 @@ CREATE TABLE IF NOT EXISTS symbols (
 
 CREATE INDEX IF NOT EXISTS symbols_file_id ON symbols(file_id);
 CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
+-- Search seeds its graph walk from the symbols inside its top chunks. Without
+-- this, each seed chunk was a scan of every symbol: on the 879k-chunk benchmark
+-- corpus, 1.25M rows read at random, once per seed, on every search.
+CREATE INDEX IF NOT EXISTS symbols_chunk_id ON symbols(chunk_id);
 
 -- What a symbol used to be, from 0.23.0. A re-index no longer simply deletes
 -- the definitions of a file it is about to rewrite: it copies them here first,
@@ -4002,6 +4006,31 @@ mod tests {
             .map(|s| (s.path.as_str(), s.start_line))
             .collect();
         assert_eq!(got, [("a.rs", 1), ("a.rs", 5), ("b.rs", 1)]);
+    }
+
+    /// Seeding the walk looks symbols up by chunk. Without an index on
+    /// `chunk_id` that was a scan of every symbol per seed chunk, minutes per
+    /// search on the benchmark corpus.
+    #[test]
+    fn symbols_in_chunks_uses_the_chunk_index() {
+        let db = Connection::open_in_memory().unwrap();
+        one_symbol(&db, "a.rs", "seed");
+        let navigational = crate::graph::not_navigational("kind");
+        let plan: Vec<String> = db
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN SELECT DISTINCT name FROM symbols \
+                 WHERE chunk_id IN (?) AND {navigational}"
+            ))
+            .unwrap()
+            .query_map([1], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|step| step.contains("symbols_chunk_id")),
+            "the seed lookup does not use the chunk index: {plan:?}"
+        );
+        assert_eq!(symbols_in_chunks(&db, &[1]).unwrap(), ["seed"]);
     }
 
     /// The walk's variant drops an edge whose target is a hub, and only that
