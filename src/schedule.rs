@@ -650,7 +650,13 @@ mod tests {
 
         let mut s = weekly();
         s.model = "GPT-9".into();
-        assert!(s.check().unwrap_err().to_string().contains("Sonnet 5"));
+        let e = s.check().unwrap_err().to_string();
+        assert!(e.contains(crate::report::DEFAULT_MODEL), "{e}");
+        // A schedule saved before 0.34.0 names one of the old three, which
+        // still price.
+        let mut s = weekly();
+        s.model = "Sonnet 5".into();
+        assert!(s.check().is_ok());
 
         let mut s = weekly();
         s.every_seconds = 5;
