@@ -646,8 +646,6 @@ position of its own, and redrawing would throw both away.
 - **Respect .gitignore** — on every run and on the watcher.
 - **Maintenance** — **Compact now**, with how much there is to reclaim, and
   **Re-index everything**.
-- **Model** — the store's embedding model, fixed for its life. To switch, make a
-  new store.
 - **Where it reads from** — each root. A root whose folder has moved offers
   **Re-point…**, which changes the directory the registry names and nothing else:
   no re-embedding, nothing rewritten. A store outside the store home that the
@@ -1330,8 +1328,7 @@ exists.
 ### About
 
 What this binary is: the version and store format, the binary's path, size and
-target, the address it is bound to, the store home, the model the stores use, the
-source licence, the uptime and process id, and the MCP revisions it speaks. The
+target, the address it is bound to, the store home, the source licence, the uptime and process id, and the MCP revisions it speaks. The
 version shown here, in the sidebar and anywhere else is the running binary's,
 read from the daemon.
 

@@ -5230,3 +5230,21 @@ button.gl-row:hover,
 .pill {
   flex-shrink: 0;
 }
+/* A switch that stands alone in a header or a toolbar sits in its own box,
+   like a button, so it reads as a control rather than a label. */
+.switch.boxed {
+  height: 32px;
+  min-height: 0;
+  padding: 0 12px 0 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.switch.boxed.h34 {
+  height: 34px;
+}
+.switch.boxed.sm {
+  height: auto;
+  padding: 4px 10px 4px 8px;
+  font-size: 12px;
+}

@@ -2335,7 +2335,6 @@ function wizardScreen() {
     setTimeout(() => input.focus(), 0);
     const suggestRow = el("div", { class: "row gap6" });
     paintSuggest(suggestRow, input);
-    const model = defaultModel();
     return el(
       "div",
       { class: "stack" },
@@ -2361,7 +2360,6 @@ function wizardScreen() {
           ),
         ),
       ),
-      el("div", { class: "model-line" }, el("span", { class: "eyebrow", text: "Model" }), el("span", { class: "t-mono", text: model }), el("span", { class: "muted t-sm", text: "— fixed for the life of the store, so its vectors stay comparable." })),
     );
   }
 
@@ -3772,14 +3770,6 @@ async function stopRun(r) {
   paintChrome();
 }
 
-/** The default model's name, read from what the daemon would download. */
-function defaultModel() {
-  const what = ((data.privacy?.downloads || [])[0] || {}).what || "";
-  const m = what.match(/\(([^)]+)\)/);
-  const stores = liveStores().filter((s) => s.model);
-  if (stores.length) return `${stores[0].model}${stores[0].dim ? ` · ${stores[0].dim} dims` : ""}`;
-  return m ? m[1].replace(", ", " · ") : "the default embedding model";
-}
 
 function classWord(cls) {
   return { content: "Secret-shaped value", policy: "Policy", credential: "Credential file", unindexable: "No text", excluded: "Excluded", dummy: "Test dummy" }[cls] || cls || "";
@@ -4022,7 +4012,7 @@ VIEWS.home = {
       "div",
       { class: "q4" },
       kpi("Stores", String(stores.length), running.length ? `${plural(running.length, "run")} going now` : reviewing.length ? `${plural(reviewing.length, "store")} needs a review` : stores.length ? "all fresh and watched" : "none yet", { onclick: () => go("stores") }),
-      kpi("Files indexed", n(files), `${n(chunks)} chunks${stores[0] && stores[0].dim ? ` · ${stores[0].dim}-dim vectors` : ""}`, { onclick: () => go("stores") }),
+      kpi("Files indexed", n(files), `${n(chunks)} chunks`, { onclick: () => go("stores") }),
       kpi("Agents connected", String(connectedCount()), connectedCount() ? (lastQuery ? `${lastQuery.client} asked ${ago(lastQuery.at)}` : "waiting for a first query") : registered.length ? `${plural(registered.length, "client")} registered · none talking now` : `${plural(found.length, "client")} found on this machine`, { onclick: () => go("agents") }),
       kpi("Fewer tokens", ledger.ratio ? `${ledger.ratio.toFixed(1)}×` : "—", ledger.ratio ? `than reading those files whole · coverage ${ledger.coverage}% · ${ledger.tier}` : "counted once an agent asks something", { onclick: () => go("ledger") }),
     );
@@ -4632,7 +4622,7 @@ function sdOverview(s) {
       "div",
       { class: "q4" },
       kpi("Files", n(s.files || 0), s.files ? `read by ${plural(s.readers || readers.length, "reader")} · ${n(s.lines || 0)} lines` : "nothing yet"),
-      kpi("Chunks", n(s.chunks || 0), s.dim ? `${s.dim}-dim vectors · ${String(s.model).match(/int8|fp16|f32/) ? String(s.model).match(/int8|fp16|f32/)[0] : "one model"}` : "no vectors yet", { tip: s.model || null }),
+      kpi("Chunks", n(s.chunks || 0), s.chunks ? "searchable on this machine" : "nothing indexed yet"),
       kpi("On disk", s.disk ? bytes(s.disk.total) : "—", reclaimable(s) ? `${bytes(reclaimable(s))} reclaimable` : "nothing to reclaim"),
       kpi("Saved for agents", v && v.total ? `${short(v.net_tokens)} tokens` : "—", v && v.total ? `coverage ${v.coverage}% · ${v.tier}` : "counted once an agent asks"),
     ),
@@ -5241,7 +5231,6 @@ function sdSettings(s) {
         el("span", { class: "card-t", text: "Maintenance" }),
         el("div", { class: "maint-row" }, el("span", { class: "col grow" }, el("span", { class: "t", text: "Compact" }), el("span", { class: "s", text: reclaim ? `${bytes(reclaim)} of deleted chunks can be reclaimed. Searches keep working while it runs.` : `Nothing to reclaim. The daemon compacts on its own past ${data.runs?.compaction?.threshold_percent ?? 25}%.` })), btn({ class: "btn", disabled: reclaim ? null : true, onclick: () => compactStores([s.name]) }, "Compact now")),
         el("div", { class: "maint-row" }, el("span", { class: "col grow" }, el("span", { class: "t", text: "Re-index everything" }), el("span", { class: "s", text: "Reads every source again. Unchanged files are skipped by hash." })), btn({ class: "btn", disabled: activeRun(s.name) || !(s.roots || []).length ? true : null, onclick: () => reindexStore(s.name) }, "Re-index")),
-        el("div", { class: "model-note" }, el("span", { class: "eyebrow sm", text: "Model" }), el("span", { text: `${s.model || "the default model"}${s.dim ? ` · ${s.dim} dims` : ""}. Fixed for this store — to switch, make a new store.` })),
       ),
       missing.length || outside
         ? el(
@@ -6453,7 +6442,7 @@ function exploreTab(picker) {
             ),
           ),
           gr.unres ? unresolvedList.map((u) => el("div", { class: "edge-row" }, el("span", { class: "col" }, el("span", { class: "n", text: u.name }), el("span", { class: "w", text: "no definition in any open store" })), confBadge("unresolved"))) : null,
-          toggle(gr.unres, gr.unres ? "Hide unresolved" : "Show unresolved", (v) => ((gr.unres = v), loadSymbol()), { cls: "t125" }),
+          toggle(gr.unres, gr.unres ? "Hide unresolved" : "Show unresolved", (v) => ((gr.unres = v), loadSymbol()), { cls: "boxed sm" }),
         ),
         el(
           "div",
@@ -6528,7 +6517,7 @@ function blastTab(picker) {
       el("span", { class: "eyebrow", text: "IF THIS CHANGES" }),
       el("div", { class: "box focus h34 grow-box" }, symInput),
       el("div", { class: "dial" }, el("span", { class: "eyebrow", text: "HOPS" }), String(b.hops), btn({ class: "pm", "aria-label": "Fewer hops", onclick: () => ((b.hops = Math.max(1, b.hops - 1)), repaint()) }, "−"), btn({ class: "pm", "aria-label": "More hops", onclick: () => ((b.hops = Math.min(6, b.hops + 1)), repaint()) }, "+")),
-      toggle(b.verified, "Verified edges only", (v) => ((b.verified = v), repaint(), b.out && runReach())),
+      toggle(b.verified, "Verified edges only", (v) => ((b.verified = v), repaint(), b.out && runReach()), { cls: "boxed h34" }),
       picker,
       btn({ class: "btn md primary", onclick: runReach }, "Reach"),
     ),
@@ -6784,7 +6773,7 @@ VIEWS.agents = {
         toggle(open, open ? "Endpoint on" : "Endpoint off", async (v) => {
           const out = await act(() => post("/api/endpoint", { open: v }), v ? "Endpoint answering again" : "Endpoint closed — agents get a clear refusal");
           if (out) await load("agents", true), repaint();
-        }, { cls: "strong" }),
+        }, { cls: "boxed h34 strong" }),
       ),
       tabs(
         [
@@ -7086,7 +7075,7 @@ VIEWS.ledger = {
             const out = await act(() => post("/api/ledger/recording", { on: v }), v ? "Recording again" : "Paused — nothing is recorded until you resume");
             if (out) await loadMany(["ledger", "about"], true), paintChrome(), repaint();
           },
-          { cls: "strong", disabled: lockedOff, tip: lockedOff ? "This daemon was started with recording off; restart it without the flag to turn it on here" : null },
+          { cls: "boxed strong", disabled: lockedOff, tip: lockedOff ? "This daemon was started with recording off; restart it without the flag to turn it on here" : null },
         ),
         btn({ class: "btn dark", onclick: () => go("reports") }, "Build a report"),
       ),
@@ -7399,6 +7388,12 @@ async function setReplay(on) {
   }
 }
 
+// A download's name without the model detail in brackets: the portal says
+// "the embedding model", never which one.
+function plainWhat(what) {
+  return String(what || "").replace(/\s*\([^)]*\)/g, "");
+}
+
 function exportLedger(format) {
   const sessions = lg.tab === "sessions";
   const list = lg.shown ? lg.shown() : sessions ? data.ledger?.sessions || [] : data.ledger?.rows || [];
@@ -7700,7 +7695,7 @@ VIEWS.privacy = {
           "div",
           { class: "col gap2 grow" },
           el("span", { class: "t", text: left ? `${plural(outbound.count, "request")} left this machine since start` : "Nothing has left this machine" }),
-          el("span", { class: "l", text: `${n(outbound.count)} outbound connections since ${outbound.since ? clock(outbound.since) : "start"}${outbound.recent && outbound.recent.length ? ` · last: ${outbound.recent[0].what} to ${outbound.recent[0].host}` : ""} · ${cached.length ? `${plural(cached.length, "download")} on disk: ${cached.map((d) => `${d.what.replace(/^the /, "")} ${bytes(d.bytes)}`).join(", ")}` : "nothing downloaded"}${airgap.on ? " · airgap on" : ""}` }),
+          el("span", { class: "l", text: `${n(outbound.count)} outbound connections since ${outbound.since ? clock(outbound.since) : "start"}${outbound.recent && outbound.recent.length ? ` · last: ${outbound.recent[0].what} to ${outbound.recent[0].host}` : ""} · ${cached.length ? `${plural(cached.length, "download")} on disk: ${cached.map((d) => `${plainWhat(d.what).replace(/^the /, "")} ${bytes(d.bytes)}`).join(", ")}` : "nothing downloaded"}${airgap.on ? " · airgap on" : ""}` }),
         ),
         toggle(airgap.on, "Airgap · refuse every outbound request", async (v) => {
           const out = await act(() => post("/api/airgap", { on: v }), v ? "Airgap on — any outbound request exits and names itself" : "Airgap off");
@@ -7744,7 +7739,7 @@ VIEWS.privacy = {
             "div",
             { class: "card" },
             el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Everything semlith ever fetches" }), meta(`${downloads.length + 2} things, each on your say-so`)),
-            downloads.map((d) => el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: cap(d.what) }), el("span", { class: "muted t-xs", text: `${d.source} · ${bytes(d.bytes)} · ${d.when}` })), pill(d.cached ? "on disk" : "never fetched", d.cached ? "green" : "grey", { dot: false }))),
+            downloads.map((d) => el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: cap(plainWhat(d.what)) }), el("span", { class: "muted t-xs", text: `${d.source} · ${bytes(d.bytes)} · ${d.when}` })), pill(d.cached ? "on disk" : "never fetched", d.cached ? "green" : "grey", { dot: false }))),
             el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "A URL you add to a store" }), el("span", { class: "muted t-xs", text: "one https request for exactly that URL · only when you press Fetch" })), pill("on request", "grey", { dot: false })),
             el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "The release check and the price table" }), el("span", { class: "muted t-xs", text: "github.com and models.dev · only when you press the button in Settings or Reports" })), pill("on request", "grey", { dot: false })),
             outbound.recent && outbound.recent.length ? el("div", { class: "card-foot", text: `last ${outbound.recent.length}: ${outbound.recent.slice(0, 4).map((r) => `${clock(r.at)} ${r.what} → ${r.host}`).join(" · ")}` }) : null,
@@ -8098,7 +8093,6 @@ function seAbout() {
   const prices = data.prices || {};
   const helpers = data.helpers || {};
   const up = seUi.update;
-  const models = liveStores().map((s) => s.model).filter(Boolean);
   return [
     el(
       "div",
@@ -8111,7 +8105,6 @@ function seAbout() {
           ["BINARY", `${tilde(a.binary)} · ${bytes(a.binary_bytes)} · ${a.target}`],
           ["BOUND TO", a.bind],
           ["STORE HOME", tilde(a.store_home)],
-          ["MODEL", models.length ? [...new Set(models)].join(", ") : defaultModel()],
           ["SOURCE", `${a.license} · free and complete`],
           ["UPTIME", `${spellTook((a.uptime || 0) * 1000)} · pid ${a.pid}`],
           ["MCP revisions", (a.revisions || []).join(" · ")],
