@@ -504,11 +504,42 @@ fn run(program: &str, args: &[&str]) -> Result<String> {
 /// efficiency cores. `setup` and `upgrade` rewrite such a definition, and
 /// `doctor` names it until one of them has.
 pub fn stale_definition() -> Option<String> {
+    if seam().is_some() {
+        return None;
+    }
     platform::stale_definition()
+}
+
+/// Test seam: a directory that stands in for the service manager.
+///
+/// HOME redirects files, not launchd, systemd or Task Scheduler — a test that
+/// installed through the real mechanism replaced the developer's own login
+/// service once already. With this set, install writes a definition file here,
+/// remove deletes it, status reads it, and no service manager is asked
+/// anything. Undocumented for users, like the other harness-only variables.
+pub const SERVICE_DIR_ENV: &str = "SEMLITH_SERVICE_DIR";
+
+fn seam() -> Option<PathBuf> {
+    std::env::var_os(SERVICE_DIR_ENV)
+        .filter(|v| !v.is_empty())
+        .map(|dir| PathBuf::from(dir).join(format!("{LABEL}.service")))
+}
+
+fn seam_status(file: PathBuf) -> Status {
+    Status {
+        installed: file.is_file(),
+        definition: file.is_file().then_some(file),
+        log: log_path().ok(),
+        restarts: true,
+        ..Status::absent(platform::MECHANISM)
+    }
 }
 
 /// Whether a login service is installed for this user, and where to look.
 pub fn status() -> Status {
+    if let Some(file) = seam() {
+        return seam_status(file);
+    }
     platform::status()
 }
 
@@ -525,6 +556,17 @@ pub fn install(binary: Option<&Path>, port: Option<u16>) -> Result<Status> {
         Some(path) => plain(path.canonicalize().unwrap_or_else(|_| path.to_path_buf())),
         None => exe()?,
     };
+    if let Some(file) = seam() {
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        let args = match port {
+            Some(port) => format!("{} start --port {port}\n", exe.display()),
+            None => format!("{} start\n", exe.display()),
+        };
+        std::fs::write(&file, args).with_context(|| format!("writing {}", file.display()))?;
+        return Ok(seam_status(file));
+    }
     // A service pointing into the temp directory is one the next cleanup
     // breaks, and it is what a test that forgot `--no-service` produces: HOME
     // is redirected, but launchd and systemd register into the real session,
@@ -738,6 +780,13 @@ fn tcc_guarded(exe: &Path) -> Option<PathBuf> {
 /// is not an error — `--no-service` on a machine that never had one is a
 /// statement about the end state, not a request that can fail.
 pub fn remove() -> Result<bool> {
+    if let Some(file) = seam() {
+        if !file.exists() {
+            return Ok(false);
+        }
+        std::fs::remove_file(&file).with_context(|| format!("removing {}", file.display()))?;
+        return Ok(true);
+    }
     platform::remove()
 }
 

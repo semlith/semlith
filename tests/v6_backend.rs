@@ -571,6 +571,34 @@ fn picked_files_reindex_as_one_run_and_its_record_survives_a_restart() {
     assert!(row["result"].is_string() && row["log"].is_array(), "{row}");
 }
 
+// ------------------------------------------------------------------ A6
+
+/// Start at login from the page installs and removes the service through
+/// the seam — never the real service manager — and About says which.
+#[test]
+fn start_at_login_installs_and_removes_through_the_seam() {
+    let (_dir, home) = home();
+    let daemon = Daemon::start(&home);
+    let login = daemon.get("/api/about")["login"].clone();
+    assert_eq!(login["installed"], json!(false), "{login}");
+    assert!(login["mechanism"].is_string());
+
+    let (status, body) = daemon.post("/api/login-item", json!({ "on": true }));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["login"]["installed"], json!(true), "{body}");
+    let file = home.join("service").join("com.semlith.daemon.service");
+    assert!(file.is_file(), "the seam was not written");
+    assert!(
+        std::fs::read_to_string(&file).unwrap().contains("start --port"),
+        "a daemon on a non-default port must keep its port at the next login"
+    );
+    assert_eq!(daemon.get("/api/about")["login"]["installed"], json!(true));
+
+    let (_, body) = daemon.post("/api/login-item", json!({ "on": false }));
+    assert_eq!(body["login"]["installed"], json!(false), "{body}");
+    assert!(!file.exists());
+}
+
 // ------------------------------------------------------------------ A11, A12
 
 /// One client is registered and unregistered by its file, backed up first,

@@ -130,6 +130,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/ledger/raw-read") => raw_read(state, request),
         (_, true, "/api/ledger/recording") => ledger_recording(request),
         (_, true, "/api/airgap") => airgap(request),
+        (_, true, "/api/login-item") => login_item(state, request),
         (_, true, "/api/agents/reveal") => reveal(state),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
@@ -1201,6 +1202,44 @@ fn raw_read(state: &Arc<State>, request: &Request) -> Response {
     with_fleet(state, json!({ "recorded": false }), move |fleet| {
         Ok(json!({ "recorded": crate::ledger::raw_read(fleet, client, session, path) }))
     })
+}
+
+/// `{installed, mechanism, path, last_start}` for the login service.
+fn login_state() -> Value {
+    let status = crate::service::status();
+    json!({
+        "installed": status.installed,
+        "mechanism": status.mechanism,
+        "path": status.definition.map(|p| crate::plain(&p.display().to_string())),
+        "last_start": crate::service::last_started(),
+    })
+}
+
+/// Start at login, from the About page: install or remove the login service
+/// through `service.rs`, the same calls `semlith setup` makes. A daemon
+/// already answering is this one, so installing registers the service for
+/// the next login and does not start a second daemon now.
+fn login_item(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(on) = body.get("on").and_then(Value::as_bool) else {
+        return Response::error(400, "missing on");
+    };
+    let port = state.server.port();
+    // The default port needs no flag in the definition; anything else does, or
+    // the next login's daemon would listen somewhere this page is not.
+    let port = (port != daemon::port_of(None)).then_some(port);
+    let done = if on {
+        crate::service::install(None, port).map(|_| ())
+    } else {
+        crate::service::remove().map(|_| ())
+    };
+    match done {
+        Ok(()) => Response::json(&json!({ "login": login_state() })),
+        Err(e) => Response::error(409, &format!("{e:#}")),
+    }
 }
 
 /// The Privacy page's airgap switch: saved, then applied to this process.
@@ -2428,6 +2467,7 @@ fn about(state: &Arc<State>) -> Response {
         // `/api/ledger` for one boolean would carry the whole ledger with it.
         "ledger": crate::ledger::enabled(),
         "recording": crate::ledger::recording_state(),
+        "login": login_state(),
         "port": state.server.port(),
         "pid": std::process::id(),
         "uptime": daemon::uptime(state),
