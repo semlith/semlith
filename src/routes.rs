@@ -508,7 +508,11 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
         let (readers_count, languages_count) = if want_coverage || want_detail {
             let paths = fleet
                 .as_mut()
-                .and_then(|f| f.each().find(|(_, s)| s.dir() == handle.dir).map(|(_, s)| s))
+                .and_then(|f| {
+                    f.each()
+                        .find(|(_, s)| s.dir() == handle.dir)
+                        .map(|(_, s)| s)
+                })
                 .and_then(|s| store::all_paths(s.db()).ok())
                 .unwrap_or_default();
             let mut by_reader: std::collections::BTreeMap<&str, u64> = Default::default();
@@ -898,8 +902,14 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
 
     let started = std::time::Instant::now();
     let only = (!only.is_empty()).then_some(only);
-    let brief = match crate::brief::brief_leaning(fleet, only.as_deref(), question, budget, &filter, prefer)
-    {
+    let brief = match crate::brief::brief_leaning(
+        fleet,
+        only.as_deref(),
+        question,
+        budget,
+        &filter,
+        prefer,
+    ) {
         Ok(b) => b,
         Err(e) => return Response::error(500, &format!("{e:#}")),
     };
@@ -1074,13 +1084,8 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         let budget = request
             .query("max_tokens")
             .and_then(|v| v.parse::<usize>().ok());
-        let reply = crate::mcp::search_reply(
-            fleet,
-            &hits,
-            query,
-            applied,
-            budget.unwrap_or(usize::MAX),
-        );
+        let reply =
+            crate::mcp::search_reply(fleet, &hits, query, applied, budget.unwrap_or(usize::MAX));
         let total = hits.len();
         let mut kept = reply.kept.iter();
         let mut kept_lines = reply.lines.into_iter();
@@ -2253,21 +2258,49 @@ fn privacy_fix(state: &Arc<State>, request: &Request) -> Response {
 /// `estimate` beside every figure; the ledger's own median replaces each as
 /// soon as there are rows enough to take one from.
 const TYPICAL_ESTIMATES: &[(&str, &str, i64)] = &[
-    ("semlith_search", "where something is: one line per hit", 700),
-    ("semlith_brief", "how something works: spans, text and callers", 1800),
+    (
+        "semlith_search",
+        "where something is: one line per hit",
+        700,
+    ),
+    (
+        "semlith_brief",
+        "how something works: spans, text and callers",
+        1800,
+    ),
     ("semlith_read", "one span or definition, whole", 900),
-    ("semlith_pattern", "every place one syntax shape occurs", 600),
+    (
+        "semlith_pattern",
+        "every place one syntax shape occurs",
+        600,
+    ),
     ("semlith_stats", "what is indexed, per store", 150),
-    ("semlith_languages", "which languages filter and carry a graph", 300),
+    (
+        "semlith_languages",
+        "which languages filter and carry a graph",
+        300,
+    ),
     ("semlith_files", "what a folder holds", 450),
-    ("semlith_index", "a folder indexed, and what was skipped", 120),
+    (
+        "semlith_index",
+        "a folder indexed, and what was skipped",
+        120,
+    ),
     ("semlith_add", "one URL fetched and indexed", 80),
     ("semlith_forget", "one file taken out", 40),
-    ("semlith_symbol", "where a name is defined and what touches it", 300),
+    (
+        "semlith_symbol",
+        "where a name is defined and what touches it",
+        300,
+    ),
     ("semlith_neighbors", "who calls it and what it calls", 350),
     ("semlith_report", "one of the five reports", 1200),
     ("semlith_impact", "every caller a change would reach", 450),
-    ("semlith_trace", "the chain from A to B, a line per hop", 400),
+    (
+        "semlith_trace",
+        "the chain from A to B, a line per hop",
+        400,
+    ),
     ("semlith_path", "whether A reaches B, and how", 200),
 ];
 
@@ -2281,7 +2314,10 @@ fn client_rows() -> Vec<Value> {
             let mut row = serde_json::to_value(client).unwrap_or(Value::Null);
             if let Some(object) = row.as_object_mut() {
                 object.insert("id".into(), json!(client_id(&client.name)));
-                object.insert("registered".into(), json!(registered.contains(&client.name)));
+                object.insert(
+                    "registered".into(),
+                    json!(registered.contains(&client.name)),
+                );
             }
             row
         })
@@ -2296,10 +2332,16 @@ fn tool_sizes(state: &Arc<State>) -> Vec<Value> {
     // `semlith_search`.
     let mut seen: std::collections::BTreeMap<String, Vec<i64>> = Default::default();
     if state.open_fleet().is_ok()
-        && let Some(fleet) = state.fleet.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        && let Some(fleet) = state
+            .fleet
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
     {
         for (_, store) in fleet.each() {
-            for (tool, tokens) in store::excerpt_tokens_by_tool(store.db(), 2_000).unwrap_or_default() {
+            for (tool, tokens) in
+                store::excerpt_tokens_by_tool(store.db(), 2_000).unwrap_or_default()
+            {
                 seen.entry(tool).or_default().push(tokens);
             }
         }
@@ -3499,7 +3541,10 @@ fn reindex(state: &Arc<State>, name: &str, body: &Value) -> Response {
         if !outside.is_empty() {
             return Response::error(
                 403,
-                &format!("outside the boundary for store {name}: {}", outside.join(", ")),
+                &format!(
+                    "outside the boundary for store {name}: {}",
+                    outside.join(", ")
+                ),
             );
         }
         (found, daemon::RunKind::Files)
@@ -4311,7 +4356,10 @@ fn refused_decide(state: &Arc<State>, request: &Request, accept: bool) -> Respon
     if body.get("files").and_then(Value::as_array).is_none()
         && body.get("path").and_then(Value::as_str).is_none()
     {
-        return Response::error(400, "path must be one file's path, as a string, or files a list");
+        return Response::error(
+            400,
+            "path must be one file's path, as a string, or files a list",
+        );
     }
     let store = match state.writable(body.get("store").and_then(Value::as_str)) {
         Ok(s) => s,

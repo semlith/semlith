@@ -2036,10 +2036,7 @@ impl Semlith {
             let accepted = store::acceptance(&self.db, &key)?;
             // Kept out by a person: decided, so not offered again, and not
             // indexed until the decision is reset.
-            if let Some(kept) = accepted
-                .as_ref()
-                .filter(|a| a.mode == "refused")
-            {
+            if let Some(kept) = accepted.as_ref().filter(|a| a.mode == "refused") {
                 not(&mut plan, &kept.class.clone(), &path);
                 continue;
             }
@@ -2175,9 +2172,7 @@ impl Semlith {
         // over the cap is the policy class, anything else is content.
         let unrecorded = || {
             let at = Path::new(&key);
-            if at.is_dir()
-                || std::fs::metadata(at).is_ok_and(|m| m.len() > chunk::MAX_FILE_BYTES)
-            {
+            if at.is_dir() || std::fs::metadata(at).is_ok_and(|m| m.len() > chunk::MAX_FILE_BYTES) {
                 store::class::POLICY
             } else {
                 store::class::CONTENT
@@ -5729,12 +5724,11 @@ pub fn serialize_plain_lists<S: serde::Serializer>(
     groups: &std::collections::BTreeMap<String, Vec<String>>,
     s: S,
 ) -> Result<S::Ok, S::Error> {
-    s.collect_map(groups.iter().map(|(k, paths)| {
-        (
-            k,
-            paths.iter().map(|p| plain(p)).collect::<Vec<String>>(),
-        )
-    }))
+    s.collect_map(
+        groups
+            .iter()
+            .map(|(k, paths)| (k, paths.iter().map(|p| plain(p)).collect::<Vec<String>>())),
+    )
 }
 
 /// Serialize a stored path in the form a person reads, leaving the value in

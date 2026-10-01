@@ -194,7 +194,9 @@ pub fn assess(
     let evidence = first.map(|m| {
         format!(
             "line {} · {} · {}",
-            m.get("line").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            m.get("line")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
             text(m, "kind"),
             text(m, "masked")
         )
@@ -279,7 +281,9 @@ pub fn assess(
                 .and_then(serde_json::Value::as_array)
                 .map(|s| {
                     s.iter()
-                        .filter(|s| s.get("effect").and_then(serde_json::Value::as_str) == Some("up"))
+                        .filter(|s| {
+                            s.get("effect").and_then(serde_json::Value::as_str) == Some("up")
+                        })
                         .filter_map(|s| s.get("name").and_then(serde_json::Value::as_str))
                         .map(str::to_string)
                         .collect()
@@ -288,7 +292,9 @@ pub fn assess(
             let why = format!(
                 "Looks like {} at line {} ({top} % likely real{}).",
                 text(m, "kind"),
-                m.get("line").and_then(serde_json::Value::as_u64).unwrap_or(0),
+                m.get("line")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
                 if up.is_empty() {
                     String::new()
                 } else {

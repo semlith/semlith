@@ -1023,8 +1023,14 @@ fn history_line(event: &serde_json::Value) -> serde_json::Value {
             "info",
             format!(
                 "done: {} indexed, {} chunks",
-                event.get("indexed").and_then(serde_json::Value::as_u64).unwrap_or(0),
-                event.get("chunks").and_then(serde_json::Value::as_u64).unwrap_or(0)
+                event
+                    .get("indexed")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                event
+                    .get("chunks")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
             ),
         ),
         _ if !text("text").is_empty() => ("info", text("text")),
@@ -4919,7 +4925,11 @@ mod tests {
             true,
             0,
         ));
-        store.begin_run(1, vec![PathBuf::from("/a"), PathBuf::from("/b")], RunKind::Files);
+        store.begin_run(
+            1,
+            vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            RunKind::Files,
+        );
         store.record(1, &serde_json::json!({ "event": "started" }));
         store.record(
             1,
@@ -4935,7 +4945,10 @@ mod tests {
         store.record(1, &serde_json::json!({ "event": "deleted", "text": "x" }));
 
         store.begin_run(2, Vec::new(), RunKind::Batch);
-        store.record(2, &serde_json::json!({ "event": "done", "indexed": 0, "removed": 0 }));
+        store.record(
+            2,
+            &serde_json::json!({ "event": "done", "indexed": 0, "removed": 0 }),
+        );
 
         let history = run_history(dir.path());
         assert_eq!(history.len(), 1, "{history:?}");
@@ -4944,7 +4957,10 @@ mod tests {
         assert_eq!(row["result"], "done");
         assert_eq!(row["files"], 1);
         assert_eq!(row["chunks"], 4);
-        assert_eq!(row["stages"], serde_json::json!({ "read": 2, "write": 3, "embed": 4 }));
+        assert_eq!(
+            row["stages"],
+            serde_json::json!({ "read": 2, "write": 3, "embed": 4 })
+        );
         let log = row["log"].as_array().unwrap();
         assert!(log.iter().any(|l| l["level"] == "error"), "{log:?}");
         assert!(log.iter().all(|l| l["at"].is_u64()));
@@ -4957,7 +4973,10 @@ mod tests {
         assert_eq!(history.len(), HISTORY_KEEP);
         assert_eq!(history[0]["result"], "failed");
         let lines = std::fs::read_to_string(dir.path().join(HISTORY_FILE)).unwrap();
-        assert!(lines.lines().count() <= HISTORY_KEEP * 2, "the file was never trimmed");
+        assert!(
+            lines.lines().count() <= HISTORY_KEEP * 2,
+            "the file was never trimmed"
+        );
     }
 
     /// A store with nothing behind it, for the parts of a run that are

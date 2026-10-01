@@ -652,6 +652,9 @@ lanes on, comma-separated: `cpu`, `gpu`, `ane`, `cuda`, `trt`, `openvino`,
 substring of its name), `SEMLITH_OPENVINO_DEVICE` and `SEMLITH_LLAMA_DEVICE`
 (force a device for those lanes; `CPU`/`cpu` is how CI checks their known answer
 without the hardware). Harness-only, undocumented for users:
+`SEMLITH_SERVICE_DIR` stands a directory in for the service manager, so a
+test of the portal's Start at login writes a file there and never asks
+launchd, systemd or Task Scheduler anything;
 `SEMLITH_PACK_<NAME>` names an unpacked pack directory in place of the pinned
 download, which is how a pack is tried before it is published; and
 `SEMLITH_COREML_WORKER=current` runs the Core ML lanes from the binary being

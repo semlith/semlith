@@ -347,9 +347,10 @@ pub fn unregister_files(client: &Client) -> Result<Vec<PathBuf>> {
         }
         let next = match stanza.format.as_str() {
             "json" => {
-                let mut base: serde_json::Value = serde_json::from_str(&text).with_context(|| {
-                    format!("{} is not valid JSON; nothing was changed", path.display())
-                })?;
+                let mut base: serde_json::Value =
+                    serde_json::from_str(&text).with_context(|| {
+                        format!("{} is not valid JSON; nothing was changed", path.display())
+                    })?;
                 let overlay: serde_json::Value = serde_json::from_str(&stanza.text)
                     .context("the documented stanza is not valid JSON")?;
                 remove_entry(&mut base, &overlay);

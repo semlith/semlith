@@ -1373,6 +1373,34 @@ left untouched, and the stanza is printed with the reason.
 | `semlith mcp` ↔ daemon | The proxy sends a `Semlith-Host` header naming the app that started it, a `notifications/semlith/alive` heartbeat every 30 s and `notifications/semlith/closed` when its client hangs up; `DELETE /mcp` ends an HTTP session. A failed call is retried for up to 20 s while the discovery file names a live daemon. |
 | `semlith mcp` | The start line on stderr reads `semlith <version>: forwarding MCP to the semlith daemon at http://127.0.0.1:<port>`. |
 
+## 0.35.0
+
+The portal's v6 pages are drawn from these. Every field below is added beside
+what was there, except the three marked as a change of shape.
+
+| Surface | Change |
+|---|---|
+| `registry.json` | Each store entry gains `kind` (`code`/`docs`/`both`, default `both`), `lean` (`code`/`docs`/`either`, default `either`), `watch`, `record` and `gitignore` (each default `true`). An older binary ignores them; an entry without them reads as the defaults, which are what every store did before. |
+| `settings.json` | New keys `ledger_paused` and `airgap`, absent meaning off. `session_replay` absent now means **on**; a file that wrote `false` stays off. |
+| A store directory | A new `runs.jsonl`: finished index runs, newest 50 kept. An older binary never opens it. |
+| `POST /api/store/create` | New: `{name, kind}` → `{name, dir, kind}`; an empty store, served at once. |
+| `POST /api/store/settings` | New: `{store, rename?, kind?, lean?, watch?, record?, gitignore?}` → `{name, kind, lean, watch, record, gitignore}`. A rename moves the store's directory with its name. |
+| `GET /api/stores` | Rows gain `kind`, `lean`, `watch`, `record`, `gitignore`; with `?detail=1` (or `?coverage=1`) also `readers_count` and `languages_count`. |
+| Searches and briefs | With no `prefer`, each store's `lean` applies to its half of the answer, over MCP as well as the portal. `either`, the default, is no bias, so nothing changes until a store sets one. |
+| `GET /api/search` | `format=locate` hits carry `line`, the tool's one line; the answer carries `tokens`, and with `max_tokens` the tool's own cut and `truncated: {shown, total}`. |
+| `GET /api/brief` | Gains `text` (what `semlith_brief` returns, byte for byte) and `prefer`. |
+| `GET /api/ledger` | **Shape change:** `recording` is `{on, reason}` (`flag`, `env`, `paused` or null), not a boolean. Gains `break: {store, row, at}` when the chain does not verify. |
+| `POST /api/ledger/recording`, `POST /api/ledger/verify` | New. Pause/resume (persisted); re-walk every chain, and with `repair` append one note row per break. A note row (`tool = 'note'`) is in the chain and in no total. |
+| `GET /api/about` | Gains `recording` and `login: {installed, mechanism, path, last_start}`. `ledger` is the live state (false while paused). |
+| `GET /api/privacy` | **Shape change:** `airgap` is `{on, reason}` (`flag`, `env`, `runtime` or null). Gains `outbound: {count, since, recent: [{at, what, host}]}`. |
+| `POST /api/airgap`, `POST /api/login-item` | New. The runtime airgap refuses what `--airgap` refuses; the login item installs or removes the service `semlith setup` installs. |
+| `GET /api/refused` | Rows gain `risk`, `band`, `likely`, `tone`, `kind`, `why`, `evidence`, `suggest`; scan-plan review items carry the same, and plans gain `not_indexed_paths`. |
+| `POST /api/refused/decide`, `GET /api/decisions` | New: bulk `in`/`redact`/`out`/`reset`, and the decisions table. `/api/refused/accept` and `/revoke` also take `files`. Keep out is an acceptance with mode `refused`, now allowed for any reviewable class. |
+| `GET /api/index/runs` | Gains `history`. Live run `kind` may also be `reindex`, `rebuild` or `files`. |
+| `POST /api/index` | `{store, files}` re-indexes those files forced; `{store}` with no path re-indexes the store (`force: true` re-embeds unchanged files too); `gitignore: false` walks past `.gitignore` and is kept on the store. |
+| `POST /api/agents/register` | Takes `{clients, action}` with `action` `register` or `unregister`. `GET /api/agents` client rows gain `id` and `registered`; `tools` rows gain `answers`, `typical_tokens` and `typical_source`. |
+| `semlith start --no-ledger` | Now stops the rows written by agents through `/mcp` too, not only the portal's. |
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:

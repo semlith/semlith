@@ -204,7 +204,10 @@ fn the_recording_switch_is_a_route_and_outlives_the_daemon() {
         );
         let (status, body) = daemon.post("/api/ledger/recording", json!({ "on": false }));
         assert_eq!(status, 200, "{body}");
-        assert_eq!(body["recording"], json!({ "on": false, "reason": "paused" }));
+        assert_eq!(
+            body["recording"],
+            json!({ "on": false, "reason": "paused" })
+        );
         assert_eq!(daemon.get("/api/about")["ledger"], json!(false));
     }
     let daemon = Daemon::start(&home);
@@ -281,10 +284,7 @@ fn a_store_is_created_empty_and_served_at_once() {
     assert_eq!(body["name"], "research-notes");
     assert_eq!(body["kind"], "docs");
     assert!(
-        body["dir"]
-            .as_str()
-            .unwrap()
-            .ends_with("research-notes"),
+        body["dir"].as_str().unwrap().ends_with("research-notes"),
         "{body}"
     );
 
@@ -332,8 +332,10 @@ fn store_settings_persist_and_a_rename_resolves_for_agents() {
             json!({ "name": "alpha", "kind": "code", "lean": "code", "watch": false,
                     "record": false, "gitignore": false })
         );
-        let (status, body) =
-            daemon.post("/api/store/settings", json!({ "store": "alpha", "lean": "prose" }));
+        let (status, body) = daemon.post(
+            "/api/store/settings",
+            json!({ "store": "alpha", "lean": "prose" }),
+        );
         assert_eq!(status, 400, "{body}");
     }
 
@@ -357,7 +359,10 @@ fn store_settings_persist_and_a_rename_resolves_for_agents() {
     assert_eq!(body["lean"], "code", "a rename lost the settings");
 
     let stores = daemon.get("/api/stores");
-    assert!(row(&stores, "alpha").is_none(), "the old name is still served");
+    assert!(
+        row(&stores, "alpha").is_none(),
+        "the old name is still served"
+    );
     assert!(row(&stores, "beta").is_some(), "the new name is not served");
     assert!(home.join("stores").join("beta").join("store.db").exists());
     assert!(!home.join("stores").join("alpha").exists());
@@ -409,8 +414,16 @@ fn the_gitignore_switch_decides_what_the_scan_walks() {
     let (_dir, home) = home();
     let corpus = home.join("notes");
     std::fs::create_dir_all(&corpus).unwrap();
-    std::fs::write(corpus.join("kept.md"), "# kept\n\nwords about kept things\n").unwrap();
-    std::fs::write(corpus.join("ignored.md"), "# ignored\n\nwords about others\n").unwrap();
+    std::fs::write(
+        corpus.join("kept.md"),
+        "# kept\n\nwords about kept things\n",
+    )
+    .unwrap();
+    std::fs::write(
+        corpus.join("ignored.md"),
+        "# ignored\n\nwords about others\n",
+    )
+    .unwrap();
     std::fs::write(corpus.join(".gitignore"), "ignored.md\n").unwrap();
 
     let daemon = Daemon::start(&home);
@@ -442,7 +455,11 @@ fn review_items_are_scored_and_decided_in_bulk_before_indexing() {
     std::fs::create_dir_all(&corpus).unwrap();
     let key = semlith::keyscan::forge(3);
     std::fs::write(corpus.join("a.rs"), format!("let token = \"{key}\";\n")).unwrap();
-    std::fs::write(corpus.join("b.rs"), format!("let other = \"{}\";\n", semlith::keyscan::forge(3))).unwrap();
+    std::fs::write(
+        corpus.join("b.rs"),
+        format!("let other = \"{}\";\n", semlith::keyscan::forge(3)),
+    )
+    .unwrap();
     std::fs::write(corpus.join("ok.md"), "# fine\n\nnothing here\n").unwrap();
     std::fs::write(corpus.join("id_rsa"), "not really a key\n").unwrap();
 
@@ -480,13 +497,20 @@ fn review_items_are_scored_and_decided_in_bulk_before_indexing() {
     );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["failed"], json!(0), "{body}");
-    assert_eq!(plan(&daemon)["review"].as_array().unwrap().len(), 0, "kept out is not offered again");
+    assert_eq!(
+        plan(&daemon)["review"].as_array().unwrap().len(),
+        0,
+        "kept out is not offered again"
+    );
 
     let decided = daemon.get("/api/decisions?store=work");
     let rows = decided["stores"][0]["rows"].as_array().unwrap();
     let kept: Vec<&Value> = rows.iter().filter(|r| r["outcome"] == "kept out").collect();
     assert_eq!(kept.len(), 2, "{decided}");
-    assert!(kept.iter().all(|r| r["by"] == "you" && r["can_undo"] == json!(true)));
+    assert!(
+        kept.iter()
+            .all(|r| r["by"] == "you" && r["can_undo"] == json!(true))
+    );
     assert_eq!(
         daemon.get("/api/refused?decisions=1&store=work"),
         decided,
@@ -498,7 +522,11 @@ fn review_items_are_scored_and_decided_in_bulk_before_indexing() {
         json!({ "store": "work", "files": [a], "decision": "reset" }),
     );
     assert_eq!(body["failed"], json!(0), "{body}");
-    assert_eq!(plan(&daemon)["review"].as_array().unwrap().len(), 1, "reset did not undo");
+    assert_eq!(
+        plan(&daemon)["review"].as_array().unwrap().len(),
+        1,
+        "reset did not undo"
+    );
 
     let rsa = corpus.join("id_rsa").display().to_string();
     let (_, body) = daemon.post(
@@ -506,8 +534,15 @@ fn review_items_are_scored_and_decided_in_bulk_before_indexing() {
         json!({ "store": "work", "files": [rsa, b], "decision": "in" }),
     );
     let results = body["results"].as_array().unwrap();
-    assert_eq!(results[0]["ok"], json!(false), "a credential was let in: {body}");
-    assert!(results[0]["error"].as_str().unwrap().contains("id_rsa"), "{body}");
+    assert_eq!(
+        results[0]["ok"],
+        json!(false),
+        "a credential was let in: {body}"
+    );
+    assert!(
+        results[0]["error"].as_str().unwrap().contains("id_rsa"),
+        "{body}"
+    );
 }
 
 // ------------------------------------------------------------------ A9, A10
@@ -534,7 +569,10 @@ fn picked_files_reindex_as_one_run_and_its_record_survives_a_restart() {
             json!({ "store": "proj", "files": [corpus.join("src/a.rs").display().to_string(), "nope.rs"] }),
         );
         assert_eq!(status, 400, "a missing file was queued: {body}");
-        assert!(body["error"].as_str().unwrap().contains("nope.rs"), "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("nope.rs"),
+            "{body}"
+        );
 
         let (status, body) = daemon.post(
             "/api/index",
@@ -556,7 +594,10 @@ fn picked_files_reindex_as_one_run_and_its_record_survives_a_restart() {
             if matches!(card["status"].as_str(), Some("done" | "failed" | "stopped")) {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "the run never finished: {runs}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the run never finished: {runs}"
+            );
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -652,7 +693,11 @@ fn a_broken_ledger_is_named_repaired_by_a_note_and_its_totals_do_not_move() {
     let (_, body) = daemon.post("/api/ledger/verify", json!({ "repair": true }));
     assert_eq!(body["stores"][0]["intact"], json!(true), "{body}");
     assert_eq!(body["stores"][0]["repaired"], json!([2]));
-    assert_eq!(body["stores"][0]["rows"], json!(4), "one note row was appended");
+    assert_eq!(
+        body["stores"][0]["rows"],
+        json!(4),
+        "one note row was appended"
+    );
     assert_eq!(daemon.get("/api/ledger")["intact"], json!(true));
     drop(daemon);
 
@@ -680,7 +725,9 @@ fn start_at_login_installs_and_removes_through_the_seam() {
     let file = home.join("service").join("com.semlith.daemon.service");
     assert!(file.is_file(), "the seam was not written");
     assert!(
-        std::fs::read_to_string(&file).unwrap().contains("start --port"),
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("start --port"),
         "a daemon on a non-default port must keep its port at the next login"
     );
     assert_eq!(daemon.get("/api/about")["login"]["installed"], json!(true));
@@ -730,7 +777,10 @@ fn one_client_registers_and_unregisters_and_tools_say_their_size() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["results"][0]["ok"], json!(true), "{body}");
     let written = std::fs::read_to_string(&file).unwrap();
-    assert!(written.contains("\"semlith\"") && written.contains("\"other\""), "{written}");
+    assert!(
+        written.contains("\"semlith\"") && written.contains("\"other\""),
+        "{written}"
+    );
     assert_eq!(row(&daemon.get("/api/agents"))["registered"], json!(true));
 
     let (_, body) = daemon.post(
@@ -739,8 +789,14 @@ fn one_client_registers_and_unregisters_and_tools_say_their_size() {
     );
     assert_eq!(body["results"][0]["ok"], json!(true), "{body}");
     let left = std::fs::read_to_string(&file).unwrap();
-    assert!(!left.contains("semlith") && left.contains("\"other\""), "{left}");
-    assert!(cursor.join("mcp.json.semlith-backup").exists(), "no backup was made");
+    assert!(
+        !left.contains("semlith") && left.contains("\"other\""),
+        "{left}"
+    );
+    assert!(
+        cursor.join("mcp.json.semlith-backup").exists(),
+        "no backup was made"
+    );
     assert_eq!(row(&daemon.get("/api/agents"))["registered"], json!(false));
 
     let (status, body) = daemon.post(

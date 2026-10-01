@@ -3084,9 +3084,11 @@ pub fn ledger_repair(db: &Connection) -> Result<Vec<i64>> {
 /// When a ledger row was written, by id.
 pub fn retrieval_at(db: &Connection, id: i64) -> Result<Option<i64>> {
     Ok(db
-        .query_row("SELECT at FROM retrievals WHERE id = ?1", params![id], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT at FROM retrievals WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
         .optional()?)
 }
 
