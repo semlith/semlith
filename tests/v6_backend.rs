@@ -443,6 +443,46 @@ fn the_gitignore_switch_decides_what_the_scan_walks() {
     assert_eq!(row(&stores, "notes").unwrap()["gitignore"], json!(false));
 }
 
+/// Add sources: a folder outside a store's roots is refused by the boundary
+/// unless the portal says it is being added, and then it becomes a root.
+#[test]
+fn add_sources_makes_a_folder_a_root_and_the_boundary_holds_without_it() {
+    let (_dir, home) = home();
+    let first = home.join("first");
+    let second = home.join("second");
+    for (dir, file) in [(&first, "a.md"), (&second, "b.md")] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(file), "# words\n\nsome words to index\n").unwrap();
+    }
+    let daemon = Daemon::start(&home);
+    daemon.post("/api/store/create", json!({ "name": "notes" }));
+    let index = |path: &PathBuf, add: bool| {
+        daemon.post(
+            "/api/index",
+            json!({ "store": "notes", "path": [path.display().to_string()],
+                    "review": "always", "add_roots": add }),
+        )
+    };
+    let (status, body) = index(&first, false);
+    assert_eq!(status, 200, "an empty store takes its first folder: {body}");
+
+    let (status, body) = index(&second, false);
+    assert_eq!(
+        status, 403,
+        "a folder outside the roots passed the boundary: {body}"
+    );
+    assert!(body.to_string().contains("outside the boundary"), "{body}");
+
+    let (status, body) = index(&second, true);
+    assert_ne!(status, 403, "Add sources was refused: {body}");
+    let stores = daemon.get("/api/stores");
+    let roots = row(&stores, "notes").unwrap()["roots"].to_string();
+    assert!(
+        roots.contains("second"),
+        "the added folder is not one of the store's roots: {roots}"
+    );
+}
+
 // ------------------------------------------------------------------ A7, A8
 
 /// The wizard's review: the scan's items carry the same risk fields the

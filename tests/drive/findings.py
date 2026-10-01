@@ -3968,7 +3968,8 @@ def _(d):
         # Up one and back down, so the drive leaves the machine as it found it.
         for label in ("Raise Runs at once", "Lower Runs at once"):
             button = "document.querySelector('#main button[aria-label=\"%s\"]')" % label
-            if d.eval("!%s || %s.disabled" % (button, button)):
+            # At its end a stepper button is aria-disabled, so it keeps focus.
+            if d.eval("!%s || %s.disabled || %s.getAttribute('aria-disabled') === 'true'" % (button, button, button)):
                 continue
             press(d, button, label)
             # The daemon applies all three limits at once and says what it is
@@ -4070,7 +4071,11 @@ def _(d):
     Fifteen hundred files nobody has indexed keep the run reading for the whole
     minute; each window fails rather than passes if the page did not repaint
     often enough to prove anything."""
-    run_id, store = start_index(d, d.fixtures.unique("steady", count=1500))
+    # Sized for the fastest lane, not the slowest: on Apple's Neural Engine
+    # (about 230 chunks a second) fifteen hundred files were done in ten
+    # seconds, before the second window opened. The run is tidied away at the
+    # end, so a slow CPU-only runner never waits for all of it.
+    run_id, store = start_index(d, d.fixtures.unique("steady", count=15000))
     try:
         running(d, run_id, store)
 
@@ -4402,7 +4407,12 @@ def _(d):
     if len(rows) < len(downloads):
         fail("the list has %d rows; /api/privacy lists %d downloads" % (len(rows), len(downloads)))
     for row, download in zip(rows, downloads):
-        expected = download["what"][0].upper() + download["what"][1:]
+        # 0.35.0 owner decision (revised v6 design): the portal never names the
+        # embedding model, so the row is the route's words without the bracketed
+        # model detail — "the embedding model", not which one. Everything else
+        # in the row is still the route's.
+        plain = re.sub(r"\s*\([^)]*\)", "", download["what"])
+        expected = plain[0].upper() + plain[1:]
         if row["what"] != expected:
             fail("a download row reads %r where the route says %r" % (row["what"], download["what"]))
         parts = [p.strip() for p in row["sub"].split("·")]
@@ -5057,7 +5067,7 @@ def _(d):
                                   body={"store": store, "files": [alpha, beta], "decision": "out"})
     want("a list sent to the decide route", status, 200)
     logged = d.api("/api/refused?store=%s&decisions=1" % urllib.parse.quote(store))
-    decisions = logged.get("decisions") or [r for s in logged.get("stores") or [] for r in s.get("decisions") or []]
+    decisions = logged.get("decisions") or [r for s in logged.get("stores") or [] for r in s.get("decisions") or s.get("rows") or []]
     by_you = {os.path.basename(r["path"]) for r in decisions if r.get("by") == "you" and r.get("outcome") == "kept out"}
     if not {"alpha.txt", "beta.txt"} <= by_you:
         fail("a two-file decision was not logged as two decisions by you: %s" % json.dumps(decisions)[:400])
@@ -5358,7 +5368,11 @@ def _(d):
     home = d.api("/api/dirs")
     want("where the folder picker opens", browse_where(d, ".wz-body"), "~")
     shown = d.eval("document.querySelectorAll('.wz-body .bitem').length")
-    want("the entries the picker lists", shown, len(home.get("entries") or []))
+    # The store home is left out of the picker: indexing semlith's own stores
+    # is refused, so offering it would be a dead end.
+    store_home = d.api("/api/about").get("store_home")
+    offered = [e for e in home.get("entries") or [] if e.get("path") != store_home]
+    want("the entries the picker lists", shown, len(offered))
     root = clean_tree(d, "sources")
     wizard_mode(d, "Paste a path")
     d.type(".wz-body .box input", root)
@@ -5569,6 +5583,10 @@ def _(d):
                what="the rename to land on the renamed store")
     if renamed not in {s["name"] for s in stores(d)}:
         fail("the page moved to %s and the daemon has no store by that name" % renamed)
+    # A rename reopens the store and its watcher catches up; renaming back
+    # mid-run is refused by design, so the clean-up waits for it.
+    if run_for(d, renamed):
+        wait_for_run(d, renamed)
     d.api("/api/store/settings", method="POST", body={"store": renamed, "rename": store})
     no_console_errors(d, "a store's Settings tab")
 

@@ -27,8 +27,10 @@ function el(tag, props, ...kids) {
   for (const [key, value] of Object.entries(props || {})) {
     if (value === null || value === undefined || value === false) continue;
     if (key === "class") node.className = value;
-    else if (key === "text") node.textContent = value;
-    else if (key.startsWith("on") && typeof value === "function") node.addEventListener(key.slice(2), value);
+    // Always its own text node, even empty, so a redraw patched in place
+    // edits the words rather than adding or removing a node.
+    else if (key === "text") node.append(document.createTextNode(String(value)));
+    else if (key.startsWith("on") && typeof value === "function") listen(node, key.slice(2), value);
     else node.setAttribute(key, value === true ? "" : String(value));
   }
   for (const kid of kids.flat(Infinity)) {
@@ -36,6 +38,47 @@ function el(tag, props, ...kids) {
     node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
   }
   return node;
+}
+
+/* Handlers go through one listener per event that reads the node's current
+ * handler, so a redraw patched in place (morph) can hand an old node the new
+ * closure without adding a second listener. */
+function listen(node, type, fn) {
+  if (!node.__h) node.__h = {};
+  if (!(type in node.__h)) node.addEventListener(type, (e) => node.__h[type] && node.__h[type](e));
+  node.__h[type] = fn;
+}
+
+/* Patch the live tree a into the freshly drawn b, keeping every node whose
+ * place and tag still match: a pressed button stays the same button, a field
+ * being typed in keeps its text and focus, a scrolled box keeps its offset.
+ * A subtree marked data-morph-keep is left alone (a log something else is
+ * filling). Only for views whose drawing is synchronous: a view that fills a
+ * node later holds the new node, which this throws away. */
+function morph(a, b) {
+  if (a.nodeType !== b.nodeType || (a.nodeType === 1 && a.tagName !== b.tagName)) {
+    a.replaceWith(b);
+    return;
+  }
+  if (a.nodeType !== 1) {
+    if (a.data !== b.data) a.data = b.data;
+    return;
+  }
+  const keep = a.getAttribute("data-morph-keep");
+  if (keep && keep === b.getAttribute("data-morph-keep")) return;
+  for (const { name } of [...a.attributes]) if (!b.hasAttribute(name)) a.removeAttribute(name);
+  for (const { name, value } of [...b.attributes]) if (a.getAttribute(name) !== value) a.setAttribute(name, value);
+  if ("value" in b && a !== document.activeElement && a.value !== b.value) a.value = b.value;
+  if ("checked" in b && a.checked !== b.checked) a.checked = b.checked;
+  for (const [type, fn] of Object.entries(b.__h || {})) listen(a, type, fn);
+  if (a.__h) for (const type of Object.keys(a.__h)) if (!b.__h || !(type in b.__h)) a.__h[type] = null;
+  const ak = [...a.childNodes];
+  const bk = [...b.childNodes];
+  for (let i = 0; i < bk.length; i++) {
+    if (i < ak.length) morph(ak[i], bk[i]);
+    else a.append(bk[i]);
+  }
+  for (let i = bk.length; i < ak.length; i++) ak[i].remove();
 }
 
 /** A button. Every clickable thing in the portal is one, so Tab reaches it. */
@@ -1044,12 +1087,12 @@ function grid(spec) {
       selbar,
       el("div", { class: "tw" }, el("table", { class: spec.cls || null }, spec.caption ? el("caption", { class: "sr-only", text: spec.caption }) : null, el("thead", {}, head), body)),
       !total() ? el("div", { class: "empty lg tb" }, spec.empty || "Nothing here yet.", spec.onClear ? [" ", lnk("Clear the filters", spec.onClear)] : null) : null,
-      spec.noFoot || !total()
+      spec.noFoot
         ? null
         : el(
             "div",
             { class: "card-foot" },
-            el("span", { class: "grow", text: `${n(from)}–${n(to)} of ${n(total())}${spec.foot ? ` · ${spec.foot}` : ""}` }),
+            el("span", { class: "grow", text: `${n(from)}–${n(to)} of ${n(total())}${spec.foot && total() ? ` · ${spec.foot}` : ""}` }),
             pager(view, pages(), changed),
           ),
     );
@@ -1339,6 +1382,8 @@ const SOURCES = {
   replay: "/api/ledger/replay",
   languages: "/api/languages",
   helpers: "/api/helpers",
+  graphpeek: () => `/api/graph?${new URLSearchParams({ store: (graphPeekFor = graphStore()), limit: "12" })}`,
+  graphmap: () => `/api/map?${new URLSearchParams({ store: (graphMapFor = graphStore()), shown: "12" })}`,
   coverage: "/api/stores?coverage=1",
 };
 
@@ -1349,7 +1394,8 @@ const loadedAt = {};
 function load(key, force) {
   if (!force && data[key] !== undefined) return Promise.resolve(data[key]);
   if (loading[key]) return loading[key];
-  const p = api(SOURCES[key])
+  // A source may depend on the page (the graph's store): then it is a function.
+  const p = api(typeof SOURCES[key] === "function" ? SOURCES[key]() : SOURCES[key])
     .then((value) => {
       data[key] = value;
       loadedAt[key] = Date.now();
@@ -1695,6 +1741,22 @@ function repaint() {
   const focus = document.activeElement;
   const keep = focus && focus.getAttribute ? focus.getAttribute("data-keep") : null;
   const sel = keep && "selectionStart" in focus ? [focus.selectionStart, focus.selectionEnd] : null;
+  // A view that draws synchronously is patched in place, so nothing under the
+  // reader is rebuilt; the rest are drawn again.
+  if (current.view.morph && current.view.morph(current.route) && shell.main.firstChild) {
+    const holder = { live: current.view.live || [], onData: null };
+    let node;
+    try {
+      node = current.view.render(current.route, holder);
+    } catch (e) {
+      console.error(e);
+      return mount(current.view, current.route);
+    }
+    morph(shell.main.firstChild, node);
+    current = { ...current, live: holder.live, onData: holder.onData, sig: current.view.sig ? current.view.sig(current.route) : null };
+    paintChrome();
+    return;
+  }
   mount(current.view, current.route);
   shell.main.scrollTop = at;
   for (const [k, top] of inner) {
@@ -2071,6 +2133,7 @@ function pickFolder({ title, ok, hint, start, confirm }) {
       try {
         done(await confirm(listing.path));
       } catch (e) {
+        toast(e.message, true);
         fill(err, errorBox(e.message));
         button.disabled = false;
       }
@@ -2913,7 +2976,7 @@ function wizardScreen() {
     try {
       const target = w.split === "split" ? "each" : w.created;
       const splitPaths = w.split === "split" ? w.sources.flatMap((s) => (s.repoPaths && s.repoPaths.length ? s.repoPaths : [s.path])).filter((p) => !/^https:/.test(p)) : paths;
-      const out = await post("/api/index", { path: splitPaths, store: target, review: "always", gitignore: w.gitignore });
+      const out = await post("/api/index", { path: splitPaths, store: target, review: "always", gitignore: w.gitignore, add_roots: target !== "each" });
       const errors = (out.runs || []).filter((r) => r.error);
       if (errors.length) throw new Error(errors.map((r) => `${r.path}: ${r.error}`).join("; "));
       w.scan.runs = (out.runs || []).map((r) => r.run).filter((x) => x !== undefined);
@@ -3303,8 +3366,8 @@ function wizardScreen() {
     const s = store(name);
     // The store's own totals once it reports them: a run counts only what it
     // embedded, not images it read or files it found unchanged.
-    const files = s?.files ?? R.reduce((a, r) => a + (r.indexed || 0), 0);
-    const chunks = s?.chunks ?? R.reduce((a, r) => a + (r.chunks || 0), 0);
+    const files = Math.max(s?.files || 0, R.reduce((a, r) => a + (r.indexed || 0), 0));
+    const chunks = Math.max(s?.chunks || 0, R.reduce((a, r) => a + (r.chunks || 0), 0));
     const tryInput = el("input", {
       value: w.tryQ,
       placeholder: "e.g. where does the watcher re-index a file",
@@ -3652,6 +3715,14 @@ function wizardScreen() {
       w.scan.state = scans.some((r) => r.status === "failed") ? "error" : "done";
       if (w.scan.state === "error") w.scan.error = "The scan failed. Its log is on the store's Runs tab.";
     }
+    // When the started runs end, the store's own totals are read once more,
+    // so the done card counts what the store holds now.
+    const started = run();
+    const ended = started.length && started.every((r) => !LIVE_RUN.has(r.status));
+    if (ended && !w.endedRead) {
+      w.endedRead = true;
+      load("stores", true).then(() => w.step === 4 && paint());
+    }
     if (w.step === 3 || w.step === 4) paint();
     else paintRail();
   });
@@ -3770,7 +3841,13 @@ const LANE_NAMES = { cpu: "CPU", ane: "Neural Engine", gpu: "GPU", cuda: "CUDA",
 const laneName = (k) => LANE_NAMES[k] || k;
 
 async function runControl(r, action) {
-  await act(() => post("/api/index/control", { store: r.store, run: r.id, action }), action === "pause" ? "Pausing at the next batch" : action === "resume" ? "Resumed" : null);
+  const out = await act(() => post("/api/index/control", { store: r.store, run: r.id, action }), action === "pause" ? "Pausing at the next batch" : action === "resume" ? "Resumed" : null);
+  // The route's own word first ("pausing", not yet "paused"), then the runs.
+  const mine = out && out.state && (data.runs?.runs || []).find((x) => x.id === r.id && x.store === r.store);
+  if (mine) {
+    mine.status = out.state;
+    repaint();
+  }
   await load("runs", true);
   for (const fn of [...runsListeners]) fn();
   paintChrome();
@@ -4582,6 +4659,9 @@ const sdUi = { glob: "", type: "all", lang: "all", view: "list", decQ: "", decOu
 VIEWS.store = {
   needs: () => ["stores", "runs", "refused", "decisions", "detail", "ledger"],
   live: ["stores", "runs", "refused", "ledger"],
+  // The Runs and Settings tabs draw synchronously, so a live update patches
+  // them in place: the run card's buttons and a half-typed name survive it.
+  morph: (route) => ["runs", "settings"].includes(route.parts[1]),
   render(route, holder) {
     const name = route.parts[0];
     const tab = route.parts[1] || "overview";
@@ -4982,7 +5062,7 @@ function sdReview(s, holder) {
   const band = (r) => (r >= 70 ? "high" : r >= 30 ? "medium" : "low");
   const decide = async (files, decision) => {
     const out = await act(() => post("/api/refused/decide", { store: s.name, files, decision }), { in: `Accepted — ${plural(files.length, "file")} indexed on the next pass`, redact: `Redacted — ${plural(files.length, "file")} indexed without the values`, out: `Kept out — ${files.length === 1 ? "it stays" : "they stay"} refused`, reset: `Undone — ${plural(files.length, "file")} back to waiting for you` }[decision]);
-    if (out) await loadMany(["refused", "stores", "runs"], true), repaint();
+    if (out) await loadMany(["refused", "decisions", "stores", "runs"], true), repaint();
   };
   const sel = (sdReview.sel[s.name] = sdReview.sel[s.name] || new Set());
   const pendingCard = pending.length
@@ -5110,7 +5190,18 @@ function decisionFromRow(r) {
 
 function sdRuns(s, holder) {
   const live = runsOf(s.name).filter((r) => LIVE_RUN.has(r.status));
-  const hist = [...(data.runs?.history || []).filter((h) => h.store === s.name), ...runsOf(s.name).filter((r) => !LIVE_RUN.has(r.status) && !(data.runs?.history || []).some((h) => h.id === r.id && h.store === s.name))].sort((a, b) => (b.finished || b.finished_at || 0) - (a.finished || a.finished_at || 0));
+  // A finished run this daemon still holds says more than its history line
+  // (what it indexed, how long it took), so it is read over the line when the
+  // two are the same run. Run ids restart with the daemon, hence the time.
+  const doneHere = runsOf(s.name).filter((r) => !LIVE_RUN.has(r.status));
+  const same = (h, r) => h.id === r.id && Math.abs((h.finished || 0) - (r.finished_at || 0)) < 5;
+  const hist = [
+    ...(data.runs?.history || []).filter((h) => h.store === s.name).map((h) => {
+      const r = doneHere.find((x) => same(h, x));
+      return r ? { ...h, ...r, log: (h.log || []).length ? h.log : r.log } : h;
+    }),
+    ...doneHere.filter((r) => !(data.runs?.history || []).some((h) => h.store === s.name && same(h, r))),
+  ].sort((a, b) => (b.finished || b.finished_at || 0) - (a.finished || a.finished_at || 0));
   const host = el("div", { class: "stack" });
   for (const r of live) {
     const paused = r.status === "paused" || r.status === "pausing";
@@ -5118,7 +5209,7 @@ function sdRuns(s, holder) {
     const b = bar(p, "h8 accent grow");
     b.setAttribute("data-tip", `Indexing · ${Math.floor(p)}%`);
     b.setAttribute("data-tip-rows", runRows(r));
-    const log = el("div", { class: "log rounded", "data-scroll-keep": `log-${r.id}` });
+    const log = el("div", { class: "log rounded", "data-scroll-keep": `log-${r.id}`, "data-morph-keep": `log-${r.id}` });
     followLog(r, log);
     host.append(
       el(
@@ -5137,7 +5228,7 @@ function sdRuns(s, holder) {
         ),
         el("div", { class: "row nowrap gap12" }, b, el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
         el("div", { class: "t-mono-sm", text: [r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "", `${n(r.chunks || 0)} chunks`, r.rate != null ? `${perSecond(r.rate)} chunks/s` : "", Object.entries(r.lane_rates || {}).filter(([, v]) => v > 0).map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`).join(" · "), r.status === "running" ? spellLeft(r.eta_ms) : ""].filter(Boolean).join(" · ") }),
-        r.phase ? el("div", { class: "muted t-sm", text: r.phase }) : null,
+        el("div", { class: "muted t-sm", text: r.phase || "", hidden: r.phase ? null : true }),
         log,
       ),
     );
@@ -5205,8 +5296,12 @@ function runLine(h) {
     const total = (f) => (f ? f.database + f.exact + f.vectors : 0);
     return `${bytes(total(c.before))} → ${bytes(total(c.after))}`;
   }
-  const took = h.elapsed_ms ? ` · took ${spellTook(h.elapsed_ms - (h.queued_ms || 0))}` : "";
-  return `${n(h.indexed || h.files_indexed || 0)} indexed · ${n(h.chunks || 0)} chunks${took}`;
+  const ms = h.elapsed_ms ? h.elapsed_ms - (h.queued_ms || 0) : h.started && h.finished ? (h.finished - h.started) * 1000 : 0;
+  // History keeps whole seconds; a run inside one second says so rather than
+  // claiming a time it did not measure.
+  const took = ms ? ` · took ${spellTook(ms)}` : h.finished || h.finished_at ? " · took under a second" : "";
+  const indexed = h.indexed ?? h.files_indexed ?? (typeof h.files === "number" ? h.files : 0);
+  return `${n(indexed)} indexed · ${n(h.chunks || 0)} chunks${took}`;
 }
 
 function stagesText(st) {
@@ -5959,9 +6054,19 @@ const gr = { store: "", sel: "", find: "", off: {}, dir: "in", unres: false, map
 
 let graphDragging = false;
 
+// The store the Graph page shows: the one picked, or the first with a graph.
+let graphMapFor = "";
+let graphPeekFor = "";
+function graphStore() {
+  const stores = liveStores().filter((s) => s.files);
+  if (gr.store && store(gr.store)) return gr.store;
+  return (stores.find((s) => s.files && (s.coverage || []).length) || stores[0] || {}).name || "";
+}
+
 VIEWS.graph = {
   fill: true,
-  needs: () => ["stores"],
+  // Blast radius opens on the store's hubs, so they load with the page.
+  needs: (route) => (route.parts[0] === "blast" ? ["stores", "graphmap", "graphpeek"] : ["stores"]),
   live: [],
   render(route) {
     const tab = route.parts[0] || "explore";
@@ -5974,7 +6079,8 @@ VIEWS.graph = {
       gr.data = null;
       gr.sym = null;
     }
-    if (!gr.store || !store(gr.store)) gr.store = (stores.find((s) => s.files && (s.coverage || []).length) || stores[0] || {}).name || "";
+    if (!gr.store || !store(gr.store)) gr.store = graphStore();
+    if (data.graphmap && graphMapFor === gr.store && !(gr.map && gr.map.store === gr.store)) gr.map = { ...data.graphmap, store: gr.store };
     const root = el("div", { class: "col fillpage grow min0" });
     root.style.height = "100%";
     const picker = btn(
@@ -6651,7 +6757,33 @@ function blastTab(picker) {
   if (b.busy) parts.push(el("div", { class: "row gap10 muted" }, el("span", { class: "spinner" }), "Walking the edges backwards…"));
   else if (b.out && b.out.error) parts.push(el("div", { class: "card" }, errorBox(b.out.error)));
   else if (!imp) {
-    const hubs = (gr.map && gr.map.store === gr.store ? gr.map.communities || [] : []).flatMap((c) => c.hubs || []).slice(0, 3);
+    let hubs = (gr.map && gr.map.store === gr.store ? gr.map.communities || [] : []).flatMap((c) => c.hubs || []).slice(0, 3);
+    // A store too small for communities still has symbols: the busiest ones
+    // in its overview graph are where to start.
+    if (!hubs.length && data.graphpeek && graphPeekFor === gr.store) {
+      const g = data.graphpeek;
+      const deg = {};
+      for (const e of g.edges || []) {
+        deg[e.from] = (deg[e.from] || 0) + 1;
+        deg[e.to] = (deg[e.to] || 0) + 1;
+      }
+      hubs = (g.nodes || [])
+        .map((nd, i) => ({ name: nd.name, path: nd.path, kind: nd.kind, d: deg[i] || 0 }))
+        .filter((h) => h.name && h.kind !== "module" && h.kind !== "file" && !/[./]/.test(h.name))
+        .sort((a, b) => b.d - a.d)
+        .slice(0, 3);
+    }
+    // Opened straight on this tab, the store's hubs are not read yet: read
+    // them, so the starting points are symbols this store really defines.
+    if (gr.store && !(gr.map && gr.map.store === gr.store)) {
+      const want = gr.store;
+      api(`/api/map?${new URLSearchParams({ store: want, shown: "12" })}`)
+        .then((out) => {
+          gr.map = { ...out, store: want };
+          if (state.route.page === "graph" && state.route.parts[0] === "blast") repaint();
+        })
+        .catch((e) => (gr.map = { error: e.message, store: want, communities: [] }));
+    }
     parts.push(
       el(
         "div",
@@ -7962,10 +8094,13 @@ VIEWS.settings = {
     return sec === "perf" ? ["runs", "accel"] : sec === "access" ? ["about", "agents", "privacy"] : sec === "about" ? ["about", "languages", "prices", "helpers"] : ["about"];
   },
   live: ["runs"],
-  // Only the limits and their settings, not a run's progress or cache hits.
+  morph: (route) => (route.parts[0] || "perf") === "perf",
+  // Each limit's reason quotes free memory, which moves every poll; what is
+  // drawn changes only when a value or where it came from does.
   sig: () => {
-    const { machine, ...limits } = data.runs?.limits || {};
-    return JSON.stringify([limits, data.runs?.compaction, data.runs?.vector_cache?.cap_mb]);
+    const L = data.runs?.limits || {};
+    const set = Object.entries(L).filter(([k]) => k !== "machine").map(([k, v]) => [k, v && v.value, v && v.source]);
+    return JSON.stringify([set, data.runs?.compaction, data.runs?.vector_cache?.cap_mb, (data.accel?.lanes || []).map((l) => [l.lane, l.enabled])]);
   },
   render(route) {
     const sec = route.parts[0] || "perf";
@@ -7991,6 +8126,12 @@ VIEWS.settings = {
   },
 };
 
+// A stepper button that reaches its end says so with aria-disabled rather than
+// disabled: a disabled button drops the focus a keyboard user just gave it.
+function stepBtn(off, label, onclick, text) {
+  return btn({ "aria-disabled": off ? "true" : "false", "aria-label": label, onclick: () => !off && onclick() }, text);
+}
+
 async function saveLimits(patch, word) {
   // The daemon says what it now runs with; that is the message, when it says.
   const out = await act(() => post("/api/index/settings", patch), (o) => (o && o.applied) || word || "Saved");
@@ -8013,9 +8154,9 @@ function sePerf() {
       el(
         "div",
         { class: "stepper", "data-tip": lim.reason || null },
-        btn({ disabled: env || lim.value <= 1 ? true : null, "aria-label": `Lower ${label}`, onclick: () => saveLimits({ [key]: Math.max(1, lim.value - step) }) }, "−"),
+        stepBtn(env || lim.value <= 1, `Lower ${label}`, () => saveLimits({ [key]: Math.max(1, lim.value - step) }), "−"),
         el("span", { class: "v", text: `${n(lim.value)}${unit || ""}` }),
-        btn({ disabled: env || lim.value >= lim.ceiling ? true : null, "aria-label": `Raise ${label}`, onclick: () => saveLimits({ [key]: Math.min(lim.ceiling, lim.value + step) }) }, "+"),
+        stepBtn(env || lim.value >= lim.ceiling, `Raise ${label}`, () => saveLimits({ [key]: Math.min(lim.ceiling, lim.value + step) }), "+"),
       ),
     );
   };
@@ -8027,9 +8168,9 @@ function sePerf() {
       el(
         "div",
         { class: "stepper" },
-        btn({ disabled: value <= min ? true : null, "aria-label": `Lower ${label}`, onclick: () => saveLimits({ [key]: Math.max(min, value - step) }) }, "−"),
+        stepBtn(value <= min, `Lower ${label}`, () => saveLimits({ [key]: Math.max(min, value - step) }), "−"),
         el("span", { class: "v", text: `${value === 0 ? "off" : `${n(value)}${unit || ""}`}` }),
-        btn({ disabled: value >= max ? true : null, "aria-label": `Raise ${label}`, onclick: () => saveLimits({ [key]: Math.min(max, value + step) }) }, "+"),
+        stepBtn(value >= max, `Raise ${label}`, () => saveLimits({ [key]: Math.min(max, value + step) }), "+"),
       ),
     );
   const lanes = data.accel?.lanes || [];

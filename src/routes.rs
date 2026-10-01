@@ -555,10 +555,19 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
             "trusted": registry.trusts(&handle.dir),
             // Told apart so the portal can show a root that is not there as a
             // problem rather than silently listing one fewer.
-            "roots": handle.roots.iter().map(|r| json!({
+            // From the registry rather than what the daemon opened with, so a
+            // folder added from the portal is listed the moment it is a root.
+            "roots": registry
+                .name_of(&handle.dir)
+                .and_then(|n| registry.stores.get(n))
+                .map(|e| e.roots.clone())
+                .unwrap_or_else(|| handle.roots.clone())
+                .iter()
+                .map(|r| json!({
                 "path": crate::plain(&r.display().to_string()),
                 "present": r.exists(),
-            })).collect::<Vec<_>>(),
+            }))
+                .collect::<Vec<_>>(),
             "files": files,
             "chunks": chunks,
             "bytes": bytes,
@@ -2924,10 +2933,16 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
         )?;
         // `symbols` stays where it was so the portal's existing symbol lookup
         // is unchanged; the rest of the block is beside it rather than in
-        // place of it.
+        // place of it. The page heads the incoming list "Called by", so it
+        // holds calls: a reference or an alias is not a caller.
+        let callers: Vec<_> = found
+            .callers
+            .into_iter()
+            .filter(|c| c.kind == "calls")
+            .collect();
         Ok(json!({
             "symbols": found.definitions,
-            "callers": found.callers,
+            "callers": callers,
             "callees": found.callees,
             "ego": found.ego,
         }))
@@ -3450,7 +3465,35 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     // between 0.20.0 and 0.26.0. A path outside the store's roots, outside
     // the store's own directory and outside the home directory is refused
     // here, by name, with the rule that refused it.
-    let roots = crate::filter::resolve_boundary(&home::index_roots(&store.dir));
+    // The portal's Add sources (0.35.0) is a person adding a folder to a store
+    // on purpose, so `add_roots` makes the posted folders roots first. Only
+    // under the user's home, the same confinement the folder picker has, and
+    // only on this session-token route: an agent's index request never reaches
+    // here and keeps the boundary it always had.
+    let add_roots = body
+        .get("add_roots")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut roots = crate::filter::resolve_boundary(&home::index_roots(&store.dir));
+    if add_roots && !scan_only {
+        let home_dir = match home::user_home() {
+            Ok(h) => crate::canonical(&h),
+            Err(e) => return Response::error(500, &format!("{e:#}")),
+        };
+        let away: Vec<String> = paths
+            .iter()
+            .filter(|p| !crate::canonical(p).starts_with(&home_dir))
+            .map(|p| crate::plain(&p.display().to_string()))
+            .collect();
+        if !away.is_empty() {
+            return Response::error(
+                403,
+                &format!("outside the home directory: {}", away.join(", ")),
+            );
+        }
+        adopt_roots(&store, &paths);
+        roots = crate::filter::resolve_boundary(&home::index_roots(&store.dir));
+    }
     let outside: Vec<String> = paths
         .iter()
         .filter(|path| !crate::filter::within_resolved(path, &roots))

@@ -1526,6 +1526,7 @@ button.dial {
   color: var(--ink);
   background: var(--soft);
 }
+.stepper button[aria-disabled="true"],
 .stepper button:disabled {
   color: var(--muted);
 }
