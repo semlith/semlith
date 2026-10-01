@@ -2634,7 +2634,7 @@ fn replay(request: &Request) -> Response {
         return Response::json(&json!({ "enabled": on }));
     }
 
-    let enabled = home::Settings::load().session_replay.unwrap_or(false);
+    let enabled = home::Settings::load().replay_on();
     let dir = crate::replay::transcripts_dir().ok();
     if !enabled {
         return Response::json(&json!({

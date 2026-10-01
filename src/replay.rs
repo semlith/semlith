@@ -6,10 +6,11 @@
 //! semlith was asked and the agent read the file anyway. A grep is a miss. An
 //! edit is the answer having sufficed.
 //!
-//! **This reads files semlith does not own, so it is off unless turned on.**
-//! `home::Settings::session_replay` gates every entry point here, the Privacy
-//! page is where it is turned on, and nothing read here is ever sent
-//! anywhere — the same rule the ledger itself keeps.
+//! **This reads files semlith does not own, so it has a switch.**
+//! `home::Settings::replay_on` gates every entry point here. From 0.35.0 it is
+//! on unless the Privacy page turned it off (a settings file that wrote off
+//! before stays off), and nothing read here is ever sent anywhere — the same
+//! rule the ledger itself keeps.
 //!
 //! Claude Code only, in 0.26.0. Its transcripts are the ones on the reference
 //! machine, and a parser written against a format nobody here can run is not

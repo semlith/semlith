@@ -255,10 +255,20 @@ pub struct Settings {
     pub embed_threads: Option<usize>,
     pub index_memory_mb: Option<usize>,
     /// Whether the ledger's Session replay tab may read this machine's agent
-    /// transcripts. Absent means off: the files belong to another program,
-    /// so nothing reads them until somebody says so on the Privacy page.
+    /// transcripts. Absent means on from 0.35.0 (the owner's decision: the
+    /// panel is the ledger's answer to "was it enough", and off by default
+    /// meant nobody saw it). A file that wrote `false` stays off. Read it
+    /// through [`Settings::replay_on`], never with an `unwrap_or` of its own.
     #[serde(default)]
     pub session_replay: Option<bool>,
+    /// The portal's Pause recording switch: no ledger row from this daemon
+    /// while it is `true`. Absent means recording, as it always has.
+    #[serde(default)]
+    pub ledger_paused: Option<bool>,
+    /// The Privacy page's airgap switch, the runtime twin of `--airgap`.
+    /// Absent means off.
+    #[serde(default)]
+    pub airgap: Option<bool>,
     /// Whether the ledger may read each AI client's own session log for the
     /// model, tokens and cost of the calls it made. Absent means off, for the
     /// same reason as `session_replay`.
@@ -286,6 +296,11 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// Whether Session replay may read transcripts: on unless turned off.
+    pub fn replay_on(&self) -> bool {
+        self.session_replay.unwrap_or(true)
+    }
+
     /// What the file says, or nothing at all.
     ///
     /// A file that cannot be read or parsed is the same answer as no file:

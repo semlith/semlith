@@ -141,7 +141,7 @@ Module responsibilities:
 | `src/ledger.rs` | The one place a retrieval is recorded, whichever surface answered it |
 | `src/report.rs` | The five reports: one structure of blocks, five renderers over it, so Markdown, CSV, JSON, HTML and PDF cannot disagree. No engine of its own |
 | `src/schedule.rs` | A report the daemon writes on a cadence: the record, `~/.semlith/schedules.json`, and the one thread that runs them |
-| `src/replay.rs` | What an agent did after an answer, read from this machine's Claude Code transcripts and only when the Privacy page's toggle is on |
+| `src/replay.rs` | What an agent did after an answer, read from this machine's Claude Code transcripts unless the Privacy page's toggle is off (on by default from 0.35.0; a file that wrote off stays off) |
 | `src/image.rs` | Image support: the five extensions, and the CLIP pair that makes a picture comparable with a sentence |
 | `src/lock.rs` | One writer per store, OS advisory lock (not file existence) |
 | `src/watch.rs` | Event source in front of the same indexer `index` runs |

@@ -673,14 +673,21 @@ fn the_ledger_page_can_filter_sort_page_and_export_its_sessions() {
     }
 }
 
-/// Session replay reads nothing until it is turned on, and says so.
+/// Session replay is on until the Privacy page turns it off (0.35.0), and a
+/// file that said off before keeps saying it.
 #[test]
-fn session_replay_is_off_until_the_privacy_page_turns_it_on() {
-    // The setting's absence is off, not a default that happens to be false
-    // somewhere else: what it reads belongs to another program.
+fn session_replay_is_on_unless_the_privacy_page_turned_it_off() {
+    // The setting's absence is on: the owner's 0.35.0 decision. What was
+    // written stays what it was, so nobody who switched it off is switched
+    // back on by an upgrade.
     let fresh = semlith::home::Settings::default();
     assert_eq!(fresh.session_replay, None);
-    assert!(!fresh.session_replay.unwrap_or(false));
+    assert!(fresh.replay_on());
+    let off: semlith::home::Settings =
+        serde_json::from_str(r#"{"session_replay": false}"#).unwrap();
+    assert!(!off.replay_on());
+    let on: semlith::home::Settings = serde_json::from_str(r#"{"session_replay": true}"#).unwrap();
+    assert!(on.replay_on());
 
     // And the reader, pointed at a directory with no transcripts, answers
     // with an empty reading rather than an error.
