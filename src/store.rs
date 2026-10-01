@@ -1408,6 +1408,23 @@ pub fn image(db: &Connection, id: i64) -> Result<Option<ImageRow>> {
         .optional()?)
 }
 
+/// Every indexed image, for the decisions table's "read as image" rows.
+pub fn image_rows(db: &Connection) -> Result<Vec<ImageRow>> {
+    let mut stmt = db.prepare(
+        "SELECT i.id, f.path, i.width, i.height FROM images i \
+         JOIN files f ON f.id = i.file_id ORDER BY f.path",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ImageRow {
+            id: r.get(0)?,
+            path: r.get(1)?,
+            width: r.get(2)?,
+            height: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// The image ids belonging to `path`, before its row is deleted.
 ///
 /// Read rather than returned by `delete_file`, because the cascade that removes

@@ -361,8 +361,11 @@ Module responsibilities:
 - **The not-indexed list and acceptances are two additive tables.** `refusals`
   and `acceptances`, `IF NOT EXISTS`, so `FORMAT_VERSION` does not move. Every
   pass that decides not to index something writes a row; a person — never an
-  agent, never in bulk — accepts one file at a time through the session-token
-  routes or `semlith refused`. An acceptance holds salted blake3 fingerprints,
+  agent — decides through the session-token routes or `semlith refused`. From
+  0.35.0 (owner decision 2026-10-01) a decision may name several files at once
+  (`/api/refused/decide`: in, redact, out, reset), and each file is still its
+  own decision and its own ledger row. Keep out is an acceptance whose mode is
+  `refused`, for any reviewable class. An acceptance holds salted blake3 fingerprints,
   never values, and `keyscan::decide` is the one function every pass (index,
   watcher, catch-up, read from disk) asks. A credential file is never accepted.
 - **`read` answers from chunks, never from disk — except for a file it indexed

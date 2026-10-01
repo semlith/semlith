@@ -113,13 +113,18 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/index/log") => index_log(state, request),
         (true, _, "/api/projects") => projects(request),
         (true, _, "/api/changes") => changes(state),
+        (true, _, "/api/refused") if request.query("decisions") == Some("1") => {
+            decisions(state, request)
+        }
         (true, _, "/api/refused") => refused(state),
+        (true, _, "/api/decisions") => decisions(state, request),
 
         (_, true, "/api/index") => index(state, request),
         (_, true, "/api/add") => add(state, request),
         (_, true, "/api/forget") => forget(state, request),
         (_, true, "/api/refused/accept") => refused_decide(state, request, true),
         (_, true, "/api/refused/revoke") => refused_decide(state, request, false),
+        (_, true, "/api/refused/decide") => decide_files(state, request),
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/trust") => trust(state, request),
         (_, true, "/api/ledger/raw-read") => raw_read(state, request),
@@ -1961,8 +1966,8 @@ fn rules(state: &Arc<State>) -> Value {
         },
         {
             "id": "refused-file acceptance",
-            "rule": "A person accepts a refused file one at a time, from this page or the command                      line, never in bulk and never by an agent: the routes need this session's                      token and no MCP tool accepts. An acceptance keeps the path, the class, the                      mode, the confidence and a salted fingerprint of each accepted match —                      never the value — in the store's own database, on this machine.",
-            "check": "the accept route takes one path and refuses a list; the agent key opens /mcp alone",
+            "rule": "A person decides about refused files, one or several at once, from this page                      or the command line, never an agent: the routes need this session's token                      and no MCP tool accepts. Each file is its own decision and its own ledger                      row, and a credential file is never let in. An acceptance keeps the path,                      the class, the mode, the confidence and a salted fingerprint of each                      accepted match — never the value — in the store's own database, on this                      machine.",
+            "check": "the decision routes take the session token only; the agent key opens /mcp alone",
             "ok": true,
         },
         {
@@ -3898,6 +3903,21 @@ fn refused(state: &Arc<State>) -> Response {
                 .map(|r| r.files.max(1) as usize)
                 .sum::<usize>();
             review += needs;
+            // Each row with its risk read off the scan's own verdict, the same
+            // function the scan plan's review items are scored by.
+            let rows: Vec<Value> = rows
+                .iter()
+                .map(|row| {
+                    let mut value = serde_json::to_value(row).unwrap_or(Value::Null);
+                    if let (Some(object), Value::Object(assessed)) = (
+                        value.as_object_mut(),
+                        crate::keyscan::assess(&row.class, &row.path, &row.matches, row.confidence),
+                    ) {
+                        object.extend(assessed);
+                    }
+                    value
+                })
+                .collect();
             stores.push(json!({
                 "store": label,
                 "rows": rows,
@@ -3924,48 +3944,168 @@ fn refused_decide(state: &Arc<State>, request: &Request, accept: bool) -> Respon
         Err(e) => return Response::error(400, &e.to_string()),
     };
     if body.get("paths").is_some() {
-        return Response::error(400, "one file at a time: send path, not paths");
+        return Response::error(400, "send path, or files as a list; not paths");
     }
-    let Some(path) = body.get("path").and_then(Value::as_str) else {
-        return Response::error(400, "path must be one file's path, as a string");
-    };
+    if body.get("files").and_then(Value::as_array).is_none()
+        && body.get("path").and_then(Value::as_str).is_none()
+    {
+        return Response::error(400, "path must be one file's path, as a string, or files a list");
+    }
     let store = match state.writable(body.get("store").and_then(Value::as_str)) {
         Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
-    let progress = if accept {
-        let mode = body.get("mode").and_then(Value::as_str).unwrap_or("");
+    let mode = body.get("mode").and_then(Value::as_str).unwrap_or("");
+    if accept {
         if !matches!(mode, "redacted" | "as-is" | "refused") {
             return Response::error(400, "mode is redacted, as-is or refused");
         }
         if body.get("reviewed").and_then(Value::as_bool) != Some(true) {
             return Response::error(400, "tick \"I have reviewed this file\" first");
         }
-        let source = match body.get("source").and_then(Value::as_str) {
-            Some("cli") => "cli",
-            _ => "portal",
-        };
-        state.accept(&store, PathBuf::from(path), mode, source)
-    } else {
-        state.revoke(&store, PathBuf::from(path))
+    }
+    let source = match body.get("source").and_then(Value::as_str) {
+        Some("cli") => "cli",
+        _ => "portal",
     };
-    let progress = match progress {
-        Ok(p) => p,
+    let decide = |path: &str| -> Result<Value, String> {
+        let progress = if accept {
+            state.accept(&store, PathBuf::from(path), mode, source)
+        } else {
+            state.revoke(&store, PathBuf::from(path))
+        }
+        .map_err(|e| e.to_string())?;
+        answer_of(progress)
+    };
+    // A list from 0.35.0 (the owner's bulk decision); each file is its own
+    // decision and its own ledger row, and one refusal does not stop the rest.
+    if let Some(files) = body.get("files").and_then(Value::as_array) {
+        let results: Vec<Value> = files
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|path| match decide(path) {
+                Ok(value) => json!({ "path": path, "ok": true, "answer": value }),
+                Err(e) => json!({ "path": path, "ok": false, "error": e }),
+            })
+            .collect();
+        return Response::json(&json!({ "results": results }));
+    }
+    let path = body.get("path").and_then(Value::as_str).unwrap_or_default();
+    match decide(path) {
+        Ok(value) => Response::json(&value),
+        Err(e) => Response::error(409, &e),
+    }
+}
+
+/// The writer's one answer to a decision: its `done`, or its error as text.
+fn answer_of(progress: std::sync::mpsc::Receiver<Value>) -> Result<Value, String> {
+    match progress.recv() {
+        Ok(value) if value.get("event").and_then(Value::as_str) == Some("error") => Err(value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("refused")
+            .to_string()),
+        Ok(value) => Ok(value),
+        Err(_) => Err("the writer stopped before answering".to_string()),
+    }
+}
+
+/// The review list's one write (0.35.0): `in`, `redact`, `out` or `reset`
+/// for a list of files in one store, as the person holding the session
+/// token. Never an agent — the agent key cannot reach any `/api` route — and
+/// a credential file still refuses `in` and `redact`, by name, while the
+/// others proceed. Works for files a held scan offered before any pass wrote
+/// a row for them, which is how the wizard decides before indexing.
+fn decide_files(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(files) = body.get("files").and_then(Value::as_array) else {
+        return Response::error(400, "files must be a list of paths");
+    };
+    let decision = body.get("decision").and_then(Value::as_str).unwrap_or("");
+    let mode = match decision {
+        "in" => Some("as-is"),
+        "redact" => Some("redacted"),
+        "out" => Some("refused"),
+        "reset" => None,
+        _ => return Response::error(400, "decision is in, redact, out or reset"),
+    };
+    let store = match state.writable(body.get("store").and_then(Value::as_str)) {
+        Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
-    match progress.recv() {
-        Ok(value) if value.get("event").and_then(Value::as_str) == Some("error") => {
-            Response::error(
-                409,
-                value
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("refused"),
-            )
+    let results: Vec<Value> = files
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|path| {
+            let progress = match mode {
+                Some(mode) => state.accept(&store, PathBuf::from(path), mode, "portal"),
+                None => state.revoke(&store, PathBuf::from(path)),
+            };
+            match progress.map_err(|e| e.to_string()).and_then(answer_of) {
+                Ok(_) => json!({ "path": path, "ok": true, "decision": decision }),
+                Err(e) => json!({ "path": path, "ok": false, "error": e }),
+            }
+        })
+        .collect();
+    let failed = results.iter().filter(|r| r["ok"] == json!(false)).count();
+    Response::json(&json!({
+        "store": store.name,
+        "decision": decision,
+        "results": results,
+        "failed": failed,
+    }))
+}
+
+/// Every decision about one store's files, the person's and the rules':
+/// `{path, outcome, why, by, at, can_undo}`.
+fn decisions(state: &Arc<State>, request: &Request) -> Response {
+    let wanted = request.query("store").map(str::to_string);
+    with_fleet(state, json!({ "stores": [] }), move |fleet| {
+        let mut stores = Vec::new();
+        for (label, store) in fleet.each() {
+            if wanted.as_deref().is_some_and(|w| w != label) {
+                continue;
+            }
+            let mut rows = Vec::new();
+            for row in crate::store::refusals(store.db())? {
+                let (outcome, by) = match (row.accepted.as_deref(), row.class.as_str()) {
+                    (Some("refused"), _) => ("kept out", "you"),
+                    (Some("redacted"), _) => ("redacted · indexed", "you"),
+                    (Some(_), _) => ("accepted", "you"),
+                    (None, crate::store::class::DUMMY) => ("accepted", "rules"),
+                    (None, crate::store::class::CREDENTIAL | crate::store::class::CONTENT) => {
+                        ("never indexed", "rules")
+                    }
+                    (None, _) => ("skipped", "rules"),
+                };
+                rows.push(json!({
+                    "path": crate::plain(&row.path),
+                    "outcome": outcome,
+                    "why": row.rule,
+                    "by": by,
+                    "at": row.last_seen,
+                    "can_undo": by == "you",
+                    "class": row.class,
+                }));
+            }
+            for image in crate::store::image_rows(store.db()).unwrap_or_default() {
+                rows.push(json!({
+                    "path": crate::plain(&image.path),
+                    "outcome": "read as image",
+                    "why": format!("an image ({}×{} px), searchable by what it shows", image.width, image.height),
+                    "by": "rules",
+                    "at": null,
+                    "can_undo": false,
+                    "class": "image",
+                }));
+            }
+            stores.push(json!({ "store": label, "rows": rows }));
         }
-        Ok(value) => Response::json(&value),
-        Err(_) => Response::error(500, "the writer stopped before answering"),
-    }
+        Ok(json!({ "stores": stores }))
+    })
 }
 
 fn forget(state: &Arc<State>, request: &Request) -> Response {

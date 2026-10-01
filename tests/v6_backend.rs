@@ -429,3 +429,116 @@ fn the_gitignore_switch_decides_what_the_scan_walks() {
     let stores = daemon.get("/api/stores");
     assert_eq!(row(&stores, "notes").unwrap()["gitignore"], json!(false));
 }
+
+// ------------------------------------------------------------------ A7, A8
+
+/// The wizard's review: the scan's items carry the same risk fields the
+/// not-indexed table does, a held scan's files can be decided before any
+/// pass ran, decisions are bulk and undoable, and a credential is never in.
+#[test]
+fn review_items_are_scored_and_decided_in_bulk_before_indexing() {
+    let (_dir, home) = home();
+    let corpus = home.join("work");
+    std::fs::create_dir_all(&corpus).unwrap();
+    let key = semlith::keyscan::forge(3);
+    std::fs::write(corpus.join("a.rs"), format!("let token = \"{key}\";\n")).unwrap();
+    std::fs::write(corpus.join("b.rs"), format!("let other = \"{}\";\n", semlith::keyscan::forge(3))).unwrap();
+    std::fs::write(corpus.join("ok.md"), "# fine\n\nnothing here\n").unwrap();
+    std::fs::write(corpus.join("id_rsa"), "not really a key\n").unwrap();
+
+    let daemon = Daemon::start(&home);
+    daemon.post("/api/store/create", json!({ "name": "work" }));
+    let plan = |daemon: &Daemon| {
+        let (status, body) = daemon.post(
+            "/api/index",
+            json!({ "store": "work", "path": [corpus.display().to_string()], "scan_only": true }),
+        );
+        assert_eq!(status, 200, "{body}");
+        body["runs"][0]["plan"].clone()
+    };
+    let first = plan(&daemon);
+    let review = first["review"].as_array().unwrap();
+    assert_eq!(review.len(), 2, "{first}");
+    for item in review {
+        assert_eq!(item["band"], "high", "{item}");
+        assert_eq!(item["suggest"], "out");
+        assert!(item["why"].as_str().is_some_and(|w| !w.is_empty()));
+        assert!(!item.to_string().contains(&key), "a value reached the plan");
+    }
+    assert!(
+        first["not_indexed_paths"]["content"]
+            .as_array()
+            .is_some_and(|p| p.len() == 2),
+        "{first}"
+    );
+
+    let a = corpus.join("a.rs").display().to_string();
+    let b = corpus.join("b.rs").display().to_string();
+    let (status, body) = daemon.post(
+        "/api/refused/decide",
+        json!({ "store": "work", "files": [a, b], "decision": "out" }),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["failed"], json!(0), "{body}");
+    assert_eq!(plan(&daemon)["review"].as_array().unwrap().len(), 0, "kept out is not offered again");
+
+    let decided = daemon.get("/api/decisions?store=work");
+    let rows = decided["stores"][0]["rows"].as_array().unwrap();
+    let kept: Vec<&Value> = rows.iter().filter(|r| r["outcome"] == "kept out").collect();
+    assert_eq!(kept.len(), 2, "{decided}");
+    assert!(kept.iter().all(|r| r["by"] == "you" && r["can_undo"] == json!(true)));
+    assert_eq!(
+        daemon.get("/api/refused?decisions=1&store=work"),
+        decided,
+        "the two spellings of the decisions route disagree"
+    );
+
+    let (_, body) = daemon.post(
+        "/api/refused/decide",
+        json!({ "store": "work", "files": [a], "decision": "reset" }),
+    );
+    assert_eq!(body["failed"], json!(0), "{body}");
+    assert_eq!(plan(&daemon)["review"].as_array().unwrap().len(), 1, "reset did not undo");
+
+    let rsa = corpus.join("id_rsa").display().to_string();
+    let (_, body) = daemon.post(
+        "/api/refused/decide",
+        json!({ "store": "work", "files": [rsa, b], "decision": "in" }),
+    );
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results[0]["ok"], json!(false), "a credential was let in: {body}");
+    assert!(results[0]["error"].as_str().unwrap().contains("id_rsa"), "{body}");
+}
+
+/// The not-indexed table's rows carry the same scored fields.
+#[test]
+fn not_indexed_rows_carry_their_risk() {
+    let (_dir, home) = home();
+    {
+        let daemon = Daemon::start(&home);
+        daemon.post("/api/store/create", json!({ "name": "rows" }));
+    }
+    let dir = home.join("stores").join("rows");
+    let text = format!("token = {}\n", semlith::keyscan::forge(3));
+    {
+        let store = semlith::Semlith::open(&dir, None).unwrap();
+        semlith::store::read_only(store.db(), false).unwrap();
+        semlith::store::refuse(
+            store.db(),
+            "/somewhere/a.rs",
+            semlith::store::class::CONTENT,
+            "holds what looks like a token",
+            &semlith::keyscan::scan("/somewhere/a.rs", &text),
+            1,
+            1,
+        )
+        .unwrap();
+    }
+    let daemon = Daemon::start(&home);
+    let refused = daemon.get("/api/refused");
+    let row = &refused["stores"][0]["rows"][0];
+    assert_eq!(row["band"], "high", "{refused}");
+    assert_eq!(row["tone"], "red");
+    assert_eq!(row["kind"], "Access token");
+    assert!(row["evidence"].as_str().unwrap().contains("line 1"));
+}
