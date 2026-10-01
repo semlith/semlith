@@ -3013,6 +3013,16 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
         .into_iter()
         .map(PathBuf::from)
         .collect();
+    // A store named with picked `files`, or with no path at all: the Store
+    // page's Re-index (0.35.0) rather than a folder being added.
+    if let Some(name) = body
+        .get("store")
+        .and_then(Value::as_str)
+        .filter(|s| *s != "each")
+        && (body.get("files").is_some() || paths.is_empty())
+    {
+        return reindex(state, name, &body);
+    }
     if paths.is_empty() {
         return Response::error(400, "no path given");
     }
@@ -3162,6 +3172,82 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     }
 }
 
+/// Re-index a store: the picked `files` (absolute, or relative to one of its
+/// roots), re-embedded whatever their hash, as one run named "Re-index N
+/// files"; or with no files the whole store, unchanged files skipped by hash
+/// unless `force` asks otherwise. Through the store's queue like any run.
+fn reindex(state: &Arc<State>, name: &str, body: &Value) -> Response {
+    let Some(store) = state.store(name) else {
+        return Response::error(404, &format!("no store called {name} is open"));
+    };
+    let picked = strings(body, "files");
+    let force = body.get("force").and_then(Value::as_bool).unwrap_or(false);
+    let (paths, kind) = if picked.is_empty() {
+        if body.get("files").is_some() {
+            return Response::error(400, "files is empty; name at least one file");
+        }
+        let kind = if force {
+            daemon::RunKind::Rebuild
+        } else {
+            daemon::RunKind::Reindex
+        };
+        (store.watched.clone(), kind)
+    } else {
+        let mut found = Vec::new();
+        let mut missing = Vec::new();
+        for file in &picked {
+            let given = Path::new(file);
+            let at = if given.is_absolute() {
+                given.exists().then(|| crate::canonical(given))
+            } else {
+                store
+                    .roots
+                    .iter()
+                    .map(|root| root.join(given))
+                    .find(|p| p.exists())
+                    .map(|p| crate::canonical(&p))
+            };
+            match at {
+                Some(path) => found.push(path),
+                None => missing.push(file.clone()),
+            }
+        }
+        if !missing.is_empty() {
+            return Response::error(
+                400,
+                &format!(
+                    "not found in {name}'s roots: {}. Name a file by its absolute path or \
+                     relative to one of the store's roots.",
+                    missing.join(", ")
+                ),
+            );
+        }
+        let roots = crate::filter::resolve_boundary(&home::index_roots(&store.dir));
+        let outside: Vec<String> = found
+            .iter()
+            .filter(|p| !crate::filter::within_resolved(p, &roots))
+            .map(|p| crate::plain(&p.display().to_string()))
+            .collect();
+        if !outside.is_empty() {
+            return Response::error(
+                403,
+                &format!("outside the boundary for store {name}: {}", outside.join(", ")),
+            );
+        }
+        (found, daemon::RunKind::Files)
+    };
+    if paths.is_empty() {
+        return Response::error(400, &format!("{name} has no root on disk to re-index"));
+    }
+    match state.reindex(&store, paths, kind) {
+        Ok(run) => Response::json(&json!({
+            "runs": [{ "run": run, "store": store.name }],
+            "target": "store",
+        })),
+        Err(e) => Response::error(409, &format!("{e:#}")),
+    }
+}
+
 /// Every store's run, and the queue waiting behind them.
 ///
 /// The standing answer to "is anything indexing and how far is it", from a
@@ -3202,7 +3288,15 @@ fn index_runs(state: &Arc<State>) -> Response {
     // the derivation is how much memory is free *now*. The memory figure is
     // the one in force, which only a start or a save changes.
     let limits = daemon::Limits::in_force().as_applied();
+    // Finished runs, from each store's own file, so they outlive the daemon.
+    let mut history: Vec<Value> = state
+        .stores()
+        .iter()
+        .flat_map(|store| daemon::run_history(&store.dir))
+        .collect();
+    history.sort_by_key(|row| std::cmp::Reverse(row["finished"].as_u64().unwrap_or(0)));
     Response::json(&json!({
+        "history": history,
         "runs": runs,
         "queue": queue,
         "running": admission.running(),

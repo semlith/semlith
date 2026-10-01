@@ -1516,6 +1516,10 @@ pub struct Semlith {
     /// store's `gitignore` setting (0.35.0); the deny-list, the hidden-file
     /// rule, `.semlithignore` and the secret scan apply either way.
     pub gitignore: bool,
+    /// Re-embed every file this pass reaches, whatever its recorded hash, and
+    /// without the vector cache: a forced re-index (0.35.0) exists to replace
+    /// what is stored, and a cache hit would hand back the same vectors.
+    pub(crate) force: bool,
     /// Size, mtime and content hash of each file the scan phase read, so the
     /// embed pass that follows it does not read an unchanged file twice.
     prehashed: std::collections::HashMap<PathBuf, (u64, i64, String)>,
@@ -1615,6 +1619,7 @@ impl Semlith {
             quiet: false,
             boundary: Boundary::default(),
             gitignore: true,
+            force: false,
             prehashed: Default::default(),
             scrub: false,
         })
@@ -2673,7 +2678,11 @@ impl Semlith {
             rescan,
             regraph,
             allow_secrets: self.boundary.allow_secrets,
-            hashes: store::all_hashes(&self.db)?,
+            hashes: if self.force {
+                Default::default()
+            } else {
+                store::all_hashes(&self.db)?
+            },
             uncounted: store::uncounted(&self.db)?,
             over_cap: store::acceptances(&self.db)?
                 .into_iter()
@@ -2684,7 +2693,7 @@ impl Semlith {
             each: each.cloned(),
             tokenizer,
             clocks: pipeline::Clocks::default(),
-            cache: accel::cache_in_use().then(|| cache::Scope::of(&self.model)),
+            cache: (accel::cache_in_use() && !self.force).then(|| cache::Scope::of(&self.model)),
             variants: accel::cache_variants(),
             lookups: Default::default(),
             hits: Default::default(),

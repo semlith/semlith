@@ -510,6 +510,67 @@ fn review_items_are_scored_and_decided_in_bulk_before_indexing() {
     assert!(results[0]["error"].as_str().unwrap().contains("id_rsa"), "{body}");
 }
 
+// ------------------------------------------------------------------ A9, A10
+
+/// Picked files are re-indexed as one run named for them, and the finished
+/// run is in the history after a restart. Airgapped, the run cannot load the
+/// model and fails — which is still a finished run the history must keep.
+#[test]
+fn picked_files_reindex_as_one_run_and_its_record_survives_a_restart() {
+    let (_dir, home) = home();
+    let corpus = home.join("proj");
+    std::fs::create_dir_all(corpus.join("src")).unwrap();
+    std::fs::write(corpus.join("src/a.rs"), "fn a() {}\n").unwrap();
+    {
+        let daemon = Daemon::start(&home);
+        daemon.post("/api/store/create", json!({ "name": "proj" }));
+        // A root first, as adding a folder would record it.
+        let _ = daemon.post(
+            "/api/index",
+            json!({ "store": "proj", "path": [corpus.display().to_string()], "scan_only": true }),
+        );
+        let (status, body) = daemon.post(
+            "/api/index",
+            json!({ "store": "proj", "files": [corpus.join("src/a.rs").display().to_string(), "nope.rs"] }),
+        );
+        assert_eq!(status, 400, "a missing file was queued: {body}");
+        assert!(body["error"].as_str().unwrap().contains("nope.rs"), "{body}");
+
+        let (status, body) = daemon.post(
+            "/api/index",
+            json!({ "store": "proj", "files": [corpus.join("src/a.rs").display().to_string()] }),
+        );
+        assert_eq!(status, 200, "{body}");
+        let run = body["runs"][0]["run"].as_u64().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let runs = daemon.get("/api/index/runs");
+            let card = runs["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == run)
+                .cloned()
+                .unwrap_or(Value::Null);
+            assert_eq!(card["kind"], "files", "{runs}");
+            if matches!(card["status"].as_str(), Some("done" | "failed" | "stopped")) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the run never finished: {runs}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let daemon = Daemon::start(&home);
+    let runs = daemon.get("/api/index/runs");
+    let history = runs["history"].as_array().unwrap();
+    let row = history
+        .iter()
+        .find(|r| r["kind"] == "Re-index 1 files")
+        .unwrap_or_else(|| panic!("no history row: {runs}"));
+    assert_eq!(row["store"], "proj");
+    assert!(row["result"].is_string() && row["log"].is_array(), "{row}");
+}
+
 /// The not-indexed table's rows carry the same scored fields.
 #[test]
 fn not_indexed_rows_carry_their_risk() {

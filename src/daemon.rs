@@ -406,6 +406,31 @@ pub enum RunKind {
     /// like any run, so it can be seen and stopped; never admitted, because
     /// it embeds nothing and holds only its own store's writer.
     Compact,
+    /// The store's Re-index button over all its roots (0.35.0). Unchanged
+    /// files are still skipped by hash, as the page says.
+    Reindex,
+    /// Re-index with `force`: every file re-embedded, hash or no hash.
+    Rebuild,
+    /// Exactly the files a person picked, re-embedded whatever their hash.
+    Files,
+}
+
+impl RunKind {
+    /// Whether this run re-embeds a file whose hash has not moved.
+    fn forced(self) -> bool {
+        matches!(self, Self::Rebuild | Self::Files)
+    }
+
+    /// The run's name in the history list.
+    fn label(self, paths: usize) -> String {
+        match self {
+            Self::Run => "Index".to_string(),
+            Self::Reindex | Self::Rebuild => "Re-index".to_string(),
+            Self::Files => format!("Re-index {paths} files"),
+            Self::CatchUp | Self::Batch => "Watcher catch-up".to_string(),
+            Self::Compact => "Compact".to_string(),
+        }
+    }
 }
 
 /// How far back the rate a run card shows looks.
@@ -892,6 +917,8 @@ impl RunState {
         let mut line = event.clone();
         if let Some(object) = line.as_object_mut() {
             object.insert("seq".into(), serde_json::json!(self.next_seq));
+            // When, for the run history's log (0.35.0); additive on the line.
+            object.entry("at").or_insert(serde_json::json!(now()));
         }
         self.next_seq += 1;
         if self.log.len() == LOG_HISTORY {
@@ -899,6 +926,153 @@ impl RunState {
         }
         self.log.push_back(line);
     }
+}
+
+/// How many runs a store's history keeps, and how many a route lists.
+const HISTORY_KEEP: usize = 50;
+
+/// Log lines kept with one finished run.
+const HISTORY_LOG: usize = 200;
+
+/// The file a store's finished runs are kept in: JSON lines, oldest first,
+/// beside `store.db` so it travels and is deleted with the store. An older
+/// binary never opens it.
+pub const HISTORY_FILE: &str = "runs.jsonl";
+
+impl RunState {
+    /// This run as the history keeps it: `{id, store, kind, started,
+    /// finished, result, files, chunks, stages {stage: ms}, log}`.
+    fn history_row(&self, store: &str) -> serde_json::Value {
+        let result = match self.status {
+            RunStatus::Stopped => "stopped",
+            RunStatus::Failed => "failed",
+            _ => "done",
+        };
+        // Flattened to one number per stage; each lane's wait is summed into
+        // `embed`, which is what the page draws as one bar.
+        let mut stages = serde_json::Map::new();
+        if let Some(object) = self.stages.as_ref().and_then(serde_json::Value::as_object) {
+            for (key, value) in object {
+                if let (Some(stage), Some(ms)) = (key.strip_suffix("_ms"), value.as_u64())
+                    && key != "wall_ms"
+                {
+                    stages.insert(stage.to_string(), serde_json::json!(ms));
+                }
+            }
+            let embed: u64 = object
+                .get("embed_wait_ms")
+                .and_then(serde_json::Value::as_object)
+                .map(|lanes| lanes.values().filter_map(serde_json::Value::as_u64).sum())
+                .unwrap_or(0);
+            stages.insert("embed".into(), serde_json::json!(embed));
+        }
+        let log: Vec<serde_json::Value> = self
+            .log
+            .iter()
+            .rev()
+            .take(HISTORY_LOG)
+            .rev()
+            .map(history_line)
+            .collect();
+        serde_json::json!({
+            "id": self.id,
+            "store": store,
+            "kind": self.kind.label(self.paths.len()),
+            "started": self.started.unwrap_or(self.submitted),
+            "finished": self.finished.unwrap_or_else(now),
+            "result": result,
+            "files": self.indexed,
+            "chunks": self.chunks,
+            "stages": stages,
+            "log": log,
+        })
+    }
+}
+
+/// One run event as a history log line: `{at, level, text}`.
+fn history_line(event: &serde_json::Value) -> serde_json::Value {
+    let text = |key: &str| {
+        event
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let name = text("event");
+    let (level, line) = match name.as_str() {
+        "file" => {
+            let outcome = text("outcome");
+            let level = match outcome.as_str() {
+                "failed" => "error",
+                "refused" | "skipped" => "warn",
+                _ => "info",
+            };
+            let why = text("why");
+            let path = text("path");
+            (
+                level,
+                if why.is_empty() {
+                    format!("{outcome} {path}")
+                } else {
+                    format!("{outcome} {path}: {why}")
+                },
+            )
+        }
+        "error" => ("error", format!("error: {}", text("error"))),
+        "done" => (
+            "info",
+            format!(
+                "done: {} indexed, {} chunks",
+                event.get("indexed").and_then(serde_json::Value::as_u64).unwrap_or(0),
+                event.get("chunks").and_then(serde_json::Value::as_u64).unwrap_or(0)
+            ),
+        ),
+        _ if !text("text").is_empty() => ("info", text("text")),
+        other => ("info", other.to_string()),
+    };
+    serde_json::json!({
+        "at": event.get("at").cloned().unwrap_or(serde_json::Value::Null),
+        "level": level,
+        "text": line,
+    })
+}
+
+/// Append one finished run to a store's history, trimming it to
+/// [`HISTORY_KEEP`] when it has grown to twice that.
+///
+/// ponytail: a whole-file rewrite at 100 lines; a run is a few KB, so it is
+/// a sub-megabyte write once every fifty runs.
+fn remember_run(dir: &Path, row: &serde_json::Value) {
+    use std::io::Write;
+    let path = dir.join(HISTORY_FILE);
+    let appended = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| writeln!(file, "{row}"));
+    if appended.is_err() {
+        return;
+    }
+    crate::home::tighten_file(&path);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.len() > HISTORY_KEEP * 2 {
+            let kept = lines[lines.len() - HISTORY_KEEP..].join("\n") + "\n";
+            let _ = crate::home::write_private(&path, kept.as_bytes());
+        }
+    }
+}
+
+/// A store's finished runs, newest first, at most [`HISTORY_KEEP`].
+pub fn run_history(dir: &Path) -> Vec<serde_json::Value> {
+    let Ok(text) = std::fs::read_to_string(dir.join(HISTORY_FILE)) else {
+        return Vec::new();
+    };
+    text.lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .take(HISTORY_KEEP)
+        .collect()
 }
 
 /// Everything about one open store that a route can ask about.
@@ -1102,14 +1276,32 @@ impl Store {
     /// another queued behind it has two records, and an event folded into the
     /// wrong one is a card describing work it did not do.
     fn record(&self, id: u64, event: &serde_json::Value) {
-        if let Some(run) = self
+        let ended = self
             .runs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter_mut()
             .find(|run| run.id == id)
-        {
-            run.absorb(event);
+            .and_then(|run| {
+                let was = run.status.finished();
+                run.absorb(event);
+                // A burst of events that changed nothing is not a run anybody
+                // will look for, as it leaves no card either.
+                let quiet = run.kind == RunKind::Batch
+                    && run.indexed == 0
+                    && run
+                        .summary
+                        .as_ref()
+                        .and_then(|s| s.get("removed"))
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
+                        == 0;
+                (!was && run.status.finished() && !quiet).then(|| run.history_row(&self.name))
+            });
+        // Written outside the lock: a page polling runs should not wait on
+        // the disk.
+        if let Some(row) = ended {
+            remember_run(&self.dir, &row);
         }
         self.runs_changed();
     }
@@ -1492,11 +1684,16 @@ impl Store {
                 // walk would drop the deleted ones; it is indexed as the list
                 // it is.
                 work: match kind {
-                    RunKind::Batch => Work::Rest(paths),
+                    // A picked list is indexed as the list it is, like a burst.
+                    RunKind::Batch | RunKind::Files => Work::Rest(paths),
                     // A compaction is never admitted, so never reaches here;
                     // named rather than folded into a wildcard so a new kind
                     // has to say where it goes.
-                    RunKind::Run | RunKind::CatchUp | RunKind::Compact => Work::Roots(paths),
+                    RunKind::Run
+                    | RunKind::CatchUp
+                    | RunKind::Compact
+                    | RunKind::Reindex
+                    | RunKind::Rebuild => Work::Roots(paths),
                 },
                 first: true,
                 already: Vec::new(),
@@ -2475,6 +2672,13 @@ impl State {
         Ok(self.admission.submit(store, paths, RunKind::Run))
     }
 
+    /// Queue a re-index run of the given kind (0.35.0's Re-index and
+    /// Re-index files), admitted like any other run.
+    pub fn reindex(&self, store: &Arc<Store>, paths: Vec<PathBuf>, kind: RunKind) -> Result<u64> {
+        Self::writer_alive(store)?;
+        Ok(self.admission.submit(store, paths, kind).0)
+    }
+
     /// The scan phase for `paths` into `store`, without the writer or the
     /// model: a read-only open of the store beside the writer's.
     pub fn plan(&self, store: &Arc<Store>, paths: &[PathBuf]) -> Result<crate::Plan> {
@@ -2712,7 +2916,6 @@ impl State {
         }
         refresh_unrecorded();
         self.reopen_readers();
-        changes::bump(changes::Domain::Stores);
     }
 
     /// Rename a store while the daemon runs: close it as a delete would,
@@ -2757,9 +2960,9 @@ impl State {
             }
         };
         drop(store);
-        let opened = self.reopen_after_stop(&dir);
-        changes::bump(changes::Domain::Stores);
-        opened
+        // `open_store` bumps the stores counter; the registry write the
+        // settings made is noticed by `changes::notice_registry`.
+        self.reopen_after_stop(&dir)
     }
 
     /// Open a store whose writer was just told to stop. The thread drops the
@@ -4038,6 +4241,9 @@ fn perform(
                     "elapsed_ms": store.run_elapsed_ms(run),
                 }));
             };
+            // Every slice of a forced run is forced: a slice only carries the
+            // files the run has not reached yet.
+            writer.force = store.run_kind(run).is_some_and(RunKind::forced);
             let outcome = match work {
                 Work::Roots(ref roots) => {
                     writer.index_within_held_under(roots, SLICE, &control, on_file)
@@ -4050,6 +4256,7 @@ fn perform(
                     on_file,
                 ),
             };
+            writer.force = false;
             match outcome {
                 Ok(mut done) => {
                     store.last_write.store(now() as usize, Ordering::Relaxed);
@@ -4695,6 +4902,62 @@ mod tests {
     fn counters() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A finished run is written to the store's history with its name, its
+    /// stages flattened, and its log; a burst that changed nothing is not;
+    /// the history reads back newest first and is trimmed.
+    #[test]
+    fn a_finished_run_outlives_the_daemon_in_its_store_history() {
+        let _held = counters();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::new(
+            "notes".into(),
+            dir.path().to_path_buf(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            0,
+        ));
+        store.begin_run(1, vec![PathBuf::from("/a"), PathBuf::from("/b")], RunKind::Files);
+        store.record(1, &serde_json::json!({ "event": "started" }));
+        store.record(
+            1,
+            &serde_json::json!({ "event": "file", "outcome": "failed", "path": "/a", "why": "unreadable" }),
+        );
+        store.record(
+            1,
+            &serde_json::json!({ "event": "done", "indexed": 1, "chunks": 4,
+                "stages": { "wall_ms": 9, "read_ms": 2, "write_ms": 3,
+                            "embed_wait_ms": { "cpu": 4 }, "prepare_cpu_ms": {} } }),
+        );
+        // A late event on a finished run does not write it twice.
+        store.record(1, &serde_json::json!({ "event": "deleted", "text": "x" }));
+
+        store.begin_run(2, Vec::new(), RunKind::Batch);
+        store.record(2, &serde_json::json!({ "event": "done", "indexed": 0, "removed": 0 }));
+
+        let history = run_history(dir.path());
+        assert_eq!(history.len(), 1, "{history:?}");
+        let row = &history[0];
+        assert_eq!(row["kind"], "Re-index 2 files");
+        assert_eq!(row["result"], "done");
+        assert_eq!(row["files"], 1);
+        assert_eq!(row["chunks"], 4);
+        assert_eq!(row["stages"], serde_json::json!({ "read": 2, "write": 3, "embed": 4 }));
+        let log = row["log"].as_array().unwrap();
+        assert!(log.iter().any(|l| l["level"] == "error"), "{log:?}");
+        assert!(log.iter().all(|l| l["at"].is_u64()));
+
+        for id in 10..10 + (HISTORY_KEEP as u64 * 2 + 5) {
+            store.begin_run(id, Vec::new(), RunKind::Run);
+            store.record(id, &serde_json::json!({ "event": "error", "error": "no" }));
+        }
+        let history = run_history(dir.path());
+        assert_eq!(history.len(), HISTORY_KEEP);
+        assert_eq!(history[0]["result"], "failed");
+        let lines = std::fs::read_to_string(dir.path().join(HISTORY_FILE)).unwrap();
+        assert!(lines.lines().count() <= HISTORY_KEEP * 2, "the file was never trimmed");
     }
 
     /// A store with nothing behind it, for the parts of a run that are
