@@ -2596,8 +2596,7 @@ fn busiest(stores: &[(&str, &rusqlite::Connection)]) -> Result<Option<String>> {
     // the whole store, seconds on a large one, and gives the same answer until
     // the symbol or edge count moves.
     type Chosen = (String, (i64, i64), Option<String>);
-    static CHOSEN: std::sync::Mutex<Vec<Chosen>> =
-        std::sync::Mutex::new(Vec::new());
+    static CHOSEN: std::sync::Mutex<Vec<Chosen>> = std::sync::Mutex::new(Vec::new());
     let mut key = String::new();
     let mut stats = (0i64, 0i64);
     for (_, db) in stores {
