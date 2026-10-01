@@ -149,6 +149,9 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/accel") => accel_change(request),
         (_, true, "/api/schedules") => schedule_write(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
+        (_, true, "/api/drop/resolve") => drop_resolve(state, request),
+        (true, _, "/api/helpers") => helpers_status(),
+        (_, true, "/api/helpers") => helpers_change(request),
 
         // A route that exists on another verb is worth telling apart from one
         // that does not exist at all: the first is a bug in the page, the
@@ -4407,6 +4410,80 @@ fn matches(pattern: &str, name: &str) -> bool {
 #[allow(dead_code)]
 fn named(state: &Arc<State>, name: &str) -> Option<Arc<Store>> {
     state.store(name)
+}
+
+/// The most items one drop may ask about. A drop is a handful of things a
+/// person dragged; the cap is what stops a hand-written body asking for a
+/// walk per item until the budget is gone many times over.
+const DROP_ITEMS: usize = 64;
+
+/// The drag pasteboard's change count at the previous drop, the baseline when
+/// a page sends none. `i64::MIN` until the first.
+static DROP_CHANGE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MIN);
+
+/// `POST /api/drop/resolve`: the real path of what was dropped on the page,
+/// found from its name and fingerprint (`crate::drop`). Nothing is uploaded and
+/// no path is logged.
+fn drop_resolve(state: &Arc<State>, request: &Request) -> Response {
+    let body: crate::drop::Request = match request
+        .json()
+        .and_then(|v| serde_json::from_value(v).map_err(Into::into))
+    {
+        Ok(body) => body,
+        Err(e) => return Response::error(400, &format!("not a drop: {e:#}")),
+    };
+    if body.items.len() > DROP_ITEMS {
+        return Response::error(400, &format!("at most {DROP_ITEMS} items per drop"));
+    }
+    let roots = state
+        .stores()
+        .iter()
+        .flat_map(|s| s.roots.clone())
+        .collect();
+    let last = DROP_CHANGE.load(Ordering::Relaxed);
+    let answer = crate::drop::resolve(
+        &body,
+        &crate::drop::Sources::system(roots),
+        (last != i64::MIN).then_some(last),
+    );
+    if let Some(change) = answer.pasteboard_change {
+        DROP_CHANGE.store(change, Ordering::Relaxed);
+    }
+    Response::json(&json!(answer))
+}
+
+/// `GET /api/helpers`: the file-manager entries for this OS and whether each
+/// is installed (`crate::helpers`).
+fn helpers_status() -> Response {
+    match crate::helpers::Env::current() {
+        Ok(env) => Response::json(&json!({
+            "os": env.os,
+            "helpers": crate::helpers::status(&env),
+        })),
+        Err(e) => Response::error(500, &format!("{e:#}")),
+    }
+}
+
+/// `POST /api/helpers {on}`: install or remove every helper for this OS, the
+/// same thing `semlith setup --file-managers` / `--no-file-managers` does.
+fn helpers_change(request: &Request) -> Response {
+    let on = match request.json().map(|v| v.get("on").and_then(Value::as_bool)) {
+        Ok(Some(on)) => on,
+        Ok(None) => return Response::error(400, r#"send {"on": true} or {"on": false}"#),
+        Err(e) => return Response::error(400, &format!("{e:#}")),
+    };
+    let result = crate::helpers::Env::current().and_then(|env| {
+        let helpers = if on {
+            crate::helpers::install(&env)?
+        } else {
+            crate::helpers::remove(&env)?
+        };
+        Ok(json!({ "os": env.os, "helpers": helpers }))
+    });
+    match result {
+        Ok(value) => Response::json(&value),
+        Err(e) => Response::error(500, &format!("{e:#}")),
+    }
 }
 
 #[cfg(test)]

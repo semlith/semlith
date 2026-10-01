@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Dropped folders resolve to their real path
+
+**A drop on the portal finds the real path, and uploads nothing.** No browser
+tells a page where a dropped file lives, so the page sends what it can see —
+name, kind, size, modified time, and a folder's first-level names — to the new
+`POST /api/drop/resolve`, and the daemon finds the path. On macOS it reads the
+drag pasteboard Finder wrote, exact and in about 0.1 s, believed only when it
+changed since the last drop and holds exactly the dropped items. On Windows it
+reads the selection of open Explorer windows. Everywhere else, and after those,
+it asks Spotlight, Windows Search, `plocate`/`locate`, localsearch or Baloo,
+then walks the stores' roots and the home directory, keeping only candidates
+whose fingerprint matches. One match is resolved, several are offered as a
+pick, and a path under a temporary directory is refused with "extract first".
+The call stays under 2.5 s. On this M1 a README with many copies on disk was
+singled out by Spotlight and its fingerprint in 0.51 s.
+
+**"Index with semlith" in the file manager, when asked.** `semlith setup
+--file-managers`, or `POST /api/helpers {"on": true}`, adds a Finder Quick
+Action, an Explorer verb and Send to entry through a windowless launcher, or a
+Nautilus script, a Dolphin service menu and a Thunar action merged beside the
+user's own. Each runs the installed binary's `index` on the selection.
+`--no-file-managers` removes them. `GET /api/helpers` lists them with whether
+each is installed.
+
 ## [0.34.0] - 2026-09-30
 
 ### What the documents hold, counted

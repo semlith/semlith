@@ -557,6 +557,17 @@ enum Command {
         /// it is already there.
         #[arg(long)]
         no_agents: bool,
+
+        /// Add "Index with semlith" to the file manager: a Finder Quick
+        /// Action, an Explorer verb and Send to entry, or Nautilus, Dolphin
+        /// and Thunar actions. Off unless asked; without either flag setup
+        /// asks, and `--yes` leaves them as they are.
+        #[arg(long, conflicts_with = "no_file_managers")]
+        file_managers: bool,
+
+        /// Remove the file-manager helpers `--file-managers` added.
+        #[arg(long)]
+        no_file_managers: bool,
     },
 
     /// Report whether each agent client on this machine can reach semlith, and
@@ -1122,6 +1133,8 @@ fn run() -> Result<()> {
             hook_mode,
             strict,
             no_agents,
+            file_managers,
+            no_file_managers,
         } => {
             arm_airgap(airgap);
             // The flag or the variable. The installers translate their own
@@ -1144,6 +1157,11 @@ fn run() -> Result<()> {
                 !no_hooks,
                 mode,
                 !no_agents,
+                match (file_managers, no_file_managers) {
+                    (true, _) => Some(true),
+                    (_, true) => Some(false),
+                    _ => None,
+                },
             )?;
         }
 

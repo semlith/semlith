@@ -210,6 +210,7 @@ pub fn status() -> Status {
 /// form: no key lands in a file, and nothing outside the client's own registry
 /// is touched. `register_all` is the one part that does ask, and it asks with
 /// the list of files in front of the user.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     yes: bool,
     airgap: bool,
@@ -218,6 +219,7 @@ pub fn run(
     hooks: bool,
     mode: crate::hook::Mode,
     agents: bool,
+    file_managers: Option<bool>,
 ) -> Result<()> {
     let _ = cliclack::intro(format!(" semlith {} setup ", env!("CARGO_PKG_VERSION")));
 
@@ -233,6 +235,7 @@ pub fn run(
         announce(step_always_load()?),
         announce(step_skill()?),
         announce(step_explorer(agents)?),
+        announce(step_file_managers(file_managers, yes)?),
         announce(step_hooks(hooks, mode)?),
         announce(step_rules(register_all)?),
         announce(step_service(service)?),
@@ -267,7 +270,7 @@ fn announce(step: Step) -> Step {
 }
 
 /// Where a shell looks for the binary this release installs.
-fn exe_name() -> &'static str {
+pub(crate) fn exe_name() -> &'static str {
     if cfg!(windows) {
         "semlith.exe"
     } else {
@@ -556,7 +559,7 @@ fn path_line(bin: &Path) -> Result<String> {
 /// and reopened in the usual way. It was double quotes before 0.14.0, which
 /// expand `$(…)`, backticks and `$VAR`, so a directory name could run a command
 /// on every shell start.
-fn posix_quote(raw: &str) -> String {
+pub(crate) fn posix_quote(raw: &str) -> String {
     format!("'{}'", raw.replace('\'', r"'\''"))
 }
 
@@ -1321,6 +1324,77 @@ fn step_explorer(wanted: bool) -> Result<Step> {
             state: State::Skipped,
             detail: "Claude Code is not on this machine".into(),
         },
+    })
+}
+
+/// The "Index with semlith" entries in the file manager (`crate::helpers`).
+///
+/// Opt-in, unlike every step around it: these write into Finder's services,
+/// Explorer's menus and Thunar's own file, which an agent install has no
+/// reason to touch. `Some(true)` is `--file-managers`, `Some(false)`
+/// `--no-file-managers` (which removes them), and `None` asks — default no —
+/// or, under `--yes`, leaves them as they are.
+fn step_file_managers(choice: Option<bool>, yes: bool) -> Result<Step> {
+    const NAME: &str = "file managers";
+    let env = crate::helpers::Env::current()?;
+    let before = crate::helpers::status(&env);
+    let all = !before.is_empty() && before.iter().all(|h| h.installed);
+    let any = before.iter().any(|h| h.installed);
+    let labels = |list: &[crate::helpers::Helper]| {
+        list.iter().map(|h| h.label).collect::<Vec<_>>().join(", ")
+    };
+
+    let wanted = match choice {
+        Some(wanted) => wanted,
+        None if all => {
+            return Ok(Step {
+                name: NAME,
+                state: State::AlreadyDone,
+                detail: format!("{} — `--no-file-managers` removes them", labels(&before)),
+            });
+        }
+        None if yes => false,
+        None => cliclack::confirm(format!(
+            "Add \"Index with semlith\" to your file manager ({})?",
+            labels(&before)
+        ))
+        .initial_value(false)
+        .interact()
+        .unwrap_or(false),
+    };
+
+    if !wanted {
+        if choice != Some(false) {
+            return Ok(Step {
+                name: NAME,
+                state: State::Skipped,
+                detail: "opt-in: `semlith setup --file-managers` adds \"Index with semlith\""
+                    .into(),
+            });
+        }
+        crate::helpers::remove(&env)?;
+        return Ok(Step {
+            name: NAME,
+            state: if any { State::Done } else { State::AlreadyDone },
+            detail: if any {
+                format!("removed {}", labels(&before))
+            } else {
+                "no file-manager helper was installed".into()
+            },
+        });
+    }
+    let after = crate::helpers::install(&env)?;
+    Ok(Step {
+        name: NAME,
+        state: if all { State::AlreadyDone } else { State::Done },
+        detail: format!(
+            "\"Index with semlith\" in {}",
+            after
+                .iter()
+                .map(|h| h.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     })
 }
 
