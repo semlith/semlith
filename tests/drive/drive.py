@@ -155,11 +155,18 @@ class Transcript:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Replay the 2026-09-17 regression drive against a live portal."
+        description="Replay the 2026-09-17 regression drive, and the v6 view checks, "
+        "against a live portal."
     )
     parser.add_argument("--out", default="drive-out", help="where screenshots and the transcript go")
     parser.add_argument("--only", default="", help="a comma-separated list of finding ids")
     parser.add_argument("--list", action="store_true", help="print the registered ids and exit")
+    parser.add_argument(
+        "--shots",
+        action="store_true",
+        help="only take the v6 screenshot set: every view, light and dark, 1440px "
+        "and 390px, into <out>/shots",
+    )
     parser.add_argument(
         "--keep-fixtures",
         action="store_true",
@@ -169,11 +176,13 @@ def main():
 
     if args.list:
         for check_id, title, _ in findings.CHECKS:
-            print("%-6s %s" % (check_id, title))
+            print("%-8s %s" % (check_id, title))
         print("\n%d checks" % len(findings.CHECKS))
         return 0
 
     wanted = {part.strip() for part in args.only.split(",") if part.strip()}
+    if args.shots:
+        wanted.add("v6.shots")
     selected = [c for c in findings.CHECKS if not wanted or c[0] in wanted]
     unknown = wanted - {c[0] for c in findings.CHECKS}
     if unknown:
@@ -237,25 +246,25 @@ def main():
 
             if skipped is not None:
                 skips += 1
-                transcript.line("skip     %-6s %s" % (check_id, title))
+                transcript.line("skip     %-8s %s" % (check_id, title))
                 transcript.line("         %s" % skipped)
             elif failure is None and issue is None:
                 passes += 1
-                transcript.line("ok       %-6s %s" % (check_id, title))
+                transcript.line("ok       %-8s %s" % (check_id, title))
             elif failure is not None and issue is not None:
                 xfails += 1
-                transcript.line("xfail    %-6s %s (#%s)" % (check_id, title, issue))
+                transcript.line("xfail    %-8s %s (#%s)" % (check_id, title, issue))
             elif failure is None and issue is not None:
                 xpasses += 1
                 needs_attention.append(check_id)
-                transcript.line("XPASS    %-6s %s" % (check_id, title))
+                transcript.line("XPASS    %-8s %s" % (check_id, title))
                 transcript.line(
                     "         #%s is fixed. Remove this id from known-failures.txt." % issue
                 )
             else:
                 fails += 1
                 needs_attention.append(check_id)
-                transcript.line("FAIL     %-6s %s" % (check_id, title))
+                transcript.line("FAIL     %-8s %s" % (check_id, title))
                 for line in failure.splitlines()[:25]:
                     transcript.line("         %s" % line)
     finally:

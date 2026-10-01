@@ -361,6 +361,24 @@ class Fixtures:
     def remove_doomed(self):
         shutil.rmtree(self.doomed(), ignore_errors=True)
 
+    def cased(self):
+        """Folders and files whose names differ in case, for finding 4.4.
+
+        Upper and lower case mixed in both halves, so a picker that sorts
+        case-sensitively puts `Beta` above `alpha` and is caught doing it, and
+        a file beside the folders, so finding 4.5 has a mix to read.
+        """
+        if getattr(self, "_cased", None):
+            return self._cased
+        directory = os.path.join(self.root, "cased")
+        for name in ("alpha", "Beta", "gamma", "Delta"):
+            os.makedirs(os.path.join(directory, name), exist_ok=True)
+        for name in ("apple.md", "Banana.md", "cherry.md"):
+            with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+                handle.write(DOC % {"name": name})
+        self._cased = directory
+        return directory
+
 
 if __name__ == "__main__":
     # A self-check for the fixture builder alone: everything but `adoptme`,
