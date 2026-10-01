@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The portal, redrawn
+
+**Nine pages in three groups, and a page per store.** Home, Stores, Search
+and Graph; Agents, Ledger and Reports; Privacy and Settings. Each store has
+its own page with Overview, Files, Review, Runs and Settings tabs. Phone,
+tablet and desktop widths each get a layout of their own, and light, dark and
+system themes follow the machine until one is picked.
+
+**A first-run screen and a five-step wizard.** With no store yet the portal
+opens on a Welcome screen that checks the machine for real — model on disk,
+clients found, the endpoint answering. New store walks through Name,
+Sources, Review, Index and Connect: folders by browsing, pasting or dropping,
+repositories found beside them kept together or split one store each, every
+sensitive file shown with its risk before anything is indexed, and the
+clients found on the machine registered in one step at the end.
+
+**What the older portal had, folded in.** Pattern is a fourth Search mode
+beside Ranked, Brief and Exact. Prices sit in the Reports savings picker and
+on Settings. Usage from client logs is a Ledger switch, and adds a model
+column to Sessions. Re-pointing a moved root and trusting a repository are
+on the store's Settings tab. Install update follows Check for updates.
+
+**Loaders are the loading.** The boot animation and each page's loader stay
+exactly as long as the fetches they cover, and go the frame they answer.
+
 ### Dropped folders resolve to their real path
 
 **A drop on the portal finds the real path, and uploads nothing.** No browser

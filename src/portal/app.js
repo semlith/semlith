@@ -8048,7 +8048,7 @@ function seAbout() {
           ["MODEL", models.length ? [...new Set(models)].join(", ") : defaultModel()],
           ["SOURCE", `${a.license} · free and complete`],
           ["UPTIME", `${spellTook((a.uptime || 0) * 1000)} · pid ${a.pid}`],
-          ["MCP", (a.revisions || []).join(" · ")],
+          ["MCP revisions", (a.revisions || []).join(" · ")],
         ].map(([k, v]) => el("div", { class: "kv" }, el("span", { class: "k", text: k }), el("span", { class: "v", text: v }))),
       ),
       el(
