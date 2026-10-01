@@ -5248,3 +5248,22 @@ button.gl-row:hover,
   padding: 4px 10px 4px 8px;
   font-size: 12px;
 }
+.g-defs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+.g-def {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  text-align: left;
+  min-width: 0;
+}
+.g-def:hover,
+.g-def.on {
+  background: var(--chip);
+}

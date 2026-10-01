@@ -830,10 +830,13 @@ function moreButton(items, label) {
 function ask({ title, body, ok, cancel, danger, extra, wide }) {
   return new Promise((resolve) => {
     const before = document.activeElement;
+    const keep = before && before.getAttribute ? before.getAttribute("data-keep") : null;
     const done = (value) => {
       scrim.remove();
       document.removeEventListener("keydown", onKey, true);
-      if (before && before.focus) before.focus();
+      // Back to the control that opened it, or its redrawn copy.
+      const back = before && before.isConnected ? before : keep ? document.querySelector(`[data-keep="${keep}"]`) : null;
+      if (back && back.focus) back.focus();
       resolve(value);
     };
     const onKey = (e) => {
@@ -1005,14 +1008,17 @@ function grid(spec) {
       }),
     );
     const count = view.sel.size;
+    // A server-paged grid holds one page; "all matching" is the whole result
+    // set, which the bulk action reads again with the same filters.
+    const matching = spec.server ? total() : allIds.length;
     const selbar =
       spec.select && count
         ? el(
             "div",
             { class: "selbar" },
-            el("span", { class: "what", text: view.all ? `All ${n(allIds.length)} matching selected` : `${n(count)} selected` }),
-            !view.all && allIds.length > count
-              ? lnk(`Select all ${n(allIds.length)} matching`, () => {
+            el("span", { class: "what", text: view.all ? `All ${n(matching)} matching selected` : `${n(count)} selected` }),
+            !view.all && matching > count
+              ? lnk(`Select all ${n(matching)} matching`, () => {
                   allIds.forEach((x) => view.sel.add(x));
                   view.all = true;
                   paint();
@@ -1028,7 +1034,7 @@ function grid(spec) {
               view.sel.clear();
               view.all = false;
               paint();
-            }) : null),
+            }, { all: view.all, total: matching }) : null),
           )
         : null;
     const from = total() ? (view.page - 1) * view.per + 1 : 0;
@@ -1038,7 +1044,7 @@ function grid(spec) {
       selbar,
       el("div", { class: "tw" }, el("table", { class: spec.cls || null }, spec.caption ? el("caption", { class: "sr-only", text: spec.caption }) : null, el("thead", {}, head), body)),
       !total() ? el("div", { class: "empty lg tb" }, spec.empty || "Nothing here yet.", spec.onClear ? [" ", lnk("Clear the filters", spec.onClear)] : null) : null,
-      spec.noFoot
+      spec.noFoot || !total()
         ? null
         : el(
             "div",
@@ -1374,7 +1380,16 @@ async function refresh(keys) {
   if (state.screen === "welcome" && state.route.page !== "welcome" && (data.stores?.stores || []).length) return render();
   paintChrome();
   if (current.onData) current.onData(list);
-  else if (current.live && list.some((k) => current.live.includes(k))) repaint();
+  else if (current.live && list.some((k) => current.live.includes(k))) {
+    // A view that names what it draws from a live domain is redrawn only when
+    // that part moved, so a run's progress does not rebuild a settings form.
+    if (current.view && current.view.sig) {
+      const sig = current.view.sig(current.route);
+      if (sig === current.sig) return;
+      current.sig = sig;
+    }
+    repaint();
+  }
 }
 
 function noteStores(value) {
@@ -1666,7 +1681,7 @@ function mount(view, route) {
     console.error(e);
     node = el("div", { class: "page" }, errorBox(`This page failed to draw: ${e.message}`));
   }
-  current = { node, live: holder.live, onData: holder.onData, view, route };
+  current = { node, live: holder.live, onData: holder.onData, view, route, sig: view.sig ? view.sig(route) : null };
   fill(shell.main, node);
   paintChrome();
 }
@@ -2016,17 +2031,17 @@ function laneWord(status) {
 
 /** Adopt a `.semlith` somewhere under home: pick the folder, the daemon opens it. */
 async function adoptFlow() {
-  const picked = await pickFolder({ title: "Adopt an existing store", ok: "Adopt this store", hint: "Folders holding a store are marked." });
-  if (!picked) return;
-  const out = await act(() => post("/api/adopt", { path: picked }), (o) => `Adopted ${o.name || o.store || baseName(picked)}`);
-  if (out) {
-    await load("stores", true);
-    go("stores");
-  }
+  // The adopt runs inside the picker, so a refusal is shown there, at the same
+  // folder, and the person can pick another without starting over.
+  const out = await pickFolder({ title: "Adopt an existing store", ok: "Adopt this store", hint: "Folders holding a store are marked.", confirm: (path) => post("/api/adopt", { path }) });
+  if (!out) return;
+  toast(`Adopted ${out.name || out.store || "the store"}`);
+  await load("stores", true);
+  go("stores");
 }
 
 /** A modal folder browser over `/api/dirs`, confined to home by the daemon. */
-function pickFolder({ title, ok, hint, start }) {
+function pickFolder({ title, ok, hint, start, confirm }) {
   return new Promise((resolve) => {
     let dir = start || "";
     let listing = null;
@@ -2041,7 +2056,7 @@ function pickFolder({ title, ok, hint, start }) {
       hint ? el("div", { class: "mb", text: hint }) : null,
       el("div", { class: "card" }, el("div", { class: "browse-head" }, up, where), list),
       err,
-      el("div", { class: "acts" }, btn({ class: "btn", onclick: () => done(null) }, "Cancel"), btn({ class: "btn primary", onclick: () => listing && done(listing.path) }, ok || "Use this folder")),
+      el("div", { class: "acts" }, btn({ class: "btn", onclick: () => done(null) }, "Cancel"), btn({ class: "btn primary", onclick: (e) => listing && choose(e.currentTarget) }, ok || "Use this folder")),
     );
     const scrim = el("div", { class: "modal-scrim", onclick: (e) => e.target === scrim && done(null) }, modal);
     const onKey = (e) => e.key === "Escape" && done(null);
@@ -2049,6 +2064,16 @@ function pickFolder({ title, ok, hint, start }) {
       scrim.remove();
       document.removeEventListener("keydown", onKey, true);
       resolve(v);
+    }
+    async function choose(button) {
+      if (!confirm) return done(listing.path);
+      button.disabled = true;
+      try {
+        done(await confirm(listing.path));
+      } catch (e) {
+        fill(err, errorBox(e.message));
+        button.disabled = false;
+      }
     }
     up.addEventListener("click", () => listing && listing.parent && open(listing.parent));
     async function open(path) {
@@ -3392,7 +3417,7 @@ function wizardScreen() {
               { class: "tw" },
               el(
                 "table",
-                {},
+                { "aria-label": "What semlith will write" },
                 el("thead", {}, el("tr", {}, el("th", { text: "Client" }), el("th", { text: "How" }), el("th", { text: "Result" }))),
                 el(
                   "tbody",
@@ -3871,6 +3896,12 @@ function kindOf(s) {
 }
 
 // The Stores page's per-store saving, never without its coverage and tier.
+// Nothing to read again when every folder a store reads from is gone.
+function rootsGone(s) {
+  const roots = s.roots || [];
+  return roots.length > 0 && roots.every((r) => r.present === false);
+}
+
 function savedLine(s) {
   if (!s.savings || !s.savings.total) return "nothing asked yet";
   return `${short(s.savings.net_tokens)} fewer · coverage ${s.savings.coverage}% · ${s.savings.tier}`;
@@ -3942,7 +3973,7 @@ function storeMenu(s) {
     { label: "Open", onclick: () => go("store", s.name) },
     { label: "Add sources", onclick: () => openWizard({ store: s.name }) },
     { label: "Search it", onclick: () => searchStore(s.name) },
-    { label: "Re-index", disabled: !!activeRun(s.name), onclick: () => reindexStore(s.name) },
+    { label: "Re-index", disabled: !!activeRun(s.name) || rootsGone(s), onclick: () => reindexStore(s.name) },
     reclaimable(s) ? { label: "Compact", hint: bytes(reclaimable(s)), onclick: () => compactStores([s.name]) } : null,
     { label: "Forget…", tone: "red", onclick: () => forgetStore(s.name) },
   ];
@@ -4011,7 +4042,7 @@ VIEWS.home = {
     const kpis = el(
       "div",
       { class: "q4" },
-      kpi("Stores", String(stores.length), running.length ? `${plural(running.length, "run")} going now` : reviewing.length ? `${plural(reviewing.length, "store")} needs a review` : stores.length ? "all fresh and watched" : "none yet", { onclick: () => go("stores") }),
+      kpi("Stores", String(stores.length), running.length ? `${plural(running.length, "run")} going now` : reviewing.length ? `${plural(reviewing.length, "store")} ${reviewing.length === 1 ? "needs" : "need"} a review` : stores.length ? "all fresh and watched" : "none yet", { onclick: () => go("stores") }),
       kpi("Files indexed", n(files), `${n(chunks)} chunks`, { onclick: () => go("stores") }),
       kpi("Agents connected", String(connectedCount()), connectedCount() ? (lastQuery ? `${lastQuery.client} asked ${ago(lastQuery.at)}` : "waiting for a first query") : registered.length ? `${plural(registered.length, "client")} registered · none talking now` : `${plural(found.length, "client")} found on this machine`, { onclick: () => go("agents") }),
       kpi("Fewer tokens", ledger.ratio ? `${ledger.ratio.toFixed(1)}×` : "—", ledger.ratio ? `than reading those files whole · coverage ${ledger.coverage}% · ${ledger.tier}` : "counted once an agent asks something", { onclick: () => go("ledger") }),
@@ -4575,7 +4606,7 @@ VIEWS.store = {
           "div",
           { class: "row" },
           btn({ class: "btn", onclick: () => searchStore(name) }, icon(I.searchSm, 14, { w: 1.8 }), "Search it"),
-          btn({ class: "btn", disabled: r || isEmpty || s.missing ? true : null, onclick: () => reindexStore(name) }, "Re-index"),
+          btn({ class: "btn", disabled: r || isEmpty || s.missing || rootsGone(s) ? true : null, "data-tip": rootsGone(s) ? "Every folder this store reads from is gone — re-point it on Settings" : null, onclick: () => reindexStore(name) }, "Re-index"),
           btn({ class: "btn dark", onclick: () => openWizard({ store: name }) }, icon(I.plus, 14, { w: 2.2 }), "Add sources"),
         ),
       ),
@@ -4715,22 +4746,29 @@ function sdFiles(s, holder) {
     langs.map((l) => el("option", { value: l, selected: sdUi.lang === l ? true : null, text: l })),
   );
   const listHost = el("div", {});
-  const toolbar = el(
-    "div",
-    { class: "row" },
-    el("div", { class: "box w240 full-sm" }, icon(I.searchSm, 14, { w: 1.8 }), globInput),
-    el("div", { class: "row gap6" }, FILE_TYPES.map(([v, label]) => btn({ class: "chip sm", "aria-pressed": String(sdUi.type === v), onclick: () => ((sdUi.type = v), reload()) }, label))),
-    langSel,
-    el("span", { class: "spacer" }),
-    seg(
-      [
-        ["list", "List"],
-        ["tree", "Tree"],
-      ],
-      sdUi.view,
-      (v) => ((sdUi.view = v), reload()),
-    ),
-  );
+  const chipsHost = el("div", { class: "row gap6" });
+  const segHost = el("div", {});
+  const toolbar = el("div", { class: "row" }, el("div", { class: "box w240 full-sm" }, icon(I.searchSm, 14, { w: 1.8 }), globInput), chipsHost, langSel, el("span", { class: "spacer" }), segHost);
+  // Repainted on every reload, so the pressed chip and the view are what the
+  // list shows. The tree reads folders, not filters, so it hides them. The
+  // glob field stays put, so typing in it never loses focus.
+  function paintBar() {
+    const tree = sdUi.view === "tree";
+    langSel.hidden = tree;
+    chipsHost.hidden = tree;
+    fill(chipsHost, FILE_TYPES.map(([v, label]) => btn({ class: "chip sm", "aria-pressed": String(sdUi.type === v), onclick: () => ((sdUi.type = v), reload()) }, label)));
+    fill(
+      segHost,
+      seg(
+        [
+          ["list", "List"],
+          ["tree", "Tree"],
+        ],
+        sdUi.view,
+        (v) => ((sdUi.view = v), reload()),
+      ),
+    );
+  }
   host.append(toolbar, listHost);
   const view = GRID_VIEWS.get(`files:${s.name}`) || { page: 1, per: 25, sort: "path", dir: "asc", sel: new Set(), all: false };
   GRID_VIEWS.set(`files:${s.name}`, view);
@@ -4762,28 +4800,49 @@ function sdFiles(s, holder) {
       { key: "indexed", label: "Indexed", cls: "ms nowrap", firstDir: "desc", sort: (r) => r.indexed_at, render: (r) => ago(r.indexed_at) },
       { key: "x", label: "", cls: "r", render: (r) => lnk("Forget", () => forgetFiles(s, [r.path]), "amber") },
     ],
-    actions: (sel, clear) => [
-      btn({ class: "btn xs", onclick: () => (copy(sel.slice(0, 2000).join("\n"), `Copied ${plural(Math.min(sel.length, 2000), "path")}${sel.length > 2000 ? " (first 2,000)" : ""}`), clear()) }, "Copy paths"),
-      btn({ class: "btn xs", disabled: activeRun(s.name) ? true : null, onclick: () => (reindexStore(s.name, sel), clear()) }, "Re-index"),
-      btn({ class: "btn xs danger", onclick: async () => (await forgetFiles(s, sel)) && clear() }, "Forget"),
-    ],
+    actions: (sel, clear, how) => {
+      // "All matching" is every file the filters match, read again in full.
+      const paths = async () => (how.all ? ((await api(`/api/files?${filesParams(0, how.total)}`)).files || []).map((f) => f.path) : sel);
+      return [
+        btn({
+          class: "btn xs",
+          onclick: async () => {
+            const list = await paths();
+            copy(list.slice(0, 2000).join("\n"), `Copied ${plural(Math.min(list.length, 2000), "path")}${list.length > 2000 ? " (first 2,000)" : ""}`);
+            clear();
+          },
+        }, "Copy paths"),
+        btn({ class: "btn xs", disabled: activeRun(s.name) ? true : null, onclick: async () => (reindexStore(s.name, await paths()), clear()) }, "Re-index"),
+        btn({ class: "btn xs danger", onclick: async () => (await forgetFiles(s, await paths())) && clear() }, "Forget"),
+      ];
+    },
   });
 
-  async function reload(fromGrid) {
-    if (!fromGrid) view.page = 1;
-    if (sdUi.view === "tree") {
-      fill(listHost, filesTree(s));
-      return;
-    }
-    fill(listHost, el("div", { class: "card" }, g.node));
-    const params = new URLSearchParams({ store: s.name, limit: String(view.per), offset: String((view.page - 1) * view.per), sort: view.sort || "path", dir: view.dir || "asc" });
+  function filesParams(offset, limit) {
+    const params = new URLSearchParams({ store: s.name, limit: String(limit), offset: String(offset), sort: view.sort || "path", dir: view.dir || "asc" });
     const glob = sdUi.glob.trim();
     if (glob) params.append("path", glob.includes("*") ? glob : `**${glob}**`);
     if (sdUi.lang !== "all") params.append("lang", sdUi.lang);
     if (sdUi.type === "tree-sitter") for (const l of codeLangs()) params.append("lang", l);
     else if (sdUi.type !== "all") for (const ext of READER_EXTS[sdUi.type] || []) params.append("ext", ext);
+    return params;
+  }
+
+  async function reload(fromGrid) {
+    if (!fromGrid) {
+      // New filters, new result set: a selection of the old one goes.
+      view.page = 1;
+      view.sel.clear();
+      view.all = false;
+    }
+    paintBar();
+    if (sdUi.view === "tree") {
+      fill(listHost, filesTree(s));
+      return;
+    }
+    fill(listHost, el("div", { class: "card" }, g.node));
     try {
-      const out = await api(`/api/files?${params}`);
+      const out = await api(`/api/files?${filesParams((view.page - 1) * view.per, view.per)}`);
       rowsNow = out.files || [];
       total = out.total || 0;
       g.update(rowsNow, total);
@@ -4827,7 +4886,7 @@ async function forgetFiles(s, paths) {
     danger: true,
   });
   if (!ok) return false;
-  const out = await act(() => post("/api/forget", { store: s.name, path: paths }), `Forgot ${plural(paths.length, "file")} — chunks dropped, files on disk untouched`);
+  const out = await act(() => post("/api/forget", { store: s.name, paths }), `Forgot ${plural(paths.length, "file")} — chunks dropped, files on disk untouched`);
   if (out) await load("stores", true), repaint();
   return !!out;
 }
@@ -4983,6 +5042,7 @@ function sdReview(s, holder) {
   const filtered = decisions.filter((d) => (sdUi.decOut === "all" || d.outcome === sdUi.decOut) && (sdUi.decBy === "all" || (sdUi.decBy === "you" ? d.can_undo : !d.can_undo)) && (!q || `${d.path} ${d.why}`.toLowerCase().includes(q)));
   const g = grid({
     key: `dec:${s.name}`,
+    caption: `Decisions for ${s.name}`,
     rows: filtered,
     select: true,
     canSelect: (d) => d.can_undo,
@@ -5068,12 +5128,12 @@ function sdRuns(s, holder) {
           "div",
           { class: "row" },
           el("span", { class: "card-t", text: r.status === "queued" ? "Waiting to start" : r.status === "review" ? "Held for review" : "Running now" }),
-          pill(paused ? "paused" : r.status === "review" ? "waiting for review" : r.status === "queued" ? `queued${r.position ? ` · ${r.position} in line` : ""}` : r.kind === "compact" ? "compacting" : r.kind === "catch-up" ? "catching up" : "indexing", paused || r.status === "review" || r.status === "queued" ? "amber" : "green", { pulse: r.status === "running" }),
+          pill(r.status === "pausing" ? "pausing" : paused ? "paused" : r.status === "review" ? "waiting for review" : r.status === "queued" ? `queued${r.position ? ` · ${r.position} in line` : ""}` : r.kind === "compact" ? "compacting" : r.kind === "catch-up" ? "catching up" : "indexing", paused || r.status === "review" || r.status === "queued" ? "amber" : "green", { pulse: r.status === "running" }),
           el("span", { class: "spacer" }),
           r.status === "review" ? btn({ class: "btn sm primary", onclick: () => go("store", s.name, "review") }, "Review and start") : null,
           r.status === "review" ? btn({ class: "btn sm", onclick: () => runControl(r, "start") }, "Start indexing") : null,
-          ["running", "paused", "pausing"].includes(r.status) ? btn({ class: "btn sm", onclick: () => runControl(r, paused ? "resume" : "pause") }, paused ? "Resume" : "Pause") : null,
-          btn({ class: "btn sm danger-soft", onclick: () => stopRun(r) }, r.status === "queued" ? "Take out of the queue" : "Stop…"),
+          ["running", "paused", "pausing"].includes(r.status) ? btn({ class: "btn sm", "data-keep": `run-ctl-${r.id}`, onclick: () => runControl(r, paused ? "resume" : "pause") }, paused ? "Resume" : "Pause") : null,
+          btn({ class: "btn sm danger-soft", "data-keep": `run-stop-${r.id}`, onclick: () => stopRun(r) }, r.status === "queued" ? "Take out of the queue" : "Stop…"),
         ),
         el("div", { class: "row nowrap gap12" }, b, el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
         el("div", { class: "t-mono-sm", text: [r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "", `${n(r.chunks || 0)} chunks`, r.rate != null ? `${perSecond(r.rate)} chunks/s` : "", Object.entries(r.lane_rates || {}).filter(([, v]) => v > 0).map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`).join(" · "), r.status === "running" ? spellLeft(r.eta_ms) : ""].filter(Boolean).join(" · ") }),
@@ -5230,7 +5290,7 @@ function sdSettings(s) {
         { class: "card pad" },
         el("span", { class: "card-t", text: "Maintenance" }),
         el("div", { class: "maint-row" }, el("span", { class: "col grow" }, el("span", { class: "t", text: "Compact" }), el("span", { class: "s", text: reclaim ? `${bytes(reclaim)} of deleted chunks can be reclaimed. Searches keep working while it runs.` : `Nothing to reclaim. The daemon compacts on its own past ${data.runs?.compaction?.threshold_percent ?? 25}%.` })), btn({ class: "btn", disabled: reclaim ? null : true, onclick: () => compactStores([s.name]) }, "Compact now")),
-        el("div", { class: "maint-row" }, el("span", { class: "col grow" }, el("span", { class: "t", text: "Re-index everything" }), el("span", { class: "s", text: "Reads every source again. Unchanged files are skipped by hash." })), btn({ class: "btn", disabled: activeRun(s.name) || !(s.roots || []).length ? true : null, onclick: () => reindexStore(s.name) }, "Re-index")),
+        el("div", { class: "maint-row" }, el("span", { class: "col grow" }, el("span", { class: "t", text: "Re-index everything" }), el("span", { class: "s", text: "Reads every source again. Unchanged files are skipped by hash." })), btn({ class: "btn", disabled: activeRun(s.name) || !(s.roots || []).length || rootsGone(s) ? true : null, onclick: () => reindexStore(s.name) }, "Re-index")),
       ),
       missing.length || outside
         ? el(
@@ -6236,6 +6296,32 @@ function drawLive(host, nodes, edges) {
   return host._live;
 }
 
+// Several /api/graph answers as one drawing: nodes by name, edges re-pointed.
+function mergeGraphs(parts) {
+  if (parts.length === 1) return parts[0];
+  const nodes = [];
+  const at = new Map();
+  const edges = [];
+  const seen = new Set();
+  let total = 0;
+  for (const g of parts) {
+    total = Math.max(total, g.total || 0);
+    const local = (g.nodes || []).map((nd) => {
+      if (!at.has(nd.name)) at.set(nd.name, nodes.push(nd) - 1);
+      return at.get(nd.name);
+    });
+    for (const e of g.edges || []) {
+      const from = local[e.from];
+      const to = local[e.to];
+      const key = `${from}>${to}>${e.kind}`;
+      if (from === undefined || to === undefined || seen.has(key)) continue;
+      seen.add(key);
+      edges.push({ ...e, from, to });
+    }
+  }
+  return { nodes, edges, total, shown: nodes.length };
+}
+
 function exploreTab(picker) {
   const wrap = el("div", { class: "gr-explore grow min0" });
   const map = el("div", { class: "g-map" });
@@ -6248,23 +6334,38 @@ function exploreTab(picker) {
     placeholder: "Jump to a symbol",
     "aria-label": "Jump to a symbol",
     "data-keep": "gr-find",
+    "aria-describedby": "gr-find-hint",
     oninput: (e) => (gr.find = e.target.value),
     onkeydown: (e) => {
       if (e.key !== "Enter") return;
-      const v = gr.find.trim();
-      if (!v) return;
-      gr.sel = v;
-      gr.data = null;
-      gr.sym = null;
-      loadExplore();
+      jump();
     },
   });
+  // Several names, comma-separated: each one's definition, and the graph
+  // around all of them, centred on the first.
+  function jump() {
+    const names = gr.find.split(",").map((x) => x.trim()).filter(Boolean).slice(0, 8);
+    if (!names.length) return;
+    gr.names = names;
+    gr.sel = names[0];
+    gr.data = null;
+    gr.sym = null;
+    gr.defs = null;
+    loadExplore();
+  }
   let liveCtl = null;
   map.append(
     el(
       "div",
       { class: "g-bar" },
-      el("div", { class: "box w260 full-sm" }, icon(I.searchSm, 14, { w: 1.8 }), findInput),
+      el(
+        "div",
+        { class: "box w260 full-sm" },
+        icon(I.searchSm, 14, { w: 1.8 }),
+        findInput,
+        el("span", { class: "sr-only", id: "gr-find-hint", text: "Press Enter or Go to jump. Separate several names with commas." }),
+        btn({ class: "x-btn", "aria-label": "Go", "data-tip": "Jump · Enter does the same", onclick: jump }, icon(I.arrow, 12, { w: 2 })),
+      ),
       el(
         "div",
         { class: "seg panel" },
@@ -6286,10 +6387,21 @@ function exploreTab(picker) {
 
   async function loadExplore() {
     fill(foot, el("span", { class: "muted", text: "Reading the graph…" }));
-    const p = new URLSearchParams({ store: gr.store, limit: "63" });
-    if (gr.sel) p.set("name", gr.sel);
+    const names = gr.names && gr.names.length > 1 && gr.names.includes(gr.sel) ? gr.names : gr.sel ? [gr.sel] : [null];
     try {
-      gr.data = await api(`/api/graph?${p}`);
+      const parts = await Promise.all(
+        names.map((nm) => {
+          const p = new URLSearchParams({ store: gr.store, limit: names.length > 1 ? "24" : "63" });
+          if (nm) p.set("name", nm);
+          return api(`/api/graph?${p}`);
+        }),
+      );
+      gr.data = mergeGraphs(parts);
+      if (names.length > 1) {
+        api(`/api/symbol?${new URLSearchParams({ names: names.join(","), store: gr.store })}`)
+          .then((out) => ((gr.defs = out.table || []), paintSide()))
+          .catch(() => {});
+      } else gr.defs = null;
       if (!gr.sel && gr.data.nodes && gr.data.nodes.length) {
         const deg = {};
         for (const e of gr.data.edges) {
@@ -6339,7 +6451,10 @@ function exploreTab(picker) {
       fill(live, errorBox(d.error));
       return;
     }
+    // Every chip off means no edges at all, not the kinds no chip names.
+    const allOff = gr.off.calls && gr.off.imports && gr.off.inferred && gr.off.ambiguous;
     const keep = d.edges.filter((e) => {
+      if (allOff) return false;
       if (e.confidence === "inferred" && gr.off.inferred) return false;
       if (e.confidence === "ambiguous" && gr.off.ambiguous) return false;
       if (e.kind === "calls" && gr.off.calls && e.confidence !== "inferred" && e.confidence !== "ambiguous") return false;
@@ -6388,7 +6503,8 @@ function exploreTab(picker) {
   function paintSide() {
     const s = gr.sym;
     const def = s && s.symbols && s.symbols[0];
-    const callers = (s && s.callers) || [];
+    // Called by means calls: a reference or an alias is not a caller.
+    const callers = ((s && s.callers) || []).filter((c) => !c.kind || c.kind === "calls");
     const callees = (s && s.callees) || [];
     const list = gr.dir === "in" ? callers : callees;
     const unresolvedList = (s && s.unresolved) || [];
@@ -6404,6 +6520,16 @@ function exploreTab(picker) {
           el("span", { class: "eyebrow sm wide", text: "SELECTED" }),
           el("span", { class: "nm", text: gr.sel || "nothing yet" }),
           el("span", { class: "t-mono-sm", text: def ? `${tilde(def.path)}:${def.start_line}-${def.end_line}` : s && s.error ? s.error : s ? "no definition in this store" : "reading…" }),
+          gr.defs && gr.defs.length > 1
+            ? el(
+                "div",
+                { class: "g-defs" },
+                el("span", { class: "eyebrow sm", text: `${gr.defs.length} definitions` }),
+                gr.defs.map((d) =>
+                  btn({ class: `g-def${d.name === gr.sel ? " on" : ""}`, onclick: () => ((gr.sel = d.name), (gr.sym = null), paint(), loadSymbol()) }, el("span", { class: "t-mono t-m", text: d.name }), el("span", { class: "t-mono-sm muted", text: `${tilde(d.path)}:${d.start_line}` })),
+                ),
+              )
+            : null,
           def ? el("div", { class: "row gap6" }, el("span", { class: "chipo blue", text: def.kind }), el("span", { class: "chipo", text: plural(def.end_line - def.start_line + 1, "line") }), el("span", { class: "chipo", text: gr.store }), (s.symbols || []).length > 1 ? el("span", { class: "chipo", text: `${s.symbols.length} definitions` }) : null) : null,
           el(
             "div",
@@ -6530,7 +6656,7 @@ function blastTab(picker) {
       el(
         "div",
         { class: "auto-fit m240" },
-        (hubs.length ? hubs : [{ name: gr.sel || "main" }]).map((h) => btn({ class: "kind-card", onclick: () => ((b.sym = h.name), runReach()) }, el("span", { class: "mono t-m", text: h.name }), el("span", { class: "d", text: h.path ? `A hub in ${tilde(h.path)} — what depends on it?` : "What depends on it?" }))),
+        (hubs.length ? hubs : gr.sel ? [{ name: gr.sel }] : []).map((h) => btn({ class: "kind-card", onclick: () => ((b.sym = h.name), runReach()) }, el("span", { class: "mono t-m", text: h.name }), el("span", { class: "d", text: h.path ? `A hub in ${tilde(h.path)} — what depends on it?` : "What depends on it?" }))),
       ),
     );
   } else parts.push(blastResult(imp, b.out.headline));
@@ -6547,6 +6673,7 @@ function blastResult(imp, headline) {
   const filtered = reached.filter((r) => (b.hop === "all" || (b.hop === "3" ? r.hop >= 3 : String(r.hop) === b.hop)) && (b.edge === "all" || (b.edge === "inferred" ? r.confidence === "inferred" || r.confidence === "ambiguous" : r.confidence === "resolved" || r.confidence === "extracted")) && (!q || `${r.name} ${r.path}`.toLowerCase().includes(q)));
   const g = grid({
     key: "blast",
+    caption: "What depends on the symbol",
     rows: filtered,
     sort: "hop",
     per: 10,
@@ -6554,7 +6681,8 @@ function blastResult(imp, headline) {
     onClear: () => ((b.q = ""), (b.hop = "all"), (b.edge = "all"), repaint()),
     columns: [
       { key: "name", label: "Reached", cls: "mm cap180", sort: (r) => r.name, render: (r) => r.name },
-      { key: "where", label: "Where", cls: "ms cap180", sort: (r) => r.path, render: (r) => el("span", { "data-tip": `${r.path}:${r.line}`, text: `${tilde(r.path)}:${r.line}` }) },
+      // Where it reaches the symbol: the call site (at), not where it is defined.
+      { key: "where", label: "Where", cls: "ms cap180", sort: (r) => `${r.path}:${String(r.at ?? r.line).padStart(8, "0")}`, render: (r) => el("span", { "data-tip": `${r.path}:${r.at ?? r.line} · defined at line ${r.line}`, text: `${tilde(r.path)}:${r.at ?? r.line}` }) },
       { key: "edge", label: "Edge", sort: (r) => r.confidence, render: (r) => el("span", { class: `badge ${r.confidence === "inferred" || r.confidence === "ambiguous" ? "amber" : "blue"}`, text: `${r.kind} · ${r.confidence}` }) },
       { key: "hop", label: "Hop", cls: "ms r", sort: (r) => r.hop, render: (r) => String(r.hop) },
     ],
@@ -6570,7 +6698,7 @@ function blastResult(imp, headline) {
     const rad = r.hop === 1 ? 0.55 : 0.85;
     const x = i === 0 ? 50 : Math.max(10, Math.min(90, 50 + Math.cos(a) * rad * 42));
     const y = i === 0 ? 52 : Math.max(10, Math.min(92, 52 + Math.sin(a) * rad * 40));
-    return { id: r.name + (i ? `#${i}` : ""), label: r.name, x: +x.toFixed(2), y: +y.toFixed(2), cls: i === 0 ? "sel" : r.hop > 1 ? "dim" : "near", color: i === 0 ? "var(--accent)" : "var(--blue)", rows: i === 0 ? rows([["role", "the symbol that changes"], ["reaches", plural(reached.length, "symbol")]]) : rows([["hop", String(r.hop)], ["file", `${tilde(r.path)}:${r.line}`], ["edge", `${r.kind} · ${r.confidence}`]]) };
+    return { id: r.name + (i ? `#${i}` : ""), label: r.name, x: +x.toFixed(2), y: +y.toFixed(2), cls: i === 0 ? "sel" : r.hop > 1 ? "dim" : "near", color: i === 0 ? "var(--accent)" : "var(--blue)", rows: i === 0 ? rows([["role", "the symbol that changes"], ["reaches", plural(reached.length, "symbol")]]) : rows([["hop", String(r.hop)], ["file", `${tilde(r.path)}:${r.at ?? r.line}`], ["edge", `${r.kind} · ${r.confidence}`]]) };
   });
   const idOf = (name) => (nodes.find((nd) => nd.label === name) || {}).id;
   const edges = nodes.slice(1).map((nd, i) => {
@@ -6771,6 +6899,12 @@ VIEWS.agents = {
         el("div", { class: "titles" }, el("div", { class: "row nowrap gap10" }, el("div", { class: "h1", text: "Agents" }), pill(open ? "answering" : "stopped", open ? "green" : "grey", { pulse: open })), el("div", { class: "lead", text: "One endpoint on this machine for every client. No per-client process, no second copy of the index." })),
         el("div", { class: "endpoint-box" }, el("span", { class: "eyebrow sm", text: "MCP" }), el("span", { class: "u", text: a.endpoint?.url || "" }), btn({ class: "btn xs soft", onclick: () => copy(a.endpoint?.url || "") }, "Copy")),
         toggle(open, open ? "Endpoint on" : "Endpoint off", async (v) => {
+          // Closing it cuts every connected agent off, so it asks first.
+          if (!v) {
+            const live = connectedRows(a).filter((c) => !c.waiting).length;
+            const ok = await ask({ title: "Stop answering agents?", body: `${live ? `${plural(live, "connected client")} will get a clear refusal on ${live === 1 ? "its" : "their"} next call` : "Every agent will get a clear refusal"} until you turn the endpoint back on. The stores, the watchers and this page keep running.`, ok: "Stop the endpoint", danger: true });
+            if (!ok) return;
+          }
           const out = await act(() => post("/api/endpoint", { open: v }), v ? "Endpoint answering again" : "Endpoint closed — agents get a clear refusal");
           if (out) await load("agents", true), repaint();
         }, { cls: "boxed h34 strong" }),
@@ -6821,7 +6955,7 @@ function agConnected(a) {
             { class: "tw" },
             el(
               "table",
-              {},
+              { "aria-label": "Connected clients" },
               el("thead", {}, el("tr", {}, ["Client", "State", "Version", "Transport", "Queries", "Last query"].map((h, i) => el("th", { class: i >= 4 ? "r" : null, text: h })))),
               el(
                 "tbody",
@@ -6965,7 +7099,7 @@ function agTools(a) {
       { class: "tw" },
       el(
         "table",
-        {},
+        { "aria-label": "MCP tools" },
         el("thead", {}, el("tr", {}, el("th", { text: "Tool" }), el("th", { text: "What it answers" }), el("th", { class: "r", text: "Typical answer" }))),
         el(
           "tbody",
@@ -7008,7 +7142,7 @@ function agHealth(a) {
         { class: "tw" },
         el(
           "table",
-          {},
+          { "aria-label": "Can each client reach semlith" },
           el("thead", {}, el("tr", {}, el("th", { text: "Client" }), el("th", { text: "Semlith" }), el("th", { text: "Skill, hook and rule" }), el("th", { text: "To fix" }))),
           el(
             "tbody",
@@ -7250,6 +7384,7 @@ function ledgerSessions(list) {
   const qInput = el("input", { value: lg.q, placeholder: "Filter by session or agent", "data-keep": "lg-q", "aria-label": "Filter sessions", oninput: (e) => ((lg.q = e.target.value), repaint()) });
   const g = grid({
     key: "lg:sessions",
+    caption: "Ledger sessions",
     rows: filtered,
     sort: "seen",
     dir: "desc",
@@ -7295,6 +7430,7 @@ function ledgerRetrievals(list) {
   const qInput = el("input", { value: lg.q, placeholder: "Filter by query", "data-keep": "lg-q", "aria-label": "Filter retrievals", oninput: (e) => ((lg.q = e.target.value), repaint()) });
   const g = grid({
     key: "lg:retrievals",
+    caption: "Ledger retrievals",
     rows: filtered,
     sort: "when",
     dir: "desc",
@@ -7809,7 +7945,7 @@ async function scanStores() {
 async function forgetFound(f) {
   const ok = await ask({ title: `Forget ${baseName(f.path)}?`, body: `${f.why}. Its chunks leave ${f.store}; the file on disk is untouched.`, ok: "Forget", danger: true });
   if (!ok) return;
-  const out = await act(() => post("/api/forget", { store: f.store, path: [f.key || f.path] }), "Forgotten");
+  const out = await act(() => post("/api/forget", { store: f.store, paths: [f.key || f.path] }), "Forgotten");
   if (out) scanStores();
 }
 
@@ -7826,6 +7962,11 @@ VIEWS.settings = {
     return sec === "perf" ? ["runs", "accel"] : sec === "access" ? ["about", "agents", "privacy"] : sec === "about" ? ["about", "languages", "prices", "helpers"] : ["about"];
   },
   live: ["runs"],
+  // Only the limits and their settings, not a run's progress or cache hits.
+  sig: () => {
+    const { machine, ...limits } = data.runs?.limits || {};
+    return JSON.stringify([limits, data.runs?.compaction, data.runs?.vector_cache?.cap_mb]);
+  },
   render(route) {
     const sec = route.parts[0] || "perf";
     const machine = data.runs?.limits?.machine;
@@ -7851,7 +7992,8 @@ VIEWS.settings = {
 };
 
 async function saveLimits(patch, word) {
-  const out = await act(() => post("/api/index/settings", patch), word);
+  // The daemon says what it now runs with; that is the message, when it says.
+  const out = await act(() => post("/api/index/settings", patch), (o) => (o && o.applied) || word || "Saved");
   if (out) await load("runs", true), repaint();
 }
 
@@ -7931,7 +8073,7 @@ function sePerf() {
             el("span", { class: "row gap8 t-m t13" }, `${l.label || laneName(l.lane)}${l.variant ? ` · ${l.variant}` : ""}`, l.experimental ? el("span", { class: "exp", text: "experimental" }) : null),
             el("span", { class: "muted t-xs", text: `${l.device || (na ? "no device found" : "named when it starts")} · ${laneState(l.status)}${(data.accel.bytes || {})[l.lane] ? ` · ${bytes(data.accel.bytes[l.lane])} on disk` : ""}` }),
           ),
-          el("span", { class: "t-mono-sm ink2 right nowrap", text: check ? `${check.cosine ? `cosine ${Number(check.cosine).toFixed(4)}` : check.ok ? "agrees" : "differs"}${check.rate ? ` · ${perSecond(check.rate)}/s` : ""}` : l.share ? `${Math.round(l.share)}% of the work` : "" }),
+          el("span", { class: "t-mono-sm ink2 right nowrap", text: check ? `${check.cosine ? `cosine ${Number(check.cosine).toFixed(4)}` : check.ok ? "agrees" : "differs"}${check.rate ? ` · ${perSecond(check.rate)}/s` : ""}` : `${Math.round(l.share || 0)}% of the work` }),
         );
       }),
     ),
@@ -8107,7 +8249,6 @@ function seAbout() {
           ["STORE HOME", tilde(a.store_home)],
           ["SOURCE", `${a.license} · free and complete`],
           ["UPTIME", `${spellTook((a.uptime || 0) * 1000)} · pid ${a.pid}`],
-          ["MCP revisions", (a.revisions || []).join(" · ")],
         ].map(([k, v]) => el("div", { class: "kv" }, el("span", { class: "k", text: k }), el("span", { class: "v", text: v }))),
       ),
       el(
