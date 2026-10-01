@@ -3214,9 +3214,15 @@ pub fn run(
     // breath as the port, that it keeps a record and how to stop it. A default
     // nobody is told about is the thing 0.12.0 was right to refuse.
     crate::ledger::set_session_off(!ledger);
-    let paused = crate::home::Settings::load()
-        .ledger_paused
-        .unwrap_or(false);
+    let settings = crate::home::Settings::load();
+    // The Privacy page's switch, as it was left. Before anything below can
+    // reach for a model or a pack.
+    crate::add::set_runtime_airgap(settings.airgap.unwrap_or(false));
+    crate::add::start_counting();
+    if settings.airgap == Some(true) && !airgap {
+        report("airgap: on from the Privacy page; nothing will be fetched");
+    }
+    let paused = settings.ledger_paused.unwrap_or(false);
     crate::ledger::set_paused(paused);
     report(if !ledger {
         "ledger: off for this session"

@@ -173,3 +173,38 @@ fn the_recording_switch_is_a_route_and_outlives_the_daemon() {
         json!({ "on": true, "reason": null })
     );
 }
+
+// ------------------------------------------------------------------ A5
+
+/// The switch airgaps this daemon at once, refuses before a socket is
+/// opened, counts nothing for a refused connection, and outlives a restart.
+#[test]
+fn the_airgap_switch_refuses_before_any_connection_and_is_kept() {
+    let (_dir, home) = home();
+    {
+        let daemon = Daemon::start(&home);
+        let privacy = daemon.get("/api/privacy");
+        assert_eq!(privacy["airgap"], json!({ "on": false, "reason": null }));
+        assert_eq!(privacy["outbound"]["count"], json!(0));
+        assert!(privacy["outbound"]["since"].as_u64().is_some());
+
+        let (status, body) = daemon.post("/api/airgap", json!({ "on": true }));
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["airgap"], json!({ "on": true, "reason": "runtime" }));
+
+        let (status, body) = daemon.post("/api/upgrade", json!({ "action": "check" }));
+        assert_ne!(status, 200, "an airgapped check answered: {body}");
+        assert!(
+            body["error"].as_str().unwrap_or("").contains("airgap"),
+            "the refusal does not say why: {body}"
+        );
+        assert_eq!(daemon.get("/api/privacy")["outbound"]["count"], json!(0));
+    }
+    let daemon = Daemon::start(&home);
+    assert_eq!(
+        daemon.get("/api/privacy")["airgap"],
+        json!({ "on": true, "reason": "runtime" })
+    );
+    let (_, body) = daemon.post("/api/airgap", json!({ "on": false }));
+    assert_eq!(body["airgap"], json!({ "on": false, "reason": null }));
+}

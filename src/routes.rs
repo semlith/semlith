@@ -124,6 +124,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/trust") => trust(state, request),
         (_, true, "/api/ledger/raw-read") => raw_read(state, request),
         (_, true, "/api/ledger/recording") => ledger_recording(request),
+        (_, true, "/api/airgap") => airgap(request),
         (_, true, "/api/agents/reveal") => reveal(state),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
@@ -1098,6 +1099,26 @@ fn raw_read(state: &Arc<State>, request: &Request) -> Response {
     })
 }
 
+/// The Privacy page's airgap switch: saved, then applied to this process.
+/// `add`, every model and pack download and `upgrade` ask `embed::airgap()`,
+/// which reads it, so it refuses what `--airgap` refuses.
+fn airgap(request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(on) = body.get("on").and_then(Value::as_bool) else {
+        return Response::error(400, "missing on");
+    };
+    let mut saved = home::Settings::load();
+    saved.airgap = Some(on);
+    if let Err(e) = saved.save() {
+        return Response::error(500, &format!("{e:#}"));
+    }
+    crate::add::set_runtime_airgap(on);
+    Response::json(&json!({ "airgap": crate::add::airgap_state() }))
+}
+
 /// Pause or resume recording for this daemon, and keep the choice.
 ///
 /// Saved before it is applied, so a pause that could not be written is
@@ -1735,7 +1756,11 @@ fn privacy(state: &Arc<State>) -> Response {
     Response::json(&json!({
         "bind": format!("127.0.0.1:{}", state.server.port()),
         "bind_is_fixed": true,
-        "airgap": state.airgap,
+        // `{on, reason}` from 0.35.0: the switch below can turn it on at
+        // runtime, so one boolean read at startup no longer says it.
+        "airgap": crate::add::airgap_state(),
+        // Every connection this process has opened, by feature and host.
+        "outbound": crate::add::outbound(),
         "model_cache": crate::plain(&cache.display().to_string()),
         "model_cached": cache.exists()
             && std::fs::read_dir(&cache).map(|mut d| d.next().is_some()).unwrap_or(false),
