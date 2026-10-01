@@ -5209,3 +5209,13 @@ button.gl-row:hover,
 .notice > .col {
   flex: 1 1 300px;
 }
+.namebox:focus-within,
+.sr-field:focus-within,
+.filter-chip:focus-within {
+  box-shadow: 0 0 0 2px var(--blue-soft);
+  border-color: var(--blue);
+}
+.inp:focus-visible,
+.sel:focus-visible {
+  box-shadow: 0 0 0 2px var(--blue-soft);
+}
