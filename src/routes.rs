@@ -926,6 +926,13 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
     }
     let mut answer = json!({
         "brief": body,
+        // What `semlith_brief` hands an agent for the same question, byte for
+        // byte, from the same renderer: the page's Copy as the agent sees it.
+        "text": crate::mcp::brief_reply(fleet, &brief, &filter),
+        "prefer": prefer.unwrap_or_else(|| match only.as_deref() {
+            Some([one]) => fleet.lean(one).unwrap_or_default(),
+            _ => crate::Prefer::default(),
+        }),
         "chunks": fleet.chunks(),
         "micros": elapsed.as_micros() as u64,
     });
@@ -1032,7 +1039,13 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         Err(e) => return Response::error(500, &format!("{e:#}")),
     };
     let elapsed = started.elapsed();
-    let hits: Vec<_> = found.into_iter().skip(offset as usize).take(k).collect();
+    let mut hits: Vec<_> = found.into_iter().skip(offset as usize).take(k).collect();
+    // What was applied: the caller's, or — sent none and scoped to one
+    // store — that store's lean.
+    let applied = prefer.unwrap_or_else(|| match only.as_deref() {
+        Some([one]) => fleet.lean(one).unwrap_or_default(),
+        _ => crate::Prefer::default(),
+    });
 
     // The `Hit` shape `--json` already prints, plus the store name — which for
     // a single-store fleet the CLI leaves out and the portal always wants,
@@ -1045,10 +1058,45 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
     let locate = request
         .query("format")
         .is_some_and(|f| f.eq_ignore_ascii_case("locate"));
+    // From 0.35.0 a locate answer is `semlith_search`'s own: the same rows,
+    // the same one line per hit, and — when `max_tokens` is sent — the same
+    // cut, made by the renderer the MCP tool uses rather than a copy of it.
+    let mut lines: Vec<String> = Vec::new();
+    let mut locate_extra = None;
+    if locate && !hits.is_empty() {
+        let budget = request
+            .query("max_tokens")
+            .and_then(|v| v.parse::<usize>().ok());
+        let reply = crate::mcp::search_reply(
+            fleet,
+            &hits,
+            query,
+            applied,
+            budget.unwrap_or(usize::MAX),
+        );
+        let total = hits.len();
+        let mut kept = reply.kept.iter();
+        let mut kept_lines = reply.lines.into_iter();
+        let mut shown_hits = Vec::new();
+        for hit in hits.drain(..) {
+            let line = kept_lines.next().unwrap_or_default();
+            if *kept.next().unwrap_or(&true) {
+                lines.push(line);
+                shown_hits.push(hit);
+            }
+        }
+        hits = shown_hits;
+        locate_extra = Some(json!({
+            "tokens": reply.tokens,
+            "truncated": (hits.len() < total).then(|| json!({ "shown": hits.len(), "total": total })),
+        }));
+    }
     let out: Vec<Value> = hits
         .iter()
-        .map(|h| {
+        .enumerate()
+        .map(|(at, h)| {
             json!({
+                "line": lines.get(at),
                 "score": h.score,
                 "path": crate::plain(&h.path),
                 "start_line": h.start_line,
@@ -1094,13 +1142,12 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         "shape": shape,
         "shape_label": shape.as_str(),
         "weighting": shape.weighting(),
-        // What was applied: the caller's, or — sent none and scoped to one
-        // store — that store's lean.
-        "prefer": prefer.unwrap_or_else(|| match only.as_deref() {
-            Some([one]) => fleet.lean(one).unwrap_or_default(),
-            _ => crate::Prefer::default(),
-        }),
+        "prefer": applied,
     });
+    if let Some(extra) = locate_extra {
+        answer["tokens"] = extra["tokens"].clone();
+        answer["truncated"] = extra["truncated"].clone();
+    }
     // Mid-run, what share of each store the vector half does not cover yet.
     // Absent at rest, so a reader written before 0.32.0 sees what it saw.
     let pending = fleet.pending();
