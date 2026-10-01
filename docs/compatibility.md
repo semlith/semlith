@@ -123,10 +123,9 @@ page carried a forty-eight-row table of every embedding model a store could be
 built with, of which one row is a model any given machine has fetched; the v4
 design has no place for it and the page it sat on is now seven facts and the
 language table. Nothing was withdrawn — `semlith models` prints the full list
-and `/api/models` answers exactly as before. `/api/pattern` has had no portal
-view in every release so far, for the reason recorded in `tests/portal.rs`: a
-tree-sitter query in S-expression syntax is not something anyone types into a
-browser box.
+and `/api/models` answers exactly as before. `/api/pattern` had no portal view
+until 0.35.0, which made it Search's fourth mode beside Ranked, Brief and
+Exact, with a language picker and the query in S-expression syntax.
 
 **Ranking scores and result ordering.** The `score` on a hit is a reciprocal
 rank fusion score. It orders results within one query and means nothing across

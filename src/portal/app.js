@@ -1323,14 +1323,11 @@ const SOURCES = {
   refused: "/api/refused",
   corpus: "/api/corpus",
   accel: "/api/accel",
-  doctor: "/api/doctor",
   schedules: "/api/schedules",
   prices: "/api/prices",
   replay: "/api/ledger/replay",
-  usage: "/api/ledger/usage",
   languages: "/api/languages",
   helpers: "/api/helpers",
-  setup: "/api/setup",
   coverage: "/api/stores?coverage=1",
 };
 
@@ -2680,7 +2677,7 @@ function wizardScreen() {
     const ok = () => /^https:\/\/\S+\.\S+/.test(w.urlDraft.trim());
     const input = el("input", {
       value: w.urlDraft,
-      placeholder: "https://… a page, a PDF or a file on GitHub",
+      placeholder: "A web address: a page, a PDF or a file on GitHub",
       spellcheck: "false",
       "data-keep": "wz-url",
       oninput: (e) => {
@@ -3782,7 +3779,7 @@ function listBadges(lists) {
 
 /** The MCP stanza a client written by hand carries. */
 function mcpJson() {
-  const url = data.agents?.endpoint?.url || `http://${location.host}/mcp`;
+  const url = data.agents?.endpoint?.url || `${location.protocol}//${location.host}/mcp`;
   const env = data.agents?.key_env || "SEMLITH_AGENT_KEY";
   return `{\n  "mcpServers": {\n    "semlith": {\n      "type": "http",\n      "url": "${url}",\n      "headers": { "Authorization": "Bearer \${${env}}" }\n    }\n  }\n}`;
 }
@@ -6986,7 +6983,7 @@ function agHealth(a) {
       (data.privacy?.rules || [])
         .filter((r) => r.applicable !== false && r.check)
         .slice(0, 6)
-        .map((r) => el("div", { class: "check-card" }, el("div", { class: "row nowrap" }, dot(r.ok ? "green" : "amber"), el("span", { class: "eyebrow grow", text: r.id }), el("span", { class: `t-mono t-m ${r.ok ? "green-ink" : "amber-ink"}`, text: r.ok ? "holds" : "to fix" })), el("span", { class: "ink2 t-sm anywhere", text: r.check }), r.manual && !r.ok ? copyField(r.manual) : null)),
+        .map((r) => el("div", { class: "check-card" }, el("div", { class: "row nowrap" }, dot(r.ok ? "green" : "amber"), el("span", { class: "eyebrow grow min0 ell", text: r.id, title: r.id }), el("span", { class: `t-mono t-m ${r.ok ? "green-ink" : "amber-ink"}`, text: r.ok ? "holds" : "to fix" })), el("span", { class: "ink2 t-sm anywhere", text: r.check }), r.manual && !r.ok ? copyField(r.manual) : null)),
     ),
   );
 }
@@ -7047,7 +7044,7 @@ VIEWS.ledger = {
           btn({ class: "btn danger", onclick: reverify }, "Re-verify"),
         ),
       );
-    if (L.legacy_rows) parts.push(el("div", { class: "notice plain", text: "Some rows were written before 0.27.0, one per open store, so totals that include them may count one search more than once. The chain is not rewritten to hide it." }));
+    if (L.legacy_rows) parts.push(el("div", { class: "notice plain", text: "Some rows were written by an older semlith, one per open store, so totals that include them may count one search more than once. The chain is not rewritten to hide it." }));
     parts.push(
       el(
         "div",

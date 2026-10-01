@@ -760,17 +760,19 @@ names a store.
 release that adds one adds the view in the same release; parity debt is not a
 thing this repository carries.
 
-A *view* is not always a page. `semlith languages` is the About page's table and
-`semlith_read` is the Search page's second stage — both have a surface a person
+A *view* is not always a page. `semlith languages` is the table on Settings ›
+About and `semlith_read` is Search's Read whole symbol — both have a surface a person
 can open, which is what the rule is for. What the rule forbids is a capability
 with no surface at all, and the exemption list in `tests/portal.rs` is where a
 deliberate absence is argued rather than assumed: `start` and `mcp` have no
-state of their own to show, and `pattern` takes a tree-sitter query that nobody
-writes into a browser box. Adding a row there is allowed; adding one without the
+state of their own to show, and `models` lists every model a store could be
+built with, which no page draws. `pattern` is Search's fourth mode from 0.35.0.
+Adding a row there is allowed; adding one without the
 reasoning beside it is not. `tests/portal.rs` is the gate: it reads the
 subcommand list out of `--help` and the tool list off a running daemon, and
-fails if any of them — bar `start` and `mcp`, which have their reasons recorded
-there — has no route. The Agents page is the one view whose content is not
+fails if any of them — bar the exemptions, which have their reasons recorded
+there — has no route. It also reads every route `app.js` calls and fails on one
+the daemon does not serve. The Agents page is the one view whose content is not
 computed: it renders the stanzas `src/clients.rs` parses out of
 `docs/clients.md`, so a change to that page is usually a change to that file.
 `docs/portal.md` documents every page, and a new one belongs there in the same
