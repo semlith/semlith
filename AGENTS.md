@@ -657,6 +657,9 @@ without the hardware). Harness-only, undocumented for users:
 `SEMLITH_SERVICE_DIR` stands a directory in for the service manager, so a
 test of the portal's Start at login writes a file there and never asks
 launchd, systemd or Task Scheduler anything;
+`SEMLITH_DROP_TIERS=walk` leaves the drag pasteboard, Explorer and the OS
+index out of `/api/drop/resolve`, so a test of the walk and the temp rule is
+not spent waiting on a cold runner's search service;
 `SEMLITH_PACK_<NAME>` names an unpacked pack directory in place of the pinned
 download, which is how a pack is tried before it is published; and
 `SEMLITH_COREML_WORKER=current` runs the Core ML lanes from the binary being

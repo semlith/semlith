@@ -527,6 +527,9 @@ impl Daemon {
             .env("SEMLITH_HOME", home.join(".semlith"))
             .env("HOME", home)
             .env("USERPROFILE", home)
+            // The walk and the temp rule only: on a cold Windows runner the
+            // Explorer and Windows Search tiers can use the whole budget.
+            .env("SEMLITH_DROP_TIERS", "walk")
             .env_remove("SEMLITH_STORE")
             .env_remove("SEMLITH_PORT")
             .current_dir(home)

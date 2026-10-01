@@ -148,6 +148,23 @@ impl Sources {
         } else {
             ["/media", "/run/media", "/mnt"].map(PathBuf::from).to_vec()
         };
+        // Test-only: `SEMLITH_DROP_TIERS=walk` leaves the pasteboard, Explorer
+        // and the OS index out, so a test of the walk and the temp rule does
+        // not spend its budget waiting on a cold runner's Explorer or search
+        // service. Unset, every tier runs.
+        let walk_only = std::env::var("SEMLITH_DROP_TIERS").is_ok_and(|v| v == "walk");
+        if walk_only {
+            return Sources {
+                pasteboard: Box::new(|| None),
+                explorer: Box::new(Vec::new),
+                index: Box::new(|_, _| Vec::new()),
+                roots,
+                home: crate::home::user_home().ok(),
+                volumes,
+                temp,
+                budget: BUDGET,
+            };
+        }
         Sources {
             pasteboard: Box::new(|| {
                 if cfg!(target_os = "macos") {
