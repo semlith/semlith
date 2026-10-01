@@ -1018,6 +1018,10 @@ impl LanguageCoverage {
 /// name this store holds. A second rule here would be a second answer to "what
 /// share resolves", and the README quotes this one.
 pub fn coverage_by_language(db: &Connection) -> Result<Vec<LanguageCoverage>> {
+    cached_by_graph(db, "coverage", || coverage_by_language_uncached(db))
+}
+
+fn coverage_by_language_uncached(db: &Connection) -> Result<Vec<LanguageCoverage>> {
     use std::collections::{BTreeMap, HashMap};
     let mut by_language: BTreeMap<String, LanguageCoverage> = BTreeMap::new();
     // Each file's language worked out once, by id. The edge pass below used
@@ -4389,30 +4393,56 @@ pub fn where_defined(db: &Connection, names: &[String]) -> Result<Vec<(String, S
 /// on a store that indexes application code every standard-library call is
 /// one of these, and the list is long and uninteresting past the first few.
 pub fn unresolved_targets(db: &Connection, limit: usize) -> Result<(Vec<(String, i64)>, i64)> {
-    let target = crate::graph::not_navigational("d.kind");
-    let sql = format!(
-        "SELECT e.dst, COUNT(*) AS n
-         FROM edges e
-         WHERE e.kind IN ('calls', 'imports')
-           AND NOT EXISTS (SELECT 1 FROM symbols d WHERE d.name = e.dst AND {target})
-         GROUP BY e.dst
-         ORDER BY n DESC, e.dst
-         LIMIT ?1"
-    );
-    let mut stmt = db.prepare(&sql)?;
-    let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    let top: Vec<(String, i64)> = rows.collect::<rusqlite::Result<_>>()?;
-    let distinct: i64 = db.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM (SELECT e.dst FROM edges e
-             WHERE e.kind IN ('calls', 'imports')
-               AND NOT EXISTS (SELECT 1 FROM symbols d WHERE d.name = e.dst AND {target})
-             GROUP BY e.dst)"
-        ),
-        [],
-        |r| r.get(0),
-    )?;
-    Ok((top, distinct))
+    // One pass, and one existence test per distinct target rather than per
+    // edge; the top list and the count come from the same rows. Two passes of
+    // a per-edge test were most of the Index health report on the 879k-chunk
+    // corpus. Cached per store until its graph changes, as the report is
+    // asked for again and again while it is being read.
+    let mut all = cached_by_graph(db, "unresolved", || {
+        let target = crate::graph::not_navigational("d.kind");
+        let mut stmt = db.prepare(&format!(
+            "WITH t AS (SELECT dst, COUNT(*) AS n FROM edges
+                        WHERE kind IN ('calls', 'imports') GROUP BY dst)
+             SELECT dst, n FROM t
+             WHERE NOT EXISTS (SELECT 1 FROM symbols d WHERE d.name = t.dst AND {target})"
+        ))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    })?;
+    let distinct = all.len() as i64;
+    all.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    all.truncate(limit);
+    Ok((all, distinct))
+}
+
+/// A figure computed over a whole store's graph, kept until the graph's
+/// symbol or edge count moves. The health report's aggregates read millions
+/// of rows on a large store and give the same answer until something is
+/// indexed or forgotten.
+fn cached_by_graph<T: Clone + Send + 'static>(
+    db: &Connection,
+    what: &str,
+    compute: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    use std::any::Any;
+    type Slot = (String, (i64, i64), Box<dyn Any + Send>);
+    static CACHE: std::sync::Mutex<Vec<Slot>> = std::sync::Mutex::new(Vec::new());
+    let key = format!("{what}|{}", db.path().unwrap_or(""));
+    let stats = graph_stats(db)?;
+    if let Some((_, _, value)) = CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(k, st, _)| *k == key && *st == stats)
+        && let Some(value) = value.downcast_ref::<T>()
+    {
+        return Ok(value.clone());
+    }
+    let value = compute()?;
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.retain(|(k, _, _)| *k != key);
+    cache.push((key, stats, Box::new(value.clone())));
+    Ok(value)
 }
 
 /// How many names this store defines more than once.
