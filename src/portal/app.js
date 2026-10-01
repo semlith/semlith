@@ -3841,6 +3841,15 @@ const LANE_NAMES = { cpu: "CPU", ane: "Neural Engine", gpu: "GPU", cuda: "CUDA",
 const laneName = (k) => LANE_NAMES[k] || k;
 
 async function runControl(r, action) {
+  // Pressing Pause says "pausing" at once: the request is on its way, and a
+  // poll that lands meanwhile must not be the first to speak.
+  if (action === "pause") {
+    const now = (data.runs?.runs || []).find((x) => x.id === r.id && x.store === r.store);
+    if (now && now.status === "running") {
+      now.status = "pausing";
+      repaint();
+    }
+  }
   const out = await act(() => post("/api/index/control", { store: r.store, run: r.id, action }), action === "pause" ? "Pausing at the next batch" : action === "resume" ? "Resumed" : null);
   // The route's own word first ("pausing", not yet "paused"), then the runs.
   const mine = out && out.state && (data.runs?.runs || []).find((x) => x.id === r.id && x.store === r.store);
@@ -5221,9 +5230,12 @@ function sdRuns(s, holder) {
           el("span", { class: "card-t", text: r.status === "queued" ? "Waiting to start" : r.status === "review" ? "Held for review" : "Running now" }),
           pill(r.status === "pausing" ? "pausing" : paused ? "paused" : r.status === "review" ? "waiting for review" : r.status === "queued" ? `queued${r.position ? ` · ${r.position} in line` : ""}` : r.kind === "compact" ? "compacting" : r.kind === "catch-up" ? "catching up" : "indexing", paused || r.status === "review" || r.status === "queued" ? "amber" : "green", { pulse: r.status === "running" }),
           el("span", { class: "spacer" }),
-          r.status === "review" ? btn({ class: "btn sm primary", onclick: () => go("store", s.name, "review") }, "Review and start") : null,
-          r.status === "review" ? btn({ class: "btn sm", onclick: () => runControl(r, "start") }, "Start indexing") : null,
-          ["running", "paused", "pausing"].includes(r.status) ? btn({ class: "btn sm", "data-keep": `run-ctl-${r.id}`, onclick: () => runControl(r, paused ? "resume" : "pause") }, paused ? "Resume" : "Pause") : null,
+          // Every control is drawn and hidden when it does not apply, so the
+          // card keeps its shape across states and a live patch never moves
+          // the button someone just pressed.
+          btn({ class: "btn sm primary", hidden: r.status === "review" ? null : true, onclick: () => go("store", s.name, "review") }, "Review and start"),
+          btn({ class: "btn sm", hidden: r.status === "review" ? null : true, onclick: () => runControl(r, "start") }, "Start indexing"),
+          btn({ class: "btn sm", hidden: ["running", "paused", "pausing"].includes(r.status) ? null : true, "data-keep": `run-ctl-${r.id}`, onclick: () => runControl(r, paused ? "resume" : "pause") }, paused ? "Resume" : "Pause"),
           btn({ class: "btn sm danger-soft", "data-keep": `run-stop-${r.id}`, onclick: () => stopRun(r) }, r.status === "queued" ? "Take out of the queue" : "Stop…"),
         ),
         el("div", { class: "row nowrap gap12" }, b, el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),

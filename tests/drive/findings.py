@@ -3871,7 +3871,9 @@ def _(d):
     screen and the offset is neither 0 nor the bottom. After each: the offset is
     where it was, the page never showed its loader, and — where the pressed
     button is still on offer afterwards — it is where it was and holds focus."""
-    run_id, store = start_index(d, d.fixtures.unique("still", count=400))
+    # Big enough to still be running after Pause, Resume and both Stop
+    # dialogs on the fastest lane (the Neural Engine finished 400 first).
+    run_id, store = start_index(d, d.fixtures.unique("still", count=4000))
     try:
         running(d, run_id, store)
         control_run(d, store, "pause", run_id)
