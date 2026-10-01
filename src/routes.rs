@@ -2165,9 +2165,198 @@ fn privacy_fix(state: &Arc<State>, request: &Request) -> Response {
 /// `{"confirm": true}` it applies that plan. This is the one place the daemon
 /// writes a file it does not own, and a user who has not seen the list has not
 /// agreed to it.
+/// What a typical answer from each tool costs an agent, before it asks.
+///
+/// Fixed estimates, in tokens, for a machine whose ledger has fewer than
+/// [`TYPICAL_MIN_ROWS`] rows for a tool: a locate search at its default
+/// budget, a brief at its default budget, a definition read whole, and the
+/// graph and housekeeping tools' short replies. Rough on purpose and labelled
+/// `estimate` beside every figure; the ledger's own median replaces each as
+/// soon as there are rows enough to take one from.
+const TYPICAL_ESTIMATES: &[(&str, &str, i64)] = &[
+    ("semlith_search", "where something is: one line per hit", 700),
+    ("semlith_brief", "how something works: spans, text and callers", 1800),
+    ("semlith_read", "one span or definition, whole", 900),
+    ("semlith_pattern", "every place one syntax shape occurs", 600),
+    ("semlith_stats", "what is indexed, per store", 150),
+    ("semlith_languages", "which languages filter and carry a graph", 300),
+    ("semlith_files", "what a folder holds", 450),
+    ("semlith_index", "a folder indexed, and what was skipped", 120),
+    ("semlith_add", "one URL fetched and indexed", 80),
+    ("semlith_forget", "one file taken out", 40),
+    ("semlith_symbol", "where a name is defined and what touches it", 300),
+    ("semlith_neighbors", "who calls it and what it calls", 350),
+    ("semlith_report", "one of the five reports", 1200),
+    ("semlith_impact", "every caller a change would reach", 450),
+    ("semlith_trace", "the chain from A to B, a line per hop", 400),
+    ("semlith_path", "whether A reaches B, and how", 200),
+];
+
+/// The documented clients as `/api/agents` lists them, each with its id and
+/// whether its own file names semlith now.
+fn client_rows() -> Vec<Value> {
+    let registered = crate::clientfile::registered_clients();
+    crate::clients::clients()
+        .iter()
+        .map(|client| {
+            let mut row = serde_json::to_value(client).unwrap_or(Value::Null);
+            if let Some(object) = row.as_object_mut() {
+                object.insert("id".into(), json!(client_id(&client.name)));
+                object.insert("registered".into(), json!(registered.contains(&client.name)));
+            }
+            row
+        })
+        .collect()
+}
+
+/// Ledger rows a tool needs before its median replaces the estimate.
+const TYPICAL_MIN_ROWS: usize = 5;
+
+fn tool_sizes(state: &Arc<State>) -> Vec<Value> {
+    // The ledger's tool column holds the short name: `search`, not
+    // `semlith_search`.
+    let mut seen: std::collections::BTreeMap<String, Vec<i64>> = Default::default();
+    if state.open_fleet().is_ok()
+        && let Some(fleet) = state.fleet.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+    {
+        for (_, store) in fleet.each() {
+            for (tool, tokens) in store::excerpt_tokens_by_tool(store.db(), 2_000).unwrap_or_default() {
+                seen.entry(tool).or_default().push(tokens);
+            }
+        }
+    }
+    crate::mcp::tool_list()
+        .into_iter()
+        .map(|(name, about)| {
+            let short = name.strip_prefix("semlith_").unwrap_or(&name).to_string();
+            let (answers, estimate) = TYPICAL_ESTIMATES
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .map(|(_, answers, tokens)| (answers.to_string(), *tokens))
+                .unwrap_or_else(|| (about.clone(), 300));
+            let (typical, source) = match seen.get_mut(&short) {
+                Some(rows) if rows.len() >= TYPICAL_MIN_ROWS => {
+                    rows.sort_unstable();
+                    (rows[rows.len() / 2], "ledger")
+                }
+                _ => (estimate, "estimate"),
+            };
+            json!({
+                "name": name,
+                "about": about,
+                "answers": answers,
+                "typical_tokens": typical,
+                "typical_source": source,
+            })
+        })
+        .collect()
+}
+
+/// A client's id in a request: its name, lowercased, dashes for the rest
+/// (`Claude Code` → `claude-code`), as the Agents page sends it.
+fn client_id(name: &str) -> String {
+    let mut id = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            id.push(c.to_ascii_lowercase());
+        } else if !id.ends_with('-') && !id.is_empty() {
+            id.push('-');
+        }
+    }
+    id.trim_end_matches('-').to_string()
+}
+
+/// Register or unregister the named clients, one at a time (0.35.0).
+///
+/// A client with a global registration CLI is asked through it, exactly as
+/// `semlith setup` asks; one whose route in is a user-level file has that
+/// file written or cleaned, backed up beside itself first. Unregistering
+/// runs the client's documented `unregister` commands where it has them and
+/// cleans the file otherwise.
+fn register_named(body: &Value) -> Response {
+    let action = body
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("register");
+    if !matches!(action, "register" | "unregister") {
+        return Response::error(400, "action is register or unregister");
+    }
+    let wanted = strings(body, "clients");
+    if wanted.is_empty() {
+        return Response::error(400, "clients names at least one client");
+    }
+    let all = crate::clients::clients();
+    let results: Vec<Value> = wanted
+        .iter()
+        .map(|asked| {
+            let Some(client) = all.iter().find(|c| {
+                client_id(&c.name) == *asked || c.name.eq_ignore_ascii_case(asked)
+            }) else {
+                return json!({ "client": asked, "ok": false, "error": format!("no client called {asked}") });
+            };
+            let outcome: Result<Vec<String>, String> = match action {
+                "register" if client.needs_a_file_written() => {
+                    let plans = crate::clientfile::plan(&[client]);
+                    let stanzas: Vec<(&str, &crate::clients::Stanza)> = client
+                        .config_files()
+                        .map(|stanza| (client.name.as_str(), stanza))
+                        .collect();
+                    if plans.is_empty() {
+                        Err(format!("{} is not on this machine", client.name))
+                    } else {
+                        crate::clientfile::apply(&plans, &stanzas)
+                            .map(|paths| paths.iter().map(|p| crate::plain(&p.display().to_string())).collect())
+                            .map_err(|e| format!("{e:#}"))
+                    }
+                }
+                "register" => match crate::setup::register(client) {
+                    crate::setup::Registration::Registered { .. } => Ok(Vec::new()),
+                    crate::setup::Registration::Absent => {
+                        Err(format!("{}'s command line is not on this machine", client.name))
+                    }
+                    crate::setup::Registration::Failed { reason } => Err(reason),
+                    _ => Err(format!("{} cannot be registered from here", client.name)),
+                },
+                _ => {
+                    let mut removed_by_cli = false;
+                    for undo in client.unregister_commands() {
+                        if let Some((program, args)) = crate::setup::argv(&undo) {
+                            removed_by_cli |= std::process::Command::new(
+                                crate::doctor::program_path(&program),
+                            )
+                            .args(&args)
+                            .output()
+                            .is_ok_and(|out| out.status.success());
+                        }
+                    }
+                    if removed_by_cli {
+                        Ok(Vec::new())
+                    } else {
+                        crate::clientfile::unregister_files(client)
+                            .map(|paths| paths.iter().map(|p| crate::plain(&p.display().to_string())).collect())
+                            .map_err(|e| format!("{e:#}"))
+                    }
+                }
+            };
+            match outcome {
+                Ok(files) => json!({ "client": client.name, "id": client_id(&client.name), "ok": true, "files": files }),
+                Err(e) => json!({ "client": client.name, "id": client_id(&client.name), "ok": false, "error": e }),
+            }
+        })
+        .collect();
+    Response::json(&json!({
+        "action": action,
+        "results": results,
+        "registered": crate::clientfile::registered_clients(),
+    }))
+}
+
 fn register_clients(state: &Arc<State>, request: &Request) -> Response {
     let _ = state;
     let body = request.json().unwrap_or(json!({}));
+    if body.get("action").is_some() || body.get("clients").is_some() {
+        return register_named(&body);
+    }
     let writable: Vec<&crate::clients::Client> = crate::clients::clients()
         .iter()
         .filter(|client| client.needs_a_file_written())
@@ -2357,10 +2546,7 @@ fn agents(state: &Arc<State>) -> Response {
         // Read from the MCP server's own definitions rather than repeated
         // here: a second copy is how a tool ends up served and invisible, and
         // a second description is how it ends up documented as something else.
-        "tools": crate::mcp::tool_list()
-            .into_iter()
-            .map(|(name, about)| json!({ "name": name, "about": about }))
-            .collect::<Vec<_>>(),
+        "tools": tool_sizes(state),
         // What the tool list costs an agent, once per session, before it has
         // asked anything. A cost a user should be able to see rather than one
         // they would have to capture traffic to discover.
@@ -2373,7 +2559,9 @@ fn agents(state: &Arc<State>) -> Response {
         "tool_list_tokens": tool_list_tokens(state).0,
         "tool_list_tier": tool_list_tokens(state).1,
         "revisions": crate::mcp::SUPPORTED,
-        "clients": crate::clients::clients(),
+        // Each documented client as before, plus the id a register or
+        // unregister names it by and whether its own file names semlith now.
+        "clients": client_rows(),
         // Whether semlith is there without being asked, and since when. The
         // page said "one endpoint, every client" while the endpoint existed
         // only as long as somebody held a terminal open for it.

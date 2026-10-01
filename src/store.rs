@@ -1408,6 +1408,18 @@ pub fn image(db: &Connection, id: i64) -> Result<Option<ImageRow>> {
         .optional()?)
 }
 
+/// `(tool, excerpt_tokens)` for every ledger row that names its tool, the
+/// newest `limit` of them: what the Agents page's typical answer sizes are
+/// the median of.
+pub fn excerpt_tokens_by_tool(db: &Connection, limit: usize) -> Result<Vec<(String, i64)>> {
+    let mut stmt = db.prepare(
+        "SELECT tool, excerpt_tokens FROM retrievals WHERE tool IS NOT NULL \
+         ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// Every indexed image, for the decisions table's "read as image" rows.
 pub fn image_rows(db: &Connection) -> Result<Vec<ImageRow>> {
     let mut stmt = db.prepare(

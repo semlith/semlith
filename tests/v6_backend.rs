@@ -571,6 +571,67 @@ fn picked_files_reindex_as_one_run_and_its_record_survives_a_restart() {
     assert!(row["result"].is_string() && row["log"].is_array(), "{row}");
 }
 
+// ------------------------------------------------------------------ A11, A12
+
+/// One client is registered and unregistered by its file, backed up first,
+/// with every other server in that file kept; the Agents page says which
+/// clients are registered and what each tool's answer typically costs.
+#[test]
+fn one_client_registers_and_unregisters_and_tools_say_their_size() {
+    let (_dir, home) = home();
+    let cursor = home.join(".cursor");
+    std::fs::create_dir_all(&cursor).unwrap();
+    let file = cursor.join("mcp.json");
+    std::fs::write(&file, r#"{"mcpServers": {"other": {"command": "o"}}}"#).unwrap();
+
+    let daemon = Daemon::start(&home);
+    let agents = daemon.get("/api/agents");
+    let tools = agents["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 16, "{agents}");
+    for tool in tools {
+        assert!(tool["typical_tokens"].as_i64().unwrap() > 0, "{tool}");
+        assert_eq!(tool["typical_source"], "estimate");
+        assert!(tool["answers"].as_str().is_some_and(|a| !a.is_empty()));
+    }
+    let row = |agents: &Value| {
+        agents["clients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "cursor")
+            .cloned()
+            .expect("cursor is listed with an id")
+    };
+    assert_eq!(row(&agents)["registered"], json!(false));
+
+    let (status, body) = daemon.post(
+        "/api/agents/register",
+        json!({ "clients": ["cursor"], "action": "register" }),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["results"][0]["ok"], json!(true), "{body}");
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert!(written.contains("\"semlith\"") && written.contains("\"other\""), "{written}");
+    assert_eq!(row(&daemon.get("/api/agents"))["registered"], json!(true));
+
+    let (_, body) = daemon.post(
+        "/api/agents/register",
+        json!({ "clients": ["cursor"], "action": "unregister" }),
+    );
+    assert_eq!(body["results"][0]["ok"], json!(true), "{body}");
+    let left = std::fs::read_to_string(&file).unwrap();
+    assert!(!left.contains("semlith") && left.contains("\"other\""), "{left}");
+    assert!(cursor.join("mcp.json.semlith-backup").exists(), "no backup was made");
+    assert_eq!(row(&daemon.get("/api/agents"))["registered"], json!(false));
+
+    let (status, body) = daemon.post(
+        "/api/agents/register",
+        json!({ "clients": ["nobody"], "action": "unregister" }),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(body["results"][0]["ok"], json!(false), "{body}");
+}
+
 /// The not-indexed table's rows carry the same scored fields.
 #[test]
 fn not_indexed_rows_carry_their_risk() {

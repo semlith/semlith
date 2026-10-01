@@ -326,6 +326,88 @@ fn write_one(stanza: &Stanza, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Take semlith's entry out of every user-level file of this client that
+/// holds one (0.35.0's per-client Unregister). Returns the files changed.
+///
+/// The same care as a write: the file is backed up beside itself first, a
+/// file that does not parse is refused and left as it was, every other key
+/// stays, and the replacement goes through a neighbouring temporary file.
+/// YAML is refused, for the reason this module never rewrites it.
+pub fn unregister_files(client: &Client) -> Result<Vec<PathBuf>> {
+    let mut changed = Vec::new();
+    for stanza in client.config_files() {
+        let Some(path) = resolve(stanza) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !names_semlith(&text) {
+            continue;
+        }
+        let next = match stanza.format.as_str() {
+            "json" => {
+                let mut base: serde_json::Value = serde_json::from_str(&text).with_context(|| {
+                    format!("{} is not valid JSON; nothing was changed", path.display())
+                })?;
+                let overlay: serde_json::Value = serde_json::from_str(&stanza.text)
+                    .context("the documented stanza is not valid JSON")?;
+                remove_entry(&mut base, &overlay);
+                serialize(&base)
+            }
+            "toml" => without_toml_table(&text),
+            other => bail!(
+                "semlith does not rewrite {other} configuration; remove its entry from {} by hand",
+                path.display()
+            ),
+        };
+        if next == text {
+            continue;
+        }
+        back_up(&path)?;
+        let temp = path.with_extension(format!(
+            "{}.semlith-tmp",
+            path.extension().and_then(|e| e.to_str()).unwrap_or("")
+        ));
+        std::fs::write(&temp, &next).with_context(|| format!("writing {}", temp.display()))?;
+        std::fs::rename(&temp, &path).with_context(|| format!("replacing {}", path.display()))?;
+        changed.push(path);
+    }
+    Ok(changed)
+}
+
+/// Remove from `base` the `semlith` key the documented stanza puts there, at
+/// the same path (`mcpServers.semlith`, `mcp.semlith`, …), and nothing else.
+fn remove_entry(base: &mut serde_json::Value, overlay: &serde_json::Value) {
+    let (serde_json::Value::Object(base), serde_json::Value::Object(overlay)) = (base, overlay)
+    else {
+        return;
+    };
+    for (key, value) in overlay {
+        if key == "semlith" {
+            base.remove(key);
+        } else if let Some(inner) = base.get_mut(key) {
+            remove_entry(inner, value);
+        }
+    }
+}
+
+/// `text` without its `[mcp_servers.semlith…]` tables, every other byte kept.
+fn without_toml_table(text: &str) -> String {
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            skipping = trimmed.starts_with("[mcp_servers.semlith");
+        }
+        if !skipping {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 /// Copy a file to `<name>.semlith-backup` before its first write.
 ///
 /// Once. A second `--register-all` would otherwise overwrite the backup with
@@ -393,6 +475,32 @@ fn serialize(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     use crate::clients::Scope;
+
+    /// Unregistering takes semlith's table out and keeps every other byte.
+    #[test]
+    fn a_toml_unregister_removes_only_semlith() {
+        let text = "model = \"x\"\n\n[mcp_servers.other]\ncommand = \"o\"\n\n\
+                    [mcp_servers.semlith]\ncommand = \"semlith\"\nargs = [\"mcp\"]\n\n\
+                    [mcp_servers.semlith.env]\nA = \"1\"\n\n[profile]\nname = \"p\"\n";
+        let out = without_toml_table(text);
+        assert!(!out.contains("semlith"), "{out}");
+        assert!(out.contains("[mcp_servers.other]") && out.contains("[profile]"));
+        assert!(out.starts_with("model = \"x\"\n"));
+    }
+
+    #[test]
+    fn a_json_unregister_removes_only_the_documented_key() {
+        let mut base: serde_json::Value = serde_json::from_str(
+            r#"{"mcpServers": {"semlith": {"command": "semlith"}, "other": {"command": "o"}}, "theme": "dark"}"#,
+        )
+        .unwrap();
+        let overlay = serde_json::json!({ "mcpServers": { "semlith": { "command": "semlith" } } });
+        remove_entry(&mut base, &overlay);
+        assert_eq!(
+            base,
+            serde_json::json!({ "mcpServers": { "other": { "command": "o" } }, "theme": "dark" })
+        );
+    }
 
     #[test]
     fn a_toml_file_gains_the_table_once_and_keeps_every_other_byte() {
