@@ -746,7 +746,17 @@ def _(d):
     if d.eval("document.querySelectorAll(%s).length" % json.dumps(LIVE_CARD)):
         live = [r for r in d.api("/api/index/runs")["runs"]
                 if r["store"] == store_name and r["status"] not in TERMINAL]
+        # The page draws from its last poll; a short follow-up run (the
+        # watcher's) can finish between that poll and this read. What the
+        # finding asks is that the card leaves once the run is over, so it gets
+        # a few polls to do so.
         if not live:
+            try:
+                d.wait_for("document.querySelectorAll(%s).length === 0" % json.dumps(LIVE_CARD),
+                           timeout=10, what="the finished run's card to leave the live area")
+            except cdp.ProtocolError:
+                pass
+        if not live and d.eval("document.querySelectorAll(%s).length" % json.dumps(LIVE_CARD)):
             fail(
                 "%s has no run going and its Runs tab still draws a live run card. "
                 "A run that is over belongs in History, with nothing to pause or stop."
