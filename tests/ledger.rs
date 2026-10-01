@@ -676,7 +676,10 @@ fn the_ledger_page_can_filter_sort_page_and_export_its_sessions() {
         "export must write the filtered rows, not every row"
     );
     for format in ["Markdown", "CSV", "JSON"] {
-        assert!(APP_JS.contains(&format!("\"{format}\"")), "no {format} export");
+        assert!(
+            APP_JS.contains(&format!("\"{format}\"")),
+            "no {format} export"
+        );
     }
 }
 
