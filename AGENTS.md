@@ -151,7 +151,9 @@ Module responsibilities:
 | `src/http.rs` | Hand-rolled synchronous HTTP/1.1: the token, `Host` and CSP rules live here |
 | `src/daemon.rs` | `semlith start`: the locks, the watcher threads, the write queue |
 | `src/routes.rs` | The daemon's routes, as adapters over `Fleet` and the queue |
-| `src/portal/` | The page itself, `include_bytes!`d — HTML, CSS, JS, IBM Plex |
+| `src/portal/` | The page itself, `include_bytes!`d — HTML, CSS, JS, IBM Plex. No `style` attribute anywhere: the CSP drops it silently, so data-driven sizes go through the CSSOM |
+| `src/drop.rs` | `POST /api/drop/resolve`: a dropped item's name, size and modified time turned into the real path — the macOS drag pasteboard, open Explorer windows, the OS search index, then a bounded walk — never an upload |
+| `src/helpers.rs` | The opt-in "Index with semlith" file-manager entries (Finder, Explorer, Nautilus, Dolphin, Thunar), installed and removed beside the user's own |
 | `src/proxy.rs` | `semlith mcp` forwarding to a running daemon |
 | `src/clients.rs` | `docs/clients.md`'s client stanzas, parsed, so the portal shows the tested text |
 | `src/main.rs` | Clap parsing and human output formatting |
