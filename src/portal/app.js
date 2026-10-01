@@ -4044,10 +4044,12 @@ function storeState(s) {
     return { state: `${r.kind === "compact" ? "compacting" : "indexing"} ${p}%`, tone: "blue", pulse: true };
   }
   const review = reviewCount(s.name);
+  // Before "not indexed": once a deleted root's files are pruned the store
+  // has none, and a missing folder is what the reader can act on.
+  if ((s.roots || []).some((r2) => !r2.present)) return { state: "root missing", tone: "red" };
   if (!s.files && !(s.roots || []).length) return { state: "empty", tone: "grey" };
   if (!s.files) return { state: "not indexed", tone: "grey" };
   if (review) return { state: `${review} to review`, tone: "amber" };
-  if ((s.roots || []).some((r2) => !r2.present)) return { state: "root missing", tone: "red" };
   if (s.watching === false && s.watch !== false && s.stopped_because) return { state: "not watching", tone: "amber", tip: s.stopped_because };
   return { state: "fresh", tone: "green" };
 }
