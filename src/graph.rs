@@ -2573,6 +2573,10 @@ impl Node {
 /// makes it possible to prefer a symbol whose edges mean something.
 const SEED_CANDIDATES: usize = 40;
 
+/// How many definitions a target may have before the graph page stops
+/// settling edges to it: the same cut search's walk makes.
+const DRAW_HUB: usize = 32;
+
 /// The symbol the graph opens on when nobody has asked for one.
 ///
 /// Not the busiest. A corpus's busiest name is its most *reused* name, and a
@@ -2587,22 +2591,53 @@ const SEED_CANDIDATES: usize = 40;
 /// definitions is preferred only when nothing unambiguous has any edges at all.
 /// The busiest name is still one search away; it is just not what the page
 /// opens on.
-fn busiest(stores: &[(&str, &crate::Semlith)]) -> Result<Option<String>> {
+fn busiest(stores: &[(&str, &rusqlite::Connection)]) -> Result<Option<String>> {
+    // Chosen once per store and graph: the choice reads the busiest symbols of
+    // the whole store, seconds on a large one, and gives the same answer until
+    // the symbol or edge count moves.
+    static CHOSEN: std::sync::Mutex<Vec<(String, (i64, i64), Option<String>)>> =
+        std::sync::Mutex::new(Vec::new());
+    let mut key = String::new();
+    let mut stats = (0i64, 0i64);
+    for (_, db) in stores {
+        key.push_str(db.path().unwrap_or(""));
+        key.push('|');
+        let (a, b) = crate::store::graph_stats(db)?;
+        stats = (stats.0 + a, stats.1 + b);
+    }
+    if let Some((_, _, name)) = CHOSEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(k, st, _)| *k == key && *st == stats)
+    {
+        return Ok(name.clone());
+    }
+    let name = busiest_uncached(stores)?;
+    let mut chosen = CHOSEN.lock().unwrap_or_else(|e| e.into_inner());
+    chosen.retain(|(k, _, _)| *k != key);
+    chosen.push((key, stats, name.clone()));
+    Ok(name)
+}
+
+fn busiest_uncached(stores: &[(&str, &rusqlite::Connection)]) -> Result<Option<String>> {
     let mut best: Option<((usize, usize, usize), String)> = None;
-    for (_, store) in stores {
-        let db = store.db();
-        for row in crate::store::symbols_scoped(db, None, SEED_CANDIDATES)? {
-            let ends: Vec<crate::store::EdgeEnd> = crate::store::edges_in(db, &row.name, &[])?
-                .into_iter()
-                .chain(crate::store::edges_out(db, &row.name, &[])?)
-                .collect();
-            if ends.is_empty() {
+    for (_, db) in stores {
+        let db: &rusqlite::Connection = db;
+        for name in crate::store::busiest_names(db, SEED_CANDIDATES * 4)? {
+            // A target nothing in the store defines (a macro, a standard
+            // library call) is busy and cannot be opened on.
+            let definitions = crate::store::symbols_named(db, &name, 2)?.len();
+            if definitions == 0 {
                 continue;
             }
-            let resolved = ends
-                .iter()
-                .filter(|e| e.confidence == RESOLVED || e.confidence == EXTRACTED)
-                .count();
+            // Counted, not settled: settling every edge of forty candidates
+            // joined millions of candidate rows on the 879k-chunk corpus and
+            // held the page, and every route behind it, for minutes.
+            let (resolved, degree) = crate::store::edge_counts(db, &name)?;
+            if degree == 0 {
+                continue;
+            }
             // Three keys, in this order. A name defined once in the store
             // cannot be a collision, whatever its degree; among those, the one
             // whose edges the extractor actually resolved; and only then raw
@@ -2615,19 +2650,21 @@ fn busiest(stores: &[(&str, &crate::Semlith)]) -> Result<Option<String>> {
             // a spelling match between functions that have nothing to do with
             // each other -- which is exactly the star of dashed lines a user
             // met on opening the page.
-            let unambiguous =
-                usize::from(crate::store::symbols_named(db, &row.name, 2)?.len() <= 1);
-            let score = (unambiguous, resolved, ends.len());
+            let unambiguous = usize::from(definitions <= 1);
+            let score = (unambiguous, resolved, degree);
             if best.as_ref().is_none_or(|(seen, _)| score > *seen) {
-                best = Some((score, row.name.clone()));
+                best = Some((score, name.clone()));
             }
         }
     }
     Ok(best.map(|(_, name)| name))
 }
 
+/// Takes connections rather than open stores, so the daemon can draw on a
+/// read-only connection of its own instead of holding every store's lock for
+/// the length of the drawing.
 pub fn scoped(
-    stores: &[(&str, &crate::Semlith)],
+    stores: &[(&str, &rusqlite::Connection)],
     focus: Option<&str>,
     prefix: Option<&str>,
     limit: usize,
@@ -2652,8 +2689,8 @@ pub fn scoped(
     };
     let focus = chosen_focus.as_deref();
 
-    for (label, store) in stores {
-        let db = store.db();
+    for (label, db) in stores {
+        let db: &rusqlite::Connection = db;
         let picked = match focus {
             Some(name) => {
                 // The symbol itself, then what touches it. Deduplicated by the
@@ -2662,10 +2699,16 @@ pub fn scoped(
                 // a neighbourhood. The rail lists every caller and callee
                 // either way, so nothing is hidden by this — only undrawn.
                 let mut around = crate::store::symbols_named(db, name, 4)?;
-                let mut ends: Vec<crate::store::EdgeEnd> = crate::store::edges_in(db, name, &[])?
-                    .into_iter()
-                    .chain(crate::store::edges_out(db, name, &[])?)
-                    .collect();
+                let mut ends: Vec<crate::store::EdgeEnd> =
+                    crate::store::edges_in_first(db, name, limit * 2)?
+                        .into_iter()
+                        .chain(crate::store::edges_out_short_of_hubs(
+                            db,
+                            name,
+                            &[],
+                            DRAW_HUB,
+                        )?)
+                        .collect();
                 // The certain edges first. When the budget cuts a hub's
                 // neighbourhood -- and it always does -- what is drawn should be
                 // the calls the extractor resolved rather than whichever
@@ -2712,9 +2755,10 @@ pub fn scoped(
     // reported 623, which cannot both be true and is not a number anyone can
     // read.
     let mut seen: std::collections::HashSet<(usize, usize, String)> = Default::default();
+    let drawn: Vec<String> = index.keys().cloned().collect();
     for (from_name, from_index) in &index {
-        for (_, store) in stores {
-            for end in crate::store::edges_out(store.db(), from_name, &[])? {
+        for (_, db) in stores {
+            for end in crate::store::edges_out_to(db, from_name, &drawn)? {
                 let Some(to_index) = index.get(&end.symbol.name) else {
                     continue;
                 };

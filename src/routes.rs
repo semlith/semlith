@@ -3302,15 +3302,56 @@ fn graph(state: &Arc<State>, request: &Request) -> Response {
     let only = request.query_all("store");
     let empty = json!({ "nodes": [], "edges": [], "total": 0, "shown": 0 });
 
-    with_fleet(state, empty, move |fleet| {
+    // The fleet's lock is held only to choose the stores: through the fleet,
+    // so a store that cannot be read is left out and reported beside the
+    // drawing, and a request scoped to nothing but unreadable stores is
+    // refused. The drawing itself reads each store on a read-only connection
+    // of its own, so a large store's graph never holds Search, Home or any
+    // other route behind it (0.35.0: on the 879k-chunk corpus it held them
+    // for minutes).
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &e.to_string());
+    }
+    let (picked, many, failed) = {
+        let fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(fleet) = fleet.as_ref() else {
+            return Response::json(&empty);
+        };
         let only = (!only.is_empty()).then_some(only);
-        // Through the fleet rather than filtered here, so a store that cannot
-        // be read is left out of the drawing and reported beside it, and so a
-        // request scoped to nothing but unreadable stores is refused.
-        let chosen = fleet.selected(only.as_deref())?;
-        let many = fleet.len() > 1;
-        crate::graph::scoped(&chosen, focus.as_deref(), prefix.as_deref(), limit, many)
-    })
+        let chosen = match fleet.selected(only.as_deref()) {
+            Ok(c) => c,
+            Err(e) => return Response::error(500, &format!("{e:#}")),
+        };
+        let picked: Vec<(String, PathBuf)> = chosen
+            .iter()
+            .map(|(label, store)| (label.to_string(), store.dir().join("store.db")))
+            .collect();
+        (picked, fleet.len() > 1, fleet.failed())
+    };
+    let mut opened = Vec::new();
+    for (label, db) in &picked {
+        match rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        {
+            Ok(conn) => {
+                let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+                opened.push((label.clone(), conn));
+            }
+            Err(e) => return Response::error(500, &format!("{label}: {e:#}")),
+        }
+    }
+    let stores: Vec<(&str, &rusqlite::Connection)> =
+        opened.iter().map(|(l, c)| (l.as_str(), c)).collect();
+    match crate::graph::scoped(&stores, focus.as_deref(), prefix.as_deref(), limit, many) {
+        Ok(mut value) => {
+            if !failed.is_empty()
+                && let Some(object) = value.as_object_mut()
+            {
+                object.insert("failed".into(), json!(failed));
+            }
+            Response::json(&value)
+        }
+        Err(e) => Response::error(500, &format!("{e:#}")),
+    }
 }
 
 // ---------------------------------------------------------------- writes

@@ -1719,28 +1719,56 @@ pub fn symbols_scoped(
     prefix: Option<&str>,
     limit: usize,
 ) -> Result<Vec<SymbolRow>> {
-    let (predicate, binds) = match prefix {
-        Some(p) => {
-            let pattern = format!("*{}*", p.to_lowercase());
-            ("lower(f.path) GLOB ?".to_string(), vec![pattern])
-        }
-        None => ("1".to_string(), Vec::new()),
-    };
     // Busiest first. A scope filled with symbols that touch nothing draws a
     // field of dots: technically the graph, and of no use to anyone looking at
     // it. Ordering by how connected a symbol is puts the shape on the screen.
+    let Some(p) = prefix else {
+        return busiest_symbols(db, limit);
+    };
+    let pattern = format!("*{}*", p.to_lowercase());
     let sql = format!(
         "SELECT {SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
-         WHERE {predicate} AND s.kind != 'module'
+         WHERE lower(f.path) GLOB ?1 AND s.kind != 'module'
          ORDER BY (
            (SELECT COUNT(*) FROM edges e WHERE e.src = s.id)
            + (SELECT COUNT(*) FROM edges e WHERE e.dst = s.name)
-         ) DESC, f.path, s.start_line LIMIT ?"
+         ) DESC, f.path, s.start_line LIMIT ?2"
     );
     let mut stmt = db.prepare(&sql)?;
-    let mut args: Vec<Value> = binds.into_iter().map(Value::Text).collect();
-    args.push(Value::Integer(limit as i64));
-    let rows = stmt.query_map(rusqlite::params_from_iter(args), symbol_row)?;
+    let rows = stmt.query_map(params![pattern, limit as i64], symbol_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// The busiest symbols of a whole store, for [`symbols_scoped`] with no scope.
+///
+/// Ordering every symbol by two correlated counts took 32 s on the 879k-chunk
+/// corpus, and it is the Graph page's first fetch. Here each direction is
+/// counted once, on its own index, for the most-targeted names and the busiest
+/// sources, and only those are ordered: about a second on the same corpus. A
+/// symbol is missed only by being busy in neither direction on its own, which
+/// a symbol worth opening on is not. A name counted as a target counts for
+/// every definition of it, as the full count did.
+fn busiest_symbols(db: &Connection, limit: usize) -> Result<Vec<SymbolRow>> {
+    let candidates = (limit * 4).max(64) as i64;
+    let sql = format!(
+        "WITH ins AS (SELECT dst AS name, COUNT(*) AS n FROM edges GROUP BY dst ORDER BY n DESC LIMIT ?1),
+              outs AS (SELECT src AS id, COUNT(*) AS n FROM edges GROUP BY src ORDER BY n DESC LIMIT ?1),
+              picked AS (
+                SELECT s.id FROM symbols s JOIN ins ON s.name = ins.name
+                UNION
+                SELECT id FROM outs
+              )
+         SELECT {SYMBOL_COLUMNS} FROM picked
+         JOIN symbols s ON s.id = picked.id
+         JOIN files f ON f.id = s.file_id
+         WHERE s.kind != 'module'
+         ORDER BY (
+           COALESCE((SELECT n FROM outs WHERE outs.id = s.id), (SELECT COUNT(*) FROM edges e WHERE e.src = s.id))
+           + COALESCE((SELECT n FROM ins WHERE ins.name = s.name), 0)
+         ) DESC, f.path, s.start_line LIMIT ?2"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map(params![candidates, limit as i64], symbol_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -1827,7 +1855,54 @@ pub fn defined_more_than(db: &Connection, name: &str, limit: usize) -> Result<bo
 /// rather than to a dependency that was never indexed — that is what the
 /// hidden-by-default unresolved targets are about, not this.
 pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<EdgeEnd>> {
-    edges_out_below(db, name, kinds, None)
+    edges_out_below(db, name, kinds, None, None)
+}
+
+/// How many edges touch `name`, and how many of them are certain, counted on
+/// the indexes alone: `(resolved, total)`.
+///
+/// For the graph page's choice of where to open, which only compares counts.
+/// An edge in counts as certain when the extractor said so; an edge out when
+/// the extractor said so or its target has exactly one definition, which is
+/// how [`edges_out`] settles the common case. An out edge to a name nothing
+/// defines is not counted, as [`edges_out`] does not return it.
+pub fn edge_counts(db: &Connection, name: &str) -> Result<(usize, usize)> {
+    let navigational = crate::graph::not_navigational("h.kind");
+    let (in_total, in_sure): (i64, i64) = db.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(confidence IN ('extracted', 'resolved')), 0)
+         FROM edges WHERE dst = ?1",
+        [name],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let (out_total, out_sure): (i64, i64) = db.query_row(
+        &format!(
+            "SELECT COUNT(*), COALESCE(SUM(e.confidence = 'extracted' OR
+                 (SELECT COUNT(*) FROM (SELECT 1 FROM symbols h WHERE h.name = e.dst AND {navigational} LIMIT 2)) = 1), 0)
+             FROM edges e JOIN symbols src ON src.id = e.src
+             WHERE src.name = ?1
+               AND EXISTS (SELECT 1 FROM symbols h WHERE h.name = e.dst AND {navigational})"
+        ),
+        [name],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok((
+        (in_sure + out_sure) as usize,
+        (in_total + out_total) as usize,
+    ))
+}
+
+/// [`edges_out`] restricted to edges whose target is one of `targets`, settled
+/// exactly as [`edges_out`] settles them.
+///
+/// For the graph page, which draws only edges with both ends on the canvas: on
+/// the 879k-chunk corpus `edges_out("main")` joins 706,461 candidate rows in
+/// about ten seconds to keep the handful that point at a drawn name, and the
+/// page asks once per drawn node.
+pub fn edges_out_to(db: &Connection, name: &str, targets: &[String]) -> Result<Vec<EdgeEnd>> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    edges_out_below(db, name, &[], None, Some(targets))
 }
 
 /// [`edges_out`] without the edges whose target has more than `hub`
@@ -1845,7 +1920,7 @@ pub fn edges_out_short_of_hubs(
     kinds: &[String],
     hub: usize,
 ) -> Result<Vec<EdgeEnd>> {
-    edges_out_below(db, name, kinds, Some(hub))
+    edges_out_below(db, name, kinds, Some(hub), None)
 }
 
 fn edges_out_below(
@@ -1853,6 +1928,7 @@ fn edges_out_below(
     name: &str,
     kinds: &[String],
     hub: Option<usize>,
+    targets: Option<&[String]>,
 ) -> Result<Vec<EdgeEnd>> {
     let filter = kind_predicate(kinds, "e.kind");
     // An edge's target is resolved by name, so without this a configuration key
@@ -1868,6 +1944,11 @@ fn edges_out_below(
         ),
         None => String::new(),
     };
+    // Bound after the kinds, in the order the holes appear.
+    let to_targets = match targets {
+        Some(t) => format!("AND e.dst IN ({})", vec!["?"; t.len()].join(", ")),
+        None => String::new(),
+    };
     let sql = format!(
         "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path, src.start_line, e.line
          FROM symbols src
@@ -1875,12 +1956,18 @@ fn edges_out_below(
          JOIN edges e ON e.src = src.id
          JOIN symbols s ON s.name = e.dst AND {target}
          JOIN files f ON f.id = s.file_id
-         WHERE src.name = ?1 AND {filter} {short_of_hub}
+         WHERE src.name = ?1 AND {filter} {to_targets} {short_of_hub}
          ORDER BY f.path, s.start_line"
     );
     let mut stmt = db.prepare(&sql)?;
     let mut binds: Vec<Value> = vec![Value::Text(name.to_string())];
     binds.extend(kinds.iter().map(|k| Value::Text(k.clone())));
+    binds.extend(
+        targets
+            .unwrap_or(&[])
+            .iter()
+            .map(|t| Value::Text(t.clone())),
+    );
     let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
         Ok(Reached {
             symbol: symbol_row(r)?,
@@ -2232,6 +2319,54 @@ pub fn edges_in(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Edg
             means: None,
         })
     })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// At most `limit` of [`edges_in`], the extractor's certain edges first.
+///
+/// For a drawing, which has room for a few dozen callers: `new` has hundreds
+/// of thousands of them on the 879k-chunk corpus, and reading them all to draw
+/// sixty took most of the Graph page's twenty seconds.
+pub fn edges_in_first(db: &Connection, name: &str, limit: usize) -> Result<Vec<EdgeEnd>> {
+    let sql = format!(
+        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.line
+         FROM edges e
+         JOIN symbols s ON s.id = e.src
+         JOIN files f ON f.id = s.file_id
+         WHERE e.dst = ?1
+         ORDER BY CASE e.confidence WHEN 'extracted' THEN 0 WHEN 'resolved' THEN 0 WHEN 'ambiguous' THEN 1 ELSE 2 END,
+                  f.path, s.start_line
+         LIMIT ?2"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map(params![name, limit as i64], |r| {
+        Ok(EdgeEnd {
+            symbol: symbol_row(r)?,
+            kind: r.get(8)?,
+            confidence: r.get(9)?,
+            definitions: 1,
+            from_path: None,
+            from_line: None,
+            line: r.get(10)?,
+            means: None,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// The names with the most edges in or out, busiest first, each counted once
+/// on its own index. For the graph page's choice of where to open: a name with
+/// seven hundred definitions is one candidate, not seven hundred.
+pub fn busiest_names(db: &Connection, limit: usize) -> Result<Vec<String>> {
+    let candidates = (limit * 4).max(64) as i64;
+    let mut stmt = db.prepare(
+        "WITH ins AS (SELECT dst AS name, COUNT(*) AS n FROM edges GROUP BY dst ORDER BY n DESC LIMIT ?1),
+              outs AS (SELECT s.name AS name, COUNT(*) AS n FROM edges e JOIN symbols s ON s.id = e.src
+                       WHERE s.kind != 'module' GROUP BY s.name ORDER BY n DESC LIMIT ?1)
+         SELECT name FROM (SELECT name, n FROM ins UNION ALL SELECT name, n FROM outs)
+         GROUP BY name ORDER BY SUM(n) DESC, name LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![candidates, limit as i64], |r| r.get::<_, String>(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
