@@ -85,6 +85,30 @@ pub fn off_reason() -> Option<&'static str> {
     }
 }
 
+/// Stores whose settings say `record: false`, by canonical directory.
+static UNRECORDED: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
+
+/// Which stores this process must not record retrievals into. The daemon
+/// sets it from the registry at start and whenever a store's settings move.
+pub fn set_unrecorded(dirs: Vec<PathBuf>) {
+    *UNRECORDED.write().unwrap_or_else(|e| e.into_inner()) =
+        dirs.iter().map(|d| crate::canonical(d)).collect();
+}
+
+/// The one write every retrieval row takes, so a store switched off is
+/// skipped in one place rather than at six call sites.
+fn write(db: &rusqlite::Connection, row: &store::NewRetrieval<'_>) -> anyhow::Result<()> {
+    let off = UNRECORDED.read().unwrap_or_else(|e| e.into_inner());
+    if !off.is_empty()
+        && let Some(dir) = db.path().and_then(|p| Path::new(p).parent())
+        && off.contains(&crate::canonical(dir))
+    {
+        return Ok(());
+    }
+    drop(off);
+    store::record_retrieval(db, row)
+}
+
 /// `{on, reason}`, as `/api/ledger` and `/api/about` report it.
 pub fn recording_state() -> serde_json::Value {
     let reason = off_reason();
@@ -227,7 +251,7 @@ pub fn search(
             .map(|m| counter.count_bytes(m.len()))
             .sum();
         let stale = mine.iter().filter(|h| !h.fresh).count() as i64;
-        let _ = store::record_retrieval(
+        let _ = write(
             store.db(),
             &store::NewRetrieval {
                 client: who.client,
@@ -289,7 +313,7 @@ pub fn reply(
             .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| counter.count_bytes(m.len()))
             .sum();
-        let _ = store::record_retrieval(
+        let _ = write(
             db,
             &store::NewRetrieval {
                 client: who.client,
@@ -499,7 +523,7 @@ pub fn graph(
         if whole == 0 {
             continue;
         }
-        let _ = store::record_retrieval(
+        let _ = write(
             store.db(),
             &store::NewRetrieval {
                 client: who.client,
@@ -555,7 +579,7 @@ pub fn brief(
         .map(|m| counter.count_bytes(m.len()))
         .sum();
     if let Some((_, store)) = fleet.each().next() {
-        let _ = store::record_retrieval(
+        let _ = write(
             store.db(),
             &store::NewRetrieval {
                 client: who.client,
@@ -607,7 +631,7 @@ pub fn raw_read(fleet: &Fleet, client: &str, session: &str, path: &str) -> bool 
         if !store::holds_path(store.db(), path).unwrap_or(false) {
             continue;
         }
-        let recorded = store::record_retrieval(
+        let recorded = write(
             store.db(),
             &store::NewRetrieval {
                 client_version: "",

@@ -590,6 +590,160 @@ pub struct Entry {
     pub model: Option<String>,
     /// Unix seconds. Only ever set when the entry is created.
     pub created: u64,
+    /// The Store settings panel's switches, flattened into the entry so an
+    /// older binary reads the same object and ignores the keys it does not
+    /// know. Every default is what a store did before the key existed.
+    #[serde(flatten)]
+    pub settings: StoreSettings,
+}
+
+/// What one store is for and how it is kept (0.35.0). Strings rather than
+/// enums for `kind` and `lean` so a value a newer binary writes still loads;
+/// the route that writes them is what refuses an unknown one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoreSettings {
+    /// `code`, `docs` or `both`: what the person said the store holds.
+    pub kind: String,
+    /// `code`, `docs` or `either`: the `prefer` a search or brief scoped to
+    /// this store takes when the caller sent none. `either` is no bias.
+    pub lean: String,
+    /// Whether filesystem events re-embed into this store.
+    pub watch: bool,
+    /// Whether the ledger records retrievals answered from this store.
+    pub record: bool,
+    /// Whether this store's walks honour `.gitignore` and the global
+    /// gitignore. The deny-list, the hidden-file rule, `.semlithignore` and
+    /// the credential scan apply either way.
+    pub gitignore: bool,
+}
+
+impl Default for StoreSettings {
+    fn default() -> Self {
+        Self {
+            kind: "both".to_string(),
+            lean: "either".to_string(),
+            watch: true,
+            record: true,
+            gitignore: true,
+        }
+    }
+}
+
+/// The name rule for a store a person names on the page: one lowercase path
+/// segment, so it is the same word in the registry, on disk and in an agent's
+/// `store:` argument.
+pub fn check_store_name(name: &str) -> Result<()> {
+    let mut chars = name.chars();
+    let ok = name.len() <= 40
+        && chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !ok {
+        bail!("Use lowercase letters, digits and dashes — for example research-notes.");
+    }
+    Ok(())
+}
+
+fn taken_message(name: &str) -> String {
+    format!("“{name}” is already a store on this machine. Pick another name.")
+}
+
+/// Make an empty store under the store home and register it, exactly as an
+/// index would have made it: the same open, so the model is recorded and the
+/// format row written. No roots yet; the first folder indexed into it
+/// becomes one.
+pub fn create_store(name: &str, kind: &str) -> Result<PathBuf> {
+    check_store_name(name)?;
+    let mut registry = Registry::load()?;
+    let dir = Registry::dir_of(name)?;
+    if registry.stores.contains_key(name) || dir.exists() {
+        bail!("{}", taken_message(name));
+    }
+    let model = crate::Semlith::open(&dir, None)?.model().to_string();
+    registry.stores.insert(
+        name.to_string(),
+        Entry {
+            roots: Vec::new(),
+            model: Some(model),
+            created: now(),
+            settings: StoreSettings {
+                kind: kind.to_string(),
+                ..StoreSettings::default()
+            },
+        },
+    );
+    registry.save()?;
+    Ok(dir)
+}
+
+/// Rename a registered store: the registry key and its directory move
+/// together.
+///
+/// The directory moves rather than staying put under the old name, because
+/// [`Registry::dir_of`] derives the directory from the name and every binary
+/// that reads this registry — an older one included — finds a store that way.
+/// A key renamed over an unmoved directory would read as a missing store to
+/// all of them. The caller must have closed the store first: the daemon stops
+/// its writer and drops its readers before calling this.
+pub fn rename_store(old: &str, new: &str) -> Result<PathBuf> {
+    check_store_name(new)?;
+    let mut registry = Registry::load()?;
+    let Some(entry) = registry.stores.get(old).cloned() else {
+        bail!("no registered store called {old}");
+    };
+    let to = Registry::dir_of(new)?;
+    if registry.stores.contains_key(new) || to.exists() {
+        bail!("{}", taken_message(new));
+    }
+    let from = Registry::dir_of(old)?;
+    if from.exists() {
+        std::fs::rename(&from, &to).with_context(|| {
+            format!(
+                "moving {} to {}; nothing was renamed",
+                crate::plain(&from.display().to_string()),
+                crate::plain(&to.display().to_string())
+            )
+        })?;
+    }
+    registry.stores.remove(old);
+    registry.stores.insert(new.to_string(), entry);
+    if let Err(e) = registry.save() {
+        // Put the directory back so the name on disk and the name in the
+        // registry still agree.
+        let _ = std::fs::rename(&to, &from);
+        return Err(e);
+    }
+    Ok(to)
+}
+
+/// Change one store's settings and save, answering what is now recorded.
+pub fn update_store_settings(
+    name: &str,
+    change: impl FnOnce(&mut StoreSettings),
+) -> Result<StoreSettings> {
+    let mut registry = Registry::load()?;
+    let Some(entry) = registry.stores.get_mut(name) else {
+        bail!("no registered store called {name}");
+    };
+    change(&mut entry.settings);
+    let out = entry.settings.clone();
+    registry.save()?;
+    Ok(out)
+}
+
+/// The settings recorded for the store at `dir`, or the defaults for one the
+/// registry does not know (a `--store` path, a store from before 0.35.0).
+pub fn store_settings(dir: &Path) -> StoreSettings {
+    Registry::load()
+        .ok()
+        .and_then(|r| {
+            r.name_of(dir)
+                .and_then(|n| r.stores.get(n))
+                .map(|e| e.settings.clone())
+        })
+        .unwrap_or_default()
 }
 
 /// `registry.json` — store name to the roots it covers.
@@ -715,6 +869,7 @@ impl Registry {
                 roots: Vec::new(),
                 model: model.map(str::to_string),
                 created: now(),
+                settings: StoreSettings::default(),
             });
         if entry.model.is_none() {
             entry.model = model.map(str::to_string);
@@ -1308,6 +1463,7 @@ mod tests {
             roots: roots.iter().map(PathBuf::from).collect(),
             model: None,
             created: 0,
+            settings: StoreSettings::default(),
         }
     }
 
@@ -1456,6 +1612,69 @@ mod agent_key_tests {
                 "the new key was not persisted"
             );
         });
+    }
+
+    /// The page's name rule, word for word, and both refusals it owes.
+    #[test]
+    fn a_created_store_is_named_by_the_rule_and_never_twice() {
+        for good in ["research-notes", "a", "0", "x-1-y"] {
+            assert!(check_store_name(good).is_ok(), "{good} refused");
+        }
+        for bad in ["", "-a", "A", "has space", "under_score", &"a".repeat(41)] {
+            let e = check_store_name(bad).unwrap_err().to_string();
+            assert_eq!(
+                e,
+                "Use lowercase letters, digits and dashes — for example research-notes."
+            );
+        }
+        let home = tempfile::tempdir().unwrap();
+        temp_env(home.path(), || {
+            let dir = create_store("research-notes", "docs").unwrap();
+            assert!(dir.join("store.db").exists());
+            let registry = Registry::load().unwrap();
+            let entry = &registry.stores["research-notes"];
+            assert!(entry.roots.is_empty());
+            assert!(entry.model.is_some(), "the model was not recorded");
+            assert_eq!(entry.settings.kind, "docs");
+            assert_eq!(entry.settings.lean, "either");
+            let again = create_store("research-notes", "both").unwrap_err();
+            assert_eq!(
+                again.to_string(),
+                "“research-notes” is already a store on this machine. Pick another name."
+            );
+        });
+    }
+
+    /// A rename moves the directory with the key, so `dir_of` still finds it,
+    /// and keeps every setting.
+    #[test]
+    fn a_rename_moves_the_directory_and_keeps_the_settings() {
+        let home = tempfile::tempdir().unwrap();
+        temp_env(home.path(), || {
+            let old = create_store("first", "code").unwrap();
+            update_store_settings("first", |s| s.lean = "code".into()).unwrap();
+            let new = rename_store("first", "second").unwrap();
+            assert!(!old.exists() && new.join("store.db").exists());
+            assert_eq!(new, Registry::dir_of("second").unwrap());
+            let registry = Registry::load().unwrap();
+            assert!(!registry.stores.contains_key("first"));
+            assert_eq!(registry.stores["second"].settings.lean, "code");
+            create_store("third", "both").unwrap();
+            assert!(rename_store("second", "third").is_err());
+            assert!(rename_store("second", "Bad").is_err());
+        });
+    }
+
+    /// A registry an older binary wrote loads with today's behaviour, and the
+    /// keys this one writes are plain siblings of `roots`.
+    #[test]
+    fn store_settings_default_to_what_a_store_did_before_them() {
+        let old: Registry =
+            serde_json::from_str(r#"{"stores":{"a":{"roots":["/x"],"created":1}}}"#).unwrap();
+        assert_eq!(old.stores["a"].settings, StoreSettings::default());
+        let written = serde_json::to_value(&old).unwrap();
+        assert_eq!(written["stores"]["a"]["watch"], serde_json::json!(true));
+        assert_eq!(written["stores"]["a"]["lean"], serde_json::json!("either"));
     }
 
     /// `SEMLITH_HOME` is process-wide, so these run one at a time.

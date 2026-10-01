@@ -837,15 +837,20 @@ fn call_tool(
                     .and_then(Value::as_u64)
                     .map(|v| v as usize)
                     .unwrap_or(DEFAULT_LOCATE_TOKENS);
-                let prefer = match args.get("prefer").and_then(Value::as_str) {
+                let asked = match args.get("prefer").and_then(Value::as_str) {
                     Some(raw) => match crate::Prefer::parse(raw) {
-                        Ok(p) => p,
+                        Ok(p) => Some(p),
                         Err(e) => return Ok(tool_error(&e.to_string())),
                     },
-                    None => crate::Prefer::default(),
+                    None => None,
                 };
-                match stores.search_preferring(Some(&only), query, k.clamp(1, 50), &filter, prefer)
-                {
+                // Sent none: each store applies its own lean (0.35.0). The
+                // reading line names the one applied when one store answers.
+                let prefer = asked.unwrap_or_else(|| match only.as_slice() {
+                    [one] => stores.lean(one).unwrap_or_default(),
+                    _ => crate::Prefer::default(),
+                });
+                match stores.search_leaning(Some(&only), query, k.clamp(1, 50), &filter, asked) {
                     Ok(hits) if hits.is_empty() => stores.no_match_reason(&filter),
                     Ok(hits) if excerpts => {
                         format!("{}\n{}", reading(query, prefer), render(&hits))
@@ -881,14 +886,9 @@ fn call_tool(
                 .and_then(Value::as_i64)
                 .unwrap_or(crate::brief::DEFAULT_BUDGET)
                 .max(1);
-            match crate::brief::brief(
-                stores,
-                Some(&only),
-                question,
-                budget,
-                &filter,
-                crate::Prefer::default(),
-            ) {
+            // No `prefer` argument, so every store's own lean applies.
+            match crate::brief::brief_leaning(stores, Some(&only), question, budget, &filter, None)
+            {
                 Ok(brief) if brief.spans.is_empty() => stores.no_match_reason(&filter),
                 Ok(brief) => {
                     let paths = stores.shortener();

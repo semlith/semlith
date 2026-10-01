@@ -20,9 +20,17 @@ struct Daemon {
 }
 
 impl Daemon {
+    /// Airgapped: a daemon with a store open warms the embedding model at
+    /// start, and in a scratch home that is a 52 MB download the tests here
+    /// neither need nor should make. The airgap test starts its own.
     fn start(home: &Path) -> Self {
+        Self::start_with(home, true)
+    }
+
+    fn start_with(home: &Path, airgapped: bool) -> Self {
         std::fs::create_dir_all(home).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_semlith"));
+        command
             .args(["start", "--port", "0"])
             .env("SEMLITH_HOME", home)
             .env("HOME", home)
@@ -32,7 +40,11 @@ impl Daemon {
             .env_remove("SEMLITH_STORE")
             .env_remove("SEMLITH_PORT")
             .env_remove("SEMLITH_LEDGER")
-            .env_remove("SEMLITH_AIRGAP")
+            .env_remove("SEMLITH_AIRGAP");
+        if airgapped {
+            command.env("SEMLITH_AIRGAP", "1");
+        }
+        let mut child = command
             .current_dir(home)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -84,6 +96,36 @@ impl Daemon {
         (status, value)
     }
 
+    /// One MCP tool call over `/mcp`, with the agent key, as an agent makes it.
+    fn call(&self, home: &Path, tool: &str, args: Value) -> Value {
+        let key = std::fs::read_to_string(home.join("agent.key")).unwrap();
+        let body = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": tool, "arguments": args },
+        })
+        .to_string();
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\n\
+             Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            self.port,
+            key.trim(),
+            body.len(),
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+        let start = body.find('{').unwrap_or(0);
+        let end = body.rfind('}').map(|e| e + 1).unwrap_or(body.len());
+        serde_json::from_str(&body[start..end]).unwrap_or(Value::Null)
+    }
+
     fn get(&self, path: &str) -> Value {
         let (status, body) = self.send("GET", path, "");
         assert_eq!(status, 200, "GET {path}: {body}");
@@ -102,6 +144,10 @@ impl Drop for Daemon {
     }
 }
 
+/// The ledger's switches are process-wide, so the tests here that flip them
+/// in this process run one at a time.
+static LEDGER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn home() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
@@ -115,6 +161,7 @@ fn home() -> (tempfile::TempDir, PathBuf) {
 /// last real one and the chain still verifies.
 #[test]
 fn a_paused_ledger_writes_nothing_and_a_resume_chains_on() {
+    let _one = LEDGER.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let store = semlith::Semlith::open(dir.path().join("store"), None).unwrap();
     let row = |path: &str| semlith::store::Acceptance {
@@ -182,7 +229,7 @@ fn the_recording_switch_is_a_route_and_outlives_the_daemon() {
 fn the_airgap_switch_refuses_before_any_connection_and_is_kept() {
     let (_dir, home) = home();
     {
-        let daemon = Daemon::start(&home);
+        let daemon = Daemon::start_with(&home, false);
         let privacy = daemon.get("/api/privacy");
         assert_eq!(privacy["airgap"], json!({ "on": false, "reason": null }));
         assert_eq!(privacy["outbound"]["count"], json!(0));
@@ -200,11 +247,185 @@ fn the_airgap_switch_refuses_before_any_connection_and_is_kept() {
         );
         assert_eq!(daemon.get("/api/privacy")["outbound"]["count"], json!(0));
     }
-    let daemon = Daemon::start(&home);
+    let daemon = Daemon::start_with(&home, false);
     assert_eq!(
         daemon.get("/api/privacy")["airgap"],
         json!({ "on": true, "reason": "runtime" })
     );
     let (_, body) = daemon.post("/api/airgap", json!({ "on": false }));
     assert_eq!(body["airgap"], json!({ "on": false, "reason": null }));
+}
+
+// ------------------------------------------------------------------ A1, A2
+
+fn row<'a>(stores: &'a Value, name: &str) -> Option<&'a Value> {
+    stores["stores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == name)
+}
+
+/// A named empty store is made, served at once with nothing in it, and a
+/// bad or taken name is refused in the page's own words.
+#[test]
+fn a_store_is_created_empty_and_served_at_once() {
+    let (_dir, home) = home();
+    let daemon = Daemon::start(&home);
+
+    let (status, body) = daemon.post(
+        "/api/store/create",
+        json!({ "name": "research-notes", "kind": "docs" }),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["name"], "research-notes");
+    assert_eq!(body["kind"], "docs");
+    assert!(
+        body["dir"]
+            .as_str()
+            .unwrap()
+            .ends_with("research-notes"),
+        "{body}"
+    );
+
+    let stores = daemon.get("/api/stores");
+    let made = row(&stores, "research-notes").expect("the new store is not served");
+    assert_eq!(made["files"], json!(0));
+    assert_eq!(made["kind"], "docs");
+    assert_eq!(made["lean"], "either");
+    assert_eq!(made["watch"], json!(true));
+    assert_eq!(made["record"], json!(true));
+    assert_eq!(made["gitignore"], json!(true));
+    assert!(made.get("unopened").is_none(), "{made}");
+
+    let (status, body) = daemon.post("/api/store/create", json!({ "name": "Research Notes" }));
+    assert_eq!(status, 400);
+    assert_eq!(
+        body["error"],
+        "Use lowercase letters, digits and dashes — for example research-notes."
+    );
+    let (status, body) = daemon.post("/api/store/create", json!({ "name": "research-notes" }));
+    assert_eq!(status, 400);
+    assert_eq!(
+        body["error"],
+        "“research-notes” is already a store on this machine. Pick another name."
+    );
+}
+
+/// Settings land in the registry, show on the row, survive a restart, and a
+/// rename is picked up by an agent's next call without a restart.
+#[test]
+fn store_settings_persist_and_a_rename_resolves_for_agents() {
+    let (_dir, home) = home();
+    {
+        let daemon = Daemon::start(&home);
+        daemon.post("/api/store/create", json!({ "name": "alpha" }));
+
+        let (status, body) = daemon.post(
+            "/api/store/settings",
+            json!({ "store": "alpha", "lean": "code", "watch": false, "record": false,
+                    "gitignore": false, "kind": "code" }),
+        );
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            json!({ "name": "alpha", "kind": "code", "lean": "code", "watch": false,
+                    "record": false, "gitignore": false })
+        );
+        let (status, body) =
+            daemon.post("/api/store/settings", json!({ "store": "alpha", "lean": "prose" }));
+        assert_eq!(status, 400, "{body}");
+    }
+
+    let daemon = Daemon::start(&home);
+    let stores = daemon.get("/api/stores");
+    let alpha = row(&stores, "alpha").expect("alpha is served");
+    assert_eq!(alpha["lean"], "code");
+    assert_eq!(alpha["watch"], json!(false));
+    assert_eq!(alpha["record"], json!(false));
+    assert_eq!(alpha["gitignore"], json!(false));
+
+    let found = daemon.call(&home, "semlith_files", json!({ "store": "alpha" }));
+    assert_ne!(found["result"]["isError"], json!(true), "{found}");
+
+    let (status, body) = daemon.post(
+        "/api/store/settings",
+        json!({ "store": "alpha", "rename": "beta" }),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["name"], "beta");
+    assert_eq!(body["lean"], "code", "a rename lost the settings");
+
+    let stores = daemon.get("/api/stores");
+    assert!(row(&stores, "alpha").is_none(), "the old name is still served");
+    assert!(row(&stores, "beta").is_some(), "the new name is not served");
+    assert!(home.join("stores").join("beta").join("store.db").exists());
+    assert!(!home.join("stores").join("alpha").exists());
+
+    let renamed = daemon.call(&home, "semlith_files", json!({ "store": "beta" }));
+    assert_ne!(renamed["result"]["isError"], json!(true), "{renamed}");
+    let old = daemon.call(&home, "semlith_files", json!({ "store": "alpha" }));
+    assert!(
+        old["result"]["isError"] == json!(true) || old.get("error").is_some(),
+        "the old name still resolves: {old}"
+    );
+}
+
+/// A store whose settings say `record: false` gets no retrieval rows, and
+/// the others still do.
+#[test]
+fn a_store_switched_off_records_nothing() {
+    let _one = LEDGER.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    drop(semlith::Semlith::open(&path, None).unwrap());
+    let fleet = semlith::fleet::Fleet::open(std::slice::from_ref(&path)).unwrap();
+    let who = semlith::ledger::Who {
+        client: "test",
+        session: "s",
+        version: "",
+    };
+    let rows = || {
+        let s = semlith::Semlith::open_existing(&path).unwrap();
+        semlith::store::ledger_totals(s.db()).unwrap().0
+    };
+    let ask = || {
+        semlith::ledger::reply(&fleet, &who, "search", "q", "", &[], Duration::ZERO);
+    };
+    ask();
+    assert_eq!(rows(), 1);
+    semlith::ledger::set_unrecorded(vec![path.clone()]);
+    ask();
+    assert_eq!(rows(), 1, "a store switched off was recorded into");
+    semlith::ledger::set_unrecorded(Vec::new());
+    ask();
+    assert_eq!(rows(), 2);
+}
+
+/// The Respect .gitignore switch: a file `.gitignore` names is in the scan
+/// only when the switch is off, and the choice is kept on the store.
+#[test]
+fn the_gitignore_switch_decides_what_the_scan_walks() {
+    let (_dir, home) = home();
+    let corpus = home.join("notes");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("kept.md"), "# kept\n\nwords about kept things\n").unwrap();
+    std::fs::write(corpus.join("ignored.md"), "# ignored\n\nwords about others\n").unwrap();
+    std::fs::write(corpus.join(".gitignore"), "ignored.md\n").unwrap();
+
+    let daemon = Daemon::start(&home);
+    daemon.post("/api/store/create", json!({ "name": "notes" }));
+    let scan = |gitignore: bool| {
+        let (status, body) = daemon.post(
+            "/api/index",
+            json!({ "store": "notes", "path": [corpus.display().to_string()],
+                    "scan_only": true, "gitignore": gitignore }),
+        );
+        assert_eq!(status, 200, "{body}");
+        body["runs"][0]["plan"]["embed"].as_u64().unwrap()
+    };
+    assert_eq!(scan(true), 1, "the .gitignore'd file was walked");
+    assert_eq!(scan(false), 2, "switching .gitignore off left the file out");
+    let stores = daemon.get("/api/stores");
+    assert_eq!(row(&stores, "notes").unwrap()["gitignore"], json!(false));
 }

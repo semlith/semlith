@@ -139,6 +139,8 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/agents/register") => register_clients(state, request),
         (_, true, "/api/root") => root(state, request),
         (_, true, "/api/store/delete") => delete_store(state, request),
+        (_, true, "/api/store/create") => create_store(state, request),
+        (_, true, "/api/store/settings") => store_settings(state, request),
         (_, true, "/api/store/compact") => compact_store(state, request),
         (_, true, "/api/index/control") => index_control(state, request),
         (_, true, "/api/index/settings") => index_settings(state, request),
@@ -308,6 +310,9 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
     // the Stores page fell far enough behind that the browser drive caught a
     // row still describing a store whose directory had already gone.
     let want_coverage = request.query("coverage") == Some("1");
+    // The per-reader and per-language file counts, without coverage's edge
+    // scan: the store Overview's bars and chips.
+    let want_detail = request.query("detail") == Some("1");
     // Before the fleet, because it may add to what the fleet has to cover. A
     // store the CLI wrote while this daemon was running is registered and not
     // open, and this is the read that notices — which is what makes `semlith
@@ -484,8 +489,45 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
         readers.sort_unstable();
         readers.dedup();
 
+        let settings = registry
+            .name_of(&handle.dir)
+            .and_then(|n| registry.stores.get(n))
+            .map(|e| e.settings.clone())
+            .unwrap_or_default();
+
+        // Files per reader and per language, for the Overview's bars and
+        // chips: one read of the paths, counted here. Only for the page that
+        // draws them, as coverage is, so the poll every page makes stays cheap.
+        let (readers_count, languages_count) = if want_coverage || want_detail {
+            let paths = fleet
+                .as_mut()
+                .and_then(|f| f.each().find(|(_, s)| s.dir() == handle.dir).map(|(_, s)| s))
+                .and_then(|s| store::all_paths(s.db()).ok())
+                .unwrap_or_default();
+            let mut by_reader: std::collections::BTreeMap<&str, u64> = Default::default();
+            let mut by_language: std::collections::BTreeMap<&str, u64> = Default::default();
+            for path in &paths {
+                let path = Path::new(path);
+                *by_reader.entry(chunk::reader_of(path)).or_default() += 1;
+                let language = language_of(path);
+                if !language.is_empty() {
+                    *by_language.entry(language).or_default() += 1;
+                }
+            }
+            (Some(by_reader), Some(by_language))
+        } else {
+            (None, None)
+        };
+
         out.push(json!({
             "name": handle.name,
+            "kind": settings.kind,
+            "lean": settings.lean,
+            "watch": settings.watch,
+            "record": settings.record,
+            "gitignore": settings.gitignore,
+            "readers_count": readers_count,
+            "languages_count": languages_count,
             "dir": crate::plain(&handle.dir.display().to_string()),
             // A store made before 0.14.0 is readable by everyone on the machine
             // until it is opened by this binary, and one somebody chmod'ed is
@@ -566,6 +608,11 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
             "name": store.name,
             "dir": crate::plain(&store.dir.display().to_string()),
             "unopened": store.why,
+            "kind": registry.stores.get(&store.name).map(|e| e.settings.kind.clone()),
+            "lean": registry.stores.get(&store.name).map(|e| e.settings.lean.clone()),
+            "watch": registry.stores.get(&store.name).map(|e| e.settings.watch),
+            "record": registry.stores.get(&store.name).map(|e| e.settings.record),
+            "gitignore": registry.stores.get(&store.name).map(|e| e.settings.gitignore),
             // A registry entry for a directory that is not there. The portal
             // shows it as missing, naming the path that is absent, and offers
             // it nowhere a real store is offered — not in the Index dropdown,
@@ -824,10 +871,10 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
     };
     let prefer = match request.query("prefer") {
         Some(raw) => match crate::Prefer::parse(raw) {
-            Ok(p) => p,
+            Ok(p) => Some(p),
             Err(e) => return Response::error(400, &e.to_string()),
         },
-        None => crate::Prefer::default(),
+        None => None,
     };
     let only: Vec<String> = request
         .query("store")
@@ -844,7 +891,7 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
 
     let started = std::time::Instant::now();
     let only = (!only.is_empty()).then_some(only);
-    let brief = match crate::brief::brief(fleet, only.as_deref(), question, budget, &filter, prefer)
+    let brief = match crate::brief::brief_leaning(fleet, only.as_deref(), question, budget, &filter, prefer)
     {
         Ok(b) => b,
         Err(e) => return Response::error(500, &format!("{e:#}")),
@@ -964,10 +1011,10 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
 
     let prefer = match request.query("prefer") {
         Some(raw) => match crate::Prefer::parse(raw) {
-            Ok(p) => p,
+            Ok(p) => Some(p),
             Err(e) => return Response::error(400, &e.to_string()),
         },
-        None => crate::Prefer::default(),
+        None => None,
     };
 
     let started = std::time::Instant::now();
@@ -980,7 +1027,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
     let deep = (offset as usize)
         .saturating_add(k)
         .min(FILE_OFFSET_MAX as usize);
-    let found = match fleet.search_preferring(only.as_deref(), query, deep, &filter, prefer) {
+    let found = match fleet.search_leaning(only.as_deref(), query, deep, &filter, prefer) {
         Ok(h) => h,
         Err(e) => return Response::error(500, &format!("{e:#}")),
     };
@@ -1047,7 +1094,12 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         "shape": shape,
         "shape_label": shape.as_str(),
         "weighting": shape.weighting(),
-        "prefer": prefer,
+        // What was applied: the caller's, or — sent none and scoped to one
+        // store — that store's lean.
+        "prefer": prefer.unwrap_or_else(|| match only.as_deref() {
+            Some([one]) => fleet.lean(one).unwrap_or_default(),
+            _ => crate::Prefer::default(),
+        }),
     });
     // Mid-run, what share of each store the vector half does not cover yet.
     // Absent at rest, so a reader written before 0.32.0 sees what it saw.
@@ -2935,7 +2987,17 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
         .get("scan_only")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // The wizard's Respect .gitignore switch (0.35.0). Kept as the store's
+    // setting rather than this run's alone, so the watcher and every later
+    // run of the store walk the same tree this one did.
+    let gitignore = body.get("gitignore").and_then(Value::as_bool);
     let start = |store: &Arc<crate::daemon::Store>, paths: Vec<PathBuf>| -> Result<Value, String> {
+        if let Some(on) = gitignore
+            && store.gitignore.load(Ordering::Relaxed) != on
+        {
+            let _ = home::update_store_settings(&store.name, |s| s.gitignore = on);
+            store.gitignore.store(on, Ordering::Relaxed);
+        }
         if scan_only {
             return state
                 .plan(store, &paths)
@@ -4022,6 +4084,125 @@ fn compact_store(state: &Arc<State>, request: &Request) -> Response {
         500,
         "the store's writer ended before the compaction answered",
     )
+}
+
+/// An empty named store, made and served now (the New store button).
+fn create_store(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let name = body.get("name").and_then(Value::as_str).unwrap_or("");
+    let kind = body.get("kind").and_then(Value::as_str).unwrap_or("both");
+    if !matches!(kind, "code" | "docs" | "both") {
+        return Response::error(400, "kind is one of code, docs or both");
+    }
+    match state.create_store(name, kind) {
+        Ok(store) => Response::json(&json!({
+            "name": store.name,
+            "dir": crate::plain(&store.dir.display().to_string()),
+            "kind": kind,
+        })),
+        Err(e) => Response::error(400, &format!("{e:#}")),
+    }
+}
+
+/// `{name, kind, lean, watch, record, gitignore}` for one store, as recorded.
+fn settings_json(name: &str, s: &home::StoreSettings) -> Value {
+    json!({
+        "name": name,
+        "kind": s.kind,
+        "lean": s.lean,
+        "watch": s.watch,
+        "record": s.record,
+        "gitignore": s.gitignore,
+    })
+}
+
+/// The Store settings panel: any of the switches, and a rename, in one
+/// write. Every value is checked before anything is saved, so a bad `lean`
+/// does not leave a half-applied change; the rename goes last because it
+/// closes and reopens the store.
+fn store_settings(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(name) = body.get("store").and_then(Value::as_str) else {
+        return Response::error(400, "missing store");
+    };
+    let Some(store) = state.store(name) else {
+        return Response::error(404, &format!("no store called {name} is open"));
+    };
+    let text = |key: &str, allowed: &[&str]| -> Result<Option<String>, String> {
+        match body.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(v)) if allowed.contains(&v.as_str()) => Ok(Some(v.clone())),
+            Some(_) => Err(format!("{key} is one of {}", allowed.join(", "))),
+        }
+    };
+    let flag = |key: &str| -> Result<Option<bool>, String> {
+        match body.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(v)) => Ok(Some(*v)),
+            Some(_) => Err(format!("{key} is true or false")),
+        }
+    };
+    let parsed = (|| -> Result<_, String> {
+        Ok((
+            text("kind", &["code", "docs", "both"])?,
+            text("lean", &["code", "docs", "either"])?,
+            flag("watch")?,
+            flag("record")?,
+            flag("gitignore")?,
+        ))
+    })();
+    let (kind, lean, watch, record, gitignore) = match parsed {
+        Ok(v) => v,
+        Err(e) => return Response::error(400, &e),
+    };
+    let rename = body
+        .get("rename")
+        .and_then(Value::as_str)
+        .filter(|n| *n != name);
+    if let Some(new) = rename
+        && let Err(e) = home::check_store_name(new)
+    {
+        return Response::error(400, &format!("{e:#}"));
+    }
+
+    let saved = home::update_store_settings(name, |s| {
+        if let Some(v) = kind {
+            s.kind = v;
+        }
+        if let Some(v) = lean {
+            s.lean = v;
+        }
+        if let Some(v) = watch {
+            s.watch = v;
+        }
+        if let Some(v) = record {
+            s.record = v;
+        }
+        if let Some(v) = gitignore {
+            s.gitignore = v;
+        }
+    });
+    let saved = match saved {
+        Ok(s) => s,
+        Err(e) => return Response::error(500, &format!("{e:#}")),
+    };
+    state.settings_changed(&store);
+
+    let mut answered = name.to_string();
+    if let Some(new) = rename {
+        drop(store);
+        match state.rename_store(name, new) {
+            Ok(store) => answered = store.name.clone(),
+            Err(e) => return Response::error(400, &format!("{e:#}")),
+        }
+    }
+    Response::json(&settings_json(&answered, &saved))
 }
 
 fn delete_store(state: &Arc<State>, request: &Request) -> Response {

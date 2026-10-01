@@ -954,6 +954,14 @@ pub struct Store {
     /// Why the writer thread ended, when it has. `/api/stores` reports it
     /// beside `watching: false`, so a stopped store says what stopped it.
     pub stopped_because: Mutex<Option<String>>,
+    /// The store's `watch` setting (0.35.0): while false, filesystem events
+    /// are dropped rather than re-embedded. The writer thread itself keeps
+    /// running, because it is also what drains the queue a portal index or a
+    /// forwarded `semlith_index` lands on — stopping it would make the store
+    /// unwritable, which is not what "stop watching" means.
+    pub watch_events: AtomicBool,
+    /// The store's `gitignore` setting, read by the writer between jobs.
+    pub gitignore: AtomicBool,
 }
 
 impl Store {
@@ -985,7 +993,15 @@ impl Store {
             // set afterwards is a flag the catch-up may already have run past.
             expecting_run_until: AtomicUsize::new(expecting_run_until),
             stopped_because: Mutex::new(None),
+            watch_events: AtomicBool::new(true),
+            gitignore: AtomicBool::new(true),
         }
+    }
+
+    /// Take the registry's settings for this store into the live flags.
+    pub fn apply_settings(&self, settings: &crate::home::StoreSettings) {
+        self.watch_events.store(settings.watch, Ordering::Relaxed);
+        self.gitignore.store(settings.gitignore, Ordering::Relaxed);
     }
 
     fn note(&self, text: String) {
@@ -2463,6 +2479,7 @@ impl State {
     /// model: a read-only open of the store beside the writer's.
     pub fn plan(&self, store: &Arc<Store>, paths: &[PathBuf]) -> Result<crate::Plan> {
         let mut reader = crate::Semlith::open_existing(&store.dir)?;
+        reader.gitignore = store.gitignore.load(Ordering::Relaxed);
         reader.plan(paths)
     }
 
@@ -2495,10 +2512,12 @@ impl State {
             let for_plan = Arc::downgrade(store);
             let dir = store.dir.clone();
             let plan_paths = paths.clone();
+            let gitignore = store.gitignore.load(Ordering::Relaxed);
             std::thread::Builder::new()
                 .name("semlith-plan".to_string())
                 .spawn(move || {
-                    let reader = crate::Semlith::open_existing(&dir).and_then(|reader| {
+                    let reader = crate::Semlith::open_existing(&dir).and_then(|mut reader| {
+                        reader.gitignore = gitignore;
                         reader.pin_snapshot()?;
                         Ok(reader)
                     });
@@ -2670,6 +2689,92 @@ impl State {
         let removed = crate::home::delete_store(name);
         changes::bump(changes::Domain::Stores);
         removed
+    }
+
+    /// Make an empty named store and serve it at once (0.35.0).
+    pub fn create_store(self: &Arc<Self>, name: &str, kind: &str) -> Result<Arc<Store>> {
+        let dir = crate::home::create_store(name, kind)?;
+        self.open_store(&dir, false)
+    }
+
+    /// Take a store's changed settings into the running daemon: the live
+    /// flags, the ledger's list, and readers rebuilt so the next search
+    /// reads the new `lean`. A `watch` turned back on queues a catch-up,
+    /// because what changed while it was off was dropped, not deferred.
+    pub fn settings_changed(self: &Arc<Self>, store: &Arc<Store>) {
+        let settings = crate::home::store_settings(&store.dir);
+        let was_watching = store.watch_events.load(Ordering::Relaxed);
+        store.apply_settings(&settings);
+        if settings.watch && !was_watching && !store.watched.is_empty() {
+            let _ = self
+                .admission
+                .submit(store, store.watched.clone(), RunKind::CatchUp);
+        }
+        refresh_unrecorded();
+        self.reopen_readers();
+        changes::bump(changes::Domain::Stores);
+    }
+
+    /// Rename a store while the daemon runs: close it as a delete would,
+    /// move its directory and registry key together, and open it again
+    /// under the new name. An agent's next `store: "<new>"` resolves; the
+    /// old name stops resolving the moment the store leaves the served set.
+    ///
+    /// Refused while it has a run going or queued: the run's card, its queue
+    /// entry and its undo all hold the store by its old record.
+    pub fn rename_store(self: &Arc<Self>, old: &str, new: &str) -> Result<Arc<Store>> {
+        let Some(store) = self.store(old) else {
+            bail!("this daemon is not serving a store called {old}");
+        };
+        crate::home::check_store_name(new)?;
+        if Registry::load()?.stores.contains_key(new) {
+            bail!("“{new}” is already a store on this machine. Pick another name.");
+        }
+        if store.run_live() || self.admission.position_of(old).is_some() || store.queue_depth() > 0
+        {
+            bail!("{old} is indexing; stop or wait for its run, then rename it");
+        }
+        store.stop.store(true, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while store.watching.load(Ordering::Relaxed) {
+            if std::time::Instant::now() > deadline {
+                bail!("{old}'s writer did not stop, so nothing was renamed");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.stores
+            .write()
+            .expect("the stores lock")
+            .retain(|s| s.name != old);
+        self.reopen_readers();
+        Discovery::remove(&store.dir);
+        let dir = match crate::home::rename_store(old, new) {
+            Ok(dir) => dir,
+            Err(e) => {
+                // Serve it again under the name it still has.
+                let _ = self.reopen_after_stop(&store.dir);
+                return Err(e);
+            }
+        };
+        drop(store);
+        let opened = self.reopen_after_stop(&dir);
+        changes::bump(changes::Domain::Stores);
+        opened
+    }
+
+    /// Open a store whose writer was just told to stop. The thread drops the
+    /// store's lock a moment after it clears `watching`, so the first try can
+    /// still find it held.
+    fn reopen_after_stop(self: &Arc<Self>, dir: &Path) -> Result<Arc<Store>> {
+        let mut last = None;
+        for _ in 0..40 {
+            match self.open_store(dir, false) {
+                Ok(store) => return Ok(store),
+                Err(e) => last = Some(e),
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("could not reopen {}", dir.display())))
     }
 
     /// Stop a store's run and, once its undo has finished, delete the store.
@@ -2928,6 +3033,9 @@ impl State {
             true,
             expecting,
         ));
+        // Before the writer thread exists, so its first catch-up already
+        // knows whether this store is watched.
+        store.apply_settings(&crate::home::store_settings(&dir));
 
         discovery(self.server.port(), &self.server.token()).write(&store.dir)?;
         self.stores
@@ -3020,6 +3128,19 @@ impl State {
             .entry(class.as_str())
             .or_insert(0) += 1;
     }
+}
+
+/// Tell the ledger which registered stores say `record: false`.
+pub fn refresh_unrecorded() {
+    let registry = Registry::load().unwrap_or_default();
+    crate::ledger::set_unrecorded(
+        registry
+            .stores
+            .iter()
+            .filter(|(_, entry)| !entry.settings.record)
+            .filter_map(|(name, _)| Registry::dir_of(name).ok())
+            .collect(),
+    );
 }
 
 fn discovery(port: u16, token: &str) -> Discovery {
@@ -3265,8 +3386,11 @@ pub fn run(
             dir.display(),
             watched.len()
         ));
-        stores.push(Arc::new(Store::new(name, dir, roots, watched, false, 0)));
+        let store = Store::new(name, dir, roots, watched, false, 0);
+        store.apply_settings(&crate::home::store_settings(&store.dir));
+        stores.push(Arc::new(store));
     }
+    refresh_unrecorded();
 
     let fleet = if stores.is_empty() {
         None
@@ -3551,6 +3675,7 @@ fn tend(
 ) -> Result<()> {
     let mut writer = Semlith::open(&store.dir, None)?;
     writer.quiet = true;
+    writer.gitignore = store.gitignore.load(Ordering::Relaxed);
     let mut next_compact_check = std::time::Instant::now() + COMPACT_FIRST_CHECK;
 
     // Before the watcher reads a single event: a store that holds files
@@ -3585,7 +3710,9 @@ fn tend(
     // the same walk up again on its own. A store the portal has just made
     // skips it, because the run on its way covers the same roots.
     let expecting = (now() as usize) < store.expecting_run_until.load(Ordering::Relaxed);
-    let deferred = !roots.is_empty() && !expecting;
+    // A store whose `watch` setting is off is not caught up either: what
+    // changed while nothing watched is exactly what it asked not to follow.
+    let deferred = !roots.is_empty() && !expecting && store.watch_events.load(Ordering::Relaxed);
     if deferred {
         let _ = admission.submit(store, roots.clone(), RunKind::CatchUp);
     }
@@ -3602,6 +3729,11 @@ fn tend(
             // checkout` of thousands of files waits its turn and shows as a
             // card rather than embedding beside every admitted run.
             defer: &|paths| {
+                // Watching off: the batch is taken and dropped. Turning it
+                // back on queues a catch-up, which is what picks these up.
+                if !store.watch_events.load(Ordering::Relaxed) {
+                    return true;
+                }
                 if paths.len() <= BATCH_ADMIT_OVER {
                     return false;
                 }
@@ -3668,6 +3800,8 @@ fn tend(
             // for a minute.
             writer.follow_budget();
             writer.release_if_idle(session_idle());
+            // The setting may have moved on the page since the last batch.
+            writer.gitignore = store.gitignore.load(Ordering::Relaxed);
             if std::time::Instant::now() >= next_compact_check {
                 next_compact_check = std::time::Instant::now() + COMPACT_CHECK;
                 auto_compact(store, writer, admission);

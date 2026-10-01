@@ -1474,6 +1474,10 @@ pub struct Semlith {
     /// What this caller may index. The default is the command line's: the
     /// deny-list, and no confinement.
     pub boundary: Boundary,
+    /// Whether walks honour `.gitignore` and the global gitignore. The
+    /// store's `gitignore` setting (0.35.0); the deny-list, the hidden-file
+    /// rule, `.semlithignore` and the secret scan apply either way.
+    pub gitignore: bool,
     /// Size, mtime and content hash of each file the scan phase read, so the
     /// embed pass that follows it does not read an unchanged file twice.
     prehashed: std::collections::HashMap<PathBuf, (u64, i64, String)>,
@@ -1572,6 +1576,7 @@ impl Semlith {
             generation,
             quiet: false,
             boundary: Boundary::default(),
+            gitignore: true,
             prehashed: Default::default(),
             scrub: false,
         })
@@ -1912,7 +1917,7 @@ impl Semlith {
     fn walk(&self, roots: &[PathBuf]) -> Walked {
         let allowed = self.accepted_folders();
         let started = std::time::Instant::now();
-        let mut walked = walk_allowing(roots, &allowed);
+        let mut walked = walk_allowing(roots, &allowed, self.gitignore);
         walked.walk_ms = started.elapsed().as_millis() as u64;
         walked
     }
@@ -2622,6 +2627,7 @@ impl Semlith {
         let mut run_lanes: std::collections::BTreeMap<String, usize> = Default::default();
         let (cpu_back, cpu_returned) = std::sync::mpsc::channel();
         let prepare_threads = pipeline::prepare_threads();
+        let gitignore = self.gitignore;
 
         std::thread::scope(|scope| -> Result<()> {
             let prefetch = pipeline::Prefetch::start(scope, first, sealed, &ctx, prepare_threads);
@@ -2629,7 +2635,7 @@ impl Semlith {
             let mut walker = pending_walk.map(|(roots, accepted)| {
                 scope.spawn(move || {
                     let started = std::time::Instant::now();
-                    let mut walked = walk_allowing(&roots, &accepted);
+                    let mut walked = walk_allowing(&roots, &accepted, gitignore);
                     walked.walk_ms = started.elapsed().as_millis() as u64;
                     walked
                 })
@@ -6139,8 +6145,9 @@ fn sibling_exists(parent: &Path, manifest: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn walk(roots: &[PathBuf]) -> Walked {
-    walk_allowing(roots, &[])
+    walk_allowing(roots, &[], true)
 }
 
 /// The bytes a run's files count for, one `stat` each: microseconds against
@@ -6338,7 +6345,7 @@ fn git_recency(paths: &[PathBuf]) -> std::collections::HashMap<PathBuf, i64> {
 }
 
 /// [`walk`], descending into the generated folders a person accepted (2.5).
-fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
+fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf], gitignore: bool) -> Walked {
     let mut out = Vec::new();
     let mut named = Vec::new();
     let mut unreadable = Vec::new();
@@ -6374,9 +6381,9 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
         let mut builder = ignore::WalkBuilder::new(root);
         builder
             .hidden(true)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
+            .git_ignore(gitignore)
+            .git_global(gitignore)
+            .git_exclude(gitignore)
             .parents(true)
             // Honour `.gitignore` even outside a git repo. A notes or docs
             // folder is a perfectly normal thing to index, and a `.gitignore`
