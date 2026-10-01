@@ -3213,10 +3213,17 @@ pub fn run(
     // a surprise: the person who started the daemon is told, in the same
     // breath as the port, that it keeps a record and how to stop it. A default
     // nobody is told about is the thing 0.12.0 was right to refuse.
-    report(if ledger {
-        "ledger: recording (local only; --no-ledger to stop)"
-    } else {
+    crate::ledger::set_session_off(!ledger);
+    let paused = crate::home::Settings::load()
+        .ledger_paused
+        .unwrap_or(false);
+    crate::ledger::set_paused(paused);
+    report(if !ledger {
         "ledger: off for this session"
+    } else if paused {
+        "ledger: paused from the portal (Resume recording on the Ledger page)"
+    } else {
+        "ledger: recording (local only; --no-ledger to stop)"
     });
 
     // The agent key is read, or written if this machine has none. It survives

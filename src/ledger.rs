@@ -18,6 +18,7 @@ use crate::fleet::Fleet;
 use crate::store;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The label on a row counted at four characters per token.
 ///
@@ -37,11 +38,57 @@ pub const OFF_ENV: &str = "SEMLITH_LEDGER";
 /// `SEMLITH_LEDGER=0` is the answer to "I never want this recorded anywhere";
 /// `semlith start --no-ledger` is the answer to "not in this session". The two
 /// exist separately because they are different promises.
+///
+/// From 0.35.0 two more answers sit beside those, both this process's own:
+/// the daemon's `--no-ledger` (it used to stop only the portal's rows, so an
+/// agent's calls through `/mcp` were still recorded) and the portal's Pause
+/// recording switch. Neither leaves the process; a CLI or a hook asks only the
+/// environment, as before.
 pub fn enabled() -> bool {
+    off_reason().is_none()
+}
+
+/// Whether the environment allows recording at all.
+pub fn env_on() -> bool {
     !matches!(
         std::env::var(OFF_ENV).as_deref(),
         Ok("0") | Ok("off") | Ok("false")
     )
+}
+
+static SESSION_OFF: AtomicBool = AtomicBool::new(false);
+static PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// `semlith start --no-ledger`, for the life of this process.
+pub fn set_session_off(off: bool) {
+    SESSION_OFF.store(off, Ordering::Relaxed);
+}
+
+/// The Pause recording switch. A paused ledger writes nothing, so the next
+/// row after a resume chains to the last real one: the chain has no gap to
+/// explain, because no row was ever written and then removed.
+pub fn set_paused(paused: bool) {
+    PAUSED.store(paused, Ordering::Relaxed);
+}
+
+/// Why nothing is being recorded, the strongest reason first: the
+/// environment outlives a session, and a session flag outlives a pause.
+pub fn off_reason() -> Option<&'static str> {
+    if !env_on() {
+        Some("env")
+    } else if SESSION_OFF.load(Ordering::Relaxed) {
+        Some("flag")
+    } else if PAUSED.load(Ordering::Relaxed) {
+        Some("paused")
+    } else {
+        None
+    }
+}
+
+/// `{on, reason}`, as `/api/ledger` and `/api/about` report it.
+pub fn recording_state() -> serde_json::Value {
+    let reason = off_reason();
+    serde_json::json!({ "on": reason.is_none(), "reason": reason })
 }
 
 /// Four characters to a token: a rough rule, said to be one.

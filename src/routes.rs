@@ -123,6 +123,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/trust") => trust(state, request),
         (_, true, "/api/ledger/raw-read") => raw_read(state, request),
+        (_, true, "/api/ledger/recording") => ledger_recording(request),
         (_, true, "/api/agents/reveal") => reveal(state),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
@@ -853,7 +854,7 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
         Ok(v) => v,
         Err(e) => return Response::error(500, &e.to_string()),
     };
-    if state.ledger {
+    if crate::ledger::enabled() {
         // From the brief rather than from its rendering. `reply` recovers the
         // files an answer named by reading them back out of rendered text, and
         // what this route hands it is JSON -- so every brief from this page was
@@ -1016,7 +1017,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         })
         .collect();
 
-    if state.ledger {
+    if crate::ledger::enabled() {
         // The portal is one client among several now, named the same way the
         // agents are, and recorded through the same path they use.
         crate::ledger::search(
@@ -1089,7 +1090,7 @@ fn raw_read(state: &Arc<State>, request: &Request) -> Response {
 
     // `--no-ledger` is a promise about this session, and it covers rows the
     // hook asks for exactly as it covers rows a search writes.
-    if !state.ledger {
+    if !crate::ledger::enabled() {
         return Response::json(&json!({ "recorded": false, "reason": "not recording" }));
     }
     with_fleet(state, json!({ "recorded": false }), move |fleet| {
@@ -1097,9 +1098,31 @@ fn raw_read(state: &Arc<State>, request: &Request) -> Response {
     })
 }
 
+/// Pause or resume recording for this daemon, and keep the choice.
+///
+/// Saved before it is applied, so a pause that could not be written is
+/// refused rather than lasting only until the next restart. `--no-ledger` and
+/// `SEMLITH_LEDGER=0` still win; the answer names them in `reason`.
+fn ledger_recording(request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(on) = body.get("on").and_then(Value::as_bool) else {
+        return Response::error(400, "missing on");
+    };
+    let mut saved = home::Settings::load();
+    saved.ledger_paused = Some(!on);
+    if let Err(e) = saved.save() {
+        return Response::error(500, &format!("{e:#}"));
+    }
+    crate::ledger::set_paused(!on);
+    Response::json(&json!({ "recording": crate::ledger::recording_state() }))
+}
+
 fn ledger(state: &Arc<State>) -> Response {
     let empty = json!({
-        "recording": state.ledger,
+        "recording": crate::ledger::recording_state(),
         "queries": 0,
         "clients": 0,
         "excerpt_tokens": 0,
@@ -1107,7 +1130,7 @@ fn ledger(state: &Arc<State>) -> Response {
         "ratio": null,
         "intact": true,
     });
-    let recording = state.ledger;
+    let recording = crate::ledger::recording_state();
     let usage_on = crate::usage::enabled();
     with_fleet(state, empty, move |fleet| {
         // Usage filled in before the rows are read, so the page shows what the
@@ -2085,7 +2108,8 @@ fn about(state: &Arc<State>) -> Response {
         // Whether this daemon is recording retrievals. The sidebar states it on
         // every page, the way the design's daemon card does, and asking
         // `/api/ledger` for one boolean would carry the whole ledger with it.
-        "ledger": state.ledger,
+        "ledger": crate::ledger::enabled(),
+        "recording": crate::ledger::recording_state(),
         "port": state.server.port(),
         "pid": std::process::id(),
         "uptime": daemon::uptime(state),
