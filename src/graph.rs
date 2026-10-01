@@ -2595,7 +2595,8 @@ fn busiest(stores: &[(&str, &rusqlite::Connection)]) -> Result<Option<String>> {
     // Chosen once per store and graph: the choice reads the busiest symbols of
     // the whole store, seconds on a large one, and gives the same answer until
     // the symbol or edge count moves.
-    static CHOSEN: std::sync::Mutex<Vec<(String, (i64, i64), Option<String>)>> =
+    type Chosen = (String, (i64, i64), Option<String>);
+    static CHOSEN: std::sync::Mutex<Vec<Chosen>> =
         std::sync::Mutex::new(Vec::new());
     let mut key = String::new();
     let mut stats = (0i64, 0i64);

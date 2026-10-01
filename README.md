@@ -219,18 +219,11 @@ semlith: opened api at /Users/you/.semlith/stores/api — watching 1 root(s)
 
 That URL is printed once, on stdout. Everything else goes to stderr, and the
 token never appears there.
-Nine pages in three groups — Home, Stores, Search and Graph; Agents, Ledger and
-Reports; Privacy and Settings — plus a page per store, each the same answer the
-terminal gives. With no store yet it opens on a first-run screen and a
-five-step wizard: name a store, add folders by browsing, pasting or dropping
-them, review every file that looks sensitive before anything is indexed, index,
-and register the agent clients found on the machine. The Graph page draws the
-symbols and edges a store holds, with a filter chip per edge kind and a
-confidence colour per edge. **[docs/portal.md](docs/portal.md) documents every
-page**, what each control does, and what each column, badge and number means.
+Nine pages plus a page per store, each the same answer the terminal gives, and
+a five-step wizard: name a store, add folders, review anything sensitive before
+it is indexed, index, and connect agents. **[docs/portal.md](docs/portal.md) documents every page.**
 
 ![The portal's Home page](https://raw.githubusercontent.com/semlith/semlith/main/assets/portal/home.png)
-![Search, ranked, with the hit read in place](https://raw.githubusercontent.com/semlith/semlith/main/assets/portal/search.png)
 
 **It is not on the network.** `127.0.0.1` is the only address it binds and there
 is no flag to change that. Every page and every `/api/` route needs the per-run
