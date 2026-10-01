@@ -29,6 +29,15 @@ on Settings. Usage from client logs is a Ledger switch, and adds a model
 column to Sessions. Re-pointing a moved root and trusting a repository are
 on the store's Settings tab. Install update follows Check for updates.
 
+**Live without rebuilding.** Over a running index the Runs tab, a store's
+Settings and Settings › Performance are patched in place: the Pause button
+you pressed stays where it was with the focus on it, and a half-typed store
+name survives every poll.
+
+**Add sources adds a folder.** Adding a folder to a store that already has
+roots posts `add_roots`, so the folder becomes one of its roots before the
+boundary check; an agent's index request keeps the boundary it always had.
+
 **Loaders are the loading.** The boot animation and each page's loader stay
 exactly as long as the fetches they cover, and go the frame they answer.
 
