@@ -571,6 +571,97 @@ fn picked_files_reindex_as_one_run_and_its_record_survives_a_restart() {
     assert!(row["result"].is_string() && row["log"].is_array(), "{row}");
 }
 
+// ------------------------------------------------------------------ ledger repair
+
+fn row_of(n: i64) -> semlith::store::NewRetrieval<'static> {
+    semlith::store::NewRetrieval {
+        client_version: "",
+        client: "test",
+        session: "s",
+        tool: "search",
+        query: "q",
+        hits: 1,
+        micros: n,
+        excerpt_tokens: 10,
+        whole_file_tokens: 100,
+        stale_hits: 0,
+        tokenizer: "chars4",
+        query_id: "",
+    }
+}
+
+/// A broken chain is named by row, re-anchored by a note row appended onto
+/// its head, and verifies after; no recorded row changes and no total moves.
+#[test]
+fn a_broken_ledger_is_named_repaired_by_a_note_and_its_totals_do_not_move() {
+    let (_dir, home) = home();
+    {
+        let daemon = Daemon::start(&home);
+        daemon.post("/api/store/create", json!({ "name": "audit" }));
+    }
+    let dir = home.join("stores").join("audit");
+    let snapshot = |db: &rusqlite::Connection| -> Vec<String> {
+        let mut stmt = db
+            .prepare("SELECT id, at, client, query, hits, micros, prev, hash FROM retrievals WHERE id <= 3 ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok(format!(
+                "{}|{}|{}|{}|{}|{}|{}|{}",
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    };
+    let (before, totals) = {
+        let store = semlith::Semlith::open(&dir, None).unwrap();
+        for n in 1..=3 {
+            semlith::store::record_retrieval(store.db(), &row_of(n)).unwrap();
+        }
+        semlith::store::read_only(store.db(), false).unwrap();
+        store
+            .db()
+            .execute("UPDATE retrievals SET query = 'edited' WHERE id = 2", [])
+            .unwrap();
+        (
+            snapshot(store.db()),
+            semlith::store::ledger_totals(store.db()).unwrap(),
+        )
+    };
+
+    let daemon = Daemon::start(&home);
+    let ledger = daemon.get("/api/ledger");
+    assert_eq!(ledger["intact"], json!(false), "{ledger}");
+    assert_eq!(ledger["break"]["store"], "audit");
+    assert_eq!(ledger["break"]["row"], json!(2));
+    assert!(ledger["break"]["at"].is_i64());
+
+    let (status, body) = daemon.post("/api/ledger/verify", json!({ "repair": false }));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["stores"][0]["intact"], json!(false));
+    assert_eq!(body["stores"][0]["break_row"], json!(2));
+
+    let (_, body) = daemon.post("/api/ledger/verify", json!({ "repair": true }));
+    assert_eq!(body["stores"][0]["intact"], json!(true), "{body}");
+    assert_eq!(body["stores"][0]["repaired"], json!([2]));
+    assert_eq!(body["stores"][0]["rows"], json!(4), "one note row was appended");
+    assert_eq!(daemon.get("/api/ledger")["intact"], json!(true));
+    drop(daemon);
+
+    let store = semlith::Semlith::open_existing(&dir).unwrap();
+    assert_eq!(snapshot(store.db()), before, "a recorded row changed");
+    assert_eq!(semlith::store::ledger_totals(store.db()).unwrap(), totals);
+    assert_eq!(semlith::store::ledger_break(store.db()).unwrap(), None);
+}
+
 // ------------------------------------------------------------------ A6
 
 /// Start at login from the page installs and removes the service through

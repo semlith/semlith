@@ -129,6 +129,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/trust") => trust(state, request),
         (_, true, "/api/ledger/raw-read") => raw_read(state, request),
         (_, true, "/api/ledger/recording") => ledger_recording(request),
+        (_, true, "/api/ledger/verify") => ledger_verify(state, request),
         (_, true, "/api/airgap") => airgap(request),
         (_, true, "/api/login-item") => login_item(state, request),
         (_, true, "/api/agents/reveal") => reveal(state),
@@ -1262,6 +1263,33 @@ fn airgap(request: &Request) -> Response {
     Response::json(&json!({ "airgap": crate::add::airgap_state() }))
 }
 
+/// Re-verify every open store's chain, and with `repair` re-anchor each
+/// break by appending a note row (never by editing or deleting a recorded
+/// one): `{stores: [{store, rows, intact, break_row, repaired}]}`.
+fn ledger_verify(state: &Arc<State>, request: &Request) -> Response {
+    let body = request.json().unwrap_or(json!({}));
+    let repair = body.get("repair").and_then(Value::as_bool).unwrap_or(false);
+    with_fleet(state, json!({ "stores": [] }), move |fleet| {
+        let mut stores = Vec::new();
+        for (label, store) in fleet.each() {
+            let repaired = if repair {
+                store::ledger_repair(store.db())?
+            } else {
+                Vec::new()
+            };
+            let broken = store::ledger_break(store.db())?;
+            stores.push(json!({
+                "store": label,
+                "rows": store::ledger_rows(store.db())?,
+                "intact": broken.is_none(),
+                "break_row": broken,
+                "repaired": repaired,
+            }));
+        }
+        Ok(json!({ "stores": stores }))
+    })
+}
+
 /// Pause or resume recording for this daemon, and keep the choice.
 ///
 /// Saved before it is applied, so a pause that could not be written is
@@ -1309,6 +1337,8 @@ fn ledger(state: &Arc<State>) -> Response {
         }
         let (mut clients, mut excerpt, mut whole) = (0, 0, 0);
         let mut intact = true;
+        // The first row that does not verify, so the page can name it.
+        let mut first_break: Option<Value> = None;
         // Unioned rather than summed: one search over six stores writes a row
         // in each that answered it, under one query id, and adding six stores'
         // own counts is what made this page report sixty-three queries for
@@ -1324,7 +1354,16 @@ fn ledger(state: &Arc<State>) -> Response {
             clients = clients.max(c);
             excerpt += e;
             whole += w;
-            intact = intact && store::ledger_break(store.db())?.is_none();
+            if let Some(row) = store::ledger_break(store.db())?
+                && intact
+            {
+                intact = false;
+                first_break = Some(json!({
+                    "store": label,
+                    "row": row,
+                    "at": store::retrieval_at(store.db(), row)?,
+                }));
+            }
         }
         let queries = seen.len() as i64;
         // Summed across stores the same way the totals are, and reported with
@@ -1448,6 +1487,7 @@ fn ledger(state: &Arc<State>) -> Response {
             "whole_file_tokens": whole,
             "ratio": ratio,
             "intact": intact,
+            "break": first_break,
             "net_tokens": net,
             "credited": credited,
             "coverage": coverage,
