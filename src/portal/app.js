@@ -1321,6 +1321,8 @@ const SOURCES = {
   privacy: "/api/privacy",
   runs: "/api/index/runs",
   refused: "/api/refused",
+  decisions: "/api/refused?decisions=1",
+  detail: "/api/stores?detail=1",
   corpus: "/api/corpus",
   accel: "/api/accel",
   schedules: "/api/schedules",
@@ -1397,12 +1399,12 @@ function noteAbout(about) {
 const live = { seen: {}, timer: null };
 
 const DOMAIN_KEYS = {
-  stores: ["stores", "refused"],
+  stores: ["stores", "refused", "decisions"],
   runs: ["runs"],
   clients: ["agents"],
   ledger: ["ledger"],
   events: ["stores"],
-  privacy: ["privacy", "refused"],
+  privacy: ["privacy", "refused", "decisions"],
 };
 
 async function pollChanges() {
@@ -1432,6 +1434,8 @@ async function pollChanges() {
   if (moved.includes("stores")) {
     delete data.corpus;
     delete data.coverage;
+    if (state.route.page === "store") keys.add("detail");
+    else delete data.detail;
   }
   if (keys.size) refresh([...keys]);
 }
@@ -1854,7 +1858,7 @@ function paintChrome() {
   const stores = liveStores().length;
   const agents = connectedCount();
   const rec = recordingWord();
-  fill(shell.daemonFacts, `${location.host} · sole writer`, el("br"), `${plural(stores, "store")} · ${plural(agents, "agent")} · ledger ${rec}`);
+  fill(shell.daemonFacts, `${location.host} · sole writer`, el("br"), `${plural(stores, "store")} · ${agents ? `${plural(agents, "agent")} connected` : `${plural(registeredClients().length, "agent")} registered`} · ledger ${rec}`);
   const railDaemon = shell.rail.querySelector(".rail-daemon");
   if (railDaemon) railDaemon.setAttribute("data-tip-rows", rows([["address", location.host], ["role", "sole writer"], ["stores", String(stores)], ["agents", String(agents)], ["ledger", rec]]));
 }
@@ -2483,7 +2487,7 @@ function wizardScreen() {
     const bits = [];
     if (s.repos > 1) bits.push(`${s.repos} repositories inside`);
     else if (s.repos === 1) bits.push("a git repository");
-    if (s.count !== undefined) bits.push(`${plural(s.count, "item")} at the top`);
+    if (s.count) bits.push(`${plural(s.count, "folder")} inside`);
     bits.push(s.dropped ? "dropped · read in place" : "read in place");
     return bits.join(" · ");
   }
@@ -3107,7 +3111,7 @@ function wizardScreen() {
         { class: "auto-fit m150" },
         kpi("Files to index", n(files), P.accepted ? `includes ${P.accepted} you accepted` : urls ? `plus ${plural(urls, "URL")} fetched at the start` : "after review"),
         kpi("Text", bytes(P.embedBytes), P.unchanged ? `${n(P.unchanged)} unchanged, skipped by hash` : "read where it sits"),
-        kpi("Estimate", P.eta != null ? spellTook(P.eta) : "measured once it starts", P.eta != null ? "from this machine's last measured rate" : "no rate measured on this machine yet"),
+        kpi("Estimate", P.eta != null ? spellTook(P.eta) : "—", P.eta != null ? "from this machine's last measured rate" : "measured once the run starts"),
       ),
       model && !model.cached
         ? el(
@@ -3133,9 +3137,9 @@ function wizardScreen() {
                     "data-tip": l.enabled ? "On · applies to every run on this machine" : "Off · applies to every run on this machine",
                     onclick: () => laneToggle(l),
                   },
-                  el("div", { class: "row nowrap" }, el("span", { class: `radio${l.enabled ? " on" : ""}` }), el("span", { class: "t", text: l.label || l.lane }), fastest && fastest.lane === l.lane && l.lane !== "cpu" ? el("span", { class: "rec", text: "fastest here" }) : null, l.experimental ? el("span", { class: "exp", text: "experimental" }) : null),
-                  el("span", { class: "m12", text: l.device || laneWord(l.status) }),
-                  el("span", { class: "d", text: l.download_bytes && !l.installed ? `needs a ${bytes(l.download_bytes)} download first` : l.lane === "cpu" ? "always available" : laneWord(l.status) }),
+                  el("div", { class: "row nowrap" }, el("span", { class: "cb", "aria-checked": String(!!l.enabled) }), el("span", { class: "t", text: l.label || l.lane }), fastest && fastest.lane === l.lane && l.lane !== "cpu" ? el("span", { class: "rec", text: "fastest here" }) : null, l.experimental ? el("span", { class: "exp", text: "experimental" }) : null),
+                  el("span", { class: "m12", text: l.device || l.variant || "" }),
+                  el("span", { class: "d", text: l.download_bytes && !l.installed ? `needs a ${bytes(l.download_bytes)} download first` : l.lane === "cpu" ? "always available" : l.enabled ? laneWord(l.status) : "off" }),
                 ),
               )
             : el("div", { class: "muted t-sm", text: "Reading the lanes…" }),
@@ -3250,11 +3254,13 @@ function wizardScreen() {
   }
 
   function doneCard(R) {
-    const files = R.reduce((a, r) => a + (r.indexed || 0), 0);
-    const chunks = R.reduce((a, r) => a + (r.chunks || 0), 0);
     const failed = R.filter((r) => r.status === "failed" || r.status === "stopped");
     const name = w.created || R[0].store;
     const s = store(name);
+    // The store's own totals once it reports them: a run counts only what it
+    // embedded, not images it read or files it found unchanged.
+    const files = s?.files ?? R.reduce((a, r) => a + (r.indexed || 0), 0);
+    const chunks = s?.chunks ?? R.reduce((a, r) => a + (r.chunks || 0), 0);
     const tryInput = el("input", {
       value: w.tryQ,
       placeholder: "e.g. where does the watcher re-index a file",
@@ -3351,7 +3357,7 @@ function wizardScreen() {
                 },
               },
               el("span", { class: "cb", "aria-checked": String(on || c.registered) }),
-              el("span", { class: "col grow" }, el("span", { class: "nm", text: c.name }), el("span", { class: "muted t-xs", text: c.found ? c.how : "not found on this machine" })),
+              el("span", { class: "col grow min0" }, el("span", { class: "nm", text: c.name }), el("span", { class: "muted t-xs anywhere", text: c.found ? c.how : "not found on this machine" })),
               registered ? pill("registered", "green", { dot: false }) : c.found ? el("span", { class: "t-mono-sm", text: "found" }) : el("span", { class: "t-mono-sm", text: "—" }),
             );
           }),
@@ -3400,9 +3406,10 @@ function wizardScreen() {
     paint();
     try {
       const out = await post("/api/agents/register", { clients: names, action: "register", confirm: true });
+      const results = out.results || [];
       w.regResult = {
-        ok: out.registered || out.ok || names.filter((x) => !(out.failed || []).some((f) => f.client === x)),
-        failed: out.failed || [],
+        ok: results.filter((r) => r.ok).map((r) => r.client),
+        failed: results.filter((r) => !r.ok),
       };
       w.reg = "done";
       toast(`Registered ${plural(w.regResult.ok.length, "client")}`);
@@ -3785,6 +3792,16 @@ function mcpJson() {
 }
 
 /** Every documented client with what this machine says about it. */
+// The command's name and verb, without the arguments that carry paths or JSON.
+function cmdHead(text) {
+  const words = [];
+  for (const w of String(text).split(/\s+/)) {
+    if (words.length === 3 || /[{"'\/]/.test(w)) break;
+    words.push(w);
+  }
+  return words.join(" ");
+}
+
 function clientRows() {
   const reports = data.agents?.doctor || [];
   return (data.agents?.clients || []).map((c) => {
@@ -3799,7 +3816,7 @@ function clientRows() {
       registered: !!r.registered,
       report: r,
       client: c,
-      how: `${c.group} · ${register ? register.text.split(/\s+/).slice(0, 3).join(" ") : file ? file.path : "by hand"}`,
+      how: `${c.group} · ${register ? cmdHead(register.text) : file ? file.path : "by hand"}`,
       write: register ? register.text.replace(/\s+/g, " ") : file ? file.path : "set up by hand",
     };
   });
@@ -4521,7 +4538,7 @@ function monthName(ym) {
 const sdUi = { glob: "", type: "all", lang: "all", view: "list", decQ: "", decOut: "all", decBy: "all", histOpen: {}, rename: {} };
 
 VIEWS.store = {
-  needs: () => ["stores", "runs", "refused", "ledger"],
+  needs: () => ["stores", "runs", "refused", "decisions", "detail", "ledger"],
   live: ["stores", "runs", "refused", "ledger"],
   render(route, holder) {
     const name = route.parts[0];
@@ -4584,8 +4601,8 @@ VIEWS.store = {
 
 function sdOverview(s) {
   const asks = (data.ledger?.rows || []).filter((r) => r.store === s.name).slice(0, 6);
-  const readers = Object.entries(s.readers_count || {}).sort((a, b) => b[1] - a[1]);
-  const langsC = Object.entries(s.languages_count || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  const readers = Object.entries(detailOf(s).readers_count || {}).sort((a, b) => b[1] - a[1]);
+  const langsC = Object.entries(detailOf(s).languages_count || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
   const v = s.savings;
   return el(
     "div",
@@ -4679,7 +4696,7 @@ function sdFiles(s, holder) {
       sdFiles.t = setTimeout(reload, 220);
     },
   });
-  const langs = Object.keys(s.languages_count || {}).sort();
+  const langs = Object.keys(detailOf(s).languages_count || {}).sort();
   const langSel = el(
     "select",
     { class: "sel", "aria-label": "Language", onchange: (e) => ((sdUi.lang = e.target.value), reload()) },
@@ -4876,7 +4893,14 @@ function filesTree(s) {
 
 function decisionsOf(name) {
   const entry = (data.refused?.stores || []).find((x) => x.store === name) || {};
-  return entry;
+  const made = (data.decisions?.stores || []).find((x) => x.store === name);
+  return made ? { ...entry, decisions: made.rows || [] } : entry;
+}
+
+// Reader and language counts cost a pass over each store's files, so the
+// store page reads them on its own instead of every stores poll.
+function detailOf(s) {
+  return (data.detail?.stores || []).find((x) => x.name === s.name) || s;
 }
 
 const OUTCOME_TONE = { accepted: "blue", "never indexed": "red", "redacted · indexed": "amber", "read as image": "green", "kept out": "grey", skipped: "grey" };
@@ -6721,7 +6745,7 @@ VIEWS.agents = {
   render(route) {
     const tab = route.parts[0] || "connected";
     const a = data.agents || {};
-    const conns = a.connections || [];
+    const conns = connectedRows(a);
     const clients = clientRows();
     const found = clients.filter((c) => c.found);
     const unreg = found.filter((c) => !c.registered);
@@ -6756,8 +6780,18 @@ VIEWS.agents = {
   },
 };
 
-function agConnected(a) {
+// Live connections first, then every registered client that has not called
+// yet, so a client registered a minute ago is on the list, waiting.
+function connectedRows(a) {
   const conns = a.connections || [];
+  const waiting = registeredClients()
+    .filter((c) => !conns.some((x) => sameClient(x.name, c.name)))
+    .map((c) => ({ name: c.name, waiting: true }));
+  return [...conns, ...waiting];
+}
+
+function agConnected(a) {
+  const conns = connectedRows(a);
   const rows = data.ledger?.rows || [];
   const lastOf = (name) => (rows.find((r) => sameClient(r.client, name)) || {}).at;
   return el(
@@ -6783,6 +6817,17 @@ function agConnected(a) {
                 "tbody",
                 {},
                 conns.map((c) => {
+                  if (c.waiting)
+                    return el(
+                      "tr",
+                      {},
+                      el("td", { class: "t-m", text: c.name }),
+                      el("td", {}, pill("registered", "blue", { dot: false, tip: "Restart it — it shows here as active on its first call" })),
+                      el("td", { class: "ms", text: "—" }),
+                      el("td", { class: "ms", text: "—" }),
+                      el("td", { class: "m r", text: "0" }),
+                      el("td", { class: "ms r", text: "waiting for its first call" }),
+                    );
                   const active = c.seen && Date.now() / 1000 - c.seen < 600;
                   const last = lastOf(c.name) || c.seen;
                   return el(

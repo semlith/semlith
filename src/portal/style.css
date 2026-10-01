@@ -5219,3 +5219,6 @@ button.gl-row:hover,
 .sel:focus-visible {
   box-shadow: 0 0 0 2px var(--blue-soft);
 }
+.pill {
+  flex-shrink: 0;
+}
