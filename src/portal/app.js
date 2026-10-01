@@ -1058,6 +1058,9 @@ function grid(spec) {
       paint();
     },
     selected: () => [...view.sel],
+    // Every row the filters let through, in the order on screen: what an
+    // export writes, so a file says what the table said.
+    shown: () => sorted(),
     clear() {
       view.sel.clear();
       paint();
@@ -1996,6 +1999,13 @@ function welcomeScreen() {
   return node;
 }
 
+// A folder listing without the store home: indexing semlith's own stores
+// is refused anyway, so offering them is a dead end.
+function browsable(entries) {
+  const home = data.about?.store_home;
+  return (entries || []).filter((e) => !home || e.path !== home);
+}
+
 function laneWord(status) {
   const s = (status && status.state) || "idle";
   if (s === "compiling") return `compiling ${status.percent || 0}%`;
@@ -2051,7 +2061,7 @@ function pickFolder({ title, ok, hint, start }) {
         fill(err);
         fill(
           list,
-          listing.entries
+          browsable(listing.entries)
             .filter((e) => e.dir)
             .map((e) =>
               el(
@@ -2115,6 +2125,17 @@ function blankWizard(opts) {
     manual: false,
     nameSuggest: [],
   };
+}
+
+// What the summary says about sources: the new ones, and for an existing
+// store what it already reads, so adding to it never reads as "none".
+function sourcesLine() {
+  const w = state.wz;
+  const added = w.sources.map((x) => baseName(x.path)).join(", ");
+  const had = w.existing ? (store(w.existing)?.roots || []).length : 0;
+  if (!had) return added || "none yet";
+  const kept = `${plural(had, "root")} already`;
+  return added ? `${kept} + ${added}` : kept;
 }
 
 function openWizard(opts) {
@@ -2565,8 +2586,8 @@ function wizardScreen() {
         ? el(
             "div",
             { class: "browse-grid", "data-scroll-keep": "browse" },
-            l.entries.length
-              ? l.entries.map((e) => {
+            browsable(l.entries).length
+              ? browsable(l.entries).map((e) => {
                   const on = [...b.sel].some((x) => x.path === e.path);
                   const toggleSel = () => {
                     const hit = [...b.sel].find((x) => x.path === e.path);
@@ -3439,7 +3460,7 @@ function wizardScreen() {
     const rowsList = [
       ["NAME", nm || "not named yet", !!w.created, !nm, true],
       ["HOLDS", { code: "Code", docs: "Docs & notes", both: "Code and docs" }[w.kind], !!w.created],
-      ["SOURCES", w.sources.length ? w.sources.map((x) => baseName(x.path)).join(", ") : "none yet", w.sources.length > 0 && step > 2, !w.sources.length, true],
+      ["SOURCES", sourcesLine(), w.sources.length > 0 && step > 2, !w.sources.length, true],
       ["REVIEW", step < 3 || w.scan.state !== "done" ? "after the scan" : P.undecided ? `${P.undecided} undecided — they stay out` : `${P.accepted ? `${P.accepted} accepted · ` : ""}all decided`, step > 3, step < 3],
       [
         "INDEX",
@@ -3859,10 +3880,10 @@ function kindOf(s) {
   return { code: "code", docs: "docs", both: "code + docs", mixed: "code + docs" }[s.kind || "both"] || "code + docs";
 }
 
+// The Stores page's per-store saving, never without its coverage and tier.
 function savedLine(s) {
-  const v = s.savings;
-  if (!v || !v.total) return "nothing asked yet";
-  return `${short(v.net_tokens)} fewer · ${v.coverage}% · ${v.tier}`;
+  if (!s.savings || !s.savings.total) return "nothing asked yet";
+  return `${short(s.savings.net_tokens)} fewer · coverage ${s.savings.coverage}% · ${s.savings.tier}`;
 }
 
 function rootsLine(s) {
@@ -7257,6 +7278,7 @@ function ledgerSessions(list) {
       { key: "tier", label: "Tier", sort: (s) => s.tier, render: (s) => pill(s.tier, s.tier === "measured" ? "blue" : "grey", { dot: false, tip: s.tier === "measured" ? "Measured from the agent's own session log" : "Modelled with the store tokenizer, not observed" }) },
     ].filter(Boolean),
   });
+  lg.shown = g.shown;
   return [
     el(
       "div",
@@ -7299,6 +7321,7 @@ function ledgerRetrievals(list) {
       { key: "ms", label: "ms", cls: "ms r", sort: (r) => r.ms, render: (r) => n(r.ms) },
     ],
   });
+  lg.shown = g.shown;
   return [
     el(
       "div",
@@ -7324,6 +7347,7 @@ function clearLedger() {
 const REPLAY_TONE = { refund: "amber", miss: "red", sufficed: "green", unknown: "grey" };
 
 function ledgerReplay() {
+  lg.shown = null;
   const r = data.replay || {};
   if (!r.enabled)
     return el(
@@ -7377,7 +7401,7 @@ async function setReplay(on) {
 
 function exportLedger(format) {
   const sessions = lg.tab === "sessions";
-  const list = sessions ? data.ledger?.sessions || [] : data.ledger?.rows || [];
+  const list = lg.shown ? lg.shown() : sessions ? data.ledger?.sessions || [] : data.ledger?.rows || [];
   const cols = sessions ? ["when", "session", "client", "store", "retrievals", "net_tokens", "tier", "model"] : ["when", "client", "store", "query", "hits", "excerpt_tokens", "whole_file_tokens", "ms"];
   const stamp = new Date().toISOString().slice(0, 10);
   const name = `ledger-${sessions ? "sessions" : "retrievals"}-${stamp}`;
