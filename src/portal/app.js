@@ -7682,11 +7682,14 @@ function exportLedger(format) {
   const name = `ledger-${sessions ? "sessions" : "retrievals"}-${stamp}`;
   if (format === "JSON") return download(`${name}.json`, JSON.stringify(list, null, 2), "application/json");
   const cell = (v) => (v === null || v === undefined ? "" : String(v));
+  // A Markdown table cell: backslashes first, then the pipe that would end
+  // the cell, and a line break folded to a space so the row stays one row.
+  const mdCell = (v) => cell(v).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
   if (format === "CSV") {
     const esc = (v) => (/[",\n]/.test(cell(v)) ? `"${cell(v).replace(/"/g, '""')}"` : cell(v));
     return download(`${name}.csv`, [cols.join(","), ...list.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n"), "text/csv");
   }
-  const md = [`# Retrieval ledger — ${sessions ? "sessions" : "retrievals"}`, "", `Exported ${new Date().toString()} from this machine.`, "", `| ${cols.join(" | ")} |`, `| ${cols.map(() => "---").join(" | ")} |`, ...list.map((r) => `| ${cols.map((c) => cell(r[c]).replace(/\|/g, "\\|")).join(" | ")} |`)].join("\n");
+  const md = [`# Retrieval ledger — ${sessions ? "sessions" : "retrievals"}`, "", `Exported ${new Date().toString()} from this machine.`, "", `| ${cols.join(" | ")} |`, `| ${cols.map(() => "---").join(" | ")} |`, ...list.map((r) => `| ${cols.map((c) => mdCell(r[c])).join(" | ")} |`)].join("\n");
   download(`${name}.md`, md, "text/markdown");
 }
 
