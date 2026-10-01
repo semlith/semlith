@@ -37,6 +37,13 @@ function el(tag, props, ...kids) {
     if (kid === null || kid === undefined || kid === false) continue;
     node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
   }
+  // Every drawn checkbox carries its tick as an inline SVG, shown when it is
+  // checked: the design's tick, with no image URL for the CSP to refuse.
+  if (node.classList.contains("cb")) {
+    const tick = icon("M5 12.5l4.5 4.5L19 7.5", 12, { w: 3.2 });
+    tick.setAttribute("class", "i cb-tick");
+    node.append(tick);
+  }
   return node;
 }
 
@@ -83,7 +90,32 @@ function morph(a, b) {
 
 /** A button. Every clickable thing in the portal is one, so Tab reaches it. */
 function btn(props, ...kids) {
-  return el("button", { type: "button", ...props }, ...kids);
+  const p = { type: "button", ...props };
+  // A control whose work takes a moment says so: while the promise its
+  // handler returns is pending it is disabled, marked busy and shows a
+  // spinner, so a switch that waits on the daemon is never pressed twice or
+  // taken for broken. Synchronous handlers are untouched.
+  if (typeof p.onclick === "function") {
+    const handler = p.onclick;
+    p.onclick = (e) => {
+      const node = e.currentTarget;
+      const out = handler(e);
+      if (out && typeof out.then === "function" && node) {
+        node.classList.add("busy");
+        node.setAttribute("aria-busy", "true");
+        const was = node.disabled;
+        node.disabled = true;
+        const done = () => {
+          node.classList.remove("busy");
+          node.removeAttribute("aria-busy");
+          node.disabled = was;
+        };
+        out.then(done, done);
+      }
+      return out;
+    };
+  }
+  return el("button", p, ...kids);
 }
 
 /** Replace an element's children. */
@@ -307,9 +339,26 @@ function tilde(path, home) {
   return p;
 }
 
-function shortPath(path) {
-  const parts = String(path).split(/[\\/]/).filter(Boolean);
-  return parts.slice(-2).join("/") || path;
+// A long path, shortened for the page: home as ~, then the middle cut so the
+// start (where it lives) and the end (what it is) both stay. The full path
+// goes in the element's tooltip; see pathEl.
+function shortPath(path, max) {
+  const t = tilde(path);
+  const limit = max || 52;
+  if (t.length <= limit) return t;
+  const head = Math.max(8, Math.floor(limit * 0.35));
+  return `${t.slice(0, head)}…${t.slice(t.length - (limit - head - 1))}`;
+}
+
+/** A path as a span: shortened, with the whole of it on hover. */
+function pathEl(path, max, cls) {
+  const short = shortPath(path, max);
+  return el("span", { class: cls || "t-mono-sm", text: short, "data-tip": short !== String(path) ? String(path) : null });
+}
+
+// Every absolute path inside a sentence, shortened the same way.
+function shortPaths(text, max) {
+  return String(text || "").replace(/(?:[A-Za-z]:\\|\/)[^\s,;'")]+/g, (p) => shortPath(p, max || 44));
 }
 
 function baseName(path) {
@@ -1522,11 +1571,32 @@ function activeRun(name) {
   return all.find((r) => r.status === "running") || all[0] || null;
 }
 
+// How far a run is, over all of it. Reading finishes long before embedding
+// does, so a bar on bytes read reached 100 % and then sat there (or went back
+// to 0 when embedding began). The daemon's pending_share is the part of the
+// whole run still to do; the bar is the rest, never moving backwards within a
+// run and never reaching 100 % before the run is done.
+const RUN_HIGH = new Map();
 function runPct(run) {
   if (!run) return 0;
   if (run.status === "done") return 100;
-  if (run.bytes_total) return Math.min(100, (run.bytes / run.bytes_total) * 100);
-  return run.total ? Math.min(100, (run.scanned / run.total) * 100) : 0;
+  let p;
+  if (typeof run.pending_share === "number") p = (1 - run.pending_share) * 100;
+  else if (run.bytes_total) p = (run.bytes / run.bytes_total) * 50;
+  else p = run.total ? (run.scanned / run.total) * 50 : 0;
+  const key = `${run.store}:${run.id}:${run.started_at || run.submitted || ""}`;
+  const high = Math.max(RUN_HIGH.get(key) || 0, Math.min(99, Math.max(0, p)));
+  RUN_HIGH.set(key, high);
+  return high;
+}
+
+// Time left from the share still to do and the time spent so far, which
+// holds through embedding where the daemon's own estimate covers reading only.
+function runLeftMs(run) {
+  if (!run || run.status !== "running") return null;
+  const done = runPct(run) / 100;
+  if (done < 0.05 || !run.elapsed_ms) return run.eta_ms ?? null;
+  return Math.round((run.elapsed_ms - (run.queued_ms || 0)) * (1 - done) / done);
 }
 
 let lastRunState = {};
@@ -2383,7 +2453,17 @@ function wizardScreen() {
       el("div", { class: "wz-head" }, el("span", { class: "eyebrow", text: `STEP ${step} OF ${L.length}` }), el("div", { class: "h", text: heads[0] }), el("div", { class: "lead", text: heads[1] })),
       [null, step1, step2, step3, step4, step5][step](),
     );
+    // Replacing the body empties it for a moment, which put the scroll back
+    // at the top on every decision; the offsets, the page's and any inner
+    // list's, are put back once the new body is in.
+    const at = body.scrollTop;
+    const inner = [...body.querySelectorAll("[data-scroll-keep]")].map((nd) => [nd.getAttribute("data-scroll-keep"), nd.scrollTop]);
     fill(body, el("div", { class: "wz-body" }, left, summaryRail()));
+    body.scrollTop = at;
+    for (const [k, t] of inner) {
+      const nd = body.querySelector(`[data-scroll-keep="${k}"]`);
+      if (nd) nd.scrollTop = t;
+    }
     paintFoot();
   }
 
@@ -3762,7 +3842,10 @@ function followLog(r, logNode) {
     const live = (data.runs?.runs || []).find((x) => x.id === r.id);
     if (live && LIVE_RUN.has(live.status)) setTimeout(tick, 1000);
   };
-  tick();
+  // After the caller has put the box on the page: called while the card is
+  // still being built, the box is not connected yet, and a first tick run now
+  // would stop at once and the log would stay empty for the whole run.
+  setTimeout(tick, 0);
 }
 followLog.cursors = {};
 
@@ -3815,7 +3898,7 @@ function runRows(r) {
     ["files", r.total ? `${n(r.scanned)} / ${n(r.total)}` : ""],
     ["chunks", n(r.chunks || 0)],
     ["rate", r.rate != null ? `${perSecond(r.rate)} chunks/s` : ""],
-    ["time left", r.status === "running" ? spellLeft(r.eta_ms) : ""],
+    ["time left", r.status === "running" ? spellLeft(runLeftMs(r)) : ""],
   ]);
 }
 
@@ -3829,10 +3912,10 @@ function runStatsRow(r) {
     "div",
     { class: "run-stats" },
     [
-      ["FILES", r.total ? `${n(r.scanned)} / ${n(r.total)}` : "counting…"],
+      ["FILES READ", r.total ? `${n(r.scanned)} / ${n(r.total)}` : "counting…", "Files read and hashed; embedding follows, counted in chunks"],
       ["CHUNKS", n(r.chunks || 0)],
       ["RATE", paused ? "paused" : r.rate != null ? `${perSecond(r.rate)} chunks/s` : "—", lanes],
-      ["TIME LEFT", paused ? "—" : r.status === "running" ? spellLeft(r.eta_ms) : r.status],
+      ["TIME LEFT", paused ? "—" : r.status === "running" ? spellLeft(runLeftMs(r)) : r.status],
     ].map(([k, v, t]) => el("div", { "data-tip": t || null }, el("span", { class: "eyebrow sm wide", text: k }), el("span", { class: "v", text: v }))),
   );
 }
@@ -3993,9 +4076,16 @@ function savedLine(s) {
   return `${short(s.savings.net_tokens)} fewer · coverage ${s.savings.coverage}% · ${s.savings.tier}`;
 }
 
+// Where a store reads from, on one line: the first root, shortened, and how
+// many more. Every root in full is in rootsAll for the tooltip.
 function rootsLine(s) {
-  const roots = (s.roots || []).map((r) => tilde(r.path));
-  return roots.length ? roots.join(", ") : "no sources yet";
+  const roots = (s.roots || []).map((r) => r.path);
+  if (!roots.length) return "no sources yet";
+  return `${shortPath(roots[0], 48)}${roots.length > 1 ? ` + ${roots.length - 1} more` : ""}`;
+}
+
+function rootsAll(s) {
+  return (s.roots || []).map((r) => tilde(r.path)).join("\n") || null;
 }
 
 function diskOf(s) {
@@ -4149,7 +4239,7 @@ VIEWS.home = {
             ? all.slice(0, 8).map((s) =>
                 btn(
                   { class: "gl-row gl-home-stores", onclick: () => go("store", s.name) },
-                  el("span", { class: "cellname" }, el("span", { class: "a", text: s.name }), el("span", { class: "b ell-start", "data-tip": rootsLine(s) }, el("bdi", { text: rootsLine(s) }))),
+                  el("span", { class: "cellname" }, el("span", { class: "a", text: s.name }), el("span", { class: "b ell-start", "data-tip": rootsAll(s) }, el("bdi", { text: rootsLine(s) }))),
                   statePill(s),
                   el("span", { class: "num", text: s.files ? n(s.files) : "—" }),
                   el("span", { class: "txt-dim", text: savedLine(s) }),
@@ -4344,7 +4434,7 @@ VIEWS.stores = {
 function storesList() {
   const all = data.stores?.stores || [];
   const f = storesUi.filter.toLowerCase();
-  const rowsAll = all.filter((s) => (storesUi.kind === "all" || (s.kind || "both") === storesUi.kind) && (!f || s.name.includes(f) || rootsLine(s).toLowerCase().includes(f)));
+  const rowsAll = all.filter((s) => (storesUi.kind === "all" || (s.kind || "both") === storesUi.kind) && (!f || s.name.includes(f) || (rootsAll(s) || "").toLowerCase().includes(f)));
   const view = GRID_VIEWS.get("stores") || { page: 1, per: 10, sort: "name", dir: "asc" };
   GRID_VIEWS.set("stores", view);
   const SORT = {
@@ -4426,7 +4516,7 @@ function storesList() {
             onclick: () => go("store", s.name),
             onkeydown: (e) => (e.key === "Enter" ? go("store", s.name) : null),
           },
-          el("span", { class: "cellname" }, el("span", { class: "a" }, s.name, " ", el("span", { class: "k", text: kindOf(s) })), el("span", { class: "b", text: rootsLine(s), "data-tip": rootsLine(s) })),
+          el("span", { class: "cellname" }, el("span", { class: "a" }, s.name, " ", el("span", { class: "k", text: kindOf(s) })), el("span", { class: "b", text: rootsLine(s), "data-tip": rootsAll(s) })),
           statePill(s),
           el("span", { class: "num c-files", text: s.files ? n(s.files) : "—" }),
           el("span", { class: "num c-chunks", text: s.chunks ? n(s.chunks) : "—" }),
@@ -4690,7 +4780,7 @@ VIEWS.store = {
         "div",
         { class: "row gap12" },
         el("span", { class: "icon-tile s38" }, icon(I.layers, 18, { w: 1.6 })),
-        el("div", { class: "col gap2 grow" }, el("div", { class: "row nowrap gap10" }, el("span", { class: "sd-name", text: s.name }), statePill(s)), el("span", { class: "t-mono-sm ell", text: `${rootsLine(s)} · ${kindOf(s)}`, "data-tip": rootsLine(s) })),
+        el("div", { class: "col gap2 grow" }, el("div", { class: "row nowrap gap10" }, el("span", { class: "sd-name", text: s.name }), statePill(s)), el("span", { class: "t-mono-sm ell", text: `${rootsLine(s)} · ${kindOf(s)}`, "data-tip": rootsAll(s) })),
         el(
           "div",
           { class: "row" },
@@ -4766,7 +4856,7 @@ function sdOverview(s) {
             })
           : el("div", { class: "root-row" }, el("span", { class: "icon-tile s28" }, icon(I.folder, 14, { w: 1.6 })), el("span", { class: "muted t-sm", text: "no sources yet" }), el("span")),
         el("div", { class: "grow" }),
-        el("div", { class: "card-foot", text: `${tilde(s.dir)}/store.db` }),
+        el("div", { class: "card-foot", text: shortPath(`${s.dir}/store.db`, 64), "data-tip": `${s.dir}/store.db` }),
       ),
       el(
         "div",
@@ -5074,55 +5164,108 @@ function sdReview(s, holder) {
     if (out) await loadMany(["refused", "decisions", "stores", "runs"], true), repaint();
   };
   const sel = (sdReview.sel[s.name] = sdReview.sel[s.name] || new Set());
+  // The same panel the wizard's review uses: filter by risk, take every
+  // suggestion at once, and a list that scrolls inside its card rather than
+  // stretching the page by hundreds of rows.
+  const risk = sdReview.risk[s.name] || "any";
+  const shown = pending.filter((d) => risk === "any" || band(d.risk) === risk);
+  const cnt = (b) => pending.filter((d) => b === "any" || band(d.risk) === b).length;
+  const SUGGEST = { out: "Keep it out", redact: "Redact & index", in: "Index it" };
+  const applySuggestions = async () => {
+    const by = {};
+    for (const d of shown) (by[d.suggest || "out"] = by[d.suggest || "out"] || []).push(d.path);
+    for (const [decision, files] of Object.entries(by)) {
+      const out = await act(() => post("/api/refused/decide", { store: s.name, files, decision }), null);
+      if (!out) break;
+    }
+    toast(`Applied suggestions to ${plural(shown.length, "file")} — undo any one below`);
+    sel.clear();
+    await loadMany(["refused", "decisions", "stores", "runs"], true);
+    repaint();
+  };
   const pendingCard = pending.length
     ? el(
         "div",
         { class: "card accent-edge" },
-        el("div", { class: "card-h amber" }, el("span", { class: "card-t grow amber-ink", text: "Waiting for your decision" }), el("span", { class: "card-meta amber-ink", text: "refused until you decide" })),
+        el("div", { class: "card-h amber" }, el("span", { class: "card-t grow amber-ink", text: "Waiting for your decision" }), el("span", { class: "card-meta amber-ink", text: `${plural(pending.length, "file")} · refused until you decide` })),
         el(
           "div",
-          { class: "dec-grid head" },
-          checkbox(pending.every((d) => sel.has(d.path)) ? true : pending.some((d) => sel.has(d.path)) ? "mixed" : false, (on) => (pending.forEach((d) => (on ? sel.add(d.path) : sel.delete(d.path))), repaint()), "Select all waiting"),
-          el("span", { text: "FILE" }),
-          el("span", { text: "RISK IF INDEXED" }),
-          el("span", { text: "DECISION" }),
+          { class: "filterbar" },
+          seg(
+            [
+              ["any", "Any risk", cnt("any")],
+              ["high", "High", cnt("high")],
+              ["medium", "Medium", cnt("medium")],
+              ["low", "Low", cnt("low")],
+            ],
+            risk,
+            (v) => ((sdReview.risk[s.name] = v), sel.clear(), repaint()),
+          ),
+          el("span", { class: "spacer" }),
+          shown.length ? btn({ class: "btn sm", onclick: applySuggestions, "data-tip": "Each file takes the decision suggested beside it; every one is logged and can be undone" }, `Apply suggestions to ${n(shown.length)}`) : null,
         ),
-        sel.size
-          ? el(
-              "div",
-              { class: "selbar" },
-              el("span", { class: "what", text: `${plural(sel.size, "file")} selected` }),
-              lnk("Clear", () => (sel.clear(), repaint())),
-              el("span", { class: "spacer" }),
-              btn({ class: "btn sm", onclick: () => (decide([...sel], "out"), sel.clear()) }, "Keep out"),
-              btn({ class: "btn sm amber", onclick: () => (decide([...sel], "redact"), sel.clear()) }, "Redact & index"),
-              btn({ class: "btn sm dark", onclick: () => (decide([...sel], "in"), sel.clear()) }, "Index"),
-            )
-          : null,
-        pending.map((d) => {
-          const b = band(d.risk);
-          const on = sel.has(d.path);
-          return el(
+        el(
+          "div",
+          { class: "gl-scroll" },
+          el(
             "div",
-            { class: "dec-grid" },
-            checkbox(on, () => (on ? sel.delete(d.path) : sel.add(d.path), repaint())),
+            { class: "minw780" },
             el(
               "div",
-              { class: "col gap4" },
-              el("div", { class: "row" }, el("span", { class: "p", text: relTo(s, d.path), "data-tip": d.path }), d.likely ? pill(d.likely, d.tone || "amber", { dot: false }) : null),
-              el("span", { class: "why" }, el("b", { text: d.kind || classWord(d.class) }), ` · ${d.why || d.rule}`),
-              d.evidence || (d.matches || [])[0] ? el("span", { class: "evidence", text: d.evidence || maskedOf(d.matches[0]) }) : null,
+              { class: "dec-grid head" },
+              checkbox(shown.length && shown.every((d) => sel.has(d.path)) ? true : shown.some((d) => sel.has(d.path)) ? "mixed" : false, (on) => (shown.forEach((d) => (on ? sel.add(d.path) : sel.delete(d.path))), repaint()), "Select all shown"),
+              el("span", { text: `FILE · ${n(shown.length)} shown · highest risk first` }),
+              el("span", { text: "RISK IF INDEXED" }),
+              el("span", { text: "DECISION" }),
             ),
-            el("div", { class: "col gap4 risk" }, el("div", { class: "row base nowrap gap6" }, el("span", { class: `risk-pct ${b}`, text: `${d.risk}%` }), el("span", { class: "t-mono-sm", text: b })), bar(Math.max(3, d.risk), `h4 ${b === "high" ? "red" : b === "medium" ? "amber" : "green"}`)),
+            sel.size
+              ? el(
+                  "div",
+                  { class: "selbar" },
+                  el("span", { class: "what", text: `${plural(sel.size, "file")} selected` }),
+                  lnk("Clear", () => (sel.clear(), repaint())),
+                  el("span", { class: "spacer" }),
+                  btn({ class: "btn sm", onclick: () => decide([...sel.values()], "out").then(() => sel.clear()) }, "Keep out"),
+                  btn({ class: "btn sm amber", onclick: () => decide([...sel.values()], "redact").then(() => sel.clear()) }, "Redact & index"),
+                  btn({ class: "btn sm dark", onclick: () => decide([...sel.values()], "in").then(() => sel.clear()) }, "Index"),
+                )
+              : null,
             el(
               "div",
-              { class: "row gap6 nowrap acts" },
-              btn({ class: "btn", onclick: () => decide([d.path], "out") }, "Keep it out"),
-              btn({ class: "btn amber", disabled: d.class === "credential" ? true : null, onclick: () => decide([d.path], "redact") }, "Redact & index"),
-              btn({ class: "btn dark", disabled: d.class === "credential" ? true : null, onclick: () => decide([d.path], "in") }, "Index it"),
+              { class: "dec-list", "data-scroll-keep": `sd-dec-${s.name}` },
+              !shown.length ? empty("No file at this risk.", "lg") : null,
+              shown.map((d) => {
+                const b = band(d.risk);
+                const on = sel.has(d.path);
+                return el(
+                  "div",
+                  { class: "dec-grid" },
+                  checkbox(on, () => (on ? sel.delete(d.path) : sel.add(d.path), repaint())),
+                  el(
+                    "div",
+                    { class: "col gap4 min0" },
+                    el("div", { class: "row min0" }, el("span", { class: "p ell", text: relTo(s, d.path), "data-tip": d.path }), d.likely ? pill(d.likely, d.tone || "amber", { dot: false }) : null),
+                    el("span", { class: "why" }, el("b", { text: d.kind || classWord(d.class) }), ` · ${d.why || d.rule}`),
+                    d.evidence || (d.matches || [])[0] ? el("span", { class: "evidence", text: d.evidence || maskedOf(d.matches[0]) }) : null,
+                  ),
+                  el("div", { class: "col gap4 risk" }, el("div", { class: "row base nowrap gap6" }, el("span", { class: `risk-pct ${b}`, text: `${d.risk}%` }), el("span", { class: "t-mono-sm", text: b })), bar(Math.max(3, d.risk), `h4 ${b === "high" ? "red" : b === "medium" ? "amber" : "green"}`)),
+                  el(
+                    "div",
+                    { class: "col gap4 acts" },
+                    el(
+                      "div",
+                      { class: "row gap6 nowrap" },
+                      btn({ class: "btn sm", onclick: () => decide([d.path], "out") }, "Keep out"),
+                      btn({ class: "btn sm amber", disabled: d.class === "credential" ? true : null, onclick: () => decide([d.path], "redact") }, "Redact & index"),
+                      btn({ class: "btn sm dark", disabled: d.class === "credential" ? true : null, onclick: () => decide([d.path], "in") }, "Index"),
+                    ),
+                    el("span", { class: "muted t-xs", text: `Suggested · ${SUGGEST[d.suggest || "out"]}` }),
+                  ),
+                );
+              }),
             ),
-          );
-        }),
+          ),
+        ),
       )
     : el("div", { class: "notice green" }, icon(I.check, 14, { w: 2.6 }), "Nothing waits for you. New files that look sensitive will show up here before they are indexed.");
 
@@ -5139,9 +5282,9 @@ function sdReview(s, holder) {
     empty: "No decision matches.",
     onClear: () => ((sdUi.decQ = ""), (sdUi.decOut = "all"), (sdUi.decBy = "all"), repaint()),
     columns: [
-      { key: "path", label: "Path", cls: "m", sort: (d) => d.path.toLowerCase(), render: (d) => el("span", { class: "ell", text: relTo(s, d.path), "data-tip": d.path }) },
+      { key: "path", label: "Path", cls: "m cap-path", sort: (d) => d.path.toLowerCase(), render: (d) => el("span", { class: "ell-start" }, el("bdi", { text: relTo(s, d.path), "data-tip": d.path })) },
       { key: "outcome", label: "Outcome", sort: (d) => d.outcome, render: (d) => pill(d.outcome, OUTCOME_TONE[d.outcome] || "grey", { dot: false }) },
-      { key: "why", label: "Why", cls: "dim", sort: (d) => (d.why || "").toLowerCase(), render: (d) => d.why || "" },
+      { key: "why", label: "Why", cls: "dim c-why", sort: (d) => (d.why || "").toLowerCase(), render: (d) => d.why || "" },
       { key: "by", label: "By", cls: "ms nowrap", sort: (d) => d.by, render: (d) => (d.at && d.by === "you" ? `you · ${ago(d.at)}` : d.by) },
       { key: "x", label: "", cls: "r", render: (d) => (d.can_undo ? lnk("Undo", () => decide([d.path], "reset")) : null) },
     ],
@@ -5189,6 +5332,7 @@ function sdReview(s, holder) {
   );
 }
 sdReview.sel = {};
+sdReview.risk = {};
 
 /** A refusal row as a Decisions-table row, for a daemon that sends no table. */
 function decisionFromRow(r) {
@@ -5239,7 +5383,7 @@ function sdRuns(s, holder) {
           btn({ class: "btn sm danger-soft", "data-keep": `run-stop-${r.id}`, onclick: () => stopRun(r) }, r.status === "queued" ? "Take out of the queue" : "Stop…"),
         ),
         el("div", { class: "row nowrap gap12" }, b, el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
-        el("div", { class: "t-mono-sm", text: [r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "", `${n(r.chunks || 0)} chunks`, r.rate != null ? `${perSecond(r.rate)} chunks/s` : "", Object.entries(r.lane_rates || {}).filter(([, v]) => v > 0).map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`).join(" · "), r.status === "running" ? spellLeft(r.eta_ms) : ""].filter(Boolean).join(" · ") }),
+        el("div", { class: "t-mono-sm", text: [r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "", `${n(r.chunks || 0)} chunks`, r.rate != null ? `${perSecond(r.rate)} chunks/s` : "", Object.entries(r.lane_rates || {}).filter(([, v]) => v > 0).map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`).join(" · "), r.status === "running" ? spellLeft(runLeftMs(r)) : ""].filter(Boolean).join(" · ") }),
         el("div", { class: "muted t-sm", text: r.phase || "", hidden: r.phase ? null : true }),
         log,
       ),
@@ -7740,23 +7884,37 @@ VIEWS.reports = {
     const savingsCard = el("div", {});
     holder.onData = () => {};
     const generate = async () => {
+      // Only the latest request paints: a slow report finishing after a
+      // quick one used to put the old answer back. Seconds tick meanwhile, so
+      // a large store's report reads as working rather than stuck.
+      const mine = (rp.seq = (rp.seq || 0) + 1);
       rp.busy = true;
+      const began = Date.now();
       setText(preview, "Generating on this machine…");
+      const tick = setInterval(() => {
+        if (rp.seq !== mine || !preview.isConnected) return clearInterval(tick);
+        setText(preview, `Generating on this machine… ${Math.round((Date.now() - began) / 1000)} s — a report over a large store reads all of it`);
+      }, 1000);
       const p = new URLSearchParams({ kind: rp.kind, format: rp.format === "pdf" ? "markdown" : rp.format, model: rp.model });
       if (!inert) p.set("window", rp.window);
       for (const s of rp.stores) p.append("scope", s);
       if (rp.hash) p.set("redact", "1");
       if (rp.excerpts) p.set("excerpts", "1");
       try {
-        rp.out = await api(`/api/report?${p}`);
+        const out = await api(`/api/report?${p}`);
+        if (rp.seq !== mine) return;
+        rp.out = out;
         setText(preview, rp.out.text || "");
         fill(previewMeta, `${def[4]} · ${rp.format} · ${rp.out.report ? rp.out.report.window : ""} · generated ${rp.out.generated || ""} · nothing uploaded`);
         paintSavings();
       } catch (e) {
+        if (rp.seq !== mine) return;
         rp.out = null;
         setText(preview, e.message);
+      } finally {
+        clearInterval(tick);
+        if (rp.seq === mine) rp.busy = false;
       }
-      rp.busy = false;
     };
     const save = async () => {
       const p = new URLSearchParams({ kind: rp.kind, format: rp.format, model: rp.model });
@@ -7791,11 +7949,12 @@ VIEWS.reports = {
             { class: "card-h" },
             el("span", { class: "card-t grow", text: "The savings, line by line" }),
             el("span", { class: "eyebrow sm", text: "PRICED AT" }),
-            seg(models.slice(0, 4).map((m) => [m.name, m.name]), rp.model, (m) => ((rp.model = m), generate())),
-            models.length > 4 ? (() => {
-              const more = btn({ class: "btn xs", onclick: () => menu.open(more, models.map((m) => ({ label: m.name, hint: `$${m.input}/Mtok`, checked: rp.model === m.name, onclick: () => ((rp.model = m.name), generate()) }))) }, "More…");
-              return more;
-            })() : null,
+            // One plain dropdown with every model the savings can be priced at.
+            el(
+              "select",
+              { class: "sel", "aria-label": "Price the savings at", onchange: (e) => ((rp.model = e.target.value), generate()) },
+              models.map((m) => el("option", { value: m.name, selected: rp.model === m.name ? true : null, text: `${m.name} · $${m.input}/Mtok` })),
+            ),
             el("span", { class: "t-mono-sm", text: model ? `$${Number(model.input).toFixed(2)} / Mtok input · prices from ${prices.source || "the built-in table"}${prices.fetched ? ` · ${prices.fetched}` : ""}` : "" }),
             btn({ class: "btn xs", onclick: updatePrices, "data-tip": `One request to ${prices.url || "models.dev"}, made now because you asked` }, "Update prices"),
           ),
@@ -7944,6 +8103,23 @@ async function updatePrices() {
 
 const pvUi = { done: {}, scan: null, scanning: false };
 
+// Each rule in a line, as the design writes them, and its finding in a few
+// words. A rule that does not hold keeps the daemon's full wording, because
+// then the detail is the point; the full finding is always on hover.
+const RULE_COPY = {
+  "header-borne token": ["The session token travels in a Semlith-Token header, never a cookie — every localhost port is the same site.", () => "no route sets or reads a cookie"],
+  "same-origin writes": ["Every non-GET carries Sec-Fetch-Site: same-origin and a JSON content type, checked before the token.", () => "enforced before any route runs"],
+  "refused-file acceptance": ["A person decides about refused files, one or several at once — never an agent.", () => "the decision routes take the session token only"],
+  "store trust": ["A store outside the store home opens only after semlith trust records it.", (c) => (/no store/.test(c) ? "no untrusted store open" : shortPaths(c))],
+  "index boundary": ["An agent indexes only under a store's registered roots or home.", () => "enforced per path"],
+  "deny-list": ["No credential directory or credential-named file is indexed by an agent or the portal.", (c) => c.replace(/ and /, " · ").replace(/name patterns/, "patterns")],
+  "private addresses": ["semlith add refuses loopback, RFC 1918, link-local and unique-local.", (c) => c],
+  "pinned models": ["Every model file is checked against a pinned hash before it loads.", () => "pinned hash matches"],
+  "model cache": ["Weights load only from a cache no other account owns or can write to.", () => "yours alone"],
+  "directory modes": ["The store home, every store, the model cache and daemon.json are readable by you alone.", (c) => (/0700/.test(c) ? "all 0700" : shortPaths(c))],
+  "agent key": ["The agent key is one file, readable by you alone; nothing writes it into a client's config.", (c) => (/600/.test(c) ? "600, owner only" : shortPaths(c))],
+};
+
 VIEWS.privacy = {
   needs: () => ["privacy", "replay", "stores"],
   live: ["privacy"],
@@ -7995,7 +8171,7 @@ VIEWS.privacy = {
           ["Telemetry", "none", "no analytics, no update check of its own"],
           ["Assets", "inside the binary", "this page is compiled in, include_bytes!"],
           ["Ledger", "local table", "in each store's own database"],
-          ["Model cache", tilde(P.model_cache || ""), P.model_cached ? "read once, then offline" : "empty until the first run"],
+          ["Model cache", shortPath(P.model_cache || "", 30), P.model_cached ? "read once, then offline" : "empty until the first run"],
           ["Cloud", "not connected", "no cloud command, no connection to any host"],
         ].map(([k, v, d]) => el("div", { class: "fact-card" }, el("span", { class: "eyebrow sm", text: k }), el("span", { class: "v", text: v }), el("span", { class: "d", text: d }))),
       ),
@@ -8061,8 +8237,8 @@ VIEWS.privacy = {
               "div",
               { class: "rule" },
               el("div", { class: "t" }, dot(r.ok === false ? "amber" : "green"), cap(r.id)),
-              el("span", { class: "d", text: r.rule.replace(/\s+/g, " ") }),
-              el("span", { class: "f", text: `found: ${r.check}` }),
+              el("span", { class: "d", text: r.ok === false ? r.rule.replace(/\s+/g, " ") : (RULE_COPY[r.id] || [r.rule])[0].replace(/\s+/g, " ") }),
+              el("span", { class: "f", "data-tip": r.check, text: `found: ${r.ok === false ? shortPaths(r.check) : (RULE_COPY[r.id] && RULE_COPY[r.id][1] ? RULE_COPY[r.id][1](r.check) : shortPaths(r.check))}` }),
               r.ok === false && r.repair ? btn({ class: "btn xs", onclick: () => fixRule(r.id) }, "Repair") : r.ok === false && r.manual ? copyField(r.manual) : null,
             ),
           ),
@@ -8143,6 +8319,11 @@ VIEWS.settings = {
 
 // A stepper button that reaches its end says so with aria-disabled rather than
 // disabled: a disabled button drops the focus a keyboard user just gave it.
+// The processor, as the CPU lane names it ("Apple M1").
+function cpuName() {
+  return ((data.accel?.lanes || []).find((l) => l.lane === "cpu") || {}).device || "";
+}
+
 function stepBtn(off, label, onclick, text) {
   return btn({ "aria-disabled": off ? "true" : "false", "aria-label": label, onclick: () => !off && onclick() }, text);
 }
@@ -8194,7 +8375,7 @@ function sePerf() {
       "div",
       { class: "model-line t-mono ink2" },
       el("span", { class: "eyebrow sm", text: "THIS MACHINE" }),
-      m.logical_cores ? `${m.logical_cores} logical cores · ${n(m.total_memory_mb)} MiB · ${n(m.available_memory_mb)} MiB free now` : "reading…",
+      m.logical_cores ? `${cpuName() ? `${cpuName()} · ` : ""}${m.logical_cores} logical cores · ${n(m.total_memory_mb)} MiB · ${n(m.available_memory_mb)} MiB free now` : "reading…",
       el("span", { class: "spacer" }),
       lnk("Reset to what it suggests", () => saveLimits({ runs_at_once: L.runs_at_once?.derived, embed_threads: L.embed_threads?.derived, index_memory_mb: L.index_memory_mb?.derived, compact_threshold_percent: comp.default_threshold_percent, history_retention_days: comp.default_retention_days, vector_cache_mb: vc.default_cap_mb }, "Limits reset to what this machine suggests")),
     ),
@@ -8295,7 +8476,7 @@ function seAccess() {
         seUi.reveal ? copyBtn(seUi.reveal, "Copy", "xs") : null,
         btn({ class: "btn xs", onclick: rotateKey }, "Rotate"),
       ),
-      el("span", { class: "muted t-sm pretty", text: `Only the HTTP form needs it. A registered client launches semlith mcp, which reads ${tilde(a.key_path || "~/.semlith/agent.key")} itself, so rotating reconfigures nothing.${P.key_grace_seconds ? ` The previous key keeps working for ${Math.ceil(P.key_grace_seconds / 60)} more minutes.` : ""}` }),
+      el("span", { class: "muted t-sm pretty", text: `Only the HTTP form needs it. A registered client launches semlith mcp, which reads ${shortPath(a.key_path || "~/.semlith/agent.key", 40)} itself, so rotating reconfigures nothing.${P.key_grace_seconds ? ` The previous key keeps working for ${Math.ceil(P.key_grace_seconds / 60)} more minutes.` : ""}` }),
     ),
     el(
       "div",
@@ -8400,9 +8581,9 @@ function seAbout() {
         { class: "card" },
         [
           ["VERSION", `${a.version} · store format ${a.format_version}`],
-          ["BINARY", `${tilde(a.binary)} · ${bytes(a.binary_bytes)} · ${a.target}`],
+          ["BINARY", `${shortPath(a.binary, 44)} · ${bytes(a.binary_bytes)} · ${a.target}`],
           ["BOUND TO", a.bind],
-          ["STORE HOME", tilde(a.store_home)],
+          ["STORE HOME", shortPath(a.store_home, 44)],
           ["SOURCE", `${a.license} · free and complete`],
           ["UPTIME", `${spellTook((a.uptime || 0) * 1000)} · pid ${a.pid}`],
         ].map(([k, v]) => el("div", { class: "kv" }, el("span", { class: "k", text: k }), el("span", { class: "v", text: v }))),

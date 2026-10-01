@@ -2354,7 +2354,12 @@ fn tool_sizes(state: &Arc<State>) -> Vec<Value> {
             for (tool, tokens) in
                 store::excerpt_tokens_by_tool(store.db(), 2_000).unwrap_or_default()
             {
-                seen.entry(tool).or_default().push(tokens);
+                // A row that recorded no excerpt (a read logged without its
+                // size) says nothing about how big an answer is; counted, it
+                // made semlith_read's median zero and the page showed "—".
+                if tokens > 0 {
+                    seen.entry(tool).or_default().push(tokens);
+                }
             }
         }
     }

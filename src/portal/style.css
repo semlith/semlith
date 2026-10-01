@@ -1227,6 +1227,9 @@ button.dial {
 .tab:hover {
   color: var(--ink);
 }
+/* As specific as `.tabs > button.tab`, which otherwise kept every selected
+   tab muted and without its underline. */
+.tabs > button.tab[aria-selected="true"],
 .tab[aria-selected="true"] {
   font-weight: 600;
   color: var(--ink);
@@ -1337,7 +1340,10 @@ button.dial {
 
 /* Checkboxes, drawn: a native box cannot be themed to the design's ink fill. */
 .cb {
-  display: inline-block;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  color: var(--panel);
   width: 16px;
   height: 16px;
   border-radius: 4px;
@@ -1351,22 +1357,8 @@ button.dial {
   vertical-align: middle;
 }
 .cb[aria-checked="true"] {
-  position: relative;
   border-color: var(--ink);
   background-color: var(--ink);
-}
-/* The tick is two borders turned, in the panel colour, so it inverts with
-   the theme and no image is needed. */
-.cb[aria-checked="true"]::after {
-  content: "";
-  position: absolute;
-  left: 4.5px;
-  top: 1.5px;
-  width: 4px;
-  height: 8px;
-  border: solid var(--panel);
-  border-width: 0 1.8px 1.8px 0;
-  transform: rotate(45deg);
 }
 .cb[aria-checked="mixed"] {
   border-color: var(--ink);
@@ -1376,8 +1368,8 @@ button.dial {
   content: "";
   display: block;
   width: 8px;
-  height: 1.5px;
-  margin: 5.75px auto 0;
+  height: 2px;
+  border-radius: 1px;
   background: var(--panel);
 }
 .radio {
@@ -1488,11 +1480,14 @@ button.dial {
   line-height: 26px;
   color: var(--ink);
   cursor: pointer;
-  /* A chevron from two gradients: no image, no URL. */
-  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  /* A line chevron, the down arrow the rest of the portal uses, drawn as two
+     thin diagonal strokes: no image, no URL for the CSP to refuse. */
+  background-image:
+    linear-gradient(45deg, transparent calc(50% - 0.8px), var(--muted) calc(50% - 0.8px), var(--muted) calc(50% + 0.8px), transparent calc(50% + 0.8px)),
+    linear-gradient(135deg, transparent calc(50% - 0.8px), var(--muted) calc(50% - 0.8px), var(--muted) calc(50% + 0.8px), transparent calc(50% + 0.8px));
   background-repeat: no-repeat;
-  background-position: right 13px center, right 9px center;
-  background-size: 4px 4px, 4px 4px;
+  background-position: right 14px center, right 9px center;
+  background-size: 5px 5px, 5px 5px;
   appearance: none;
   -webkit-appearance: none;
   outline: none;
@@ -3579,8 +3574,9 @@ button.gl-row:hover,
   color: var(--muted);
   text-decoration: line-through;
 }
+/* The state column sizes to its pill ("492 to review" was cut at 112px). */
 .gl-home-stores {
-  grid-template-columns: minmax(130px, 1.6fr) 112px 64px minmax(110px, 1.1fr) 62px;
+  grid-template-columns: minmax(130px, 1.6fr) 140px 64px minmax(110px, 1.1fr) 62px;
 }
 .gl-activity {
   grid-template-columns: 62px 96px minmax(0, 1fr) 70px;
@@ -3664,7 +3660,7 @@ button.gl-row:hover,
   overflow: visible;
 }
 .gl-stores {
-  grid-template-columns: minmax(180px, 1.6fr) 118px 70px 84px 116px minmax(150px, 1.25fr) 66px 30px;
+  grid-template-columns: minmax(180px, 1.6fr) 140px 70px 84px 116px minmax(150px, 1.25fr) 66px 30px;
 }
 .st-disk {
   display: flex;
@@ -4878,7 +4874,7 @@ button.gl-row:hover,
 
 @container stbl (max-width: 859px) {
   .gl-stores {
-    grid-template-columns: minmax(0, 1.6fr) 112px 64px 80px 116px 62px 30px;
+    grid-template-columns: minmax(0, 1.6fr) 140px 64px 80px 116px 62px 30px;
   }
   .gl-stores > .c-saved {
     display: none;
@@ -5267,4 +5263,70 @@ button.gl-row:hover,
 .g-def:hover,
 .g-def.on {
   background: var(--chip);
+}
+
+/* The tick inside every checkbox, in the panel colour so it inverts with the
+   theme; hidden until the box is checked. */
+.cb .cb-tick {
+  display: none;
+}
+.cb[aria-checked="true"] .cb-tick {
+  display: block;
+}
+/* The search page's mode switch stands beside a 44px field and matches it. */
+.sr-bar .seg.lg {
+  height: 44px;
+  align-self: stretch;
+  flex-wrap: nowrap;
+}
+.sr-bar .seg.lg > button {
+  height: 100%;
+  padding: 0 16px;
+}
+/* Busy: a control waiting on the daemon. A switch spins its knob; any other
+   button shows a small spinner after its label. Both are disabled meanwhile. */
+button.busy {
+  cursor: progress;
+}
+button.busy:disabled {
+  opacity: 1;
+}
+button.busy .tg::after {
+  border: 2px solid var(--line);
+  border-top-color: var(--blue);
+  box-sizing: border-box;
+  animation: spin 0.8s linear infinite;
+}
+button.busy:not(.switch):not(.tg-row):not(.tg-plain):not(.cb)::after {
+  content: "";
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-left: 7px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  opacity: 0.7;
+  animation: spin 0.8s linear infinite;
+  vertical-align: -1px;
+  flex-shrink: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  button.busy .tg::after,
+  button.busy::after {
+    animation-duration: 2.4s;
+  }
+}
+/* A path column that cannot push its neighbours off the card: cut from the
+   start so the file name stays, the whole path on hover. */
+td.cap-path {
+  max-width: 420px;
+  min-width: 160px;
+}
+td.cap-path .ell-start {
+  display: block;
+}
+td.c-why {
+  min-width: 260px;
+  max-width: 520px;
 }

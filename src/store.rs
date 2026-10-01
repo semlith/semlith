@@ -1018,60 +1018,78 @@ impl LanguageCoverage {
 /// name this store holds. A second rule here would be a second answer to "what
 /// share resolves", and the README quotes this one.
 pub fn coverage_by_language(db: &Connection) -> Result<Vec<LanguageCoverage>> {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     let mut by_language: BTreeMap<String, LanguageCoverage> = BTreeMap::new();
-    let language = |path: &str| -> String {
-        crate::graph::language_of(std::path::Path::new(path))
-            .unwrap_or("other")
-            .to_string()
-    };
+    // Each file's language worked out once, by id. The edge pass below used
+    // to parse a path per edge: three million of them on the 879k-chunk
+    // corpus, which made the Index health report take half a minute.
+    let mut language_of: HashMap<i64, String> = HashMap::new();
 
-    let mut stmt = db.prepare("SELECT path, graph FROM files")?;
+    let mut stmt = db.prepare("SELECT id, path, graph FROM files")?;
     let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+        ))
     })?;
     for row in rows {
-        let (path, graph) = row?;
-        let entry = by_language.entry(language(&path)).or_default();
+        let (id, path, graph) = row?;
+        let language = crate::graph::language_of(std::path::Path::new(&path))
+            .unwrap_or("other")
+            .to_string();
+        let entry = by_language.entry(language.clone()).or_default();
         entry.files += 1;
         if graph.as_deref() == Some("timeout") {
             entry.parser_failed += 1;
         }
+        language_of.insert(id, language);
     }
+    let lang = |id: i64| {
+        language_of
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| "other".to_string())
+    };
 
-    let mut stmt = db.prepare(
-        "SELECT f.path, COUNT(*) FROM symbols s JOIN files f ON f.id = s.file_id GROUP BY f.path",
-    )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    let mut stmt = db.prepare("SELECT file_id, COUNT(*) FROM symbols GROUP BY file_id")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
     for row in rows {
-        let (path, count) = row?;
-        by_language.entry(language(&path)).or_default().definitions +=
+        let (file, count) = row?;
+        by_language.entry(lang(file)).or_default().definitions +=
             usize::try_from(count).unwrap_or(0);
     }
 
-    // One row per edge, and the definition count of its target beside it.
+    // Counted per file, whether the extractor settled the edge, and how many
+    // definitions its target has -- none, one or several, which is all the
+    // row needs, so the count stops at two.
     let mut stmt = db.prepare(
-        "SELECT f.path, e.confidence, (SELECT COUNT(*) FROM symbols d WHERE d.name = e.dst) \
-         FROM edges e JOIN symbols s ON s.id = e.src JOIN files f ON f.id = s.file_id \
-         WHERE e.kind = 'calls'",
+        "SELECT s.file_id, e.confidence = 'extracted',
+                (SELECT COUNT(*) FROM (SELECT 1 FROM symbols d WHERE d.name = e.dst LIMIT 2)) AS defs,
+                COUNT(*)
+         FROM edges e JOIN symbols s ON s.id = e.src
+         WHERE e.kind = 'calls'
+         GROUP BY s.file_id, 2, defs",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
+            r.get::<_, i64>(0)?,
+            r.get::<_, bool>(1)?,
             r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
         ))
     })?;
     for row in rows {
-        let (path, confidence, definitions) = row?;
-        let entry = by_language.entry(language(&path)).or_default();
-        if confidence == crate::graph::EXTRACTED {
-            entry.extracted += 1;
+        let (file, extracted, definitions, count) = row?;
+        let count = usize::try_from(count).unwrap_or(0);
+        let entry = by_language.entry(lang(file)).or_default();
+        if extracted {
+            entry.extracted += count;
         } else {
             match definitions {
-                0 => entry.unresolved += 1,
-                1 => entry.resolved += 1,
-                _ => entry.ambiguous += 1,
+                0 => entry.unresolved += count,
+                1 => entry.resolved += count,
+                _ => entry.ambiguous += count,
             }
         }
     }
