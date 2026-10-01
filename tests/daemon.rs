@@ -1147,7 +1147,10 @@ fn the_privacy_route_reports_what_this_process_actually_does() {
 
     assert_eq!(privacy["bind"], format!("127.0.0.1:{}", daemon.port));
     assert_eq!(privacy["cors"], serde_json::json!(false));
-    assert_eq!(privacy["airgap"], serde_json::json!(true));
+    assert_eq!(
+        privacy["airgap"],
+        serde_json::json!({ "on": true, "reason": "flag" })
+    );
     assert_eq!(privacy["csp"], "default-src 'self'");
     assert_eq!(privacy["token_header"], "Semlith-Token");
     assert!(

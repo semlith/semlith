@@ -56,6 +56,60 @@ user's own. Each runs the installed binary's `index` on the selection.
 `--no-file-managers` removes them. `GET /api/helpers` lists them with whether
 each is installed.
 
+### The portal's v6 backend
+
+**Stores are made, named and set from the page.** `POST /api/store/create`
+makes an empty named store and serves it at once. `POST /api/store/settings`
+renames a store (its directory moves with its name, and an agent's next
+`store:` resolves without a restart) and sets what it holds (`kind`), the
+preference a bare search or brief takes for it (`lean`, over MCP too), whether
+it follows file changes (`watch`), whether its retrievals are recorded
+(`record`) and whether its walks honour `.gitignore`. The keys are additive in
+`registry.json`, and their defaults are what every store did before.
+
+**Review decides several files at once.** Owner decision of 2026-10-01: a
+person may now decide about many refused files in one request
+(`POST /api/refused/decide`: in, redact, out, reset); each file is still its
+own decision and its own ledger row, a credential file is still never let in,
+and no agent can reach the route. Keep out is a recorded decision that leaves
+the waiting list until it is reset, and the wizard can decide files a held scan
+offered before any pass ran. Every review row and scan item carries a risk read
+off the scan's own verdict — risk, band, likely, tone, kind, why, the masked
+evidence and a suggestion. `GET /api/decisions` lists the person's and the
+rules' decisions.
+
+**Index runs are kept.** Finished runs are written to the store's
+`runs.jsonl` with their stage times and log, and `GET /api/index/runs` lists
+them after a restart. `POST /api/index {store, files}` re-embeds exactly those
+files whatever their hash, as one run.
+
+**The ledger can be paused, and a broken chain repaired without a rewrite.**
+`POST /api/ledger/recording` pauses and resumes recording, kept across
+restarts; a resume chains to the last real row. `GET /api/ledger` names the
+first row that does not verify, and `POST /api/ledger/verify {repair: true}`
+appends a note row per break instead of editing anything. `--no-ledger` now
+stops rows written through `/mcp` too.
+
+**Session replay is on by default.** A settings file that switched it off
+stays off.
+
+**Airgap can be switched on at runtime, and every outbound connection is
+counted.** `POST /api/airgap` refuses what `--airgap` refuses — `add`, model
+and pack downloads, the upgrade check (which the portal's Check button reached
+under `--airgap` until now) and `prices update` — and `/api/privacy` lists
+every connection the daemon opened, by feature and host.
+
+**Start at login, one client at a time, and what each tool costs.**
+`POST /api/login-item` installs or removes the login service.
+`POST /api/agents/register` registers or unregisters named clients, backing a
+file up before it is cleaned. `GET /api/agents` says which clients are
+registered and each tool's typical answer size, from this machine's ledger
+once there are rows enough.
+
+**Search and brief answers carry what the agent sees.** A locate search carries
+the tool's own line per hit, its token cost and its cut; a brief carries the
+tool's exact text.
+
 ## [0.34.0] - 2026-09-30
 
 ### What the documents hold, counted

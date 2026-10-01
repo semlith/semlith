@@ -18,6 +18,7 @@ use crate::fleet::Fleet;
 use crate::store;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The label on a row counted at four characters per token.
 ///
@@ -37,11 +38,81 @@ pub const OFF_ENV: &str = "SEMLITH_LEDGER";
 /// `SEMLITH_LEDGER=0` is the answer to "I never want this recorded anywhere";
 /// `semlith start --no-ledger` is the answer to "not in this session". The two
 /// exist separately because they are different promises.
+///
+/// From 0.35.0 two more answers sit beside those, both this process's own:
+/// the daemon's `--no-ledger` (it used to stop only the portal's rows, so an
+/// agent's calls through `/mcp` were still recorded) and the portal's Pause
+/// recording switch. Neither leaves the process; a CLI or a hook asks only the
+/// environment, as before.
 pub fn enabled() -> bool {
+    off_reason().is_none()
+}
+
+/// Whether the environment allows recording at all.
+pub fn env_on() -> bool {
     !matches!(
         std::env::var(OFF_ENV).as_deref(),
         Ok("0") | Ok("off") | Ok("false")
     )
+}
+
+static SESSION_OFF: AtomicBool = AtomicBool::new(false);
+static PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// `semlith start --no-ledger`, for the life of this process.
+pub fn set_session_off(off: bool) {
+    SESSION_OFF.store(off, Ordering::Relaxed);
+}
+
+/// The Pause recording switch. A paused ledger writes nothing, so the next
+/// row after a resume chains to the last real one: the chain has no gap to
+/// explain, because no row was ever written and then removed.
+pub fn set_paused(paused: bool) {
+    PAUSED.store(paused, Ordering::Relaxed);
+}
+
+/// Why nothing is being recorded, the strongest reason first: the
+/// environment outlives a session, and a session flag outlives a pause.
+pub fn off_reason() -> Option<&'static str> {
+    if !env_on() {
+        Some("env")
+    } else if SESSION_OFF.load(Ordering::Relaxed) {
+        Some("flag")
+    } else if PAUSED.load(Ordering::Relaxed) {
+        Some("paused")
+    } else {
+        None
+    }
+}
+
+/// Stores whose settings say `record: false`, by canonical directory.
+static UNRECORDED: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
+
+/// Which stores this process must not record retrievals into. The daemon
+/// sets it from the registry at start and whenever a store's settings move.
+pub fn set_unrecorded(dirs: Vec<PathBuf>) {
+    *UNRECORDED.write().unwrap_or_else(|e| e.into_inner()) =
+        dirs.iter().map(|d| crate::canonical(d)).collect();
+}
+
+/// The one write every retrieval row takes, so a store switched off is
+/// skipped in one place rather than at six call sites.
+fn write(db: &rusqlite::Connection, row: &store::NewRetrieval<'_>) -> anyhow::Result<()> {
+    let off = UNRECORDED.read().unwrap_or_else(|e| e.into_inner());
+    if !off.is_empty()
+        && let Some(dir) = db.path().and_then(|p| Path::new(p).parent())
+        && off.contains(&crate::canonical(dir))
+    {
+        return Ok(());
+    }
+    drop(off);
+    store::record_retrieval(db, row)
+}
+
+/// `{on, reason}`, as `/api/ledger` and `/api/about` report it.
+pub fn recording_state() -> serde_json::Value {
+    let reason = off_reason();
+    serde_json::json!({ "on": reason.is_none(), "reason": reason })
 }
 
 /// Four characters to a token: a rough rule, said to be one.
@@ -180,7 +251,7 @@ pub fn search(
             .map(|m| counter.count_bytes(m.len()))
             .sum();
         let stale = mine.iter().filter(|h| !h.fresh).count() as i64;
-        let _ = store::record_retrieval(
+        let _ = write(
             store.db(),
             &store::NewRetrieval {
                 client: who.client,
@@ -242,7 +313,7 @@ pub fn reply(
             .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| counter.count_bytes(m.len()))
             .sum();
-        let _ = store::record_retrieval(
+        let _ = write(
             db,
             &store::NewRetrieval {
                 client: who.client,
@@ -452,7 +523,7 @@ pub fn graph(
         if whole == 0 {
             continue;
         }
-        let _ = store::record_retrieval(
+        let _ = write(
             store.db(),
             &store::NewRetrieval {
                 client: who.client,
@@ -508,7 +579,7 @@ pub fn brief(
         .map(|m| counter.count_bytes(m.len()))
         .sum();
     if let Some((_, store)) = fleet.each().next() {
-        let _ = store::record_retrieval(
+        let _ = write(
             store.db(),
             &store::NewRetrieval {
                 client: who.client,
@@ -560,7 +631,7 @@ pub fn raw_read(fleet: &Fleet, client: &str, session: &str, path: &str) -> bool 
         if !store::holds_path(store.db(), path).unwrap_or(false) {
             continue;
         }
-        let recorded = store::record_retrieval(
+        let recorded = write(
             store.db(),
             &store::NewRetrieval {
                 client_version: "",

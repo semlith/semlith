@@ -1408,6 +1408,35 @@ pub fn image(db: &Connection, id: i64) -> Result<Option<ImageRow>> {
         .optional()?)
 }
 
+/// `(tool, excerpt_tokens)` for every ledger row that names its tool, the
+/// newest `limit` of them: what the Agents page's typical answer sizes are
+/// the median of.
+pub fn excerpt_tokens_by_tool(db: &Connection, limit: usize) -> Result<Vec<(String, i64)>> {
+    let mut stmt = db.prepare(
+        "SELECT tool, excerpt_tokens FROM retrievals WHERE tool IS NOT NULL \
+         ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Every indexed image, for the decisions table's "read as image" rows.
+pub fn image_rows(db: &Connection) -> Result<Vec<ImageRow>> {
+    let mut stmt = db.prepare(
+        "SELECT i.id, f.path, i.width, i.height FROM images i \
+         JOIN files f ON f.id = i.file_id ORDER BY f.path",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ImageRow {
+            id: r.get(0)?,
+            path: r.get(1)?,
+            width: r.get(2)?,
+            height: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// The image ids belonging to `path`, before its row is deleted.
 ///
 /// Read rather than returned by `delete_file`, because the cascade that removes
@@ -2519,7 +2548,7 @@ pub fn unfilled(db: &Connection, since: i64) -> Result<Vec<Unfilled>> {
                 COALESCE(query_id, '')
            FROM retrievals
           WHERE usage_source IS NULL AND at >= ?1 AND client NOT IN ('cli', 'portal')
-            AND COALESCE(tool, '') != 'raw-read'
+            AND COALESCE(tool, '') NOT IN ('raw-read', 'note')
           ORDER BY at, id",
     )?;
     let rows = q.query_map(params![since], |r| {
@@ -2758,7 +2787,7 @@ pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
     let mut stmt = db.prepare(&format!(
         "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, hash,
                 query_id, {USAGE_COLUMNS}
-         FROM retrievals ORDER BY id DESC LIMIT ?1"
+         FROM retrievals WHERE COALESCE(tool, '') != 'note' ORDER BY id DESC LIMIT ?1"
     ))?;
     let rows = stmt.query_map(params![limit as i64], |r| {
         Ok(Retrieval {
@@ -2802,7 +2831,9 @@ pub enum LedgerScope {
 /// what it was.
 pub fn ledger_keys(db: &Connection, store: &str, scope: LedgerScope) -> Result<Vec<String>> {
     let sql = match scope {
-        LedgerScope::All => "SELECT DISTINCT query_id, id FROM retrievals",
+        LedgerScope::All => {
+            "SELECT DISTINCT query_id, id FROM retrievals WHERE COALESCE(tool, '') != 'note'"
+        }
         LedgerScope::Credited => "SELECT DISTINCT query_id, id FROM retrievals WHERE hits > 0",
         LedgerScope::Estimated => {
             "SELECT DISTINCT query_id, id FROM retrievals
@@ -2832,7 +2863,8 @@ pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
     Ok(db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)), COUNT(DISTINCT client),
                 COALESCE(SUM(excerpt_tokens), 0),
-                COALESCE(SUM(whole_file_tokens), 0) FROM retrievals",
+                COALESCE(SUM(whole_file_tokens), 0) FROM retrievals
+         WHERE COALESCE(tool, '') != 'note'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?)
@@ -2885,7 +2917,7 @@ pub fn ledger_savings_since(db: &Connection, since: i64) -> Result<Savings> {
     )?;
     let total: i64 = db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE at >= ?1",
+         WHERE at >= ?1 AND COALESCE(tool, '') != 'note'",
         [since],
         |r| r.get(0),
     )?;
@@ -2955,7 +2987,7 @@ pub fn ledger_misses(db: &Connection) -> Result<Misses> {
     )?;
     let zero_hit: i64 = db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE hits = 0 AND (tool IS NULL OR tool != ?1)",
+         WHERE hits = 0 AND (tool IS NULL OR tool NOT IN (?1, 'note'))",
         params![crate::ledger::RAW_READ],
         |r| r.get(0),
     )?;
@@ -2980,16 +3012,97 @@ pub struct Misses {
 /// How many retrievals each client made, most first.
 pub fn ledger_clients(db: &Connection) -> Result<Vec<(String, i64)>> {
     let mut stmt = db.prepare(
-        "SELECT client, COUNT(*) FROM retrievals GROUP BY client ORDER BY COUNT(*) DESC, client",
+        "SELECT client, COUNT(*) FROM retrievals WHERE COALESCE(tool, '') != 'note'
+         GROUP BY client ORDER BY COUNT(*) DESC, client",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// The `tool` of a ledger note: a row the chain carries that is not a
+/// retrieval, and no total counts.
+pub const NOTE_TOOL: &str = "note";
+
+/// The rows a note has re-anchored the chain after: their ids.
+fn acknowledged(db: &Connection) -> Result<std::collections::HashSet<i64>> {
+    let mut stmt = db.prepare("SELECT query FROM retrievals WHERE tool = ?1")?;
+    let rows = stmt.query_map(params![NOTE_TOOL], |r| r.get::<_, String>(0))?;
+    let mut out = std::collections::HashSet::new();
+    for text in rows {
+        let text = text?;
+        if let Some(rest) = text.split("after row ").nth(1) {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if let Ok(id) = digits.parse() {
+                out.insert(id);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Re-anchor the chain after a row that does not verify, by appending a
+/// note row onto the current head (0.35.0's Re-verify with repair).
+///
+/// Nothing recorded is edited or deleted: the note says which row broke, and
+/// [`ledger_break`] accepts that row as it stands from then on. The edit is
+/// still visible, in the note, which is what an audit trail owes its reader.
+pub fn ledger_note(db: &Connection, broken: i64) -> Result<()> {
+    let query = format!("chain re-anchored after row {broken} was edited or removed");
+    record_retrieval(
+        db,
+        &NewRetrieval {
+            client_version: "",
+            client: "semlith",
+            session: "",
+            tool: NOTE_TOOL,
+            query: &query,
+            hits: 0,
+            micros: 0,
+            excerpt_tokens: 0,
+            whole_file_tokens: 0,
+            stale_hits: 0,
+            tokenizer: crate::ledger::CHARS4,
+            query_id: "",
+        },
+    )
+}
+
+/// Append a note for every unacknowledged break, first to last, and say which
+/// rows they were. Bounded, so a chain broken at every row is not a loop.
+pub fn ledger_repair(db: &Connection) -> Result<Vec<i64>> {
+    let mut noted = Vec::new();
+    while let Some(id) = ledger_break(db)? {
+        if noted.contains(&id) || noted.len() >= 1_000 {
+            break;
+        }
+        ledger_note(db, id)?;
+        noted.push(id);
+    }
+    Ok(noted)
+}
+
+/// When a ledger row was written, by id.
+pub fn retrieval_at(db: &Connection, id: i64) -> Result<Option<i64>> {
+    Ok(db
+        .query_row(
+            "SELECT at FROM retrievals WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// How many rows the chain holds, notes included: what a verify walked.
+pub fn ledger_rows(db: &Connection) -> Result<i64> {
+    Ok(db.query_row("SELECT COUNT(*) FROM retrievals", [], |r| r.get(0))?)
+}
+
 /// Re-walk the chain and return the id of the first row that does not verify.
 ///
-/// `None` means the ledger is intact.
+/// `None` means the ledger is intact. A row a note re-anchored after
+/// ([`ledger_note`]) is accepted as it stands, and the walk goes on from it.
 pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
+    let acked = acknowledged(db)?;
     let mut stmt = db.prepare(
         "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
                 session, tool, stale_hits, tokenizer
@@ -3005,6 +3118,10 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
             (r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?);
         let prev: String = r.get(8)?;
         let hash: String = r.get(9)?;
+        if acked.contains(&id) {
+            expected = hash;
+            continue;
+        }
         if prev != expected {
             return Ok(Some(id));
         }
@@ -3821,8 +3938,9 @@ pub fn corpus(db: &Connection, language_of: impl Fn(&str) -> String) -> Result<C
             // `micros`, which is what the column is called. Asking for `ms`
             // did not fail loudly — the row read errored and the fallback
             // reported a store that had never been queried.
-            "SELECT micros / 1000 FROM retrievals ORDER BY micros
-              LIMIT 1 OFFSET (SELECT COUNT(*) FROM retrievals) / 2",
+            "SELECT micros / 1000 FROM retrievals WHERE COALESCE(tool, '') != 'note'
+              ORDER BY micros LIMIT 1 OFFSET (SELECT COUNT(*) FROM retrievals
+              WHERE COALESCE(tool, '') != 'note') / 2",
             [],
             |r| r.get(0),
         )
@@ -3904,6 +4022,7 @@ pub fn ledger_sessions(db: &Connection, limit: usize) -> Result<Vec<SessionRow>>
                     AND r2.client = retrievals.client AND r2.model IS NOT NULL
                   GROUP BY r2.model ORDER BY COUNT(*) DESC LIMIT 1)
          FROM retrievals
+         WHERE COALESCE(tool, '') != 'note'
          GROUP BY COALESCE(session, ''), client
          ORDER BY MAX(at) DESC
          LIMIT ?1",
@@ -3931,7 +4050,9 @@ pub fn ledger_sessions(db: &Connection, limit: usize) -> Result<Vec<SessionRow>>
 /// From the rows themselves rather than from a benchmark, so the figure is
 /// what this machine actually served rather than what it can serve.
 pub fn ledger_latency(db: &Connection) -> Result<(i64, i64)> {
-    let mut stmt = db.prepare("SELECT micros FROM retrievals ORDER BY micros")?;
+    let mut stmt = db.prepare(
+        "SELECT micros FROM retrievals WHERE COALESCE(tool, '') != 'note' ORDER BY micros",
+    )?;
     let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
     let all: Vec<i64> = rows.collect::<rusqlite::Result<_>>()?;
     if all.is_empty() {
@@ -3970,6 +4091,7 @@ pub fn ledger_zero_hit_queries_since(
 ) -> Result<Vec<(String, i64)>> {
     let mut stmt = db.prepare(
         "SELECT query, COUNT(*) AS n FROM retrievals WHERE hits = 0 AND at >= ?1
+           AND COALESCE(tool, '') != 'note'
          GROUP BY query ORDER BY n DESC, query LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {
@@ -4003,7 +4125,8 @@ pub struct RetrievalRow {
 pub fn ledger_retrievals(db: &Connection, since: i64, limit: usize) -> Result<Vec<RetrievalRow>> {
     let mut stmt = db.prepare(
         "SELECT at, client, COALESCE(tool, ''), query, hits, excerpt_tokens, whole_file_tokens
-         FROM retrievals WHERE at >= ?1 ORDER BY at DESC, id DESC LIMIT ?2",
+         FROM retrievals WHERE at >= ?1 AND COALESCE(tool, '') != 'note'
+         ORDER BY at DESC, id DESC LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {
         Ok(RetrievalRow {

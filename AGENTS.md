@@ -141,7 +141,7 @@ Module responsibilities:
 | `src/ledger.rs` | The one place a retrieval is recorded, whichever surface answered it |
 | `src/report.rs` | The five reports: one structure of blocks, five renderers over it, so Markdown, CSV, JSON, HTML and PDF cannot disagree. No engine of its own |
 | `src/schedule.rs` | A report the daemon writes on a cadence: the record, `~/.semlith/schedules.json`, and the one thread that runs them |
-| `src/replay.rs` | What an agent did after an answer, read from this machine's Claude Code transcripts and only when the Privacy page's toggle is on |
+| `src/replay.rs` | What an agent did after an answer, read from this machine's Claude Code transcripts unless the Privacy page's toggle is off (on by default from 0.35.0; a file that wrote off stays off) |
 | `src/image.rs` | Image support: the five extensions, and the CLIP pair that makes a picture comparable with a sentence |
 | `src/lock.rs` | One writer per store, OS advisory lock (not file existence) |
 | `src/watch.rs` | Event source in front of the same indexer `index` runs |
@@ -363,8 +363,11 @@ Module responsibilities:
 - **The not-indexed list and acceptances are two additive tables.** `refusals`
   and `acceptances`, `IF NOT EXISTS`, so `FORMAT_VERSION` does not move. Every
   pass that decides not to index something writes a row; a person — never an
-  agent, never in bulk — accepts one file at a time through the session-token
-  routes or `semlith refused`. An acceptance holds salted blake3 fingerprints,
+  agent — decides through the session-token routes or `semlith refused`. From
+  0.35.0 (owner decision 2026-10-01) a decision may name several files at once
+  (`/api/refused/decide`: in, redact, out, reset), and each file is still its
+  own decision and its own ledger row. Keep out is an acceptance whose mode is
+  `refused`, for any reviewable class. An acceptance holds salted blake3 fingerprints,
   never values, and `keyscan::decide` is the one function every pass (index,
   watcher, catch-up, read from disk) asks. A credential file is never accepted.
 - **`read` answers from chunks, never from disk — except for a file it indexed
@@ -651,6 +654,9 @@ lanes on, comma-separated: `cpu`, `gpu`, `ane`, `cuda`, `trt`, `openvino`,
 substring of its name), `SEMLITH_OPENVINO_DEVICE` and `SEMLITH_LLAMA_DEVICE`
 (force a device for those lanes; `CPU`/`cpu` is how CI checks their known answer
 without the hardware). Harness-only, undocumented for users:
+`SEMLITH_SERVICE_DIR` stands a directory in for the service manager, so a
+test of the portal's Start at login writes a file there and never asks
+launchd, systemd or Task Scheduler anything;
 `SEMLITH_PACK_<NAME>` names an unpacked pack directory in place of the pinned
 download, which is how a pack is tried before it is published; and
 `SEMLITH_COREML_WORKER=current` runs the Core ML lanes from the binary being

@@ -406,6 +406,31 @@ pub enum RunKind {
     /// like any run, so it can be seen and stopped; never admitted, because
     /// it embeds nothing and holds only its own store's writer.
     Compact,
+    /// The store's Re-index button over all its roots (0.35.0). Unchanged
+    /// files are still skipped by hash, as the page says.
+    Reindex,
+    /// Re-index with `force`: every file re-embedded, hash or no hash.
+    Rebuild,
+    /// Exactly the files a person picked, re-embedded whatever their hash.
+    Files,
+}
+
+impl RunKind {
+    /// Whether this run re-embeds a file whose hash has not moved.
+    fn forced(self) -> bool {
+        matches!(self, Self::Rebuild | Self::Files)
+    }
+
+    /// The run's name in the history list.
+    fn label(self, paths: usize) -> String {
+        match self {
+            Self::Run => "Index".to_string(),
+            Self::Reindex | Self::Rebuild => "Re-index".to_string(),
+            Self::Files => format!("Re-index {paths} files"),
+            Self::CatchUp | Self::Batch => "Watcher catch-up".to_string(),
+            Self::Compact => "Compact".to_string(),
+        }
+    }
 }
 
 /// How far back the rate a run card shows looks.
@@ -892,6 +917,8 @@ impl RunState {
         let mut line = event.clone();
         if let Some(object) = line.as_object_mut() {
             object.insert("seq".into(), serde_json::json!(self.next_seq));
+            // When, for the run history's log (0.35.0); additive on the line.
+            object.entry("at").or_insert(serde_json::json!(now()));
         }
         self.next_seq += 1;
         if self.log.len() == LOG_HISTORY {
@@ -899,6 +926,159 @@ impl RunState {
         }
         self.log.push_back(line);
     }
+}
+
+/// How many runs a store's history keeps, and how many a route lists.
+const HISTORY_KEEP: usize = 50;
+
+/// Log lines kept with one finished run.
+const HISTORY_LOG: usize = 200;
+
+/// The file a store's finished runs are kept in: JSON lines, oldest first,
+/// beside `store.db` so it travels and is deleted with the store. An older
+/// binary never opens it.
+pub const HISTORY_FILE: &str = "runs.jsonl";
+
+impl RunState {
+    /// This run as the history keeps it: `{id, store, kind, started,
+    /// finished, result, files, chunks, stages {stage: ms}, log}`.
+    fn history_row(&self, store: &str) -> serde_json::Value {
+        let result = match self.status {
+            RunStatus::Stopped => "stopped",
+            RunStatus::Failed => "failed",
+            _ => "done",
+        };
+        // Flattened to one number per stage; each lane's wait is summed into
+        // `embed`, which is what the page draws as one bar.
+        let mut stages = serde_json::Map::new();
+        if let Some(object) = self.stages.as_ref().and_then(serde_json::Value::as_object) {
+            for (key, value) in object {
+                if let (Some(stage), Some(ms)) = (key.strip_suffix("_ms"), value.as_u64())
+                    && key != "wall_ms"
+                {
+                    stages.insert(stage.to_string(), serde_json::json!(ms));
+                }
+            }
+            let embed: u64 = object
+                .get("embed_wait_ms")
+                .and_then(serde_json::Value::as_object)
+                .map(|lanes| lanes.values().filter_map(serde_json::Value::as_u64).sum())
+                .unwrap_or(0);
+            stages.insert("embed".into(), serde_json::json!(embed));
+        }
+        let log: Vec<serde_json::Value> = self
+            .log
+            .iter()
+            .rev()
+            .take(HISTORY_LOG)
+            .rev()
+            .map(history_line)
+            .collect();
+        serde_json::json!({
+            "id": self.id,
+            "store": store,
+            "kind": self.kind.label(self.paths.len()),
+            "started": self.started.unwrap_or(self.submitted),
+            "finished": self.finished.unwrap_or_else(now),
+            "result": result,
+            "files": self.indexed,
+            "chunks": self.chunks,
+            "stages": stages,
+            "log": log,
+        })
+    }
+}
+
+/// One run event as a history log line: `{at, level, text}`.
+fn history_line(event: &serde_json::Value) -> serde_json::Value {
+    let text = |key: &str| {
+        event
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let name = text("event");
+    let (level, line) = match name.as_str() {
+        "file" => {
+            let outcome = text("outcome");
+            let level = match outcome.as_str() {
+                "failed" => "error",
+                "refused" | "skipped" => "warn",
+                _ => "info",
+            };
+            let why = text("why");
+            let path = text("path");
+            (
+                level,
+                if why.is_empty() {
+                    format!("{outcome} {path}")
+                } else {
+                    format!("{outcome} {path}: {why}")
+                },
+            )
+        }
+        "error" => ("error", format!("error: {}", text("error"))),
+        "done" => (
+            "info",
+            format!(
+                "done: {} indexed, {} chunks",
+                event
+                    .get("indexed")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                event
+                    .get("chunks")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            ),
+        ),
+        _ if !text("text").is_empty() => ("info", text("text")),
+        other => ("info", other.to_string()),
+    };
+    serde_json::json!({
+        "at": event.get("at").cloned().unwrap_or(serde_json::Value::Null),
+        "level": level,
+        "text": line,
+    })
+}
+
+/// Append one finished run to a store's history, trimming it to
+/// [`HISTORY_KEEP`] when it has grown to twice that.
+///
+/// ponytail: a whole-file rewrite at 100 lines; a run is a few KB, so it is
+/// a sub-megabyte write once every fifty runs.
+fn remember_run(dir: &Path, row: &serde_json::Value) {
+    use std::io::Write;
+    let path = dir.join(HISTORY_FILE);
+    let appended = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| writeln!(file, "{row}"));
+    if appended.is_err() {
+        return;
+    }
+    crate::home::tighten_file(&path);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.len() > HISTORY_KEEP * 2 {
+            let kept = lines[lines.len() - HISTORY_KEEP..].join("\n") + "\n";
+            let _ = crate::home::write_private(&path, kept.as_bytes());
+        }
+    }
+}
+
+/// A store's finished runs, newest first, at most [`HISTORY_KEEP`].
+pub fn run_history(dir: &Path) -> Vec<serde_json::Value> {
+    let Ok(text) = std::fs::read_to_string(dir.join(HISTORY_FILE)) else {
+        return Vec::new();
+    };
+    text.lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .take(HISTORY_KEEP)
+        .collect()
 }
 
 /// Everything about one open store that a route can ask about.
@@ -954,6 +1134,14 @@ pub struct Store {
     /// Why the writer thread ended, when it has. `/api/stores` reports it
     /// beside `watching: false`, so a stopped store says what stopped it.
     pub stopped_because: Mutex<Option<String>>,
+    /// The store's `watch` setting (0.35.0): while false, filesystem events
+    /// are dropped rather than re-embedded. The writer thread itself keeps
+    /// running, because it is also what drains the queue a portal index or a
+    /// forwarded `semlith_index` lands on — stopping it would make the store
+    /// unwritable, which is not what "stop watching" means.
+    pub watch_events: AtomicBool,
+    /// The store's `gitignore` setting, read by the writer between jobs.
+    pub gitignore: AtomicBool,
 }
 
 impl Store {
@@ -985,7 +1173,15 @@ impl Store {
             // set afterwards is a flag the catch-up may already have run past.
             expecting_run_until: AtomicUsize::new(expecting_run_until),
             stopped_because: Mutex::new(None),
+            watch_events: AtomicBool::new(true),
+            gitignore: AtomicBool::new(true),
         }
+    }
+
+    /// Take the registry's settings for this store into the live flags.
+    pub fn apply_settings(&self, settings: &crate::home::StoreSettings) {
+        self.watch_events.store(settings.watch, Ordering::Relaxed);
+        self.gitignore.store(settings.gitignore, Ordering::Relaxed);
     }
 
     fn note(&self, text: String) {
@@ -1086,14 +1282,32 @@ impl Store {
     /// another queued behind it has two records, and an event folded into the
     /// wrong one is a card describing work it did not do.
     fn record(&self, id: u64, event: &serde_json::Value) {
-        if let Some(run) = self
+        let ended = self
             .runs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter_mut()
             .find(|run| run.id == id)
-        {
-            run.absorb(event);
+            .and_then(|run| {
+                let was = run.status.finished();
+                run.absorb(event);
+                // A burst of events that changed nothing is not a run anybody
+                // will look for, as it leaves no card either.
+                let quiet = run.kind == RunKind::Batch
+                    && run.indexed == 0
+                    && run
+                        .summary
+                        .as_ref()
+                        .and_then(|s| s.get("removed"))
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
+                        == 0;
+                (!was && run.status.finished() && !quiet).then(|| run.history_row(&self.name))
+            });
+        // Written outside the lock: a page polling runs should not wait on
+        // the disk.
+        if let Some(row) = ended {
+            remember_run(&self.dir, &row);
         }
         self.runs_changed();
     }
@@ -1476,11 +1690,16 @@ impl Store {
                 // walk would drop the deleted ones; it is indexed as the list
                 // it is.
                 work: match kind {
-                    RunKind::Batch => Work::Rest(paths),
+                    // A picked list is indexed as the list it is, like a burst.
+                    RunKind::Batch | RunKind::Files => Work::Rest(paths),
                     // A compaction is never admitted, so never reaches here;
                     // named rather than folded into a wildcard so a new kind
                     // has to say where it goes.
-                    RunKind::Run | RunKind::CatchUp | RunKind::Compact => Work::Roots(paths),
+                    RunKind::Run
+                    | RunKind::CatchUp
+                    | RunKind::Compact
+                    | RunKind::Reindex
+                    | RunKind::Rebuild => Work::Roots(paths),
                 },
                 first: true,
                 already: Vec::new(),
@@ -2459,10 +2678,18 @@ impl State {
         Ok(self.admission.submit(store, paths, RunKind::Run))
     }
 
+    /// Queue a re-index run of the given kind (0.35.0's Re-index and
+    /// Re-index files), admitted like any other run.
+    pub fn reindex(&self, store: &Arc<Store>, paths: Vec<PathBuf>, kind: RunKind) -> Result<u64> {
+        Self::writer_alive(store)?;
+        Ok(self.admission.submit(store, paths, kind).0)
+    }
+
     /// The scan phase for `paths` into `store`, without the writer or the
     /// model: a read-only open of the store beside the writer's.
     pub fn plan(&self, store: &Arc<Store>, paths: &[PathBuf]) -> Result<crate::Plan> {
         let mut reader = crate::Semlith::open_existing(&store.dir)?;
+        reader.gitignore = store.gitignore.load(Ordering::Relaxed);
         reader.plan(paths)
     }
 
@@ -2495,10 +2722,12 @@ impl State {
             let for_plan = Arc::downgrade(store);
             let dir = store.dir.clone();
             let plan_paths = paths.clone();
+            let gitignore = store.gitignore.load(Ordering::Relaxed);
             std::thread::Builder::new()
                 .name("semlith-plan".to_string())
                 .spawn(move || {
-                    let reader = crate::Semlith::open_existing(&dir).and_then(|reader| {
+                    let reader = crate::Semlith::open_existing(&dir).and_then(|mut reader| {
+                        reader.gitignore = gitignore;
                         reader.pin_snapshot()?;
                         Ok(reader)
                     });
@@ -2670,6 +2899,91 @@ impl State {
         let removed = crate::home::delete_store(name);
         changes::bump(changes::Domain::Stores);
         removed
+    }
+
+    /// Make an empty named store and serve it at once (0.35.0).
+    pub fn create_store(self: &Arc<Self>, name: &str, kind: &str) -> Result<Arc<Store>> {
+        let dir = crate::home::create_store(name, kind)?;
+        self.open_store(&dir, false)
+    }
+
+    /// Take a store's changed settings into the running daemon: the live
+    /// flags, the ledger's list, and readers rebuilt so the next search
+    /// reads the new `lean`. A `watch` turned back on queues a catch-up,
+    /// because what changed while it was off was dropped, not deferred.
+    pub fn settings_changed(self: &Arc<Self>, store: &Arc<Store>) {
+        let settings = crate::home::store_settings(&store.dir);
+        let was_watching = store.watch_events.load(Ordering::Relaxed);
+        store.apply_settings(&settings);
+        if settings.watch && !was_watching && !store.watched.is_empty() {
+            let _ = self
+                .admission
+                .submit(store, store.watched.clone(), RunKind::CatchUp);
+        }
+        refresh_unrecorded();
+        self.reopen_readers();
+    }
+
+    /// Rename a store while the daemon runs: close it as a delete would,
+    /// move its directory and registry key together, and open it again
+    /// under the new name. An agent's next `store: "<new>"` resolves; the
+    /// old name stops resolving the moment the store leaves the served set.
+    ///
+    /// Refused while it has a run going or queued: the run's card, its queue
+    /// entry and its undo all hold the store by its old record.
+    pub fn rename_store(self: &Arc<Self>, old: &str, new: &str) -> Result<Arc<Store>> {
+        let Some(store) = self.store(old) else {
+            bail!("this daemon is not serving a store called {old}");
+        };
+        crate::home::check_store_name(new)?;
+        if Registry::load()?.stores.contains_key(new) {
+            bail!("“{new}” is already a store on this machine. Pick another name.");
+        }
+        if store.run_live() || self.admission.position_of(old).is_some() || store.queue_depth() > 0
+        {
+            bail!("{old} is indexing; stop or wait for its run, then rename it");
+        }
+        store.stop.store(true, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while store.watching.load(Ordering::Relaxed) {
+            if std::time::Instant::now() > deadline {
+                bail!("{old}'s writer did not stop, so nothing was renamed");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.stores
+            .write()
+            .expect("the stores lock")
+            .retain(|s| s.name != old);
+        self.reopen_readers();
+        Discovery::remove(&store.dir);
+        let dir = match crate::home::rename_store(old, new) {
+            Ok(dir) => dir,
+            Err(e) => {
+                // Serve it again under the name it still has.
+                let _ = self.reopen_after_stop(&store.dir);
+                return Err(e);
+            }
+        };
+        drop(store);
+        // `open_store` bumps the stores counter; the registry write the
+        // settings made is noticed by `changes::notice_registry`.
+        self.reopen_after_stop(&dir)
+    }
+
+    /// Open a store whose writer was just told to stop. The thread drops the
+    /// store's lock a moment after it clears `watching`, so the first try can
+    /// still find it held.
+    fn reopen_after_stop(self: &Arc<Self>, dir: &Path) -> Result<Arc<Store>> {
+        let mut last = None;
+        for _ in 0..40 {
+            match self.open_store(dir, false) {
+                Ok(store) => return Ok(store),
+                Err(e) => last = Some(e),
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("could not reopen {}", dir.display())))
     }
 
     /// Stop a store's run and, once its undo has finished, delete the store.
@@ -2928,6 +3242,9 @@ impl State {
             true,
             expecting,
         ));
+        // Before the writer thread exists, so its first catch-up already
+        // knows whether this store is watched.
+        store.apply_settings(&crate::home::store_settings(&dir));
 
         discovery(self.server.port(), &self.server.token()).write(&store.dir)?;
         self.stores
@@ -3020,6 +3337,19 @@ impl State {
             .entry(class.as_str())
             .or_insert(0) += 1;
     }
+}
+
+/// Tell the ledger which registered stores say `record: false`.
+pub fn refresh_unrecorded() {
+    let registry = Registry::load().unwrap_or_default();
+    crate::ledger::set_unrecorded(
+        registry
+            .stores
+            .iter()
+            .filter(|(_, entry)| !entry.settings.record)
+            .filter_map(|(name, _)| Registry::dir_of(name).ok())
+            .collect(),
+    );
 }
 
 fn discovery(port: u16, token: &str) -> Discovery {
@@ -3213,10 +3543,23 @@ pub fn run(
     // a surprise: the person who started the daemon is told, in the same
     // breath as the port, that it keeps a record and how to stop it. A default
     // nobody is told about is the thing 0.12.0 was right to refuse.
-    report(if ledger {
-        "ledger: recording (local only; --no-ledger to stop)"
-    } else {
+    crate::ledger::set_session_off(!ledger);
+    let settings = crate::home::Settings::load();
+    // The Privacy page's switch, as it was left. Before anything below can
+    // reach for a model or a pack.
+    crate::add::set_runtime_airgap(settings.airgap.unwrap_or(false));
+    crate::add::start_counting();
+    if settings.airgap == Some(true) && !airgap {
+        report("airgap: on from the Privacy page; nothing will be fetched");
+    }
+    let paused = settings.ledger_paused.unwrap_or(false);
+    crate::ledger::set_paused(paused);
+    report(if !ledger {
         "ledger: off for this session"
+    } else if paused {
+        "ledger: paused from the portal (Resume recording on the Ledger page)"
+    } else {
+        "ledger: recording (local only; --no-ledger to stop)"
     });
 
     // The agent key is read, or written if this machine has none. It survives
@@ -3252,8 +3595,11 @@ pub fn run(
             dir.display(),
             watched.len()
         ));
-        stores.push(Arc::new(Store::new(name, dir, roots, watched, false, 0)));
+        let store = Store::new(name, dir, roots, watched, false, 0);
+        store.apply_settings(&crate::home::store_settings(&store.dir));
+        stores.push(Arc::new(store));
     }
+    refresh_unrecorded();
 
     let fleet = if stores.is_empty() {
         None
@@ -3538,6 +3884,7 @@ fn tend(
 ) -> Result<()> {
     let mut writer = Semlith::open(&store.dir, None)?;
     writer.quiet = true;
+    writer.gitignore = store.gitignore.load(Ordering::Relaxed);
     let mut next_compact_check = std::time::Instant::now() + COMPACT_FIRST_CHECK;
 
     // Before the watcher reads a single event: a store that holds files
@@ -3572,7 +3919,9 @@ fn tend(
     // the same walk up again on its own. A store the portal has just made
     // skips it, because the run on its way covers the same roots.
     let expecting = (now() as usize) < store.expecting_run_until.load(Ordering::Relaxed);
-    let deferred = !roots.is_empty() && !expecting;
+    // A store whose `watch` setting is off is not caught up either: what
+    // changed while nothing watched is exactly what it asked not to follow.
+    let deferred = !roots.is_empty() && !expecting && store.watch_events.load(Ordering::Relaxed);
     if deferred {
         let _ = admission.submit(store, roots.clone(), RunKind::CatchUp);
     }
@@ -3589,6 +3938,11 @@ fn tend(
             // checkout` of thousands of files waits its turn and shows as a
             // card rather than embedding beside every admitted run.
             defer: &|paths| {
+                // Watching off: the batch is taken and dropped. Turning it
+                // back on queues a catch-up, which is what picks these up.
+                if !store.watch_events.load(Ordering::Relaxed) {
+                    return true;
+                }
                 if paths.len() <= BATCH_ADMIT_OVER {
                     return false;
                 }
@@ -3655,6 +4009,8 @@ fn tend(
             // for a minute.
             writer.follow_budget();
             writer.release_if_idle(session_idle());
+            // The setting may have moved on the page since the last batch.
+            writer.gitignore = store.gitignore.load(Ordering::Relaxed);
             if std::time::Instant::now() >= next_compact_check {
                 next_compact_check = std::time::Instant::now() + COMPACT_CHECK;
                 auto_compact(store, writer, admission);
@@ -3891,6 +4247,9 @@ fn perform(
                     "elapsed_ms": store.run_elapsed_ms(run),
                 }));
             };
+            // Every slice of a forced run is forced: a slice only carries the
+            // files the run has not reached yet.
+            writer.force = store.run_kind(run).is_some_and(RunKind::forced);
             let outcome = match work {
                 Work::Roots(ref roots) => {
                     writer.index_within_held_under(roots, SLICE, &control, on_file)
@@ -3903,6 +4262,7 @@ fn perform(
                     on_file,
                 ),
             };
+            writer.force = false;
             match outcome {
                 Ok(mut done) => {
                     store.last_write.store(now() as usize, Ordering::Relaxed);
@@ -4548,6 +4908,75 @@ mod tests {
     fn counters() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A finished run is written to the store's history with its name, its
+    /// stages flattened, and its log; a burst that changed nothing is not;
+    /// the history reads back newest first and is trimmed.
+    #[test]
+    fn a_finished_run_outlives_the_daemon_in_its_store_history() {
+        let _held = counters();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::new(
+            "notes".into(),
+            dir.path().to_path_buf(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            0,
+        ));
+        store.begin_run(
+            1,
+            vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            RunKind::Files,
+        );
+        store.record(1, &serde_json::json!({ "event": "started" }));
+        store.record(
+            1,
+            &serde_json::json!({ "event": "file", "outcome": "failed", "path": "/a", "why": "unreadable" }),
+        );
+        store.record(
+            1,
+            &serde_json::json!({ "event": "done", "indexed": 1, "chunks": 4,
+                "stages": { "wall_ms": 9, "read_ms": 2, "write_ms": 3,
+                            "embed_wait_ms": { "cpu": 4 }, "prepare_cpu_ms": {} } }),
+        );
+        // A late event on a finished run does not write it twice.
+        store.record(1, &serde_json::json!({ "event": "deleted", "text": "x" }));
+
+        store.begin_run(2, Vec::new(), RunKind::Batch);
+        store.record(
+            2,
+            &serde_json::json!({ "event": "done", "indexed": 0, "removed": 0 }),
+        );
+
+        let history = run_history(dir.path());
+        assert_eq!(history.len(), 1, "{history:?}");
+        let row = &history[0];
+        assert_eq!(row["kind"], "Re-index 2 files");
+        assert_eq!(row["result"], "done");
+        assert_eq!(row["files"], 1);
+        assert_eq!(row["chunks"], 4);
+        assert_eq!(
+            row["stages"],
+            serde_json::json!({ "read": 2, "write": 3, "embed": 4 })
+        );
+        let log = row["log"].as_array().unwrap();
+        assert!(log.iter().any(|l| l["level"] == "error"), "{log:?}");
+        assert!(log.iter().all(|l| l["at"].is_u64()));
+
+        for id in 10..10 + (HISTORY_KEEP as u64 * 2 + 5) {
+            store.begin_run(id, Vec::new(), RunKind::Run);
+            store.record(id, &serde_json::json!({ "event": "error", "error": "no" }));
+        }
+        let history = run_history(dir.path());
+        assert_eq!(history.len(), HISTORY_KEEP);
+        assert_eq!(history[0]["result"], "failed");
+        let lines = std::fs::read_to_string(dir.path().join(HISTORY_FILE)).unwrap();
+        assert!(
+            lines.lines().count() <= HISTORY_KEEP * 2,
+            "the file was never trimmed"
+        );
     }
 
     /// A store with nothing behind it, for the parts of a run that are

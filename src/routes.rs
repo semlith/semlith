@@ -113,16 +113,25 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/index/log") => index_log(state, request),
         (true, _, "/api/projects") => projects(request),
         (true, _, "/api/changes") => changes(state),
+        (true, _, "/api/refused") if request.query("decisions") == Some("1") => {
+            decisions(state, request)
+        }
         (true, _, "/api/refused") => refused(state),
+        (true, _, "/api/decisions") => decisions(state, request),
 
         (_, true, "/api/index") => index(state, request),
         (_, true, "/api/add") => add(state, request),
         (_, true, "/api/forget") => forget(state, request),
         (_, true, "/api/refused/accept") => refused_decide(state, request, true),
         (_, true, "/api/refused/revoke") => refused_decide(state, request, false),
+        (_, true, "/api/refused/decide") => decide_files(state, request),
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/trust") => trust(state, request),
         (_, true, "/api/ledger/raw-read") => raw_read(state, request),
+        (_, true, "/api/ledger/recording") => ledger_recording(request),
+        (_, true, "/api/ledger/verify") => ledger_verify(state, request),
+        (_, true, "/api/airgap") => airgap(request),
+        (_, true, "/api/login-item") => login_item(state, request),
         (_, true, "/api/agents/reveal") => reveal(state),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
@@ -137,6 +146,8 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/agents/register") => register_clients(state, request),
         (_, true, "/api/root") => root(state, request),
         (_, true, "/api/store/delete") => delete_store(state, request),
+        (_, true, "/api/store/create") => create_store(state, request),
+        (_, true, "/api/store/settings") => store_settings(state, request),
         (_, true, "/api/store/compact") => compact_store(state, request),
         (_, true, "/api/index/control") => index_control(state, request),
         (_, true, "/api/index/settings") => index_settings(state, request),
@@ -309,6 +320,9 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
     // the Stores page fell far enough behind that the browser drive caught a
     // row still describing a store whose directory had already gone.
     let want_coverage = request.query("coverage") == Some("1");
+    // The per-reader and per-language file counts, without coverage's edge
+    // scan: the store Overview's bars and chips.
+    let want_detail = request.query("detail") == Some("1");
     // Before the fleet, because it may add to what the fleet has to cover. A
     // store the CLI wrote while this daemon was running is registered and not
     // open, and this is the read that notices — which is what makes `semlith
@@ -485,8 +499,49 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
         readers.sort_unstable();
         readers.dedup();
 
+        let settings = registry
+            .name_of(&handle.dir)
+            .and_then(|n| registry.stores.get(n))
+            .map(|e| e.settings.clone())
+            .unwrap_or_default();
+
+        // Files per reader and per language, for the Overview's bars and
+        // chips: one read of the paths, counted here. Only for the page that
+        // draws them, as coverage is, so the poll every page makes stays cheap.
+        let (readers_count, languages_count) = if want_coverage || want_detail {
+            let paths = fleet
+                .as_mut()
+                .and_then(|f| {
+                    f.each()
+                        .find(|(_, s)| s.dir() == handle.dir)
+                        .map(|(_, s)| s)
+                })
+                .and_then(|s| store::all_paths(s.db()).ok())
+                .unwrap_or_default();
+            let mut by_reader: std::collections::BTreeMap<&str, u64> = Default::default();
+            let mut by_language: std::collections::BTreeMap<&str, u64> = Default::default();
+            for path in &paths {
+                let path = Path::new(path);
+                *by_reader.entry(chunk::reader_of(path)).or_default() += 1;
+                let language = language_of(path);
+                if !language.is_empty() {
+                    *by_language.entry(language).or_default() += 1;
+                }
+            }
+            (Some(by_reader), Some(by_language))
+        } else {
+            (None, None)
+        };
+
         out.push(json!({
             "name": handle.name,
+            "kind": settings.kind,
+            "lean": settings.lean,
+            "watch": settings.watch,
+            "record": settings.record,
+            "gitignore": settings.gitignore,
+            "readers_count": readers_count,
+            "languages_count": languages_count,
             "dir": crate::plain(&handle.dir.display().to_string()),
             // A store made before 0.14.0 is readable by everyone on the machine
             // until it is opened by this binary, and one somebody chmod'ed is
@@ -567,6 +622,11 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
             "name": store.name,
             "dir": crate::plain(&store.dir.display().to_string()),
             "unopened": store.why,
+            "kind": registry.stores.get(&store.name).map(|e| e.settings.kind.clone()),
+            "lean": registry.stores.get(&store.name).map(|e| e.settings.lean.clone()),
+            "watch": registry.stores.get(&store.name).map(|e| e.settings.watch),
+            "record": registry.stores.get(&store.name).map(|e| e.settings.record),
+            "gitignore": registry.stores.get(&store.name).map(|e| e.settings.gitignore),
             // A registry entry for a directory that is not there. The portal
             // shows it as missing, naming the path that is absent, and offers
             // it nowhere a real store is offered — not in the Index dropdown,
@@ -825,10 +885,10 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
     };
     let prefer = match request.query("prefer") {
         Some(raw) => match crate::Prefer::parse(raw) {
-            Ok(p) => p,
+            Ok(p) => Some(p),
             Err(e) => return Response::error(400, &e.to_string()),
         },
-        None => crate::Prefer::default(),
+        None => None,
     };
     let only: Vec<String> = request
         .query("store")
@@ -845,8 +905,14 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
 
     let started = std::time::Instant::now();
     let only = (!only.is_empty()).then_some(only);
-    let brief = match crate::brief::brief(fleet, only.as_deref(), question, budget, &filter, prefer)
-    {
+    let brief = match crate::brief::brief_leaning(
+        fleet,
+        only.as_deref(),
+        question,
+        budget,
+        &filter,
+        prefer,
+    ) {
         Ok(b) => b,
         Err(e) => return Response::error(500, &format!("{e:#}")),
     };
@@ -856,7 +922,7 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
         Ok(v) => v,
         Err(e) => return Response::error(500, &e.to_string()),
     };
-    if state.ledger {
+    if crate::ledger::enabled() {
         // From the brief rather than from its rendering. `reply` recovers the
         // files an answer named by reading them back out of rendered text, and
         // what this route hands it is JSON -- so every brief from this page was
@@ -880,6 +946,13 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
     }
     let mut answer = json!({
         "brief": body,
+        // What `semlith_brief` hands an agent for the same question, byte for
+        // byte, from the same renderer: the page's Copy as the agent sees it.
+        "text": crate::mcp::brief_reply(fleet, &brief, &filter),
+        "prefer": prefer.unwrap_or_else(|| match only.as_deref() {
+            Some([one]) => fleet.lean(one).unwrap_or_default(),
+            _ => crate::Prefer::default(),
+        }),
         "chunks": fleet.chunks(),
         "micros": elapsed.as_micros() as u64,
     });
@@ -965,10 +1038,10 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
 
     let prefer = match request.query("prefer") {
         Some(raw) => match crate::Prefer::parse(raw) {
-            Ok(p) => p,
+            Ok(p) => Some(p),
             Err(e) => return Response::error(400, &e.to_string()),
         },
-        None => crate::Prefer::default(),
+        None => None,
     };
 
     let started = std::time::Instant::now();
@@ -981,12 +1054,18 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
     let deep = (offset as usize)
         .saturating_add(k)
         .min(FILE_OFFSET_MAX as usize);
-    let found = match fleet.search_preferring(only.as_deref(), query, deep, &filter, prefer) {
+    let found = match fleet.search_leaning(only.as_deref(), query, deep, &filter, prefer) {
         Ok(h) => h,
         Err(e) => return Response::error(500, &format!("{e:#}")),
     };
     let elapsed = started.elapsed();
-    let hits: Vec<_> = found.into_iter().skip(offset as usize).take(k).collect();
+    let mut hits: Vec<_> = found.into_iter().skip(offset as usize).take(k).collect();
+    // What was applied: the caller's, or — sent none and scoped to one
+    // store — that store's lean.
+    let applied = prefer.unwrap_or_else(|| match only.as_deref() {
+        Some([one]) => fleet.lean(one).unwrap_or_default(),
+        _ => crate::Prefer::default(),
+    });
 
     // The `Hit` shape `--json` already prints, plus the store name — which for
     // a single-store fleet the CLI leaves out and the portal always wants,
@@ -999,10 +1078,40 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
     let locate = request
         .query("format")
         .is_some_and(|f| f.eq_ignore_ascii_case("locate"));
+    // From 0.35.0 a locate answer is `semlith_search`'s own: the same rows,
+    // the same one line per hit, and — when `max_tokens` is sent — the same
+    // cut, made by the renderer the MCP tool uses rather than a copy of it.
+    let mut lines: Vec<String> = Vec::new();
+    let mut locate_extra = None;
+    if locate && !hits.is_empty() {
+        let budget = request
+            .query("max_tokens")
+            .and_then(|v| v.parse::<usize>().ok());
+        let reply =
+            crate::mcp::search_reply(fleet, &hits, query, applied, budget.unwrap_or(usize::MAX));
+        let total = hits.len();
+        let mut kept = reply.kept.iter();
+        let mut kept_lines = reply.lines.into_iter();
+        let mut shown_hits = Vec::new();
+        for hit in hits.drain(..) {
+            let line = kept_lines.next().unwrap_or_default();
+            if *kept.next().unwrap_or(&true) {
+                lines.push(line);
+                shown_hits.push(hit);
+            }
+        }
+        hits = shown_hits;
+        locate_extra = Some(json!({
+            "tokens": reply.tokens,
+            "truncated": (hits.len() < total).then(|| json!({ "shown": hits.len(), "total": total })),
+        }));
+    }
     let out: Vec<Value> = hits
         .iter()
-        .map(|h| {
+        .enumerate()
+        .map(|(at, h)| {
             json!({
+                "line": lines.get(at),
                 "score": h.score,
                 "path": crate::plain(&h.path),
                 "start_line": h.start_line,
@@ -1019,7 +1128,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         })
         .collect();
 
-    if state.ledger {
+    if crate::ledger::enabled() {
         // The portal is one client among several now, named the same way the
         // agents are, and recorded through the same path they use.
         crate::ledger::search(
@@ -1048,8 +1157,12 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         "shape": shape,
         "shape_label": shape.as_str(),
         "weighting": shape.weighting(),
-        "prefer": prefer,
+        "prefer": applied,
     });
+    if let Some(extra) = locate_extra {
+        answer["tokens"] = extra["tokens"].clone();
+        answer["truncated"] = extra["truncated"].clone();
+    }
     // Mid-run, what share of each store the vector half does not cover yet.
     // Absent at rest, so a reader written before 0.32.0 sees what it saw.
     let pending = fleet.pending();
@@ -1092,7 +1205,7 @@ fn raw_read(state: &Arc<State>, request: &Request) -> Response {
 
     // `--no-ledger` is a promise about this session, and it covers rows the
     // hook asks for exactly as it covers rows a search writes.
-    if !state.ledger {
+    if !crate::ledger::enabled() {
         return Response::json(&json!({ "recorded": false, "reason": "not recording" }));
     }
     with_fleet(state, json!({ "recorded": false }), move |fleet| {
@@ -1100,9 +1213,116 @@ fn raw_read(state: &Arc<State>, request: &Request) -> Response {
     })
 }
 
+/// `{installed, mechanism, path, last_start}` for the login service.
+fn login_state() -> Value {
+    let status = crate::service::status();
+    json!({
+        "installed": status.installed,
+        "mechanism": status.mechanism,
+        "path": status.definition.map(|p| crate::plain(&p.display().to_string())),
+        "last_start": crate::service::last_started(),
+    })
+}
+
+/// Start at login, from the About page: install or remove the login service
+/// through `service.rs`, the same calls `semlith setup` makes. A daemon
+/// already answering is this one, so installing registers the service for
+/// the next login and does not start a second daemon now.
+fn login_item(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(on) = body.get("on").and_then(Value::as_bool) else {
+        return Response::error(400, "missing on");
+    };
+    let port = state.server.port();
+    // The default port needs no flag in the definition; anything else does, or
+    // the next login's daemon would listen somewhere this page is not.
+    let port = (port != daemon::port_of(None)).then_some(port);
+    let done = if on {
+        crate::service::install(None, port).map(|_| ())
+    } else {
+        crate::service::remove().map(|_| ())
+    };
+    match done {
+        Ok(()) => Response::json(&json!({ "login": login_state() })),
+        Err(e) => Response::error(409, &format!("{e:#}")),
+    }
+}
+
+/// The Privacy page's airgap switch: saved, then applied to this process.
+/// `add`, every model and pack download and `upgrade` ask `embed::airgap()`,
+/// which reads it, so it refuses what `--airgap` refuses.
+fn airgap(request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(on) = body.get("on").and_then(Value::as_bool) else {
+        return Response::error(400, "missing on");
+    };
+    let mut saved = home::Settings::load();
+    saved.airgap = Some(on);
+    if let Err(e) = saved.save() {
+        return Response::error(500, &format!("{e:#}"));
+    }
+    crate::add::set_runtime_airgap(on);
+    Response::json(&json!({ "airgap": crate::add::airgap_state() }))
+}
+
+/// Re-verify every open store's chain, and with `repair` re-anchor each
+/// break by appending a note row (never by editing or deleting a recorded
+/// one): `{stores: [{store, rows, intact, break_row, repaired}]}`.
+fn ledger_verify(state: &Arc<State>, request: &Request) -> Response {
+    let body = request.json().unwrap_or(json!({}));
+    let repair = body.get("repair").and_then(Value::as_bool).unwrap_or(false);
+    with_fleet(state, json!({ "stores": [] }), move |fleet| {
+        let mut stores = Vec::new();
+        for (label, store) in fleet.each() {
+            let repaired = if repair {
+                store::ledger_repair(store.db())?
+            } else {
+                Vec::new()
+            };
+            let broken = store::ledger_break(store.db())?;
+            stores.push(json!({
+                "store": label,
+                "rows": store::ledger_rows(store.db())?,
+                "intact": broken.is_none(),
+                "break_row": broken,
+                "repaired": repaired,
+            }));
+        }
+        Ok(json!({ "stores": stores }))
+    })
+}
+
+/// Pause or resume recording for this daemon, and keep the choice.
+///
+/// Saved before it is applied, so a pause that could not be written is
+/// refused rather than lasting only until the next restart. `--no-ledger` and
+/// `SEMLITH_LEDGER=0` still win; the answer names them in `reason`.
+fn ledger_recording(request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(on) = body.get("on").and_then(Value::as_bool) else {
+        return Response::error(400, "missing on");
+    };
+    let mut saved = home::Settings::load();
+    saved.ledger_paused = Some(!on);
+    if let Err(e) = saved.save() {
+        return Response::error(500, &format!("{e:#}"));
+    }
+    crate::ledger::set_paused(!on);
+    Response::json(&json!({ "recording": crate::ledger::recording_state() }))
+}
+
 fn ledger(state: &Arc<State>) -> Response {
     let empty = json!({
-        "recording": state.ledger,
+        "recording": crate::ledger::recording_state(),
         "queries": 0,
         "clients": 0,
         "excerpt_tokens": 0,
@@ -1110,7 +1330,7 @@ fn ledger(state: &Arc<State>) -> Response {
         "ratio": null,
         "intact": true,
     });
-    let recording = state.ledger;
+    let recording = crate::ledger::recording_state();
     let usage_on = crate::usage::enabled();
     with_fleet(state, empty, move |fleet| {
         // Usage filled in before the rows are read, so the page shows what the
@@ -1125,6 +1345,8 @@ fn ledger(state: &Arc<State>) -> Response {
         }
         let (mut clients, mut excerpt, mut whole) = (0, 0, 0);
         let mut intact = true;
+        // The first row that does not verify, so the page can name it.
+        let mut first_break: Option<Value> = None;
         // Unioned rather than summed: one search over six stores writes a row
         // in each that answered it, under one query id, and adding six stores'
         // own counts is what made this page report sixty-three queries for
@@ -1140,7 +1362,16 @@ fn ledger(state: &Arc<State>) -> Response {
             clients = clients.max(c);
             excerpt += e;
             whole += w;
-            intact = intact && store::ledger_break(store.db())?.is_none();
+            if let Some(row) = store::ledger_break(store.db())?
+                && intact
+            {
+                intact = false;
+                first_break = Some(json!({
+                    "store": label,
+                    "row": row,
+                    "at": store::retrieval_at(store.db(), row)?,
+                }));
+            }
         }
         let queries = seen.len() as i64;
         // Summed across stores the same way the totals are, and reported with
@@ -1264,6 +1495,7 @@ fn ledger(state: &Arc<State>) -> Response {
             "whole_file_tokens": whole,
             "ratio": ratio,
             "intact": intact,
+            "break": first_break,
             "net_tokens": net,
             "credited": credited,
             "coverage": coverage,
@@ -1715,7 +1947,11 @@ fn privacy(state: &Arc<State>) -> Response {
     Response::json(&json!({
         "bind": format!("127.0.0.1:{}", state.server.port()),
         "bind_is_fixed": true,
-        "airgap": state.airgap,
+        // `{on, reason}` from 0.35.0: the switch below can turn it on at
+        // runtime, so one boolean read at startup no longer says it.
+        "airgap": crate::add::airgap_state(),
+        // Every connection this process has opened, by feature and host.
+        "outbound": crate::add::outbound(),
         "model_cache": crate::plain(&cache.display().to_string()),
         "model_cached": cache.exists()
             && std::fs::read_dir(&cache).map(|mut d| d.next().is_some()).unwrap_or(false),
@@ -1817,8 +2053,8 @@ fn rules(state: &Arc<State>) -> Value {
         },
         {
             "id": "refused-file acceptance",
-            "rule": "A person accepts a refused file one at a time, from this page or the command                      line, never in bulk and never by an agent: the routes need this session's                      token and no MCP tool accepts. An acceptance keeps the path, the class, the                      mode, the confidence and a salted fingerprint of each accepted match —                      never the value — in the store's own database, on this machine.",
-            "check": "the accept route takes one path and refuses a list; the agent key opens /mcp alone",
+            "rule": "A person decides about refused files, one or several at once, from this page                      or the command line, never an agent: the routes need this session's token                      and no MCP tool accepts. Each file is its own decision and its own ledger                      row, and a credential file is never let in. An acceptance keeps the path,                      the class, the mode, the confidence and a salted fingerprint of each                      accepted match — never the value — in the store's own database, on this                      machine.",
+            "check": "the decision routes take the session token only; the agent key opens /mcp alone",
             "ok": true,
         },
         {
@@ -2016,9 +2252,235 @@ fn privacy_fix(state: &Arc<State>, request: &Request) -> Response {
 /// `{"confirm": true}` it applies that plan. This is the one place the daemon
 /// writes a file it does not own, and a user who has not seen the list has not
 /// agreed to it.
+/// What a typical answer from each tool costs an agent, before it asks.
+///
+/// Fixed estimates, in tokens, for a machine whose ledger has fewer than
+/// [`TYPICAL_MIN_ROWS`] rows for a tool: a locate search at its default
+/// budget, a brief at its default budget, a definition read whole, and the
+/// graph and housekeeping tools' short replies. Rough on purpose and labelled
+/// `estimate` beside every figure; the ledger's own median replaces each as
+/// soon as there are rows enough to take one from.
+const TYPICAL_ESTIMATES: &[(&str, &str, i64)] = &[
+    (
+        "semlith_search",
+        "where something is: one line per hit",
+        700,
+    ),
+    (
+        "semlith_brief",
+        "how something works: spans, text and callers",
+        1800,
+    ),
+    ("semlith_read", "one span or definition, whole", 900),
+    (
+        "semlith_pattern",
+        "every place one syntax shape occurs",
+        600,
+    ),
+    ("semlith_stats", "what is indexed, per store", 150),
+    (
+        "semlith_languages",
+        "which languages filter and carry a graph",
+        300,
+    ),
+    ("semlith_files", "what a folder holds", 450),
+    (
+        "semlith_index",
+        "a folder indexed, and what was skipped",
+        120,
+    ),
+    ("semlith_add", "one URL fetched and indexed", 80),
+    ("semlith_forget", "one file taken out", 40),
+    (
+        "semlith_symbol",
+        "where a name is defined and what touches it",
+        300,
+    ),
+    ("semlith_neighbors", "who calls it and what it calls", 350),
+    ("semlith_report", "one of the five reports", 1200),
+    ("semlith_impact", "every caller a change would reach", 450),
+    (
+        "semlith_trace",
+        "the chain from A to B, a line per hop",
+        400,
+    ),
+    ("semlith_path", "whether A reaches B, and how", 200),
+];
+
+/// The documented clients as `/api/agents` lists them, each with its id and
+/// whether its own file names semlith now.
+fn client_rows() -> Vec<Value> {
+    let registered = crate::clientfile::registered_clients();
+    crate::clients::clients()
+        .iter()
+        .map(|client| {
+            let mut row = serde_json::to_value(client).unwrap_or(Value::Null);
+            if let Some(object) = row.as_object_mut() {
+                object.insert("id".into(), json!(client_id(&client.name)));
+                object.insert(
+                    "registered".into(),
+                    json!(registered.contains(&client.name)),
+                );
+            }
+            row
+        })
+        .collect()
+}
+
+/// Ledger rows a tool needs before its median replaces the estimate.
+const TYPICAL_MIN_ROWS: usize = 5;
+
+fn tool_sizes(state: &Arc<State>) -> Vec<Value> {
+    // The ledger's tool column holds the short name: `search`, not
+    // `semlith_search`.
+    let mut seen: std::collections::BTreeMap<String, Vec<i64>> = Default::default();
+    if state.open_fleet().is_ok()
+        && let Some(fleet) = state
+            .fleet
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+    {
+        for (_, store) in fleet.each() {
+            for (tool, tokens) in
+                store::excerpt_tokens_by_tool(store.db(), 2_000).unwrap_or_default()
+            {
+                seen.entry(tool).or_default().push(tokens);
+            }
+        }
+    }
+    crate::mcp::tool_list()
+        .into_iter()
+        .map(|(name, about)| {
+            let short = name.strip_prefix("semlith_").unwrap_or(&name).to_string();
+            let (answers, estimate) = TYPICAL_ESTIMATES
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .map(|(_, answers, tokens)| (answers.to_string(), *tokens))
+                .unwrap_or_else(|| (about.clone(), 300));
+            let (typical, source) = match seen.get_mut(&short) {
+                Some(rows) if rows.len() >= TYPICAL_MIN_ROWS => {
+                    rows.sort_unstable();
+                    (rows[rows.len() / 2], "ledger")
+                }
+                _ => (estimate, "estimate"),
+            };
+            json!({
+                "name": name,
+                "about": about,
+                "answers": answers,
+                "typical_tokens": typical,
+                "typical_source": source,
+            })
+        })
+        .collect()
+}
+
+/// A client's id in a request: its name, lowercased, dashes for the rest
+/// (`Claude Code` → `claude-code`), as the Agents page sends it.
+fn client_id(name: &str) -> String {
+    let mut id = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            id.push(c.to_ascii_lowercase());
+        } else if !id.ends_with('-') && !id.is_empty() {
+            id.push('-');
+        }
+    }
+    id.trim_end_matches('-').to_string()
+}
+
+/// Register or unregister the named clients, one at a time (0.35.0).
+///
+/// A client with a global registration CLI is asked through it, exactly as
+/// `semlith setup` asks; one whose route in is a user-level file has that
+/// file written or cleaned, backed up beside itself first. Unregistering
+/// runs the client's documented `unregister` commands where it has them and
+/// cleans the file otherwise.
+fn register_named(body: &Value) -> Response {
+    let action = body
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("register");
+    if !matches!(action, "register" | "unregister") {
+        return Response::error(400, "action is register or unregister");
+    }
+    let wanted = strings(body, "clients");
+    if wanted.is_empty() {
+        return Response::error(400, "clients names at least one client");
+    }
+    let all = crate::clients::clients();
+    let results: Vec<Value> = wanted
+        .iter()
+        .map(|asked| {
+            let Some(client) = all.iter().find(|c| {
+                client_id(&c.name) == *asked || c.name.eq_ignore_ascii_case(asked)
+            }) else {
+                return json!({ "client": asked, "ok": false, "error": format!("no client called {asked}") });
+            };
+            let outcome: Result<Vec<String>, String> = match action {
+                "register" if client.needs_a_file_written() => {
+                    let plans = crate::clientfile::plan(&[client]);
+                    let stanzas: Vec<(&str, &crate::clients::Stanza)> = client
+                        .config_files()
+                        .map(|stanza| (client.name.as_str(), stanza))
+                        .collect();
+                    if plans.is_empty() {
+                        Err(format!("{} is not on this machine", client.name))
+                    } else {
+                        crate::clientfile::apply(&plans, &stanzas)
+                            .map(|paths| paths.iter().map(|p| crate::plain(&p.display().to_string())).collect())
+                            .map_err(|e| format!("{e:#}"))
+                    }
+                }
+                "register" => match crate::setup::register(client) {
+                    crate::setup::Registration::Registered { .. } => Ok(Vec::new()),
+                    crate::setup::Registration::Absent => {
+                        Err(format!("{}'s command line is not on this machine", client.name))
+                    }
+                    crate::setup::Registration::Failed { reason } => Err(reason),
+                    _ => Err(format!("{} cannot be registered from here", client.name)),
+                },
+                _ => {
+                    let mut removed_by_cli = false;
+                    for undo in client.unregister_commands() {
+                        if let Some((program, args)) = crate::setup::argv(&undo) {
+                            removed_by_cli |= std::process::Command::new(
+                                crate::doctor::program_path(&program),
+                            )
+                            .args(&args)
+                            .output()
+                            .is_ok_and(|out| out.status.success());
+                        }
+                    }
+                    if removed_by_cli {
+                        Ok(Vec::new())
+                    } else {
+                        crate::clientfile::unregister_files(client)
+                            .map(|paths| paths.iter().map(|p| crate::plain(&p.display().to_string())).collect())
+                            .map_err(|e| format!("{e:#}"))
+                    }
+                }
+            };
+            match outcome {
+                Ok(files) => json!({ "client": client.name, "id": client_id(&client.name), "ok": true, "files": files }),
+                Err(e) => json!({ "client": client.name, "id": client_id(&client.name), "ok": false, "error": e }),
+            }
+        })
+        .collect();
+    Response::json(&json!({
+        "action": action,
+        "results": results,
+        "registered": crate::clientfile::registered_clients(),
+    }))
+}
+
 fn register_clients(state: &Arc<State>, request: &Request) -> Response {
     let _ = state;
     let body = request.json().unwrap_or(json!({}));
+    if body.get("action").is_some() || body.get("clients").is_some() {
+        return register_named(&body);
+    }
     let writable: Vec<&crate::clients::Client> = crate::clients::clients()
         .iter()
         .filter(|client| client.needs_a_file_written())
@@ -2088,7 +2550,9 @@ fn about(state: &Arc<State>) -> Response {
         // Whether this daemon is recording retrievals. The sidebar states it on
         // every page, the way the design's daemon card does, and asking
         // `/api/ledger` for one boolean would carry the whole ledger with it.
-        "ledger": state.ledger,
+        "ledger": crate::ledger::enabled(),
+        "recording": crate::ledger::recording_state(),
+        "login": login_state(),
         "port": state.server.port(),
         "pid": std::process::id(),
         "uptime": daemon::uptime(state),
@@ -2207,10 +2671,7 @@ fn agents(state: &Arc<State>) -> Response {
         // Read from the MCP server's own definitions rather than repeated
         // here: a second copy is how a tool ends up served and invisible, and
         // a second description is how it ends up documented as something else.
-        "tools": crate::mcp::tool_list()
-            .into_iter()
-            .map(|(name, about)| json!({ "name": name, "about": about }))
-            .collect::<Vec<_>>(),
+        "tools": tool_sizes(state),
         // What the tool list costs an agent, once per session, before it has
         // asked anything. A cost a user should be able to see rather than one
         // they would have to capture traffic to discover.
@@ -2223,7 +2684,9 @@ fn agents(state: &Arc<State>) -> Response {
         "tool_list_tokens": tool_list_tokens(state).0,
         "tool_list_tier": tool_list_tokens(state).1,
         "revisions": crate::mcp::SUPPORTED,
-        "clients": crate::clients::clients(),
+        // Each documented client as before, plus the id a register or
+        // unregister names it by and whether its own file names semlith now.
+        "clients": client_rows(),
         // Whether semlith is there without being asked, and since when. The
         // page said "one endpoint, every client" while the endpoint existed
         // only as long as somebody held a terminal open for it.
@@ -2637,7 +3100,7 @@ fn replay(request: &Request) -> Response {
         return Response::json(&json!({ "enabled": on }));
     }
 
-    let enabled = home::Settings::load().session_replay.unwrap_or(false);
+    let enabled = home::Settings::load().replay_on();
     let dir = crate::replay::transcripts_dir().ok();
     if !enabled {
         return Response::json(&json!({
@@ -2863,6 +3326,16 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
         .into_iter()
         .map(PathBuf::from)
         .collect();
+    // A store named with picked `files`, or with no path at all: the Store
+    // page's Re-index (0.35.0) rather than a folder being added.
+    if let Some(name) = body
+        .get("store")
+        .and_then(Value::as_str)
+        .filter(|s| *s != "each")
+        && (body.get("files").is_some() || paths.is_empty())
+    {
+        return reindex(state, name, &body);
+    }
     if paths.is_empty() {
         return Response::error(400, "no path given");
     }
@@ -2889,7 +3362,17 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
         .get("scan_only")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // The wizard's Respect .gitignore switch (0.35.0). Kept as the store's
+    // setting rather than this run's alone, so the watcher and every later
+    // run of the store walk the same tree this one did.
+    let gitignore = body.get("gitignore").and_then(Value::as_bool);
     let start = |store: &Arc<crate::daemon::Store>, paths: Vec<PathBuf>| -> Result<Value, String> {
+        if let Some(on) = gitignore
+            && store.gitignore.load(Ordering::Relaxed) != on
+        {
+            let _ = home::update_store_settings(&store.name, |s| s.gitignore = on);
+            store.gitignore.store(on, Ordering::Relaxed);
+        }
         if scan_only {
             return state
                 .plan(store, &paths)
@@ -3002,6 +3485,85 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     }
 }
 
+/// Re-index a store: the picked `files` (absolute, or relative to one of its
+/// roots), re-embedded whatever their hash, as one run named "Re-index N
+/// files"; or with no files the whole store, unchanged files skipped by hash
+/// unless `force` asks otherwise. Through the store's queue like any run.
+fn reindex(state: &Arc<State>, name: &str, body: &Value) -> Response {
+    let Some(store) = state.store(name) else {
+        return Response::error(404, &format!("no store called {name} is open"));
+    };
+    let picked = strings(body, "files");
+    let force = body.get("force").and_then(Value::as_bool).unwrap_or(false);
+    let (paths, kind) = if picked.is_empty() {
+        if body.get("files").is_some() {
+            return Response::error(400, "files is empty; name at least one file");
+        }
+        let kind = if force {
+            daemon::RunKind::Rebuild
+        } else {
+            daemon::RunKind::Reindex
+        };
+        (store.watched.clone(), kind)
+    } else {
+        let mut found = Vec::new();
+        let mut missing = Vec::new();
+        for file in &picked {
+            let given = Path::new(file);
+            let at = if given.is_absolute() {
+                given.exists().then(|| crate::canonical(given))
+            } else {
+                store
+                    .roots
+                    .iter()
+                    .map(|root| root.join(given))
+                    .find(|p| p.exists())
+                    .map(|p| crate::canonical(&p))
+            };
+            match at {
+                Some(path) => found.push(path),
+                None => missing.push(file.clone()),
+            }
+        }
+        if !missing.is_empty() {
+            return Response::error(
+                400,
+                &format!(
+                    "not found in {name}'s roots: {}. Name a file by its absolute path or \
+                     relative to one of the store's roots.",
+                    missing.join(", ")
+                ),
+            );
+        }
+        let roots = crate::filter::resolve_boundary(&home::index_roots(&store.dir));
+        let outside: Vec<String> = found
+            .iter()
+            .filter(|p| !crate::filter::within_resolved(p, &roots))
+            .map(|p| crate::plain(&p.display().to_string()))
+            .collect();
+        if !outside.is_empty() {
+            return Response::error(
+                403,
+                &format!(
+                    "outside the boundary for store {name}: {}",
+                    outside.join(", ")
+                ),
+            );
+        }
+        (found, daemon::RunKind::Files)
+    };
+    if paths.is_empty() {
+        return Response::error(400, &format!("{name} has no root on disk to re-index"));
+    }
+    match state.reindex(&store, paths, kind) {
+        Ok(run) => Response::json(&json!({
+            "runs": [{ "run": run, "store": store.name }],
+            "target": "store",
+        })),
+        Err(e) => Response::error(409, &format!("{e:#}")),
+    }
+}
+
 /// Every store's run, and the queue waiting behind them.
 ///
 /// The standing answer to "is anything indexing and how far is it", from a
@@ -3042,7 +3604,15 @@ fn index_runs(state: &Arc<State>) -> Response {
     // the derivation is how much memory is free *now*. The memory figure is
     // the one in force, which only a start or a save changes.
     let limits = daemon::Limits::in_force().as_applied();
+    // Finished runs, from each store's own file, so they outlive the daemon.
+    let mut history: Vec<Value> = state
+        .stores()
+        .iter()
+        .flat_map(|store| daemon::run_history(&store.dir))
+        .collect();
+    history.sort_by_key(|row| std::cmp::Reverse(row["finished"].as_u64().unwrap_or(0)));
     Response::json(&json!({
+        "history": history,
         "runs": runs,
         "queue": queue,
         "running": admission.running(),
@@ -3743,6 +4313,21 @@ fn refused(state: &Arc<State>) -> Response {
                 .map(|r| r.files.max(1) as usize)
                 .sum::<usize>();
             review += needs;
+            // Each row with its risk read off the scan's own verdict, the same
+            // function the scan plan's review items are scored by.
+            let rows: Vec<Value> = rows
+                .iter()
+                .map(|row| {
+                    let mut value = serde_json::to_value(row).unwrap_or(Value::Null);
+                    if let (Some(object), Value::Object(assessed)) = (
+                        value.as_object_mut(),
+                        crate::keyscan::assess(&row.class, &row.path, &row.matches, row.confidence),
+                    ) {
+                        object.extend(assessed);
+                    }
+                    value
+                })
+                .collect();
             stores.push(json!({
                 "store": label,
                 "rows": rows,
@@ -3769,48 +4354,171 @@ fn refused_decide(state: &Arc<State>, request: &Request, accept: bool) -> Respon
         Err(e) => return Response::error(400, &e.to_string()),
     };
     if body.get("paths").is_some() {
-        return Response::error(400, "one file at a time: send path, not paths");
+        return Response::error(400, "send path, or files as a list; not paths");
     }
-    let Some(path) = body.get("path").and_then(Value::as_str) else {
-        return Response::error(400, "path must be one file's path, as a string");
-    };
+    if body.get("files").and_then(Value::as_array).is_none()
+        && body.get("path").and_then(Value::as_str).is_none()
+    {
+        return Response::error(
+            400,
+            "path must be one file's path, as a string, or files a list",
+        );
+    }
     let store = match state.writable(body.get("store").and_then(Value::as_str)) {
         Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
-    let progress = if accept {
-        let mode = body.get("mode").and_then(Value::as_str).unwrap_or("");
+    let mode = body.get("mode").and_then(Value::as_str).unwrap_or("");
+    if accept {
         if !matches!(mode, "redacted" | "as-is" | "refused") {
             return Response::error(400, "mode is redacted, as-is or refused");
         }
         if body.get("reviewed").and_then(Value::as_bool) != Some(true) {
             return Response::error(400, "tick \"I have reviewed this file\" first");
         }
-        let source = match body.get("source").and_then(Value::as_str) {
-            Some("cli") => "cli",
-            _ => "portal",
-        };
-        state.accept(&store, PathBuf::from(path), mode, source)
-    } else {
-        state.revoke(&store, PathBuf::from(path))
+    }
+    let source = match body.get("source").and_then(Value::as_str) {
+        Some("cli") => "cli",
+        _ => "portal",
     };
-    let progress = match progress {
-        Ok(p) => p,
+    let decide = |path: &str| -> Result<Value, String> {
+        let progress = if accept {
+            state.accept(&store, PathBuf::from(path), mode, source)
+        } else {
+            state.revoke(&store, PathBuf::from(path))
+        }
+        .map_err(|e| e.to_string())?;
+        answer_of(progress)
+    };
+    // A list from 0.35.0 (the owner's bulk decision); each file is its own
+    // decision and its own ledger row, and one refusal does not stop the rest.
+    if let Some(files) = body.get("files").and_then(Value::as_array) {
+        let results: Vec<Value> = files
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|path| match decide(path) {
+                Ok(value) => json!({ "path": path, "ok": true, "answer": value }),
+                Err(e) => json!({ "path": path, "ok": false, "error": e }),
+            })
+            .collect();
+        return Response::json(&json!({ "results": results }));
+    }
+    let path = body.get("path").and_then(Value::as_str).unwrap_or_default();
+    match decide(path) {
+        Ok(value) => Response::json(&value),
+        Err(e) => Response::error(409, &e),
+    }
+}
+
+/// The writer's one answer to a decision: its `done`, or its error as text.
+fn answer_of(progress: std::sync::mpsc::Receiver<Value>) -> Result<Value, String> {
+    match progress.recv() {
+        Ok(value) if value.get("event").and_then(Value::as_str) == Some("error") => Err(value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("refused")
+            .to_string()),
+        Ok(value) => Ok(value),
+        Err(_) => Err("the writer stopped before answering".to_string()),
+    }
+}
+
+/// The review list's one write (0.35.0): `in`, `redact`, `out` or `reset`
+/// for a list of files in one store, as the person holding the session
+/// token. Never an agent — the agent key cannot reach any `/api` route — and
+/// a credential file still refuses `in` and `redact`, by name, while the
+/// others proceed. Works for files a held scan offered before any pass wrote
+/// a row for them, which is how the wizard decides before indexing.
+fn decide_files(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(files) = body.get("files").and_then(Value::as_array) else {
+        return Response::error(400, "files must be a list of paths");
+    };
+    let decision = body.get("decision").and_then(Value::as_str).unwrap_or("");
+    let mode = match decision {
+        "in" => Some("as-is"),
+        "redact" => Some("redacted"),
+        "out" => Some("refused"),
+        "reset" => None,
+        _ => return Response::error(400, "decision is in, redact, out or reset"),
+    };
+    let store = match state.writable(body.get("store").and_then(Value::as_str)) {
+        Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
-    match progress.recv() {
-        Ok(value) if value.get("event").and_then(Value::as_str) == Some("error") => {
-            Response::error(
-                409,
-                value
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("refused"),
-            )
+    let results: Vec<Value> = files
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|path| {
+            let progress = match mode {
+                Some(mode) => state.accept(&store, PathBuf::from(path), mode, "portal"),
+                None => state.revoke(&store, PathBuf::from(path)),
+            };
+            match progress.map_err(|e| e.to_string()).and_then(answer_of) {
+                Ok(_) => json!({ "path": path, "ok": true, "decision": decision }),
+                Err(e) => json!({ "path": path, "ok": false, "error": e }),
+            }
+        })
+        .collect();
+    let failed = results.iter().filter(|r| r["ok"] == json!(false)).count();
+    Response::json(&json!({
+        "store": store.name,
+        "decision": decision,
+        "results": results,
+        "failed": failed,
+    }))
+}
+
+/// Every decision about one store's files, the person's and the rules':
+/// `{path, outcome, why, by, at, can_undo}`.
+fn decisions(state: &Arc<State>, request: &Request) -> Response {
+    let wanted = request.query("store").map(str::to_string);
+    with_fleet(state, json!({ "stores": [] }), move |fleet| {
+        let mut stores = Vec::new();
+        for (label, store) in fleet.each() {
+            if wanted.as_deref().is_some_and(|w| w != label) {
+                continue;
+            }
+            let mut rows = Vec::new();
+            for row in crate::store::refusals(store.db())? {
+                let (outcome, by) = match (row.accepted.as_deref(), row.class.as_str()) {
+                    (Some("refused"), _) => ("kept out", "you"),
+                    (Some("redacted"), _) => ("redacted · indexed", "you"),
+                    (Some(_), _) => ("accepted", "you"),
+                    (None, crate::store::class::DUMMY) => ("accepted", "rules"),
+                    (None, crate::store::class::CREDENTIAL | crate::store::class::CONTENT) => {
+                        ("never indexed", "rules")
+                    }
+                    (None, _) => ("skipped", "rules"),
+                };
+                rows.push(json!({
+                    "path": crate::plain(&row.path),
+                    "outcome": outcome,
+                    "why": row.rule,
+                    "by": by,
+                    "at": row.last_seen,
+                    "can_undo": by == "you",
+                    "class": row.class,
+                }));
+            }
+            for image in crate::store::image_rows(store.db()).unwrap_or_default() {
+                rows.push(json!({
+                    "path": crate::plain(&image.path),
+                    "outcome": "read as image",
+                    "why": format!("an image ({}×{} px), searchable by what it shows", image.width, image.height),
+                    "by": "rules",
+                    "at": null,
+                    "can_undo": false,
+                    "class": "image",
+                }));
+            }
+            stores.push(json!({ "store": label, "rows": rows }));
         }
-        Ok(value) => Response::json(&value),
-        Err(_) => Response::error(500, "the writer stopped before answering"),
-    }
+        Ok(json!({ "stores": stores }))
+    })
 }
 
 fn forget(state: &Arc<State>, request: &Request) -> Response {
@@ -3976,6 +4684,125 @@ fn compact_store(state: &Arc<State>, request: &Request) -> Response {
         500,
         "the store's writer ended before the compaction answered",
     )
+}
+
+/// An empty named store, made and served now (the New store button).
+fn create_store(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let name = body.get("name").and_then(Value::as_str).unwrap_or("");
+    let kind = body.get("kind").and_then(Value::as_str).unwrap_or("both");
+    if !matches!(kind, "code" | "docs" | "both") {
+        return Response::error(400, "kind is one of code, docs or both");
+    }
+    match state.create_store(name, kind) {
+        Ok(store) => Response::json(&json!({
+            "name": store.name,
+            "dir": crate::plain(&store.dir.display().to_string()),
+            "kind": kind,
+        })),
+        Err(e) => Response::error(400, &format!("{e:#}")),
+    }
+}
+
+/// `{name, kind, lean, watch, record, gitignore}` for one store, as recorded.
+fn settings_json(name: &str, s: &home::StoreSettings) -> Value {
+    json!({
+        "name": name,
+        "kind": s.kind,
+        "lean": s.lean,
+        "watch": s.watch,
+        "record": s.record,
+        "gitignore": s.gitignore,
+    })
+}
+
+/// The Store settings panel: any of the switches, and a rename, in one
+/// write. Every value is checked before anything is saved, so a bad `lean`
+/// does not leave a half-applied change; the rename goes last because it
+/// closes and reopens the store.
+fn store_settings(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(name) = body.get("store").and_then(Value::as_str) else {
+        return Response::error(400, "missing store");
+    };
+    let Some(store) = state.store(name) else {
+        return Response::error(404, &format!("no store called {name} is open"));
+    };
+    let text = |key: &str, allowed: &[&str]| -> Result<Option<String>, String> {
+        match body.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(v)) if allowed.contains(&v.as_str()) => Ok(Some(v.clone())),
+            Some(_) => Err(format!("{key} is one of {}", allowed.join(", "))),
+        }
+    };
+    let flag = |key: &str| -> Result<Option<bool>, String> {
+        match body.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(v)) => Ok(Some(*v)),
+            Some(_) => Err(format!("{key} is true or false")),
+        }
+    };
+    let parsed = (|| -> Result<_, String> {
+        Ok((
+            text("kind", &["code", "docs", "both"])?,
+            text("lean", &["code", "docs", "either"])?,
+            flag("watch")?,
+            flag("record")?,
+            flag("gitignore")?,
+        ))
+    })();
+    let (kind, lean, watch, record, gitignore) = match parsed {
+        Ok(v) => v,
+        Err(e) => return Response::error(400, &e),
+    };
+    let rename = body
+        .get("rename")
+        .and_then(Value::as_str)
+        .filter(|n| *n != name);
+    if let Some(new) = rename
+        && let Err(e) = home::check_store_name(new)
+    {
+        return Response::error(400, &format!("{e:#}"));
+    }
+
+    let saved = home::update_store_settings(name, |s| {
+        if let Some(v) = kind {
+            s.kind = v;
+        }
+        if let Some(v) = lean {
+            s.lean = v;
+        }
+        if let Some(v) = watch {
+            s.watch = v;
+        }
+        if let Some(v) = record {
+            s.record = v;
+        }
+        if let Some(v) = gitignore {
+            s.gitignore = v;
+        }
+    });
+    let saved = match saved {
+        Ok(s) => s,
+        Err(e) => return Response::error(500, &format!("{e:#}")),
+    };
+    state.settings_changed(&store);
+
+    let mut answered = name.to_string();
+    if let Some(new) = rename {
+        drop(store);
+        match state.rename_store(name, new) {
+            Ok(store) => answered = store.name.clone(),
+            Err(e) => return Response::error(400, &format!("{e:#}")),
+        }
+    }
+    Response::json(&settings_json(&answered, &saved))
 }
 
 fn delete_store(state: &Arc<State>, request: &Request) -> Response {

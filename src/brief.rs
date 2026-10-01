@@ -202,7 +202,20 @@ pub fn brief(
     filter: &Filter,
     prefer: Prefer,
 ) -> Result<Brief> {
-    let hits = fleet.search_preferring(only, question, SPANS, filter, prefer)?;
+    brief_leaning(fleet, only, question, budget, filter, Some(prefer))
+}
+
+/// [`brief`] for a caller that may have sent no preference: `None` takes
+/// each store's `lean` setting, as [`Fleet::search_leaning`] does.
+pub fn brief_leaning(
+    fleet: &mut Fleet,
+    only: Option<&[String]>,
+    question: &str,
+    budget: i64,
+    filter: &Filter,
+    prefer: Option<Prefer>,
+) -> Result<Brief> {
+    let hits = fleet.search_leaning(only, question, SPANS, filter, prefer)?;
 
     // Immutable from here: the counter borrows the fleet, and so does every
     // graph lookup below it.

@@ -155,6 +155,188 @@ pub fn fingerprint(salt: &[u8; 32], text: &str, m: &Match) -> String {
     blake3::keyed_hash(salt, value.as_bytes()).to_hex()[..32].to_string()
 }
 
+/// How bad it would be to index one not-indexed row, for the review list
+/// (0.35.0): `{risk, band, likely, tone, kind, why, evidence, suggest}`.
+///
+/// Read off the verdict this module already gave each match — its dummy rule
+/// and its confidence — and nothing else: there is no second classifier. The
+/// matches are taken as stored (masked, serialised), which is the one shape
+/// both the not-indexed table and the scan plan hold, so the two lists the
+/// portal draws cannot score one file two ways. `evidence` is the match's
+/// mask and line, never its value.
+pub fn assess(
+    class: &str,
+    path: &str,
+    matches: &[serde_json::Value],
+    confidence: Option<u8>,
+) -> serde_json::Value {
+    let text = |m: &serde_json::Value, key: &str| {
+        m.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let live: Vec<&serde_json::Value> = matches
+        .iter()
+        .filter(|m| m.get("dummy").is_none_or(serde_json::Value::is_null))
+        .collect();
+    let first = live.first().copied().or_else(|| matches.first());
+    let kind_of = |m: &serde_json::Value| match text(m, "provider").as_str() {
+        "pem" => "Private key",
+        "aws" | "google" => "Cloud key",
+        "anthropic" | "openai" | "twilio" | "sendgrid" | "stripe" => "API key",
+        "github" | "slack" | "npm" | "semlith" => "Access token",
+        "jwt" => "Token",
+        _ if text(m, "kind").contains("connection") => "Connection string",
+        _ if text(m, "kind").contains("password") => "Password",
+        _ => "Secret",
+    };
+    let evidence = first.map(|m| {
+        format!(
+            "line {} · {} · {}",
+            m.get("line")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            text(m, "kind"),
+            text(m, "masked")
+        )
+    });
+    let is_dir = std::path::Path::new(path).is_dir();
+
+    let (risk, likely, kind, why, suggest): (u8, String, String, String, &str) = match class {
+        crate::store::class::CREDENTIAL => (
+            95,
+            "credential file".into(),
+            "Credential file".into(),
+            "A credential file by its name; semlith never indexes one, whatever is in it.".into(),
+            "out",
+        ),
+        crate::store::class::POLICY => (
+            0,
+            "no secret found".into(),
+            if is_dir { "Generated" } else { "Large file" }.into(),
+            if is_dir {
+                "A generated or vendored folder: indexing it adds chunks nobody asked about."
+            } else {
+                "Over the size cap; nothing secret was found, it is only large."
+            }
+            .into(),
+            if is_dir { "out" } else { "in" },
+        ),
+        _ if live.is_empty() => {
+            let documented = matches
+                .iter()
+                .any(|m| text(m, "dummy").contains("documentation"));
+            let kind = first.map_or("Secret", kind_of).to_string();
+            if matches.is_empty() {
+                (
+                    0,
+                    "no secret found".into(),
+                    kind,
+                    "Nothing secret-shaped was found in it.".into(),
+                    "in",
+                )
+            } else {
+                (
+                    5,
+                    if documented {
+                        "documented example key"
+                    } else {
+                        "likely a test value"
+                    }
+                    .into(),
+                    kind,
+                    format!(
+                        "Every match is a declared test dummy: {}.",
+                        first.map(|m| text(m, "dummy")).unwrap_or_default()
+                    ),
+                    "in",
+                )
+            }
+        }
+        _ => {
+            let top = live
+                .iter()
+                .filter_map(|m| m.get("confidence").and_then(serde_json::Value::as_u64))
+                .max()
+                .map(|c| c.min(100) as u8)
+                .or(confidence)
+                .unwrap_or(50);
+            let m = first.expect("a live match");
+            let kind = kind_of(m).to_string();
+            let noun = if kind == "Password" {
+                "password"
+            } else {
+                "key"
+            };
+            let likely = if top >= 70 {
+                format!("likely a real {noun}")
+            } else if top >= 30 {
+                format!("may be a real {noun}")
+            } else {
+                "likely a test value".to_string()
+            };
+            let up: Vec<String> = m
+                .get("signals")
+                .and_then(serde_json::Value::as_array)
+                .map(|s| {
+                    s.iter()
+                        .filter(|s| {
+                            s.get("effect").and_then(serde_json::Value::as_str) == Some("up")
+                        })
+                        .filter_map(|s| s.get("name").and_then(serde_json::Value::as_str))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let why = format!(
+                "Looks like {} at line {} ({top} % likely real{}).",
+                text(m, "kind"),
+                m.get("line")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                if up.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", up.join(", "))
+                }
+            );
+            let suggest = if top >= 70 {
+                "out"
+            } else if top >= 30 {
+                "redact"
+            } else {
+                "in"
+            };
+            (top, likely, kind, why, suggest)
+        }
+    };
+    let band = if risk >= 70 {
+        "high"
+    } else if risk >= 30 {
+        "medium"
+    } else {
+        "low"
+    };
+    let tone = match (class, band) {
+        (crate::store::class::POLICY, _) => "grey",
+        (_, "high") => "red",
+        (_, "medium") => "amber",
+        _ if risk == 0 => "grey",
+        _ => "green",
+    };
+    serde_json::json!({
+        "risk": risk,
+        "band": band,
+        "likely": likely,
+        "tone": tone,
+        "kind": kind,
+        "why": why,
+        "evidence": evidence,
+        "suggest": suggest,
+    })
+}
+
 /// What a pass does with one scanned file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -922,6 +1104,54 @@ fn base64_url(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stored(text: &str) -> Vec<serde_json::Value> {
+        scan("", text)
+            .iter()
+            .map(|m| serde_json::to_value(m).unwrap())
+            .collect()
+    }
+
+    /// The review list's risk is read off the scan's own verdict: a forged
+    /// live key is high and red and suggested out, a documented example is
+    /// low and green, a credential file is never suggested in, and nothing
+    /// in the answer is the value.
+    #[test]
+    fn a_review_row_is_scored_from_the_scan_and_never_shows_the_value() {
+        let live = forge(3);
+        let text = format!("token = {live}\n");
+        let found = stored(&text);
+        let a = assess(crate::store::class::CONTENT, "/x/a.rs", &found, None);
+        assert_eq!(a["band"], "high", "{a}");
+        assert_eq!(a["tone"], "red");
+        assert_eq!(a["suggest"], "out");
+        assert_eq!(a["kind"], "Access token");
+        assert_eq!(a["likely"], "likely a real key");
+        assert!(a["risk"].as_u64().unwrap() >= 70);
+        assert!(!a.to_string().contains(&live), "the value leaked: {a}");
+        assert!(a["evidence"].as_str().unwrap().starts_with("line 1"));
+
+        let example = concat!("AKIAIOSFODNN7", "EXAMPLE");
+        let doc = assess(
+            crate::store::class::DUMMY,
+            "/x/b.rs",
+            &stored(&format!("key = {example}\n")),
+            None,
+        );
+        assert_eq!(doc["band"], "low", "{doc}");
+        assert_eq!(doc["tone"], "green");
+        assert_eq!(doc["likely"], "documented example key");
+        assert_eq!(doc["suggest"], "in");
+
+        let cred = assess(crate::store::class::CREDENTIAL, "/x/.npmrc", &[], None);
+        assert_eq!(cred["suggest"], "out");
+        assert_eq!(cred["band"], "high");
+
+        let big = assess(crate::store::class::POLICY, "/x/huge.log", &[], None);
+        assert_eq!(big["likely"], "no secret found");
+        assert_eq!(big["tone"], "grey");
+        assert_eq!(big["band"], "low");
+    }
 
     #[test]
     fn crc32_matches_the_standard_check_value() {
