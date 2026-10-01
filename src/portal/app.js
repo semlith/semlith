@@ -92,23 +92,24 @@ function morph(a, b) {
 function btn(props, ...kids) {
   const p = { type: "button", ...props };
   // A control whose work takes a moment says so: while the promise its
-  // handler returns is pending it is disabled, marked busy and shows a
-  // spinner, so a switch that waits on the daemon is never pressed twice or
-  // taken for broken. Synchronous handlers are untouched.
+  // handler returns is pending it is marked busy, shows a spinner and ignores
+  // presses, so a switch that waits on the daemon is never pressed twice or
+  // taken for broken. Not `disabled`: disabling the focused button drops a
+  // keyboard user's focus to the page. Synchronous handlers are untouched.
   if (typeof p.onclick === "function") {
     const handler = p.onclick;
     p.onclick = (e) => {
       const node = e.currentTarget;
+      if (node?.classList.contains("busy")) return;
       const out = handler(e);
       if (out && typeof out.then === "function" && node) {
         node.classList.add("busy");
         node.setAttribute("aria-busy", "true");
-        const was = node.disabled;
-        node.disabled = true;
+        node.setAttribute("aria-disabled", "true");
         const done = () => {
           node.classList.remove("busy");
           node.removeAttribute("aria-busy");
-          node.disabled = was;
+          node.removeAttribute("aria-disabled");
         };
         out.then(done, done);
       }

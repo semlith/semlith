@@ -5284,12 +5284,10 @@ button.gl-row:hover,
   padding: 0 16px;
 }
 /* Busy: a control waiting on the daemon. A switch spins its knob; any other
-   button shows a small spinner after its label. Both are disabled meanwhile. */
+   button shows a small spinner after its label. Both ignore presses meanwhile
+   (aria-disabled, not disabled, so the focus stays on them). */
 button.busy {
   cursor: progress;
-}
-button.busy:disabled {
-  opacity: 1;
 }
 button.busy .tg::after {
   border: 2px solid var(--line);

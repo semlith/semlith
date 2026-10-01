@@ -2404,6 +2404,17 @@ def _(d):
 # ==========================================================================
 
 
+# Whether a tooltip carries the whole of what a line shows. From 0.35.0 a long
+# path is shortened in the middle ("~/a/…/z") and several roots read as the
+# first plus "+ N more", so the tooltip is the longer value: every piece the
+# line shows must be in it.
+COVERS_JS = (
+    "((held, full) => { held = (held || '').trim(); full = (full || '').trim();"
+    " if (!full || !held) return false; if (held === full) return true;"
+    " return full.replace(/ \\+ \\d+ more$/, '').split('\u2026').every(p => held.includes(p.trim())); })"
+)
+
+
 @finding("4.1", "a truncated path carries its full value on hover")
 def _(d):
     # A title then, a `data-tip` from 0.35.0: the page's one tooltip, which
@@ -2416,7 +2427,8 @@ def _(d):
         "[...document.querySelectorAll('#main .gl-row.gl-stores .cellname .b')].filter(b => {"
         " const t = (b.textContent || '').trim(); if (!/[\\\\/~]/.test(t)) return false;"
         " const h = b.closest('[data-tip], [title]');"
-        " return !h || (h.getAttribute('data-tip') || h.getAttribute('title')) !== t; }).map(b => b.textContent.trim())"
+        " return !h || !%s(h.getAttribute('data-tip') || h.getAttribute('title'), t); }).map(b => b.textContent.trim())"
+        % COVERS_JS
     )
     if missing:
         fail("%d store root lines on the Stores list carry no full value on hover. First: %r"
@@ -2620,11 +2632,11 @@ def _(d):
                 const full = (el.innerText || '').trim();
                 const h = el.closest('[data-tip], [title]');
                 const held = h ? (h.getAttribute('data-tip') || h.getAttribute('title') || '') : '';
-                return !full || held.trim() !== full;
+                return !full || !COVERS(held, full);
               })
               .map(el => (el.innerText || '').trim())
               .slice(0, 3)
-            """
+            """.replace("COVERS", COVERS_JS)
         )
         if clipped:
             fail(
