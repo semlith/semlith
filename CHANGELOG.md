@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-02
+
 ### The portal, redrawn
 
 **Nine pages in three groups, and a page per store.** Home, Stores, Search
@@ -33,6 +35,13 @@ on the store's Settings tab. Install update follows Check for updates.
 Settings and Settings › Performance are patched in place: the Pause button
 you pressed stays where it was with the focus on it, and a half-typed store
 name survives every poll.
+
+**A large store's Graph page no longer holds the daemon.** On the 879k-chunk
+benchmark corpus the Graph page's first fetch took minutes, and every other
+route waited behind it. The drawing now reads the store on a read-only
+connection of its own, so Search, Home and the rest keep answering (worst
+0.83 s while a graph was drawn), and it is cheaper: the default view drew in
+57 s and now takes 5-10 s the first time and under 0.1 s after.
 
 **Add sources adds a folder.** Adding a folder to a store that already has
 roots posts `add_roots`, so the folder becomes one of its roots before the
@@ -4225,7 +4234,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.34.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.35.0...HEAD
+[0.35.0]: https://github.com/semlith/semlith/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/semlith/semlith/compare/v0.33.1...v0.34.0
 [0.33.1]: https://github.com/semlith/semlith/compare/v0.33.0...v0.33.1
 [0.33.0]: https://github.com/semlith/semlith/compare/v0.32.0...v0.33.0
