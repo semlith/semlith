@@ -2987,7 +2987,15 @@ def reach(d, symbol, store=None):
         current = d.eval("((document.querySelector('.ctrl-card button[aria-haspopup] .mono') || {}).textContent || '').trim()")
         if current != store:
             pick_store(d, ".ctrl-card button[aria-haspopup]", store, "graph/blast")
-    d.type('.ctrl-card input[aria-label="Symbol"]', symbol)
+    # Typed until the field holds exactly the symbol: the page repaints when
+    # the store's hubs arrive, and a repaint between the clear and the typing
+    # put the last symbol back with the caret after it ("calleecallee").
+    box = '.ctrl-card input[aria-label="Symbol"]'
+    for _ in range(3):
+        d.type(box, symbol)
+        pause(d, 300)
+        if d.eval("(document.querySelector(%s) || {}).value" % json.dumps(box)) == symbol:
+            break
     press_text(d, ".ctrl-card button", "Reach", "Reach")
     d.wait_for("!document.querySelector('#main .spinner') && (!!document.querySelector('#main .q3') || !!document.querySelector('#main .error-box'))",
                timeout=40, what="Blast radius to answer for %s" % symbol)
