@@ -2461,6 +2461,12 @@ pub struct State {
     /// daemon they only just started. Readers take a snapshot rather than hold
     /// the guard, so a slow search never blocks a store being opened.
     stores: RwLock<Vec<Arc<Store>>>,
+    /// Store directories a delete is taking down. Between leaving the served
+    /// set and leaving the registry a store is registered and unserved, which
+    /// is exactly what `reconcile` opens -- and an open there recreated the
+    /// store a stop had just deleted and caught it up again (the macOS drive's
+    /// 8.6). `reconcile` passes these over.
+    deleting: Mutex<std::collections::BTreeSet<PathBuf>>,
     /// The writer threads of stores opened after startup, joined at shutdown
     /// with the startup ones. They were detached until 0.33.0, so a stop while
     /// one was embedding let `main` return and tear ONNX Runtime down under a
@@ -2636,7 +2642,13 @@ impl State {
                 continue;
             };
             let dir = crate::canonical(&dir);
-            if open.contains(&dir) {
+            if open.contains(&dir)
+                || self
+                    .deleting
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&dir)
+            {
                 continue;
             }
             if !dir.exists() {
@@ -2897,6 +2909,22 @@ impl State {
         let Some(store) = self.store(name) else {
             anyhow::bail!("this daemon is not serving a store called {name}");
         };
+        // Held until the registry entry is gone, whichever way this returns.
+        struct Deleting<'a>(&'a Mutex<std::collections::BTreeSet<PathBuf>>, PathBuf);
+        impl Drop for Deleting<'_> {
+            fn drop(&mut self) {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&self.1);
+            }
+        }
+        let dir = crate::canonical(&store.dir);
+        self.deleting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(dir.clone());
+        let _deleting = Deleting(&self.deleting, dir);
 
         store.stop.store(true, Ordering::SeqCst);
         // The watcher checks the flag between filesystem events, so this is a
@@ -3689,6 +3717,7 @@ pub fn run(
         server: Arc::clone(&server),
         fleet: Mutex::new(fleet),
         stores: RwLock::new(stores),
+        deleting: Mutex::new(std::collections::BTreeSet::new()),
         late_writers: Mutex::new(Vec::new()),
         admission: Arc::new(Admission::new(limits.runs_at_once.value)),
         airgap,
@@ -5577,6 +5606,7 @@ mod tests {
             debounce: Duration::from_millis(500),
             report: Arc::new(|_| {}),
             refusals: Mutex::new(BTreeMap::new()),
+            deleting: Mutex::new(std::collections::BTreeSet::new()),
             late_writers: Mutex::new(Vec::new()),
             awaiting: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
