@@ -745,6 +745,17 @@ fn checkpoint_files() -> usize {
     }
 }
 
+/// One resolved filter: what it was, the store state it was resolved
+/// against, and what it resolved to.
+struct FilterMemo {
+    groups: Vec<Vec<String>>,
+    generation: u64,
+    newest_chunk: i64,
+    allowlist: Allowlist,
+    selected: std::sync::Arc<std::collections::HashSet<u64>>,
+}
+
+/// What `read` was asked for: a span of a file, or a symbol by name.
 ///
 /// Parsed rather than guessed at, so `src/store.rs:1041-1080` and
 /// `record_retrieval` are told apart by shape and a caller is never handed the
@@ -1603,6 +1614,11 @@ pub struct Semlith {
     /// The index generation this process has loaded. Compared against the
     /// store's on every search to notice another process's writes.
     generation: u64,
+    /// The last filter this store resolved, kept until the store changes. An
+    /// agent scoped to one repository asks with the same `path` call after
+    /// call, and resolving it again was the largest cost left in a scoped
+    /// search (#170).
+    filter_memo: Option<FilterMemo>,
     /// Print model-download progress to stderr. Off for the MCP server, where
     /// stdout/stderr are a protocol channel.
     pub quiet: bool,
@@ -1713,6 +1729,7 @@ impl Semlith {
             tokenizer: None,
             clip: image::Clip::default(),
             generation,
+            filter_memo: None,
             quiet: false,
             boundary: Boundary::default(),
             gitignore: true,
@@ -4558,14 +4575,34 @@ impl Semlith {
         self.search_filtered(query, k, &Filter::default())
     }
 
-    /// Resolve a filter to the ids the vector index may consider.
-    fn allowlist(&mut self, filter: &Filter) -> Result<Allowlist> {
+    /// Resolve a filter to the ids the vector index may consider, and every
+    /// chunk the filter selects -- the keyword list's set, which also holds
+    /// chunks whose vectors are still being made. `None` for no filter.
+    fn allowlist(
+        &mut self,
+        filter: &Filter,
+    ) -> Result<(
+        Allowlist,
+        Option<std::sync::Arc<std::collections::HashSet<u64>>>,
+    )> {
         if filter.is_empty() {
-            return Ok(Allowlist::All);
+            return Ok((Allowlist::All, None));
+        }
+        // The same filter over the same store is the same answer. "Same
+        // store" is the index generation, which every committed write moves,
+        // and the newest chunk id, which a row written ahead of its vectors
+        // moves before the generation does.
+        let newest_chunk = store::newest_chunk(&self.db)?;
+        if let Some(memo) = &self.filter_memo
+            && memo.groups == filter.groups()
+            && memo.generation == self.generation
+            && memo.newest_chunk == newest_chunk
+        {
+            return Ok((memo.allowlist.clone(), Some(memo.selected.clone())));
         }
         let candidates = store::filtered_chunk_ids(&self.db, filter.groups())?;
         let mut ids = Vec::with_capacity(candidates.len());
-        for id in candidates {
+        for &id in &candidates {
             // turbovec panics on an id the index does not hold, and SQLite can
             // hold a chunk the index does not if a run was interrupted between
             // the two. A stale row must not take a search down with it.
@@ -4574,7 +4611,7 @@ impl Semlith {
             }
         }
 
-        Ok(if ids.is_empty() {
+        let allowlist = if ids.is_empty() {
             Allowlist::Empty
         } else if ids.len() == self.len() {
             // The filter excludes nothing, so skip building a mask the size of
@@ -4582,7 +4619,16 @@ impl Semlith {
             Allowlist::All
         } else {
             Allowlist::Subset(ids)
-        })
+        };
+        let selected = std::sync::Arc::new(candidates.into_iter().collect());
+        self.filter_memo = Some(FilterMemo {
+            groups: filter.groups().to_vec(),
+            generation: self.generation,
+            newest_chunk,
+            allowlist: allowlist.clone(),
+            selected: std::sync::Arc::clone(&selected),
+        });
+        Ok((allowlist, Some(selected)))
     }
 
     /// How many indexed files `filter` selects.
@@ -4736,7 +4782,7 @@ impl Semlith {
         // Which half of the fusion this query's own text says to trust.
         let shape = shape_of(query);
 
-        let allowlist = self.allowlist(filter)?;
+        let (allowlist, selected) = self.allowlist(filter)?;
         if matches!(allowlist, Allowlist::Empty) {
             return Ok(Vec::new());
         }
@@ -4821,7 +4867,12 @@ impl Semlith {
 
         let (dense_scores, dense_ids) = self.search_vectors(vector, depth, &allowlist)?;
         let (dense_scores, dense_ids) = self.rescored(vector, dense_scores, dense_ids);
-        let keyword_ids = store::keyword_search(&self.db, query, depth, filter.groups())?;
+        // The filter's set once, shared: the keyword list used to resolve the
+        // filter again in SQL, which was most of a scoped search (#170).
+        let keyword_ids = match &selected {
+            Some(set) => store::keyword_search_within(&self.db, query, depth, set)?,
+            None => store::keyword_search(&self.db, query, depth, &[])?,
+        };
         // Mid-run, the keyword half already holds chunks the vector half has
         // not reached. A few of the best of them are embedded here, on the
         // query path, and join the vector list by their own similarity, so a

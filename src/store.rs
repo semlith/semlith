@@ -675,6 +675,11 @@ pub fn is_interrupted(e: &anyhow::Error) -> bool {
     })
 }
 
+/// The highest chunk id, or 0 for none. One step down the rowid b-tree.
+pub fn newest_chunk(db: &Connection) -> Result<i64> {
+    Ok(db.query_row("SELECT COALESCE(MAX(id), 0) FROM chunks", [], |r| r.get(0))?)
+}
+
 /// Ids of every chunk whose file matches `groups`.
 ///
 /// This is the single source of the subset. The vector index gets these ids as
@@ -683,8 +688,12 @@ pub fn is_interrupted(e: &anyhow::Error) -> bool {
 /// see.
 pub fn filtered_chunk_ids(db: &Connection, groups: &[Vec<String>]) -> Result<Vec<u64>> {
     let (predicate, binds) = glob_predicate(groups);
-    let sql =
-        format!("SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE {predicate}");
+    // Files first, then their chunks through `chunks_file_id`. A join planned
+    // the other way scanned every chunk and tested its file's path, 250-680 ms
+    // on the 879k-chunk corpus; this is 24-48 ms for the same rows (#170).
+    let sql = format!(
+        "SELECT id FROM chunks WHERE file_id IN (SELECT f.id FROM files f WHERE {predicate})"
+    );
     let mut stmt = db.prepare(&sql)?;
     let args = binds.into_iter().map(Value::Text);
     let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, i64>(0))?;
@@ -739,6 +748,26 @@ pub fn keyword_search(
     limit: usize,
     groups: &[Vec<String>],
 ) -> Result<Vec<u64>> {
+    let Some(match_expr) = match_expr(query) else {
+        return Ok(Vec::new());
+    };
+    if groups.is_empty() {
+        let mut stmt = db.prepare(UNFILTERED_SQL)?;
+        let rows = stmt.query_map(params![match_expr, limit as i64], |r| r.get::<_, i64>(0))?;
+        return Ok(rows
+            .collect::<Result<Vec<i64>, _>>()?
+            .into_iter()
+            .map(|i| i as u64)
+            .collect());
+    }
+    let allowed: std::collections::HashSet<u64> =
+        filtered_chunk_ids(db, groups)?.into_iter().collect();
+    keyword_search_within(db, query, limit, &allowed)
+}
+
+/// The FTS5 expression for `query`: its words, quoted, OR-ed. `None` when it
+/// has no word at all.
+fn match_expr(query: &str) -> Option<String> {
     let words: Vec<&str> = query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|t| !t.is_empty())
@@ -756,38 +785,41 @@ pub fn keyword_search(
         .collect();
     let kept = if content.is_empty() { &words } else { &content };
     let terms: Vec<String> = kept.iter().map(|t| format!("\"{t}\"")).collect();
-    if terms.is_empty() {
+    (!terms.is_empty()).then(|| terms.join(" OR "))
+}
+
+/// The keyword list inside a set of chunk ids, for a filtered search that has
+/// the set already.
+///
+/// Every match is read with its rank and the set is applied here. Joining the
+/// matches to their files in SQL stopped FTS5 applying its own `LIMIT`, so it
+/// ranked and joined every match: 81-688 ms on the 879k-chunk corpus against
+/// 14 ms unfiltered, which is most of why a scoped search was slower than an
+/// unscoped one (#170). Reading the matches is the 14 ms, the filter well
+/// under one, and the order is the same.
+pub fn keyword_search_within(
+    db: &Connection,
+    query: &str,
+    limit: usize,
+    allowed: &std::collections::HashSet<u64>,
+) -> Result<Vec<u64>> {
+    let Some(match_expr) = match_expr(query) else {
         return Ok(Vec::new());
-    }
-    let match_expr = terms.join(" OR ");
-
-    let (sql, mut args) = if groups.is_empty() {
-        (UNFILTERED_SQL.to_string(), vec![Value::Text(match_expr)])
-    } else {
-        let (predicate, binds) = glob_predicate(groups);
-        let mut args = vec![Value::Text(match_expr)];
-        args.extend(binds.into_iter().map(Value::Text));
-        (
-            format!(
-                "SELECT x.rowid FROM chunks_fts x
-                 JOIN chunks c ON c.id = x.rowid
-                 JOIN files f ON f.id = c.file_id
-                 WHERE x.chunks_fts MATCH ? AND {predicate}
-                 ORDER BY x.rank LIMIT ?"
-            ),
-            args,
-        )
     };
-    // Bound last because `LIMIT` is the final placeholder in either statement.
-    args.push(Value::Integer(limit as i64));
-
-    let mut stmt = db.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, i64>(0))?;
-    Ok(rows
-        .collect::<Result<Vec<i64>, _>>()?
-        .into_iter()
-        .map(|i| i as u64)
-        .collect())
+    let mut stmt = db.prepare("SELECT rowid, rank FROM chunks_fts WHERE chunks_fts MATCH ?")?;
+    let rows = stmt.query_map(params![match_expr], |r| {
+        Ok((r.get::<_, i64>(0)? as u64, r.get::<_, f64>(1)?))
+    })?;
+    let mut kept: Vec<(u64, f64)> = Vec::new();
+    for row in rows {
+        let (id, rank) = row?;
+        if allowed.contains(&id) {
+            kept.push((id, rank));
+        }
+    }
+    // FTS5's rank is ascending-is-better; ties by id, as the index gives them.
+    kept.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    Ok(kept.into_iter().take(limit).map(|(id, _)| id).collect())
 }
 
 pub fn get_meta(db: &Connection, k: &str) -> Result<Option<String>> {
