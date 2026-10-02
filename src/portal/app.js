@@ -3174,14 +3174,23 @@ function wizardScreen() {
     const scanning = w.scan.state !== "done";
     if (scanning) {
       const total = runs.reduce((a, r) => a + (r.total || 0), 0);
-      const scanned = runs.reduce((a, r) => a + (r.scanned || 0), 0);
-      const p = total ? (scanned / total) * 100 : 3;
+      const realScanned = runs.reduce((a, r) => a + (r.scanned || 0), 0);
+      // Shown at the slower of the real scan and a pace of 4-8 seconds: a
+      // scan of a small folder is over in a blink, and a card that flashes
+      // past says nothing about what was checked. A slow scan is never
+      // hurried; the pace only holds a fast one back.
+      const real = w.scan.realDone ? 1 : total ? realScanned / total : 0;
+      const paced = Math.min(1, (Date.now() - (w.scan.began || Date.now())) / (w.scan.pace || 1));
+      const f = Math.min(real, paced);
+      const p = Math.max(3, f * 100);
+      const scanned = total ? Math.min(realScanned || total, Math.round(f * total)) : 0;
       const stages = [
-        ["Walking the tree", total > 0, !total, total ? plural(total, "file") : ""],
-        ["Reading and hashing", scanned >= total && total > 0, total > 0 && scanned < total, total ? `${n(scanned)} / ${n(total)}` : ""],
-        ["Checking for credentials", scanned >= total && total > 0, total > 0 && scanned < total, "content + names"],
-        ["Matching rules", false, scanned >= total && total > 0, ".gitignore · build"],
+        ["Walking the tree", f >= 0.15, f < 0.15, total ? plural(total, "file") : ""],
+        ["Reading and hashing", f >= 0.55, f >= 0.15 && f < 0.55, total ? `${n(scanned)} / ${n(total)}` : ""],
+        ["Checking for credentials", f >= 0.85, f >= 0.55 && f < 0.85, "content + names"],
+        ["Matching rules", f >= 1, f >= 0.85 && f < 1, ".gitignore · build"],
       ];
+      paceScan();
       return el(
         "div",
         { class: "card pad16" },
@@ -3203,8 +3212,30 @@ function wizardScreen() {
     return reviewPanel();
   }
 
+  // While a scan is shown, the card is redrawn a few times a second so the
+  // paced bar moves; the scan reads as done only when the real scan has
+  // finished and the pace has run its course.
+  function paceScan() {
+    const scan = w.scan;
+    if (scan.tick) return;
+    scan.tick = setInterval(() => {
+      // Its own scan only: a scan started again is a new object.
+      if (!host.isConnected || w.scan !== scan || scan.state !== "scanning") {
+        clearInterval(scan.tick);
+        scan.tick = null;
+        return;
+      }
+      if (scan.realDone && Date.now() - scan.began >= scan.pace) {
+        clearInterval(scan.tick);
+        scan.tick = null;
+        scan.state = "done";
+      }
+      if (w.step === 3) paint();
+    }, 150);
+  }
+
   async function startScan() {
-    w.scan = { state: "scanning", runs: [], error: "" };
+    w.scan = { state: "scanning", runs: [], error: "", began: Date.now(), pace: 4000 + Math.random() * 4000 };
     const paths = w.sources.filter((s) => s.type !== "url").map((s) => s.path);
     if (!paths.length) {
       // Only URLs: nothing to scan. They are fetched when the run starts.
@@ -3950,8 +3981,15 @@ function wizardScreen() {
     if (!host.isConnected) return offRuns();
     const scans = scanRuns();
     if (w.scan.state === "scanning" && scans.length && scans.every((r) => r.status !== "running" && r.status !== "queued")) {
-      w.scan.state = scans.some((r) => r.status === "failed") ? "error" : "done";
-      if (w.scan.state === "error") w.scan.error = "The scan failed. Its log is on the store's Runs tab.";
+      // A failure shows at once; a success waits for the paced card to
+      // reach its end (paceScan), unless the pace is already over.
+      if (scans.some((r) => r.status === "failed")) {
+        w.scan.state = "error";
+        w.scan.error = "The scan failed. Its log is on the store's Runs tab.";
+      } else {
+        w.scan.realDone = true;
+        if (!w.scan.began || Date.now() - w.scan.began >= (w.scan.pace || 0)) w.scan.state = "done";
+      }
     }
     // When the started runs end, the store's own totals are read once more,
     // so the done card counts what the store holds now.
