@@ -602,10 +602,7 @@ impl Server {
                     let taken = live.fetch_add(1, Ordering::Relaxed);
                     let in_flight = InFlight(Arc::clone(&live), crate::priority::request());
                     if taken >= MAX_CONNECTIONS {
-                        let _ = write_response(
-                            &mut stream,
-                            Response::new(503, "text/plain", Vec::new()),
-                        );
+                        refuse_busy(stream);
                         drop(in_flight);
                         continue;
                     }
@@ -685,6 +682,54 @@ impl Auth {
             !previous.is_empty() && *until > std::time::Instant::now() && same(bearer, previous)
         })
     }
+}
+
+/// How long a connection past the limit may take to finish sending its
+/// request before it is answered anyway.
+const BUSY_READ: Duration = Duration::from_millis(50);
+
+/// The most of a refused request read before answering it.
+const BUSY_DRAIN: usize = 64 * 1024;
+
+/// Answer a connection past [`MAX_CONNECTIONS`] with 503, having read its
+/// request first.
+///
+/// Closing a socket whose request is still unread is a reset, not a close, on
+/// Windows and Linux alike, and a browser shows a reset as
+/// ERR_CONNECTION_RESET rather than the 503 -- the Windows drive's intermittent
+/// failure (#181). So the head and the body it declares are read off first,
+/// up to [`BUSY_DRAIN`], and the write side is shut so the client reads the
+/// 503 and then an end of stream. On loopback the request lands with the
+/// connect, so this is microseconds; [`BUSY_READ`] bounds what a slow sender
+/// can cost the accept loop.
+fn refuse_busy(mut stream: TcpStream) {
+    let started = std::time::Instant::now();
+    let _ = stream.set_read_timeout(Some(BUSY_READ));
+    let mut seen: Vec<u8> = Vec::new();
+    let mut want: Option<usize> = None;
+    let mut buf = [0u8; 8 * 1024];
+    while seen.len() < BUSY_DRAIN && started.elapsed() < BUSY_READ {
+        if want.is_some_and(|total| seen.len() >= total) {
+            break;
+        }
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => seen.extend_from_slice(&buf[..n]),
+        }
+        if want.is_none()
+            && let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n")
+        {
+            let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
+            let body = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            want = Some(end + 4 + body);
+        }
+    }
+    let _ = write_response(&mut stream, Response::new(503, "text/plain", Vec::new()));
+    let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
 /// Answer one connection. Returns why it was refused, if it was.
@@ -1419,6 +1464,40 @@ mod tests {
         // where the entropy is.
         assert_eq!(token_from(Ok([0u8; 32])), "0".repeat(64));
         assert_eq!(&token_from(Ok([0xab; 32]))[..4], "abab");
+    }
+
+    /// A connection past the limit is answered 503 and closed cleanly, not
+    /// reset. Closing a socket whose request was never read sends a reset on
+    /// Windows and Linux, which a browser reports as ERR_CONNECTION_RESET and
+    /// never shows the 503 (#181).
+    #[test]
+    fn a_connection_past_the_limit_is_answered_not_reset() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = std::thread::spawn(move || {
+            let mut c = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+            let body = vec![b'x'; 8 * 1024];
+            let head = format!(
+                "POST /api/x HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            c.write_all(head.as_bytes()).unwrap();
+            c.write_all(&body).unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut answer = Vec::new();
+            c.read_to_end(&mut answer).map(|_| answer)
+        });
+        let (stream, _) = listener.accept().unwrap();
+        // Give the client's bytes time to land in the receive buffer, as they
+        // have under a real flood.
+        std::thread::sleep(Duration::from_millis(100));
+        refuse_busy(stream);
+        let answer = client.join().unwrap().expect("the client saw a reset");
+        assert!(
+            String::from_utf8_lossy(&answer).starts_with("HTTP/1.1 503"),
+            "{}",
+            String::from_utf8_lossy(&answer)
+        );
     }
 
     /// A mistyped URL costs a quarter of a second; a run of guesses costs more
