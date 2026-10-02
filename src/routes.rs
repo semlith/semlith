@@ -3176,6 +3176,12 @@ fn corpus(state: &Arc<State>) -> Response {
     // every other read route behind it (found 2026-09-30, `/api/stores` held
     // for about five minutes). The rows are the store's own, so a second
     // reader answers exactly what the fleet's would.
+    //
+    // And off the request (#175): a measure is kept per store until the store
+    // changes, and one that has to be taken is taken on a thread of its own
+    // while the page shows the last one, or `measuring`. A cold measure of the
+    // corpus store was 373 s of I/O and CPU on an HTTP worker, competing with
+    // every other route on every visit.
     let mut stores = Vec::new();
     // A store whose directory has gone is left out, as `open_fleet` leaves it.
     for store in state
@@ -3183,26 +3189,95 @@ fn corpus(state: &Arc<State>) -> Response {
         .into_iter()
         .filter(|s| s.dir.join("store.db").exists())
     {
-        let measured = crate::store::open(&store.dir.join("store.db")).and_then(|db| {
-            crate::store::corpus(&db, |path| {
-                language_of(std::path::Path::new(path)).to_string()
-            })
-        });
-        match measured {
-            Ok(measured) => {
-                let mut row = serde_json::to_value(&measured).unwrap_or_else(|_| json!({}));
-                if let Some(map) = row.as_object_mut() {
-                    map.insert("store".into(), json!(store.name));
-                }
-                stores.push(row);
+        let db_path = store.dir.join("store.db");
+        let key = crate::store::open(&db_path)
+            .and_then(|db| Ok((crate::store::stats(&db)?, crate::store::last_write(&db)?)));
+        let key = match key {
+            Ok(key) => key,
+            Err(e) => {
+                stores.push(json!({ "store": store.name, "error": format!("{e:#}") }));
+                continue;
             }
-            // One store that cannot be measured is not the whole page. It is
-            // reported as itself, the way an unreadable store is.
-            Err(e) => stores.push(json!({ "store": store.name, "error": format!("{e:#}") })),
+        };
+        let cached = MEASURED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&store.dir)
+            .cloned();
+        match cached {
+            Some((at, row)) if at == key => {
+                stores.push(row);
+                continue;
+            }
+            Some((_, row)) => stores.push(row),
+            None => stores.push(json!({ "store": store.name, "measuring": true })),
+        }
+        let (dir, name) = (store.dir.clone(), store.name.clone());
+        let measure = move || {
+            let measured = crate::store::open(&dir.join("store.db")).and_then(|db| {
+                crate::store::corpus(&db, |path| {
+                    language_of(std::path::Path::new(path)).to_string()
+                })
+            });
+            let row = match measured {
+                Ok(measured) => {
+                    let mut row = serde_json::to_value(&measured).unwrap_or_else(|_| json!({}));
+                    if let Some(map) = row.as_object_mut() {
+                        map.insert("store".into(), json!(name));
+                    }
+                    row
+                }
+                // One store that cannot be measured is not the whole page.
+                // It is reported as itself, the way an unreadable store is.
+                Err(e) => json!({ "store": name, "error": format!("{e:#}") }),
+            };
+            MEASURED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(dir.clone(), (key, row.clone()));
+            MEASURING
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&dir);
+            row
+        };
+        // A small store is measured here, in well under a second, so the page
+        // has its figures on the first read; only a large one goes to a thread.
+        let chunks = (key.0).1;
+        if chunks <= INLINE_MEASURE_CHUNKS {
+            let row = measure();
+            stores.pop();
+            stores.push(row);
+            continue;
+        }
+        let started = MEASURING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(store.dir.clone());
+        if started {
+            std::thread::spawn(move || {
+                measure();
+                daemon::changes::bump(daemon::changes::Domain::Stores);
+            });
         }
     }
     Response::json(&json!({ "stores": stores }))
 }
+
+/// The largest store measured on the request itself.
+const INLINE_MEASURE_CHUNKS: i64 = 20_000;
+
+/// What changes a store's measure: its counts and its last write.
+type MeasureKey = ((i64, i64, i64), Option<i64>);
+
+/// Each store's last measure for `Inside the index`, by store directory.
+static MEASURED: std::sync::Mutex<std::collections::BTreeMap<PathBuf, (MeasureKey, Value)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The stores being measured now, so a second visit does not start a second
+/// measure of the same store.
+static MEASURING: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
 
 /// One of the five reports, in one of the five formats, over a window and a
 /// scope.
@@ -3304,6 +3379,9 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
 /// drawable nor readable. The payload is a documented shape rather than
 /// whatever the renderer happened to want: `{ nodes, edges, total, shown }`,
 /// so another tool can draw the same graph and the renderer can be replaced.
+/// How long one Graph request may read before it is refused as too large.
+const GRAPH_LIMIT: std::time::Duration = std::time::Duration::from_secs(15);
+
 fn graph(state: &Arc<State>, request: &Request) -> Response {
     let focus = request.query("name").map(str::to_string);
     let prefix = request.query("path").map(str::to_string);
@@ -3357,7 +3435,22 @@ fn graph(state: &Arc<State>, request: &Request) -> Response {
     }
     let stores: Vec<(&str, &rusqlite::Connection)> =
         opened.iter().map(|(l, c)| (l.as_str(), c)).collect();
-    match crate::graph::scoped(&stores, focus.as_deref(), prefix.as_deref(), limit, many) {
+    // Bounded, because the fleet lock is not the only thing a drawing over
+    // every edge of a very large store can hold: it held a worker for twelve
+    // minutes and the page asked again (#173). Past the limit the answer says
+    // to scope it.
+    let conns: Vec<&rusqlite::Connection> = stores.iter().map(|(_, c)| *c).collect();
+    let drawn = crate::store::bounded(&conns, GRAPH_LIMIT, || {
+        crate::graph::scoped(&stores, focus.as_deref(), prefix.as_deref(), limit, many)
+    });
+    match drawn {
+        Err(e) if crate::store::is_interrupted(&e) => Response::error(
+            503,
+            &format!(
+                "the graph took longer than {} s to draw; pick one store, a path or a name",
+                GRAPH_LIMIT.as_secs()
+            ),
+        ),
         Ok(mut value) => {
             if !failed.is_empty()
                 && let Some(object) = value.as_object_mut()

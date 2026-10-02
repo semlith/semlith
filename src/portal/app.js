@@ -4796,7 +4796,8 @@ function storesList() {
 const PALETTE = ["#F0A43C", "#4C7088", "#3E9A6E", "#2F4F68", "#B07A2A", "#8A9DAB"];
 
 function insideIndex() {
-  const corpus = (data.corpus?.stores || []).filter((c) => !c.error);
+  const corpus = (data.corpus?.stores || []).filter((c) => !c.error && !c.measuring);
+  const measuring = (data.corpus?.stores || []).filter((c) => c.measuring);
   const sum = (k) => corpus.reduce((a, c) => a + (c[k] || 0), 0);
   const files = sum("files");
   const lines = sum("lines");
@@ -4845,7 +4846,8 @@ function insideIndex() {
   return el(
     "div",
     { class: "stack" },
-    el("div", { class: "muted t-sm", text: `Measured from the stores themselves on every read, not estimated — ${plural(corpus.length, "store")}, ${n(files)} files.` }),
+    el("div", { class: "muted t-sm", text: `Measured from the stores themselves, again after every change, not estimated — ${plural(corpus.length, "store")}, ${n(files)} files.` }),
+    measuring.length ? el("div", { class: "notice" }, el("span", { class: "sub", text: `Measuring ${measuring.map((m) => m.store).join(", ")} — the figures appear here when it is done.` })) : null,
     errs.length ? el("div", { class: "notice red" }, el("span", { class: "sub", text: `${errs.map((e) => e.store).join(", ")} could not be measured: ${errs[0].error}` })) : null,
     el(
       "div",

@@ -5258,12 +5258,15 @@ mod tests {
     /// a store's writer ending are three writes of one domain, and there is no
     /// single function they go through — `open_store` takes a lock and spawns
     /// a watcher, `delete_store` stops one and removes the directory, and
-    /// `keep_writing` is the thread itself ending. `runs`: a store's own runs,
+    /// `keep_writing` is the thread itself ending; and from 0.36.0 a large
+    /// store's `Inside the index` measure finishing on its own thread, which
+    /// is a new reading of the store rather than a write anyone else makes
+    /// (#175). `runs`: a store's own runs,
     /// and the cards of runs whose stop deleted their store, which no store is
     /// left to hold. Every other domain has exactly one writer and a second
     /// site would be a second source of truth.
     const BUMP_SITES: &[(&str, usize)] = &[
-        ("stores", 3),
+        ("stores", 4),
         ("runs", 2),
         ("clients", 1),
         ("ledger", 1),

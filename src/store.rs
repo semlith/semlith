@@ -637,6 +637,44 @@ fn glob_predicate(groups: &[Vec<String>]) -> (String, Vec<String>) {
     (clauses.join(" AND "), binds)
 }
 
+/// Run `work` over `conns`, interrupting their queries once `limit` passes.
+///
+/// For the reads a person asks for on a store of any size -- the Graph page's
+/// drawing over every edge of a 879k-chunk store did not answer in twelve
+/// minutes and held a worker the whole time (#173). An interrupted query fails
+/// with SQLite's "interrupted", which [`is_interrupted`] recognises, so the
+/// caller can say the request was too large rather than that it broke.
+pub fn bounded<T>(
+    conns: &[&Connection],
+    limit: std::time::Duration,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let handles: Vec<rusqlite::InterruptHandle> =
+        conns.iter().map(|c| c.get_interrupt_handle()).collect();
+    let (done, wait) = std::sync::mpsc::channel::<()>();
+    let timer = std::thread::spawn(move || {
+        if wait.recv_timeout(limit) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+            for handle in &handles {
+                handle.interrupt();
+            }
+        }
+    });
+    let out = work();
+    let _ = done.send(());
+    let _ = timer.join();
+    out
+}
+
+/// Whether an error is a query [`bounded`] interrupted.
+pub fn is_interrupted(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            == Some(rusqlite::ErrorCode::OperationInterrupted)
+    })
+}
+
 /// Ids of every chunk whose file matches `groups`.
 ///
 /// This is the single source of the subset. The vector index gets these ids as
@@ -4503,6 +4541,31 @@ mod tests {
     /// More names than SQLite takes variables in one statement. 0.32.0 bound
     /// them all into one `IN (...)`, and on the 70-repository benchmark corpus
     /// every search failed with "too many SQL variables".
+    /// A read that runs past its limit is interrupted and says so; one that
+    /// finishes inside it is untouched.
+    #[test]
+    fn a_bounded_read_is_interrupted_at_its_limit() {
+        let db = Connection::open_in_memory().unwrap();
+        let started = std::time::Instant::now();
+        let slow = bounded(&[&db], std::time::Duration::from_millis(100), || {
+            let n: i64 = db.query_row(
+                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) \
+                 SELECT COUNT(*) FROM (SELECT x FROM c LIMIT 10000000000)",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(n)
+        });
+        let err = slow.expect_err("a ten-billion-row count finished");
+        assert!(is_interrupted(&err), "{err:#}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+        let quick = bounded(&[&db], std::time::Duration::from_secs(5), || {
+            Ok(db.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?)
+        });
+        assert_eq!(quick.unwrap(), 1);
+    }
+
     #[test]
     fn symbols_by_names_takes_more_names_than_sqlite_takes_variables() {
         let db = Connection::open_in_memory().unwrap();
