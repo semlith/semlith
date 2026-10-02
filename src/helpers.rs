@@ -58,7 +58,7 @@ impl Env {
     }
 }
 
-/// One helper, as `GET /api/helpers` lists it.
+/// One helper, as `semlith setup --file-managers` reports it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Helper {
     pub id: &'static str,

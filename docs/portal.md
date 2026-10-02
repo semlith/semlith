@@ -1339,11 +1339,6 @@ read from the daemon.
 - **Prices** — the price table behind the ledger's cost and every savings figure:
   how many models, from which source and date. **Update prices** is `semlith
   prices update`.
-- **Index from your file manager** — the helpers that add **Index with semlith**
-  to Finder, Explorer (a verb under the user's own registry keys and a Send to
-  shortcut, no administrator rights), Nautilus, Dolphin or Thunar, with a switch
-  to install or remove them. They are off unless you turn them on, and `semlith
-  setup` can install or remove them too.
 - **First-run screen** — opens Welcome again. Nothing is deleted.
 
 **Languages** is every name `--lang` accepts, marked where the code graph is
