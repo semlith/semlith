@@ -2656,7 +2656,10 @@ function wizardScreen() {
     // item's real path (or file:// URL) into a text field, which is the one
     // way a page learns where a file sits, so what lands here is added as it
     // is: no lookup, no guess. Where nothing lands, the daemon lookup runs.
-    const catcher = el("textarea", {
+    // An <input>, the same kind of field the paste box is: the one a Safari
+    // drop was seen to write a path into.
+    const catcher = el("input", {
+      type: "text",
       class: "drop-catch",
       tabindex: "-1",
       "aria-hidden": "true",
@@ -3042,11 +3045,13 @@ function wizardScreen() {
       .join("\n");
   }
 
-  // Safari (WebKit without Chromium's file handles) writes a dropped file's
-  // path into a text field; Chromium may open the file in the tab instead, so
-  // it keeps the lookup.
+  // Safari writes a dropped file's path into a text field; Chromium may open
+  // the file in the tab instead, so it keeps the lookup. Told apart by vendor
+  // alone ("Apple Computer, Inc." in Safari, "Google Inc." in Chromium, empty
+  // in Firefox): Safari has grown parts of the file-handle API, and testing
+  // for its absence took Safari for Chromium.
   function writesDroppedPaths() {
-    return /Apple/.test(navigator.vendor || "") && !("getAsFileSystemHandle" in (window.DataTransferItem ? DataTransferItem.prototype : {}));
+    return /^Apple/.test(navigator.vendor || "");
   }
 
   // The drop's items, read while the event lasts: a DataTransfer is emptied
