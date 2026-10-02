@@ -605,6 +605,7 @@ impl Server {
                     // holding open, and the flood that matters never reaches a
                     // worker at all.
                     let taken = live.fetch_add(1, Ordering::Relaxed);
+                    trace(&stream, || format!("accepted, {} live", taken + 1));
                     let in_flight = InFlight(Arc::clone(&live), crate::priority::request());
                     if taken >= MAX_CONNECTIONS {
                         // Off the accept loop: it may wait for the request.
@@ -625,11 +626,14 @@ impl Server {
                     let pool = Arc::clone(&pool);
                     std::thread::spawn(move || {
                         let mut first = [0u8; 1];
-                        if matches!(stream.peek(&mut first), Ok(n) if n > 0)
+                        let peeked = stream.peek(&mut first);
+                        if matches!(peeked, Ok(n) if n > 0)
                             && let Some(tx) =
                                 pool.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
                         {
                             let _ = tx.send((stream, in_flight));
+                        } else {
+                            trace(&stream, || format!("closed before a request: {peeked:?}"));
                         }
                     });
                     // A worker that ended for any reason is replaced here, so
@@ -707,6 +711,23 @@ impl Auth {
     }
 }
 
+/// Whether `SEMLITH_HTTP_TRACE=1`: one stderr line per connection event --
+/// accepted, closed before a request, answered (route, status, time, whether
+/// the write reached the client). A diagnostic for transport faults that only
+/// one platform shows, such as #181 on Windows; off by default.
+fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SEMLITH_HTTP_TRACE").is_ok_and(|v| v == "1"))
+}
+
+/// One trace line, when tracing is on.
+fn trace(stream: &TcpStream, what: impl FnOnce() -> String) {
+    if tracing() {
+        let port = stream.peer_addr().map(|a| a.port()).unwrap_or(0);
+        eprintln!("semlith http: {port} {}", what());
+    }
+}
+
 /// How long a connection past the limit may take to finish sending its
 /// request before it is answered anyway.
 const BUSY_READ: Duration = Duration::from_millis(50);
@@ -737,8 +758,10 @@ fn refuse_busy(mut stream: TcpStream) {
     // another.
     let mut first = [0u8; 1];
     if !matches!(stream.peek(&mut first), Ok(n) if n > 0) {
+        trace(&stream, || "over the limit, closed: no request".to_string());
         return;
     }
+    trace(&stream, || "over the limit, answered 503".to_string());
     while seen.len() < BUSY_DRAIN && started.elapsed() < BUSY_READ {
         if want.is_some_and(|total| seen.len() >= total) {
             break;
@@ -789,8 +812,12 @@ fn answer(
     // cross-origin attempts from costing a thousand bodies' worth of it.
     let mut request = match read_head(&mut reader) {
         Ok(Some(r)) => r,
-        Ok(None) => return None,
-        Err(_) => {
+        Ok(None) => {
+            trace(&stream, || "closed with no request".to_string());
+            return None;
+        }
+        Err(e) => {
+            trace(&stream, || format!("bad request head: {e:#}"));
             let _ = write_response(&mut stream, Response::new(400, "text/plain", Vec::new()));
             return Some(Refusal::Malformed);
         }
@@ -933,7 +960,17 @@ fn answer(
         return None;
     }
 
-    let _ = write_response(&mut stream, response);
+    let status = response.status;
+    let wrote = write_response(&mut stream, response);
+    trace(&stream, || {
+        format!(
+            "{} {} -> {status} in {} ms, write {:?}",
+            request.method,
+            request.path,
+            started.elapsed().as_millis(),
+            wrote.as_ref().map(|_| "ok")
+        )
+    });
     None
 }
 
