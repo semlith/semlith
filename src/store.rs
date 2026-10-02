@@ -724,17 +724,38 @@ const UNFILTERED_SQL: &str =
 /// bare `AND` is an operator — a search for "index AND search" would silently
 /// mean something the user did not type, and a search for `foo(` would fail
 /// outright.
+/// English words too common to say what a chunk is about.
+const STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do", "does", "for", "from",
+    "has", "have", "how", "i", "if", "in", "into", "is", "it", "its", "of", "on", "or", "not",
+    "no", "so", "that", "the", "their", "then", "there", "these", "this", "to", "was", "were",
+    "what", "when", "where", "which", "who", "why", "will", "with", "you", "your", "we", "our",
+    "they", "them", "he", "she", "my", "me", "than", "also", "any", "all",
+];
+
 pub fn keyword_search(
     db: &Connection,
     query: &str,
     limit: usize,
     groups: &[Vec<String>],
 ) -> Result<Vec<u64>> {
-    let terms: Vec<String> = query
+    let words: Vec<&str> = query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{t}\""))
         .collect();
+    // Stopwords out of the MATCH: an OR over "the" and "of" asks FTS5 to rank
+    // nearly every chunk of a large store. On the 879k-chunk corpus that took
+    // the keyword list from 884 to 226 ms at the median, and the 727-question
+    // benchmark scored the same either way (408 against 407 scoped, 340 and
+    // 340 unscoped, development split). A query of nothing but stopwords keeps
+    // them all, so it still finds something.
+    let content: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|w| !STOPWORDS.contains(&w.to_ascii_lowercase().as_str()))
+        .collect();
+    let kept = if content.is_empty() { &words } else { &content };
+    let terms: Vec<String> = kept.iter().map(|t| format!("\"{t}\"")).collect();
     if terms.is_empty() {
         return Ok(Vec::new());
     }
@@ -4541,6 +4562,28 @@ mod tests {
     /// More names than SQLite takes variables in one statement. 0.32.0 bound
     /// them all into one `IN (...)`, and on the 70-repository benchmark corpus
     /// every search failed with "too many SQL variables".
+    /// Stopwords leave the keyword list's query unless they are all there is.
+    #[test]
+    fn stopwords_leave_the_keyword_query_unless_nothing_else_is_there() {
+        let db = Connection::open_in_memory().unwrap();
+        prepare_for_tests(&db);
+        let file = insert_file(&db, "a.md", "h", 1, 0).unwrap();
+        for (ord, text) in ["the parser recovers", "of the and the of"]
+            .iter()
+            .enumerate()
+        {
+            insert_chunk(&db, file, ord, ord as u32 + 1, ord as u32 + 1, text).unwrap();
+        }
+        let ids = keyword_search(&db, "how does the parser recover", 10, &[]).unwrap();
+        assert_eq!(ids.len(), 1, "a chunk of stopwords matched: {ids:?}");
+        let only = keyword_search(&db, "the of", 10, &[]).unwrap();
+        assert_eq!(
+            only.len(),
+            2,
+            "a query of stopwords found nothing: {only:?}"
+        );
+    }
+
     /// A read that runs past its limit is interrupted and says so; one that
     /// finishes inside it is untouched.
     #[test]

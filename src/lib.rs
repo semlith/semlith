@@ -275,6 +275,7 @@ impl Shape {
             // reach a passing text chunk however confident CLIP was. The
             // weight below carries the confidence; this carries the curve.
             (_, "image") => STEEP,
+            (_, "named") => STEEP,
             _ => RRF_K,
         }
     }
@@ -398,6 +399,70 @@ pub fn code_shaped(query: &str) -> bool {
     }) || query.contains("()")
 }
 
+/// The identifiers a sentence names: backticked, `snake_case`, `camelCase`,
+/// `a::b` and `call()` words, at most three.
+fn named_identifiers(query: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in query.split_whitespace() {
+        let call = raw.contains("()");
+        let word = raw.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != ':');
+        let word = word.rsplit("::").next().unwrap_or(word);
+        if word.len() < 3
+            || !word
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
+        {
+            continue;
+        }
+        let inner_capital =
+            word.chars().skip(1).any(char::is_uppercase) && word.chars().any(char::is_lowercase);
+        let ticked = raw.starts_with('`');
+        if (word.contains('_') || inner_capital || ticked || call || raw.contains("::"))
+            && !out.iter().any(|w| w == word)
+        {
+            out.push(word.to_string());
+        }
+        if out.len() == 3 {
+            break;
+        }
+    }
+    out
+}
+
+/// Whether a query asks about releases, which keeps release notes in place.
+fn names_releases(query: &str) -> bool {
+    query.split(|c: char| !c.is_alphanumeric()).any(|w| {
+        let w = w.to_lowercase();
+        w.starts_with("changelog") || w.starts_with("release") || w == "version" || w == "news"
+    })
+}
+
+/// Whether a path is release notes: a CHANGELOG, CHANGES, HISTORY, RELEASES or
+/// NEWS file, or anything under a `changelogs` directory.
+fn is_release_notes(path: &str) -> bool {
+    let p = Path::new(path);
+    let stem = p
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    // Prose only: `history.rs` is code that happens to share the name.
+    (!filter::is_code(path)
+        && matches!(
+            stem.as_str(),
+            "changelog"
+                | "changes"
+                | "history"
+                | "releases"
+                | "release-notes"
+                | "release_notes"
+                | "news"
+        ))
+        || p.components()
+            .any(|c| c.as_os_str().eq_ignore_ascii_case("changelogs"))
+}
+
 /// Whether a query asks about tests, which is what exempts it from
 /// [`TEST_PENALTY`].
 fn names_tests(query: &str) -> bool {
@@ -470,6 +535,98 @@ impl Prefer {
             _ => 1.0,
         }
     }
+}
+
+/// How far the project the head of the answer agrees on is lifted, on a store
+/// of several projects: a hit is multiplied by `1 + PROJECT_LIFT * share`,
+/// where `share` is its project's part of the head's fused score.
+///
+/// Not a tiebreak, on purpose: it has to move a chunk of the right repository
+/// past one of another that shares the question's words. Measured on the
+/// 727-question benchmark (development split, unscoped, 4k tokens) together
+/// with [`NAMED_PROJECT_LIFT`], release notes last and the named-identifier
+/// list: 319 to 340 of 507, 25 wins against 4 losses; scoped 398 to 407 with
+/// no loss.
+const PROJECT_LIFT: f32 = 1.0;
+
+/// How far a hit is lifted when the query names its project: a word of four
+/// letters or more of the project directory's name is a word of the query.
+/// A bug report that says "ripgrep" is about ripgrep. Adding it took the
+/// unscoped development split from 333 to 340.
+const NAMED_PROJECT_LIFT: f32 = 3.0;
+
+/// How many of the fused head vote on which project a query is about.
+const PROJECT_HEAD: usize = 20;
+
+/// Each hit's project's share of the head's fused score, or 0.0 for every hit
+/// when the candidates sit in fewer than two projects.
+///
+/// A store of seventy repositories answered an unscoped question 15 points
+/// worse than one scoped to the right repository (63 % against 78 % on the
+/// 727-question benchmark of 2026-10-01): a chunk of another repository that
+/// shares the question's vocabulary outranks the one that answers it. The
+/// lists that found the head mostly agree on the repository even where they
+/// disagree on the chunk, so the agreement is the prior. A project is the
+/// nearest directory holding `.git`; one project, or none, is no change.
+fn project_prior(hits: &[(Hit, f32)], query: &str) -> (Vec<f32>, Vec<bool>) {
+    let mut seen: std::collections::HashMap<PathBuf, Option<PathBuf>> =
+        std::collections::HashMap::new();
+    let mut project_of = |path: &str| -> Option<PathBuf> {
+        let dir = Path::new(path).parent()?.to_path_buf();
+        if let Some(found) = seen.get(&dir) {
+            return found.clone();
+        }
+        let found = dir
+            .ancestors()
+            .find(|d| d.join(".git").exists())
+            .map(Path::to_path_buf);
+        seen.insert(dir, found.clone());
+        found
+    };
+    let projects: Vec<Option<PathBuf>> = hits.iter().map(|(h, _)| project_of(&h.path)).collect();
+    // A project the query names: a word of four letters or more of the
+    // project directory's name is a word of the query.
+    let words: std::collections::HashSet<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .collect();
+    let named: Vec<bool> = projects
+        .iter()
+        .map(|p| {
+            p.as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| {
+                    n.to_lowercase()
+                        .split(|c: char| !c.is_alphanumeric())
+                        .any(|t| t.len() >= 4 && words.contains(t))
+                })
+        })
+        .collect();
+    let named = if named.iter().all(|n| *n) {
+        vec![false; named.len()]
+    } else {
+        named
+    };
+    let mut mass: std::collections::HashMap<&PathBuf, f32> = std::collections::HashMap::new();
+    for ((hit, _), project) in hits.iter().zip(&projects).take(PROJECT_HEAD) {
+        if let Some(project) = project {
+            *mass.entry(project).or_default() += hit.score.max(0.0);
+        }
+    }
+    let total: f32 = mass.values().sum();
+    if mass.len() < 2 || total <= 0.0 {
+        return (vec![0.0; hits.len()], named);
+    }
+    let shares = projects
+        .iter()
+        .map(|p| {
+            p.as_ref()
+                .and_then(|p| mass.get(p))
+                .map_or(0.0, |m| m / total)
+        })
+        .collect();
+    (shares, named)
 }
 
 /// How much a chunk from a file edited since it was indexed is pushed down.
@@ -4636,6 +4793,32 @@ impl Semlith {
             Vec::new()
         };
 
+        // The definitions of the identifiers a sentence names, as a list of
+        // their own. The lift above is for a query that is one identifier; a
+        // sentence that names `parse_args` is still asking about it, and the
+        // keyword list ranks every mention of the word, not its definition.
+        // A list rather than a lift, so it votes beside the others and a
+        // wrong guess at what is an identifier costs a place, not the answer.
+        let named: Vec<u64> = if shape != Shape::Identifier {
+            let names = named_identifiers(query);
+            let mut ids = Vec::new();
+            for name in &names {
+                if let Some(chunk) =
+                    store::symbols_by_names(&self.db, std::slice::from_ref(name), filter.groups())?
+                        .into_iter()
+                        .find_map(|row| row.chunk_id)
+                {
+                    let id = chunk as u64;
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+            ids
+        } else {
+            Vec::new()
+        };
+
         let (dense_scores, dense_ids) = self.search_vectors(vector, depth, &allowlist)?;
         let (dense_scores, dense_ids) = self.rescored(vector, dense_scores, dense_ids);
         let keyword_ids = store::keyword_search(&self.db, query, depth, filter.groups())?;
@@ -4708,6 +4891,7 @@ impl Semlith {
                 definitions.iter().map(|id| (*id, 0.0)).collect(),
             ),
             ("image", true, image_list),
+            ("named", false, named.iter().map(|id| (*id, 1.0)).collect()),
             (
                 "vector",
                 false,
@@ -4924,7 +5108,12 @@ impl Semlith {
         // chunk the query matched badly does not climb over one it matched
         // well because it happens to sit in a function.
         let about_tests = names_tests(query);
-        for (hit, _) in hits.iter_mut() {
+        let (prior, named) = project_prior(&hits, query);
+        for (((hit, _), share), named) in hits.iter_mut().zip(prior).zip(named) {
+            hit.score *= 1.0 + PROJECT_LIFT * share;
+            if named {
+                hit.score *= 1.0 + NAMED_PROJECT_LIFT;
+            }
             if !hit.fresh {
                 hit.score *= 1.0 - STALE_PENALTY;
             }
@@ -4945,6 +5134,14 @@ impl Semlith {
         collapse_copies(&mut hits);
         if !about_tests {
             product_first(&mut hits);
+        }
+        // Release notes last, for a question that is not about releases. A
+        // changelog repeats every name and every bug report's words, one line
+        // each, and on the benchmark it filled the budget ahead of the code
+        // in 19 of the 41 Rust and TypeScript misses. A stable sort, so the
+        // order within each side is the ranking's.
+        if !names_releases(query) {
+            hits.sort_by_key(|(h, _)| is_release_notes(&h.path));
         }
         hits.truncate(k);
         Ok(hits)
@@ -6452,6 +6649,93 @@ mod tests {
         let corpus = root.join("tests/fixtures/corpus");
         let inside = walk(std::slice::from_ref(&corpus)).files;
         assert_eq!(inside, vec![corpus.join("src/lib.rs")], "{inside:?}");
+    }
+
+    /// Release notes are told apart by name, and only by name.
+    #[test]
+    fn release_notes_are_named_files_and_changelog_directories() {
+        for path in [
+            "/w/repo/CHANGELOG.md",
+            "/w/repo/CHANGES.rst",
+            "/w/repo/HISTORY.md",
+            "/w/repo/NEWS",
+            "/w/repo/docs/changelogs/v1.2.md",
+        ] {
+            assert!(is_release_notes(path), "{path}");
+        }
+        for path in [
+            "/w/repo/README.md",
+            "/w/repo/src/history.rs",
+            "/w/repo/src/news_feed.rs",
+        ] {
+            assert!(!is_release_notes(path), "{path}");
+        }
+        assert!(names_releases("what changed in the 1.2 release"));
+        assert!(!names_releases("how does the parser recover from an error"));
+    }
+
+    /// The identifiers a sentence names: code-shaped words, not English.
+    #[test]
+    fn a_sentence_names_its_code_shaped_words() {
+        assert_eq!(
+            named_identifiers("why does `parse_args` call Config::load and buildRequest() twice"),
+            ["parse_args", "load", "buildRequest"]
+        );
+        assert!(named_identifiers("how does the server shut down").is_empty());
+        assert_eq!(
+            named_identifiers("a_b c_d e_f g_h").len(),
+            3,
+            "capped at three"
+        );
+    }
+
+    /// The project prior is nothing on a store of one project, and on a store
+    /// of several it favours the project the head agrees on.
+    #[test]
+    fn the_project_prior_follows_the_head_and_ignores_one_project() {
+        let root = tempfile::tempdir().unwrap();
+        for repo in ["one", "two"] {
+            std::fs::create_dir_all(root.path().join(repo).join(".git")).unwrap();
+            std::fs::create_dir_all(root.path().join(repo).join("src")).unwrap();
+        }
+        let hit = |repo: &str, score: f32| {
+            (
+                Hit {
+                    score,
+                    path: root
+                        .path()
+                        .join(repo)
+                        .join("src/a.rs")
+                        .display()
+                        .to_string(),
+                    start_line: 1,
+                    end_line: 2,
+                    text: String::new(),
+                    store: None,
+                    lists: vec!["vector"],
+                    image: None,
+                    fresh: true,
+                    symbol: None,
+                    symbol_kind: None,
+                    symbol_line: None,
+                    copies: Vec::new(),
+                },
+                0.0,
+            )
+        };
+        let hits = vec![hit("one", 3.0), hit("one", 2.0), hit("two", 1.0)];
+        let (shares, named) = project_prior(&hits, "how does two handle it");
+        assert!(shares[0] > shares[2], "{shares:?}");
+        assert!((shares[0] - 5.0 / 6.0).abs() < 1e-6, "{shares:?}");
+        assert_eq!(
+            named,
+            [false, false, false],
+            "a word of three letters names nothing"
+        );
+
+        let alone = vec![hit("one", 3.0), hit("one", 2.0)];
+        let (shares, _) = project_prior(&alone, "anything");
+        assert_eq!(shares, [0.0, 0.0]);
     }
 
     /// The rule is crude on purpose, so these are the whole of it.
