@@ -586,7 +586,7 @@ impl Server {
 
         while !stop.load(Ordering::Relaxed) {
             match self.listener.accept() {
-                Ok((mut stream, _)) => {
+                Ok((stream, _)) => {
                     // The waker's own connection arrives here too; it carries
                     // no request, so `answer` reads nothing and closes it.
                     if stop.load(Ordering::Relaxed) {
