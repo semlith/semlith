@@ -101,21 +101,27 @@ counted over the eight it is sent with.
 
 - A folder added to a running store is watched from that moment; it used to be
   indexed once and then not watched until the daemon restarted (#180).
-- A socket a browser opens ahead of its requests no longer holds a worker. One
-  sat in the request reader until the 30 s timeout, eight held the whole pool,
-  and the requests behind them queued past the connection limit into 503s and,
-  on Windows, resets the portal showed as ERR_CONNECTION_RESET (#181). A
-  connection now joins the pool when it has sent something; one over the limit
-  that has sent nothing is closed, and one that has is answered 503 after its
-  request is read.
+- The portal on Windows no longer reports ERR_CONNECTION_RESET (#181). The
+  daemon closes after every response, and a socket closed with bytes unread
+  in it is reset rather than closed; a browser that receives the reset
+  discards the response it has already read. Every response now ends with a
+  lingering close: the write side is shut, then whatever the client still
+  sends is read until it closes or 500 ms pass. Separately, a socket a browser
+  opens ahead of its requests no longer holds a worker: eight of them held the
+  whole pool until the 30 s read timeout. `SEMLITH_HTTP_TRACE=1` writes one
+  line per connection to the daemon's log, which is how the cause was found.
+- A store deleted while the page was polling is no longer opened again in the
+  moment between leaving the served set and leaving the registry, which
+  recreated and re-indexed it.
 - The Graph route reads under a 15 s limit and answers 503 naming how to scope
   it past that, so no request holds a worker for minutes on a very large store
   (#173).
 - `Inside the index` keeps each store's measure until the store changes and
   measures a store over 20 000 chunks on a thread of its own, so a cold measure
   no longer competes with every other route (#175).
-- The accel countdown test takes its clock before the lane's, so a preempted
-  runner cannot overshoot its bound (#177).
+- The accel countdown test measures the gap between its clock and the lane's
+  and allows for it, so a preempted runner cannot push it out of bounds
+  either way (#177).
 
 ### Installing
 
