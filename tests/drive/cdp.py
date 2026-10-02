@@ -426,9 +426,19 @@ class Drive:
             if last:
                 return last
             time.sleep(0.1)
+        # What the page was still waiting on: a request that never answers
+        # holds every route that needs the same source behind its loader.
+        try:
+            waiting = self.eval(
+                "JSON.stringify({loader: !!document.querySelector('.ld'),"
+                " inflight: [...(window.__semlithInflight || new Map()).entries()]"
+                ".map(([u, t]) => u + ' ' + Math.round((performance.now() - t) / 1000) + 's')})"
+            )
+        except Exception as error:  # the page itself may be what is stuck
+            waiting = "unreadable: %s" % error
         raise ProtocolError(
-            "waited %ds for %s and it never became true (last value: %r)"
-            % (timeout, what or js_predicate.strip().splitlines()[0], last)
+            "waited %ds for %s and it never became true (last value: %r; page: %s)"
+            % (timeout, what or js_predicate.strip().splitlines()[0], last, waiting)
         )
 
     def screenshot(self, path):

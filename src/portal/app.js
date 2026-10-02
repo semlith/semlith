@@ -196,7 +196,21 @@ function authed(extra) {
 /** True once a request has failed to reach the daemon at all. */
 let daemonDown = false;
 
+// Requests on their way, by path, with when each left: what the browser drive
+// reports when a page never finishes loading.
+const INFLIGHT = (window.__semlithInflight = new Map());
+
 async function api(path, options) {
+  const key = `${((options || {}).method || "GET").toUpperCase()} ${path}#${Math.random().toString(36).slice(2, 6)}`;
+  INFLIGHT.set(key, performance.now());
+  try {
+    return await fetchJson(path, options);
+  } finally {
+    INFLIGHT.delete(key);
+  }
+}
+
+async function fetchJson(path, options) {
   const options_ = options || {};
   let response;
   try {
