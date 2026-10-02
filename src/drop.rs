@@ -144,7 +144,7 @@ impl Sources {
         let volumes = if cfg!(target_os = "macos") {
             vec![PathBuf::from("/Volumes")]
         } else if cfg!(windows) {
-            Vec::new()
+            windows_drives()
         } else {
             ["/media", "/run/media", "/mnt"].map(PathBuf::from).to_vec()
         };
@@ -188,6 +188,23 @@ impl Sources {
             budget: BUDGET,
         }
     }
+}
+
+/// Every drive this Windows machine has mounted, `C:\` included.
+///
+/// Windows has no /Volumes: another disk is a drive letter, and projects
+/// commonly live outside the profile (`C:\dev`, `D:\src`). With only home
+/// and the store roots allowed, a Windows Search answer there was found and
+/// then dropped. The fingerprint (size and time, or a folder's children) is
+/// what keeps a same-named system copy out, not the place.
+pub fn windows_drives() -> Vec<PathBuf> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    (b'A'..=b'Z')
+        .map(|letter| PathBuf::from(format!("{}:\\", letter as char)))
+        .filter(|drive| drive.is_dir())
+        .collect()
 }
 
 /// The shortcut that copies a selected item's path in this OS's file manager,

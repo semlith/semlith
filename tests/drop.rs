@@ -443,6 +443,22 @@ fn the_answer_has_the_contract_shape() {
     assert_eq!(parsed.pasteboard_change, Some(9));
 }
 
+/// On Windows every drive is a place a drop may come from.
+#[test]
+#[cfg(windows)]
+fn every_windows_drive_is_a_place_a_drop_may_come_from() {
+    // The system drive at least, and only drive roots.
+    let drives = drop::windows_drives();
+    let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+    assert!(
+        drives.iter().any(|d| d
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&format!("{system}\\"))),
+        "{drives:?}"
+    );
+    assert!(drives.iter().all(|d| d.parent().is_none()), "{drives:?}");
+}
+
 /// The real macOS drag pasteboard, read-only. Run by hand after dragging
 /// something out of Finder: `cargo test --test drop -- --ignored --nocapture`.
 #[test]
