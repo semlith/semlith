@@ -784,6 +784,17 @@ start_daemon() {
 
 c_daemon_up() { [ -n "$daemon_pid" ]; }
 c_daemon_portal() { [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/")" = 200 ]; }
+c_daemon_portal_assets() {
+  # The v6 page (0.35.0) swaps two logos by theme and loads five bundled fonts,
+  # all compiled into the binary and served without a token. A page whose
+  # fonts 404 still loads, in the wrong typeface, which nothing else would see.
+  for asset in /app.js /style.css /logo.svg /logo-dark.svg \
+    /fonts/IBMPlexSans-Regular.woff2 /fonts/IBMPlexSans-Medium.woff2 /fonts/IBMPlexSans-SemiBold.woff2 \
+    /fonts/IBMPlexMono-Regular.woff2 /fonts/IBMPlexMono-Medium.woff2; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port$asset")
+    [ "$code" = 200 ] || { echo "GET $asset without a token answered $code"; return 1; }
+  done
+}
 c_daemon_announces() {
   grep -qi 'listening on 127.0.0.1' "$work/daemon.out" || { sed 's/^/  /' "$work/daemon.out"; return 1; }
 }
@@ -830,6 +841,7 @@ c_daemon_search_while_up() { semlith search "store lock" -k 1 > /dev/null 2>&1; 
 if start_daemon; then
   check cli/daemon/up            "the daemon starts"                c_daemon_up
   check cli/daemon/portal        "the portal answers 200"           c_daemon_portal
+  check cli/daemon/portal-assets "the v6 page's logos and fonts are served" c_daemon_portal_assets
   check cli/daemon/announces     "it says where it listens"         c_daemon_announces
   check cli/daemon/ledger-notice "it says the ledger records"       c_daemon_ledger_notice
   check cli/daemon/token-url     "it prints a tokenised URL"        c_daemon_token_url
@@ -840,7 +852,7 @@ if start_daemon; then
 else
   echo "the daemon did not come up:"
   sed 's/^/  /' "$work/daemon.out" 2>/dev/null | head -20
-  for id in up portal announces ledger-notice token-url mcp-needs-key mcp-with-key second-instance search-while-up; do
+  for id in up portal portal-assets announces ledger-notice token-url mcp-needs-key mcp-with-key second-instance search-while-up; do
     skip "cli/daemon/$id" "the daemon did not start"
   done
 fi

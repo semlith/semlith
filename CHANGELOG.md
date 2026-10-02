@@ -7,6 +7,163 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-02
+
+### The portal, redrawn
+
+**Nine pages in three groups, and a page per store.** Home, Stores, Search
+and Graph; Agents, Ledger and Reports; Privacy and Settings. Each store has
+its own page with Overview, Files, Review, Runs and Settings tabs. Phone,
+tablet and desktop widths each get a layout of their own, and light, dark and
+system themes follow the machine until one is picked.
+
+**A first-run screen and a five-step wizard.** With no store yet the portal
+opens on a Welcome screen that checks the machine for real — model on disk,
+clients found, the endpoint answering. New store walks through Name,
+Sources, Review, Index and Connect: folders by browsing, pasting or dropping,
+repositories found beside them kept together or split one store each, every
+sensitive file shown with its risk before anything is indexed, and the
+clients found on the machine registered in one step at the end.
+
+**What the older portal had, folded in.** Pattern is a fourth Search mode
+beside Ranked, Brief and Exact. Prices sit in the Reports savings picker and
+on Settings. Usage from client logs is a Ledger switch, and adds a model
+column to Sessions. Re-pointing a moved root and trusting a repository are
+on the store's Settings tab. Install update follows Check for updates.
+
+**Live without rebuilding.** Over a running index the Runs tab, a store's
+Settings and Settings › Performance are patched in place: the Pause button
+you pressed stays where it was with the focus on it, and a half-typed store
+name survives every poll.
+
+**A large store's Graph page no longer holds the daemon.** On the 879k-chunk
+benchmark corpus the Graph page's first fetch took minutes, and every other
+route waited behind it. The drawing now reads the store on a read-only
+connection of its own, so Search, Home and the rest keep answering (worst
+0.83 s while a graph was drawn), and it is cheaper: the default view drew in
+57 s and now takes 5-10 s the first time and under 0.1 s after.
+
+**Add sources adds a folder.** Adding a folder to a store that already has
+roots posts `add_roots`, so the folder becomes one of its roots before the
+boundary check; an agent's index request keeps the boundary it always had.
+
+**Loaders are the loading.** The boot animation and each page's loader stay
+exactly as long as the fetches they cover, and go the frame they answer.
+
+### Dropped folders resolve to their real path
+
+**A drop on the portal finds the real path, and uploads nothing.** No browser
+tells a page where a dropped file lives, so the page sends what it can see —
+name, kind, size, modified time, and a folder's first-level names — to the new
+`POST /api/drop/resolve`, and the daemon finds the path. On macOS it reads the
+drag pasteboard Finder wrote, exact and in about 0.1 s, believed only when it
+changed since the last drop and holds exactly the dropped items. On Windows it
+reads the selection of open Explorer windows. Everywhere else, and after those,
+it asks Spotlight, Windows Search, `plocate`/`locate`, localsearch or Baloo,
+then walks the stores' roots and the home directory, keeping only candidates
+whose fingerprint matches. One match is resolved, several are offered as a
+pick, and a path under a temporary directory is refused with "extract first".
+The call stays under 2.5 s. On this M1 a README with many copies on disk was
+singled out by Spotlight and its fingerprint in 0.51 s.
+
+**"Index with semlith" in the file manager, when asked.** `semlith setup
+--file-managers` adds a Finder Quick Action, an Explorer verb and Send to entry
+through a windowless launcher, or a Nautilus script, a Dolphin service menu and
+a Thunar action merged beside the user's own. Each runs the installed binary's
+`index` on the selection. `--no-file-managers` removes them. It is the CLI's
+only: a drop on the page already does what it offers, so the portal has no
+card for it.
+
+**Safari drops take the real path.** Safari writes a dropped item's path into
+a text field, so in Safari the drop zone carries an unseen one and a drop is
+added from it exactly, with no lookup; the lookup runs only if nothing lands.
+Chrome and Firefox write no path into a field and go straight to the lookup.
+Every drop ends in the paste box when nothing finds it. On Windows a Windows
+Search answer on any drive counts, not only under the profile.
+
+### From the owner's walk
+
+**Read and decided the way people use it.** Every dropdown is the portal's
+own, drawn like the Graph's store picker. Long paths lose their start, never
+their end, with the whole path on hover, and text no longer runs out of its
+card. A store's Review tab filters by risk, applies suggestions and scrolls in
+its card; the wizard keeps its scroll on every decision, and its scan is shown
+over four to eight seconds unless the real scan is slower. A run's bar follows
+the whole run and never jumps back; its live log fills. Controls that wait on
+the daemon spin and keep their focus. Dialogs close by their buttons or Escape
+only. The folder picker selects on a click and opens a folder on a
+double-click. Path from here opens on what the symbol calls. Check each lane
+shows what it found, a lane's downloaded files can be removed, and lanes built
+for another OS are set apart. The graph moves as it did before 0.35.0, with
+the v6 lines. Phones and tablets get the clear breaks fixed: the search
+toolbar, wrapping tabs, stacked review and history rows, a graph sized to the
+canvas.
+
+**Index health reads each store once.** The report's unresolved-names pass
+groups by target before testing each, and both aggregates are kept per store
+until its graph changes: 16 s the first time on the 879k-chunk corpus, about
+1 s after.
+
+**`semlith start` and `semlith upgrade` say it once and say it right.**
+`start` against a running daemon prints one line and one link per daemon
+rather than per store. `upgrade` no longer reports a failed restart over a
+daemon that came up on the new binary: re-registering the login service had
+already replaced it, and the restart that followed raced the old one exiting.
+
+### The portal's v6 backend
+
+**Stores are made, named and set from the page.** `POST /api/store/create`
+makes an empty named store and serves it at once. `POST /api/store/settings`
+renames a store (its directory moves with its name, and an agent's next
+`store:` resolves without a restart) and sets what it holds (`kind`), the
+preference a bare search or brief takes for it (`lean`, over MCP too), whether
+it follows file changes (`watch`), whether its retrievals are recorded
+(`record`) and whether its walks honour `.gitignore`. The keys are additive in
+`registry.json`, and their defaults are what every store did before.
+
+**Review decides several files at once.** Owner decision of 2026-10-01: a
+person may now decide about many refused files in one request
+(`POST /api/refused/decide`: in, redact, out, reset); each file is still its
+own decision and its own ledger row, a credential file is still never let in,
+and no agent can reach the route. Keep out is a recorded decision that leaves
+the waiting list until it is reset, and the wizard can decide files a held scan
+offered before any pass ran. Every review row and scan item carries a risk read
+off the scan's own verdict — risk, band, likely, tone, kind, why, the masked
+evidence and a suggestion. `GET /api/decisions` lists the person's and the
+rules' decisions.
+
+**Index runs are kept.** Finished runs are written to the store's
+`runs.jsonl` with their stage times and log, and `GET /api/index/runs` lists
+them after a restart. `POST /api/index {store, files}` re-embeds exactly those
+files whatever their hash, as one run.
+
+**The ledger can be paused, and a broken chain repaired without a rewrite.**
+`POST /api/ledger/recording` pauses and resumes recording, kept across
+restarts; a resume chains to the last real row. `GET /api/ledger` names the
+first row that does not verify, and `POST /api/ledger/verify {repair: true}`
+appends a note row per break instead of editing anything. `--no-ledger` now
+stops rows written through `/mcp` too.
+
+**Session replay is on by default.** A settings file that switched it off
+stays off.
+
+**Airgap can be switched on at runtime, and every outbound connection is
+counted.** `POST /api/airgap` refuses what `--airgap` refuses — `add`, model
+and pack downloads, the upgrade check (which the portal's Check button reached
+under `--airgap` until now) and `prices update` — and `/api/privacy` lists
+every connection the daemon opened, by feature and host.
+
+**Start at login, one client at a time, and what each tool costs.**
+`POST /api/login-item` installs or removes the login service.
+`POST /api/agents/register` registers or unregisters named clients, backing a
+file up before it is cleaned. `GET /api/agents` says which clients are
+registered and each tool's typical answer size, from this machine's ledger
+once there are rows enough.
+
+**Search and brief answers carry what the agent sees.** A locate search carries
+the tool's own line per hit, its token cost and its cut; a brief carries the
+tool's exact text.
+
 ## [0.34.0] - 2026-09-30
 
 ### What the documents hold, counted
@@ -4113,7 +4270,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.34.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.35.0...HEAD
+[0.35.0]: https://github.com/semlith/semlith/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/semlith/semlith/compare/v0.33.1...v0.34.0
 [0.33.1]: https://github.com/semlith/semlith/compare/v0.33.0...v0.33.1
 [0.33.0]: https://github.com/semlith/semlith/compare/v0.32.0...v0.33.0

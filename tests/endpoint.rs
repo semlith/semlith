@@ -147,6 +147,7 @@ fn the_agent_key_opens_mcp_and_nothing_else() {
         "/api/refused",
         "/api/refused/accept",
         "/api/refused/revoke",
+        "/api/refused/decide",
     ] {
         let (status, _) = daemon.send(
             "POST",
@@ -157,19 +158,21 @@ fn the_agent_key_opens_mcp_and_nothing_else() {
         assert_eq!(status, 403, "the agent key reached {route}");
     }
 
-    // With the session token the accept route takes one path, never a list.
+    // With the session token the accept route takes one path or, from 0.35.0
+    // (the owner's bulk decision), a `files` list — each file its own
+    // decision. Anything else is refused before a store is even chosen.
     let (status, body) = daemon.with_token(
         "POST",
         "/api/refused/accept",
         r#"{"paths": ["/x/a.rs", "/x/b.rs"], "mode": "as-is", "reviewed": true}"#,
     );
-    assert_eq!(status, 400, "a list was accepted: {body}");
+    assert_eq!(status, 400, "a paths key was accepted: {body}");
     let (status, body) = daemon.with_token(
         "POST",
         "/api/refused/accept",
         r#"{"path": ["/x/a.rs", "/x/b.rs"], "mode": "as-is", "reviewed": true}"#,
     );
-    assert_eq!(status, 400, "two paths were accepted: {body}");
+    assert_eq!(status, 400, "a path that is a list was accepted: {body}");
     // And no MCP tool accepts: no tool is named for accepting or for the
     // not-indexed list.
     let (_, listed) = daemon.with_key(&key, LIST);

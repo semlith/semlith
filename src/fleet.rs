@@ -57,6 +57,9 @@ struct Member {
     /// store named by `--store` that the registry does not know, which then
     /// answers with absolute paths as it always did.
     roots: Vec<PathBuf>,
+    /// The store's `lean` setting as a preference: what a search or brief
+    /// that sent no `prefer` applies to this store's half of the answer.
+    lean: crate::Prefer,
 }
 
 /// A store directory that holds a `store.db` the process could not open.
@@ -220,6 +223,7 @@ impl Fleet {
                 label: String::new(),
                 store,
                 roots: Vec::new(),
+                lean: crate::Prefer::Any,
             });
         }
 
@@ -227,13 +231,14 @@ impl Fleet {
         let registry = crate::home::Registry::load().unwrap_or_default();
         for (member, key) in members.iter_mut().zip(&keys) {
             member.label = label(key);
-            member.roots = registry
-                .stores
-                .iter()
-                .find(|(name, _)| {
-                    crate::home::Registry::dir_of(name).is_ok_and(|d| canonical(&d) == *key)
-                })
+            let entry = registry.stores.iter().find(|(name, _)| {
+                crate::home::Registry::dir_of(name).is_ok_and(|d| canonical(&d) == *key)
+            });
+            member.roots = entry
                 .map(|(_, entry)| entry.roots.clone())
+                .unwrap_or_default();
+            member.lean = entry
+                .and_then(|(_, entry)| crate::Prefer::parse(&entry.settings.lean).ok())
                 .unwrap_or_default();
         }
         disambiguate(&mut members, &keys);
@@ -261,6 +266,14 @@ impl Fleet {
 
     pub fn len(&self) -> usize {
         self.members.len()
+    }
+
+    /// The preference a store applies when a caller sends none.
+    pub fn lean(&self, label: &str) -> Option<crate::Prefer> {
+        self.members
+            .iter()
+            .find(|m| m.label == label)
+            .map(|m| m.lean)
     }
 
     /// `(label, store)` for each chosen store that can be read.
@@ -511,6 +524,21 @@ impl Fleet {
         filter: &Filter,
         prefer: crate::Prefer,
     ) -> Result<Vec<Hit>> {
+        self.search_leaning(only, query, k, filter, Some(prefer))
+    }
+
+    /// [`Fleet::search_preferring`] for a caller that may have sent no
+    /// preference: `None` takes each store's own `lean` (0.35.0), applied to
+    /// that store's half of the answer before the merge, exactly as an
+    /// explicit preference is. An explicit one, `any` included, wins.
+    pub fn search_leaning(
+        &mut self,
+        only: Option<&[String]>,
+        query: &str,
+        k: usize,
+        filter: &Filter,
+        prefer: Option<crate::Prefer>,
+    ) -> Result<Vec<Hit>> {
         let chosen = self.chosen(only)?;
         // Labels are worth their tokens only when there is something to tell
         // apart. One store means the output is what it was before stores could
@@ -532,6 +560,7 @@ impl Fleet {
                 }
             };
 
+            let prefer = prefer.unwrap_or(self.members[i].lean);
             let hits = self.members[i]
                 .store
                 .search_preferring(query, &vector, k, filter, prefer)?;
@@ -1521,5 +1550,20 @@ mod tests {
             vec!["/a/api/.semlith", "/b/api/.semlith", "cli"],
             "a label that names two stores is worse than a long one"
         );
+    }
+
+    /// A store's `lean` reaches the fleet that answers for it, and a store
+    /// that never set one leans nowhere.
+    #[test]
+    fn a_store_lean_is_the_preference_a_bare_search_takes() {
+        let home = tempfile::tempdir().unwrap();
+        crate::home::with_env_var(crate::home::HOME_ENV, home.path().as_os_str(), || {
+            let code = crate::home::create_store("leans-code", "code").unwrap();
+            let plain = crate::home::create_store("leans-nowhere", "both").unwrap();
+            crate::home::update_store_settings("leans-code", |s| s.lean = "code".into()).unwrap();
+            let fleet = super::Fleet::open(&[code, plain]).unwrap();
+            assert_eq!(fleet.lean("leans-code"), Some(crate::Prefer::Code));
+            assert_eq!(fleet.lean("leans-nowhere"), Some(crate::Prefer::Any));
+        });
     }
 }

@@ -837,28 +837,25 @@ fn call_tool(
                     .and_then(Value::as_u64)
                     .map(|v| v as usize)
                     .unwrap_or(DEFAULT_LOCATE_TOKENS);
-                let prefer = match args.get("prefer").and_then(Value::as_str) {
+                let asked = match args.get("prefer").and_then(Value::as_str) {
                     Some(raw) => match crate::Prefer::parse(raw) {
-                        Ok(p) => p,
+                        Ok(p) => Some(p),
                         Err(e) => return Ok(tool_error(&e.to_string())),
                     },
-                    None => crate::Prefer::default(),
+                    None => None,
                 };
-                match stores.search_preferring(Some(&only), query, k.clamp(1, 50), &filter, prefer)
-                {
+                // Sent none: each store applies its own lean (0.35.0). The
+                // reading line names the one applied when one store answers.
+                let prefer = asked.unwrap_or_else(|| match only.as_slice() {
+                    [one] => stores.lean(one).unwrap_or_default(),
+                    _ => crate::Prefer::default(),
+                });
+                match stores.search_leaning(Some(&only), query, k.clamp(1, 50), &filter, asked) {
                     Ok(hits) if hits.is_empty() => stores.no_match_reason(&filter),
                     Ok(hits) if excerpts => {
                         format!("{}\n{}", reading(query, prefer), render(&hits))
                     }
-                    Ok(hits) => {
-                        let paths = stores.shortener();
-                        let rows = locate(&hits, query, max_tokens, &|p| paths.short(p));
-                        let note = stores
-                            .pending_note()
-                            .map(|n| format!("\n{n}"))
-                            .unwrap_or_default();
-                        paths.with_header(format!("{}\n{rows}{note}", reading(query, prefer)))
-                    }
+                    Ok(hits) => search_reply(stores, &hits, query, prefer, max_tokens).text,
                     // Tool failures are reported in-band so the agent can react,
                     // rather than as a protocol-level error.
                     Err(e) => return Ok(tool_error(&e.to_string())),
@@ -881,19 +878,10 @@ fn call_tool(
                 .and_then(Value::as_i64)
                 .unwrap_or(crate::brief::DEFAULT_BUDGET)
                 .max(1);
-            match crate::brief::brief(
-                stores,
-                Some(&only),
-                question,
-                budget,
-                &filter,
-                crate::Prefer::default(),
-            ) {
-                Ok(brief) if brief.spans.is_empty() => stores.no_match_reason(&filter),
-                Ok(brief) => {
-                    let paths = stores.shortener();
-                    paths.with_header(render_brief(&brief, &|p| paths.short(p)))
-                }
+            // No `prefer` argument, so every store's own lean applies.
+            match crate::brief::brief_leaning(stores, Some(&only), question, budget, &filter, None)
+            {
+                Ok(brief) => brief_reply(stores, &brief, &filter),
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
@@ -2027,55 +2015,129 @@ fn locate(
     max_tokens: usize,
     shorten: &dyn Fn(&str) -> String,
 ) -> String {
-    if hits.is_empty() {
-        return String::new();
+    locate_cut(hits, query, max_tokens, shorten).0
+}
+
+/// `semlith_search`'s reply as an agent receives it, and what the portal
+/// draws beside it. One renderer and one cut, so the page's list and an
+/// agent's answer cannot disagree about what fitted the budget.
+pub struct SearchReply {
+    /// The exact text the tool returns.
+    pub text: String,
+    /// Which hits the budget kept, by index.
+    pub kept: Vec<bool>,
+    /// Each hit's one line, as the locate row shows it.
+    pub lines: Vec<String>,
+    /// What the reply costs, counted the way this module counts.
+    pub tokens: usize,
+}
+
+/// [`SearchReply`] for hits a search already found. `hits` must not be
+/// empty: an empty answer is `Fleet::no_match_reason`, and that is the
+/// caller's to say.
+pub fn search_reply(
+    fleet: &Fleet,
+    hits: &[crate::Hit],
+    query: &str,
+    prefer: crate::Prefer,
+    max_tokens: usize,
+) -> SearchReply {
+    let paths = fleet.shortener();
+    let (rows, kept) = locate_cut(hits, query, max_tokens, &|p| paths.short(p));
+    let note = fleet
+        .pending_note()
+        .map(|n| format!("\n{n}"))
+        .unwrap_or_default();
+    let text = paths.with_header(format!("{}\n{rows}{note}", reading(query, prefer)));
+    let terms = query_terms(query);
+    let lines = hits
+        .iter()
+        .map(|hit| match hit.image {
+            Some(px) => format!("image {}x{} px", px.width, px.height),
+            None => best_line(&hit.text, &terms),
+        })
+        .collect();
+    SearchReply {
+        tokens: tokens(&text),
+        text,
+        kept,
+        lines,
     }
-    let budget = max_tokens.max(MIN_LOCATE_TOKENS);
-    let terms: Vec<String> = query
+}
+
+/// `semlith_brief`'s reply text, byte for byte.
+pub fn brief_reply(fleet: &Fleet, brief: &crate::brief::Brief, filter: &crate::Filter) -> String {
+    if brief.spans.is_empty() {
+        return fleet.no_match_reason(filter);
+    }
+    let paths = fleet.shortener();
+    paths.with_header(render_brief(brief, &|p| paths.short(p)))
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|t| t.len() > 2)
         .map(|t| t.to_lowercase())
-        .collect();
+        .collect()
+}
+
+/// [`locate`], and which hits it kept.
+fn locate_cut(
+    hits: &[crate::Hit],
+    query: &str,
+    max_tokens: usize,
+    shorten: &dyn Fn(&str) -> String,
+) -> (String, Vec<bool>) {
+    if hits.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let budget = max_tokens.max(MIN_LOCATE_TOKENS);
+    let terms = query_terms(query);
 
     // Grouped, but in the order the ranking put the files in: the best hit's
     // file is the first thing read.
-    let mut files: Vec<(String, Vec<&crate::Hit>)> = Vec::new();
-    for hit in hits {
+    let mut files: Vec<(String, Vec<(usize, &crate::Hit)>)> = Vec::new();
+    for (at, hit) in hits.iter().enumerate() {
         let label = match &hit.store {
             Some(store) => format!("{store} {}", shorten(&hit.path)),
             None => shorten(&hit.path),
         };
         match files.iter_mut().find(|(name, _)| *name == label) {
-            Some((_, group)) => group.push(hit),
-            None => files.push((label, vec![hit])),
+            Some((_, group)) => group.push((at, hit)),
+            None => files.push((label, vec![(at, hit)])),
         }
     }
 
     // Rendered whole, then cut from the bottom — the ranking's own order — so
     // what is dropped is what was worth least.
-    let mut blocks: Vec<(usize, String)> = Vec::new();
+    let mut blocks: Vec<(Vec<usize>, String)> = Vec::new();
     for (label, group) in &files {
         let mut block = format!("{label}\n");
-        for hit in group {
+        for (_, hit) in group {
             block.push_str(&locate_row(hit, &terms, shorten));
         }
-        blocks.push((group.len(), block));
+        blocks.push((group.iter().map(|(at, _)| *at).collect(), block));
     }
 
     let total = hits.len();
     let mut out = String::new();
+    let mut kept = vec![false; total];
     let mut shown = 0usize;
-    for (count, block) in blocks {
+    for (members, block) in blocks {
         if !out.is_empty() && tokens(&out) + tokens(&block) > budget {
             break;
         }
         out.push_str(&block);
-        shown += count;
+        shown += members.len();
+        for at in members {
+            kept[at] = true;
+        }
     }
     if shown < total {
         out.push_str(&format!("truncated: {shown} of {total}\n"));
     }
-    out.trim_end().to_string()
+    (out.trim_end().to_string(), kept)
 }
 
 /// How the query was read, in one short line above the hits.
@@ -2477,6 +2539,21 @@ mod tests {
             cut.contains("of 40"),
             "the reader is told what the total was: {cut}"
         );
+
+        // The portal's view of the same cut: exactly the hits whose rows are
+        // in the text are kept, and the text is the tool's own.
+        let (text, kept) = locate_cut(&hits, "helper", MIN_LOCATE_TOKENS, &crate::plain);
+        assert_eq!(text, cut);
+        let shown = kept.iter().filter(|k| **k).count();
+        assert!(cut.contains(&format!("truncated: {shown} of 40")), "{cut}");
+        for (hit, kept) in hits.iter().zip(&kept) {
+            assert_eq!(
+                cut.contains(&format!("{}\n", hit.path)),
+                *kept,
+                "{}",
+                hit.path
+            );
+        }
     }
 
     /// A budget small enough to return nothing would turn a search into a

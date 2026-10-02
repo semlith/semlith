@@ -365,6 +365,7 @@ pub(crate) fn download(
         .timeout_global(Some(std::time::Duration::from_secs(1800)))
         .build()
         .into();
+    crate::add::note_outbound("pack", url);
     let mut response = agent
         .get(url)
         .call()

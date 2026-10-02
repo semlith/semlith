@@ -151,6 +151,13 @@ class Drive:
             # The portal is served over plain HTTP on loopback, and Chrome is
             # otherwise happy to upgrade or block parts of it.
             "--disable-features=Translate,MediaRouter",
+            # The drive runs with HOME pointed at a scratch home so the daemon
+            # and the fixtures stay out of the real one. Chrome on macOS then
+            # finds no login keychain for its cookie encryption and waits on a
+            # prompt nobody can see, and every navigation hangs before it
+            # connects. A mock keychain is what Chrome provides for automation.
+            "--use-mock-keychain",
+            "--password-store=basic",
             "about:blank",
         ]
         self._process = subprocess.Popen(
@@ -419,9 +426,19 @@ class Drive:
             if last:
                 return last
             time.sleep(0.1)
+        # What the page was still waiting on: a request that never answers
+        # holds every route that needs the same source behind its loader.
+        try:
+            waiting = self.eval(
+                "JSON.stringify({loader: !!document.querySelector('.ld'),"
+                " inflight: [...(window.__semlithInflight || new Map()).entries()]"
+                ".map(([u, t]) => u + ' ' + Math.round((performance.now() - t) / 1000) + 's')})"
+            )
+        except Exception as error:  # the page itself may be what is stuck
+            waiting = "unreadable: %s" % error
         raise ProtocolError(
-            "waited %ds for %s and it never became true (last value: %r)"
-            % (timeout, what or js_predicate.strip().splitlines()[0], last)
+            "waited %ds for %s and it never became true (last value: %r; page: %s)"
+            % (timeout, what or js_predicate.strip().splitlines()[0], last, waiting)
         )
 
     def screenshot(self, path):
@@ -478,178 +495,201 @@ class Drive:
 
     # ------------------------------------------------------- portal helpers
 
-    # Every view in `src/portal/app.js` is an `async` function that awaits one
-    # or more `/api/…` calls before it returns a single node, and `render()`
-    # fills the page with a bare "Loading…" while it does. So a check that
-    # navigates and then reads immediately reads the *previous* view — or an
-    # empty one — and reports the control it wanted as missing.
+    # The v6 portal (0.35.0) routes on `#/<page>/<parts>` — see `parseHash` in
+    # `src/portal/app.js` and the route table in docs/portal.md. Every page
+    # awaits the `/api/…` reads it lists in `needs` before anything of it is
+    # inserted, and shows a loader (`.ld.area`) over `<main>` while it waits,
+    # so a check that reads right after navigating reads the page before it.
     #
-    # The heading is the signal that the awaits are over: `render()` picks the
-    # view out of `VIEWS`, and each view's own `pageHead(title, …)` writes that
-    # same title into the one `h1` on the page. The Search page's is
-    # `el("h1", {class: "sr-only", text: "Search"})`, which is the same
-    # contract. Until the awaited node is inserted there is no `h1` at all.
+    # A route counts as on screen when three things hold at once: the node the
+    # router mounted is a new one (the old one is marked before the hash moves,
+    # and `render()` replaces it), the page's own heading reads its title, and
+    # no loader is up. The heading is a `div.h1` from 0.35.0, not an `h1`: the
+    # design draws every title in one class, and the Search page draws none —
+    # its query box is its signal instead.
     #
-    #: view id -> the `h1` that view paints, from `VIEWS` in `src/portal/app.js`.
-    VIEW_TITLES = {
+    #: page -> the `.h1` that page paints. `None` means a page with no heading.
+    PAGE_TITLES = {
+        "home": "Home",
         "stores": "Stores",
-        "files": "Files",
-        "index": "Index",
-        "corpus": "Inside the index",
-        "search": "Search",
+        "search": None,
         "graph": "Graph",
-        "impact": "Impact",
         "agents": "Agents",
         "ledger": "Retrieval ledger",
         "reports": "Reports",
-        "cloud": "Cloud",
         "privacy": "Privacy",
-        "doctor": "Doctor",
-        "about": "About",
+        "settings": "Settings",
     }
 
-    #: The views whose heading paints before their content does, and the
-    #: expression that is true once the content is there too. The Graph page is
-    #: the only one: it returns its frame and then fetches `/api/graph` from a
-    #: `setTimeout`, because the canvas has no size until it is in the document,
-    #: so its heading is on screen while `.graph-count` still reads "loading…".
-    VIEW_READY = {
-        "graph": (
-            "/\\d[\\d,]*\\s*symbols/i.test("
-            "((document.querySelector('.graph-count') || {}).innerText) || '')"
-        ),
-    }
+    #: Every route the v6 portal draws, in sidebar order. The screenshot set,
+    #: the console check and the sideways-scroll check walk this list; a store's
+    #: own page is added by those checks, because it needs a store's name.
+    ROUTES = [
+        "home",
+        "stores",
+        "stores/inside",
+        "search",
+        "graph",
+        "graph/blast",
+        "graph/path",
+        "agents",
+        "agents/add",
+        "agents/tools",
+        "agents/health",
+        "ledger",
+        "ledger/retrievals",
+        "ledger/replay",
+        "reports",
+        "privacy",
+        "settings",
+        "settings/access",
+        "settings/cloud",
+        "settings/about",
+    ]
 
-    def open_view(self, view_id, fresh=False, timeout=30):
-        """Open one of the portal's views and wait until it is actually on screen.
+    #: The tabs of a store's own page, `#/store/<name>/<tab>`.
+    STORE_TABS = ["overview", "files", "review", "runs", "settings"]
+
+    def _ready_js(self, route):
+        """A JavaScript predicate true once `route` is drawn."""
+        page = route.split("/")[0]
+        fresh = (
+            "(() => { const m = document.querySelector('#main');"
+            " const c = m && m.firstElementChild;"
+            " return !!c && !c.hasAttribute('data-drive-old')"
+            " && !document.querySelector('.ld'); })()"
+        )
+        if page == "welcome":
+            return (
+                "(() => { const c = document.querySelector('#root > #app');"
+                " return !!c && !c.hasAttribute('data-drive-old')"
+                " && !!document.querySelector('.welcome-card'); })()"
+            )
+        if page == "new":
+            return (
+                "(() => { const c = document.querySelector('#root > #app');"
+                " return !!c && !c.hasAttribute('data-drive-old')"
+                " && !!document.querySelector('.wz-steps .wz-step'); })()"
+            )
+        if page == "store":
+            name = route.split("/")[1] if "/" in route else ""
+            return (
+                "%s && (() => { const s = document.querySelector('#main .sd-name');"
+                " return !!s && s.textContent.trim() === %s; })()" % (fresh, json.dumps(name))
+            )
+        if page == "search":
+            return "%s && !!document.querySelector('#main input[aria-label=\"Search query\"]')" % fresh
+        title = self.PAGE_TITLES.get(page)
+        if title is None:
+            raise ProtocolError(
+                "the portal has no page called %r. They are %s, plus store/<name>, "
+                "welcome and new." % (page, ", ".join(sorted(self.PAGE_TITLES)))
+            )
+        heading = (
+            "(() => { const h = document.querySelector('#main .h1');"
+            " return !!h && (h.textContent || '').trim() === %s; })()" % json.dumps(title)
+        )
+        ready = "%s && %s" % (fresh, heading)
+        if route == "graph":
+            # The Explore canvas is drawn from a `setTimeout` after the frame
+            # mounts, because the live host has no size until it is in the
+            # document. Its foot says how many symbols it drew once it has.
+            ready += (
+                " && (/\\d[\\d,]* of [\\d,]+ symbols/.test("
+                "((document.querySelector('.g-foot') || {}).innerText) || '')"
+                " || /nothing indexed yet|no store has anything/i.test("
+                "((document.querySelector('#main') || {}).innerText) || ''))"
+            )
+        return ready
+
+    def open_view(self, route, fresh=False, timeout=40):
+        """Open one of the portal's routes and wait until it is on screen.
+
+        `route` is the fragment without its `#/`: `stores`, `stores/inside`,
+        `store/<name>/runs`, `graph/blast`, `settings/about`, `welcome`, `new`.
 
         The token travels in the query on the first load only; the page moves
         it into sessionStorage and takes it out of the address bar, exactly as
-        `src/portal/app.js` describes. `fresh=True` forces the query form
-        again, which is what a check wants when it has just cleared storage.
+        `src/portal/app.js` describes. `fresh=True` forces a full load, which is
+        what a check wants after it has changed localStorage or cleared state.
         """
-        if view_id not in self.VIEW_TITLES:
-            raise ProtocolError(
-                "the portal has no view called %r. They are %s."
-                % (view_id, ", ".join(sorted(self.VIEW_TITLES)))
-            )
-
-        already_loaded = False
+        route = route.strip("/")
+        already = False
         if not fresh:
             try:
-                already_loaded = bool(self.eval("!!document.querySelector('#root nav')"))
+                already = bool(self.eval("!!document.querySelector('#root > #app')"))
             except Exception:
-                already_loaded = False
-
-        if already_loaded:
-            self.eval("location.hash = %s" % json.dumps("#" + view_id))
+                already = False
+        if already:
+            self.eval(
+                """
+                (() => {
+                  let want = %s;
+                  // Asked for the route already on screen: the router does not
+                  // run for an unchanged hash, and a check that asks again wants
+                  // the page drawn from now, not from whenever it was opened.
+                  // A trailing slash is the same route to `parseHash` and a new
+                  // hash to the browser.
+                  if (location.hash === want) want += '/';
+                  for (const n of [document.querySelector('#root > #app'),
+                                   (document.querySelector('#main') || {}).firstElementChild]) {
+                    if (n) n.setAttribute('data-drive-old', '1');
+                  }
+                  location.hash = want;
+                  return true;
+                })()
+                """
+                % json.dumps("#/" + route)
+            )
         else:
-            self.navigate("%s/?token=%s#%s" % (self.portal_url, self.token, view_id))
-
-        title = self.VIEW_TITLES[view_id]
+            self.navigate("%s/?token=%s#/%s" % (self.portal_url, self.token, route))
         self.wait_for(
-            "(() => { const h = document.querySelector('#root h1');"
-            " return !!h && (h.textContent || '').trim() === %s; })()" % json.dumps(title),
+            self._ready_js(route),
             timeout=timeout,
             what=(
-                "the #%s view's own heading to read %r. Every view awaits an "
-                "/api/… call before anything of it is inserted, so a view that "
-                "has merely been navigated to is still the one before it — and "
-                "with no store open the whole page is the welcome screen, whose "
-                "heading is 'No stores yet'." % (view_id, title)
+                "the #/%s route to be drawn: a newly mounted page, its own heading, "
+                "and no loader. With no store registered most routes draw the "
+                "Welcome screen instead (store, settings, privacy and agents are "
+                "the exceptions)." % route
             ),
         )
-        extra = self.VIEW_READY.get(view_id)
-        if extra:
-            self.wait_for(
-                extra,
-                timeout=timeout,
-                what="the #%s view's content to arrive behind its heading" % view_id,
-            )
         # One frame of settle, so a check reading geometry does not read it
         # mid-render. Cheap, and it removes a whole class of flake.
         self.eval("new Promise(done => requestAnimationFrame(() => done(true)))")
 
-    # The Index page keeps its folder picker, its projects checklist, its URL
-    # panel and its machine limits behind one button each, and the four are
-    # mutually exclusive: opening one closes the rest. Every panel starts
-    # `hidden`, and a hidden subtree contributes nothing to `innerText`, so a
-    # check that reads a panel without pressing its button reads an empty
-    # string and blames the product for a control that is simply folded away.
-    #
-    # The value is a JavaScript expression that is true once the panel that
-    # button reveals is actually on screen. Two of the buttons open a picker,
-    # and only one picker can be open at a time, which is why they share one.
-    INDEX_PANELS = {
-        "Choose folders…": (
-            "!!document.querySelector('.card.picker:not([hidden]) .crumbs')"
-        ),
-        "Projects under a folder…": (
-            "!!document.querySelector('.card.picker:not([hidden]) .crumbs')"
-        ),
-        "Add from a URL": (
-            "(() => { const field = document.querySelector('#index-url');"
-            " return !!field && !field.closest('.card').hidden; })()"
-        ),
-        "Machine limits": (
-            "(() => { const field = document.querySelector("
-            "'input[aria-label=\"runs at once\"]');"
-            " return !!field && !field.closest('.card').hidden; })()"
-        ),
-    }
+    def set_theme(self, theme, route=None):
+        """Store a theme the way the page's own control does, and reload.
 
-    def _index_panel_button(self, label, timeout=20):
-        """The `aria-pressed` of the Index page button reading `label`.
-
-        Waited for rather than read once. `indexView()` awaits `refreshStores()`
-        and `refreshRuns()` before any of its four buttons exists, so a single
-        miss means "not yet", not "gone" — and reporting it as gone is what made
-        five checks blame the product for a button that arrived a moment later.
-        Both answers, `"true"` and `"false"`, are non-empty strings and so are
-        truthy to `wait_for`; only the absent button polls again.
+        The page reads `semlith-theme` once at boot (`light`, `dark` or
+        `system`) and writes `data-theme` on the root as the resolved scheme.
         """
-        if label not in self.INDEX_PANELS:
-            raise ProtocolError(
-                "the drive does not know an Index page panel called %r. The four "
-                "are %s." % (label, ", ".join(sorted(self.INDEX_PANELS)))
-            )
-        return self.wait_for(
-            """
-            (() => {
-              const wanted = %s.trim().toLowerCase();
-              for (const button of document.querySelectorAll('button.secondary')) {
-                if ((button.innerText || '').trim().toLowerCase() === wanted) {
-                  return button.getAttribute('aria-pressed') || 'false';
-                }
-              }
-              return null;
-            })()
-            """
-            % json.dumps(label),
-            timeout=timeout,
-            what=(
-                "the Index page's %r button. The page's four reveal buttons are "
-                "how every one of its panels is reached; if their wording moved, "
-                "update `INDEX_PANELS` rather than the check." % label
-            ),
+        self.eval("try { localStorage.setItem('semlith-theme', %s); } catch (e) {}" % json.dumps(theme))
+        here = route or (self.eval("(location.hash || '#/home').replace(/^#\\/?/, '')") or "home")
+        self.open_view(here, fresh=True)
+
+    def emulate_media(self, features):
+        """Emulate CSS media features, e.g. `{"prefers-color-scheme": "dark"}`."""
+        self._send(
+            "Emulation.setEmulatedMedia",
+            {"features": [{"name": k, "value": v} for k, v in features.items()]},
         )
 
-    def open_index_panel(self, label, timeout=20):
-        """Press one of the Index page's four reveal buttons and wait for its panel.
+    #: The page's one confirm dialog: `ask()` builds a `.modal[role=dialog]`
+    #: inside a `.modal-scrim` on the body, and the folder picker is the same
+    #: shape with `.modal.wide`. There is no `<dialog>` element in the v6 page.
+    MODAL = ".modal-scrim > .modal[role=dialog]"
 
-        A panel that is already open is left alone, because pressing its button
-        again is what closes it.
-        """
-        if self._index_panel_button(label) != "true":
-            self.click_text("button.secondary", label)
-        self.wait_for(
-            self.INDEX_PANELS[label], timeout=timeout, what="the %r panel" % label
+    def modal_open(self):
+        return bool(self.eval("!!document.querySelector(%s)" % json.dumps(self.MODAL)))
+
+    def modal_text(self):
+        return self.eval(
+            "(document.querySelector(%s) || {}).innerText || null" % json.dumps(self.MODAL)
         )
 
-    def close_index_panel(self, label):
-        """Fold a panel back up, so the next check finds the page as it was."""
-        if self._index_panel_button(label) == "true":
-            self.click_text("button.secondary", label)
+    def modal_press(self, label):
+        """Press the confirm dialog's button that reads `label`."""
+        self.click_text(self.MODAL + " button", label)
 
     # ---------------------------------------------------------- portal HTTP
 

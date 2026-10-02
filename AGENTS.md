@@ -141,7 +141,7 @@ Module responsibilities:
 | `src/ledger.rs` | The one place a retrieval is recorded, whichever surface answered it |
 | `src/report.rs` | The five reports: one structure of blocks, five renderers over it, so Markdown, CSV, JSON, HTML and PDF cannot disagree. No engine of its own |
 | `src/schedule.rs` | A report the daemon writes on a cadence: the record, `~/.semlith/schedules.json`, and the one thread that runs them |
-| `src/replay.rs` | What an agent did after an answer, read from this machine's Claude Code transcripts and only when the Privacy page's toggle is on |
+| `src/replay.rs` | What an agent did after an answer, read from this machine's Claude Code transcripts unless the Privacy page's toggle is off (on by default from 0.35.0; a file that wrote off stays off) |
 | `src/image.rs` | Image support: the five extensions, and the CLIP pair that makes a picture comparable with a sentence |
 | `src/lock.rs` | One writer per store, OS advisory lock (not file existence) |
 | `src/watch.rs` | Event source in front of the same indexer `index` runs |
@@ -151,7 +151,9 @@ Module responsibilities:
 | `src/http.rs` | Hand-rolled synchronous HTTP/1.1: the token, `Host` and CSP rules live here |
 | `src/daemon.rs` | `semlith start`: the locks, the watcher threads, the write queue |
 | `src/routes.rs` | The daemon's routes, as adapters over `Fleet` and the queue |
-| `src/portal/` | The page itself, `include_bytes!`d — HTML, CSS, JS, IBM Plex |
+| `src/portal/` | The page itself, `include_bytes!`d — HTML, CSS, JS, IBM Plex. No `style` attribute anywhere: the CSP drops it silently, so data-driven sizes go through the CSSOM |
+| `src/drop.rs` | `POST /api/drop/resolve`: a dropped item's name, size and modified time turned into the real path — the macOS drag pasteboard, open Explorer windows, the OS search index, then a bounded walk — never an upload |
+| `src/helpers.rs` | The opt-in "Index with semlith" file-manager entries (Finder, Explorer, Nautilus, Dolphin, Thunar), installed and removed beside the user's own |
 | `src/proxy.rs` | `semlith mcp` forwarding to a running daemon |
 | `src/clients.rs` | `docs/clients.md`'s client stanzas, parsed, so the portal shows the tested text |
 | `src/main.rs` | Clap parsing and human output formatting |
@@ -361,8 +363,11 @@ Module responsibilities:
 - **The not-indexed list and acceptances are two additive tables.** `refusals`
   and `acceptances`, `IF NOT EXISTS`, so `FORMAT_VERSION` does not move. Every
   pass that decides not to index something writes a row; a person — never an
-  agent, never in bulk — accepts one file at a time through the session-token
-  routes or `semlith refused`. An acceptance holds salted blake3 fingerprints,
+  agent — decides through the session-token routes or `semlith refused`. From
+  0.35.0 (owner decision 2026-10-01) a decision may name several files at once
+  (`/api/refused/decide`: in, redact, out, reset), and each file is still its
+  own decision and its own ledger row. Keep out is an acceptance whose mode is
+  `refused`, for any reviewable class. An acceptance holds salted blake3 fingerprints,
   never values, and `keyscan::decide` is the one function every pass (index,
   watcher, catch-up, read from disk) asks. A credential file is never accepted.
 - **`read` answers from chunks, never from disk — except for a file it indexed
@@ -649,6 +654,12 @@ lanes on, comma-separated: `cpu`, `gpu`, `ane`, `cuda`, `trt`, `openvino`,
 substring of its name), `SEMLITH_OPENVINO_DEVICE` and `SEMLITH_LLAMA_DEVICE`
 (force a device for those lanes; `CPU`/`cpu` is how CI checks their known answer
 without the hardware). Harness-only, undocumented for users:
+`SEMLITH_SERVICE_DIR` stands a directory in for the service manager, so a
+test of the portal's Start at login writes a file there and never asks
+launchd, systemd or Task Scheduler anything;
+`SEMLITH_DROP_TIERS=walk` leaves the drag pasteboard, Explorer and the OS
+index out of `/api/drop/resolve`, so a test of the walk and the temp rule is
+not spent waiting on a cold runner's search service;
 `SEMLITH_PACK_<NAME>` names an unpacked pack directory in place of the pinned
 download, which is how a pack is tried before it is published; and
 `SEMLITH_COREML_WORKER=current` runs the Core ML lanes from the binary being
@@ -758,17 +769,19 @@ names a store.
 release that adds one adds the view in the same release; parity debt is not a
 thing this repository carries.
 
-A *view* is not always a page. `semlith languages` is the About page's table and
-`semlith_read` is the Search page's second stage — both have a surface a person
+A *view* is not always a page. `semlith languages` is the table on Settings ›
+About and `semlith_read` is Search's Read whole symbol — both have a surface a person
 can open, which is what the rule is for. What the rule forbids is a capability
 with no surface at all, and the exemption list in `tests/portal.rs` is where a
 deliberate absence is argued rather than assumed: `start` and `mcp` have no
-state of their own to show, and `pattern` takes a tree-sitter query that nobody
-writes into a browser box. Adding a row there is allowed; adding one without the
+state of their own to show, and `models` lists every model a store could be
+built with, which no page draws. `pattern` is Search's fourth mode from 0.35.0.
+Adding a row there is allowed; adding one without the
 reasoning beside it is not. `tests/portal.rs` is the gate: it reads the
 subcommand list out of `--help` and the tool list off a running daemon, and
-fails if any of them — bar `start` and `mcp`, which have their reasons recorded
-there — has no route. The Agents page is the one view whose content is not
+fails if any of them — bar the exemptions, which have their reasons recorded
+there — has no route. It also reads every route `app.js` calls and fails on one
+the daemon does not serve. The Agents page is the one view whose content is not
 computed: it renders the stanzas `src/clients.rs` parses out of
 `docs/clients.md`, so a change to that page is usually a change to that file.
 `docs/portal.md` documents every page, and a new one belongs there in the same

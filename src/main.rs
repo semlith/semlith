@@ -557,6 +557,17 @@ enum Command {
         /// it is already there.
         #[arg(long)]
         no_agents: bool,
+
+        /// Add "Index with semlith" to the file manager: a Finder Quick
+        /// Action, an Explorer verb and Send to entry, or Nautilus, Dolphin
+        /// and Thunar actions. Off unless asked; without either flag setup
+        /// asks, and `--yes` leaves them as they are.
+        #[arg(long, conflicts_with = "no_file_managers")]
+        file_managers: bool,
+
+        /// Remove the file-manager helpers `--file-managers` added.
+        #[arg(long)]
+        no_file_managers: bool,
     },
 
     /// Report whether each agent client on this machine can reach semlith, and
@@ -1122,6 +1133,8 @@ fn run() -> Result<()> {
             hook_mode,
             strict,
             no_agents,
+            file_managers,
+            no_file_managers,
         } => {
             arm_airgap(airgap);
             // The flag or the variable. The installers translate their own
@@ -1144,6 +1157,11 @@ fn run() -> Result<()> {
                 !no_hooks,
                 mode,
                 !no_agents,
+                match (file_managers, no_file_managers) {
+                    (true, _) => Some(true),
+                    (_, true) => Some(false),
+                    _ => None,
+                },
             )?;
         }
 
@@ -3125,13 +3143,27 @@ fn run() -> Result<()> {
             // the login service starts one, the error chain this used to print
             // fired on the most ordinary command there is.
             let (held, free) = semlith::daemon::held_by_daemon(&dirs);
+            // Once per daemon, not once per store: ten stores served by one
+            // daemon printed the same line and the same link ten times.
+            let mut daemons: Vec<(&semlith::daemon::Discovery, Vec<&std::path::PathBuf>)> =
+                Vec::new();
             for (dir, found) in &held {
+                match daemons
+                    .iter_mut()
+                    .find(|(d, _)| d.pid == found.pid && d.port == found.port)
+                {
+                    Some((_, dirs)) => dirs.push(dir),
+                    None => daemons.push((found, vec![dir])),
+                }
+            }
+            for (found, dirs) in &daemons {
+                let what = match dirs.as_slice() {
+                    [one] => format!("{} is", one.display()),
+                    many => format!("{} stores are", many.len()),
+                };
                 println!(
-                    "semlith: {} is already served by a running daemon — pid {}, port {}, semlith {}",
-                    dir.display(),
-                    found.pid,
-                    found.port,
-                    found.version
+                    "semlith: {what} already served by a running daemon — pid {}, port {}, semlith {}",
+                    found.pid, found.port, found.version
                 );
                 // Alone on its line so a terminal makes it clickable, and on
                 // stdout for the reason `daemon::run` prints its own URL there:

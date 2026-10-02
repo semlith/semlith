@@ -2,7 +2,8 @@
 
 A scripted browser drive over the Chrome DevTools Protocol that replays the
 reproduction for every finding of the 2026-09-17 full manual regression drive
-and asserts the corrected behaviour.
+and asserts the corrected behaviour — and, from 0.35.0, checks every view and
+flow of the v6 portal.
 
 The manual drive found 47 defects across 62 numbered findings and took most of
 a day. This is the standing gate that would have caught all of them, and it
@@ -22,14 +23,29 @@ python3 tests/drive/drive.py
 ```
 
 Output lands in `drive-out/`: a `transcript.txt` and one screenshot per check,
-named `<id>-<slug-of-title>.png`. The exit status is the number of unexpected
-failures plus the number of XPASSes, so CI can use it directly.
+named `<id>-<slug-of-title>.png`, and — from the `v6.shots` check — `shots/`,
+one picture of every v6 view in light and dark at 1440px and 390px wide, named
+`<theme>-<width>-<route>.png`. `drive-out/` is gitignored; never commit it. The
+exit status is the number of unexpected failures plus the number of XPASSes, so
+CI can use it directly.
 
 ```sh
 python3 tests/drive/drive.py --list             # every registered id
 python3 tests/drive/drive.py --only 2.9,2.10    # a subset
 python3 tests/drive/drive.py --out /tmp/drive   # somewhere else
 python3 tests/drive/drive.py --keep-fixtures    # leave the corpora on disk
+python3 tests/drive/drive.py --shots            # only the v6 screenshot set
+```
+
+Point it at a daemon with its own, empty store home — never the one you use.
+With no store registered there is no `daemon.json` to read the token from, so
+pass the token the daemon printed:
+
+```sh
+HOME=$SCRATCH/home SEMLITH_HOME=$SCRATCH/home/.semlith semlith start --port 7398
+HOME=$SCRATCH/home TMPDIR=$SCRATCH/home/tmp SEMLITH_HOME=$SCRATCH/home/.semlith \
+  SEMLITH_PORTAL_URL=http://127.0.0.1:7398 SEMLITH_TOKEN=<printed token> \
+  SEMLITH_BIN=$(which semlith) python3 tests/drive/drive.py
 ```
 
 ### What it needs
@@ -100,6 +116,7 @@ checkout next door. Each is built on first use and removed at the end:
 | `adoptme()` | a folder holding a real `.semlith`, built by `SEMLITH_BIN`, for 2.1 and 4.18 |
 | `monorepo()` | two git repositories and one plain folder, for the projects picker in 2.5 |
 | `doomed()` | a corpus deleted out from under its own store, for the dead-entry badge in 3.1 |
+| `cased()` | folders and files whose names differ in case, for the picker checks in 4.4 and 4.5 |
 
 `/api/dirs` confines the portal's pickers to the user's home directory, on
 purpose (issue #71). The picker checks therefore need the fixtures inside it:
@@ -149,6 +166,37 @@ the product for its own breakage is worse than no harness.
 5. Nothing uses a test framework and nothing raises a bare `assert`. Python is
    run with `-O` often enough, and an `AssertionError` with no message is a
    failure nobody can act on.
+
+## The v6 portal, and what moved
+
+0.35.0 rebuilt the portal on design v6, and every check was migrated to it
+rather than deleted. The router is `#/<page>/<parts>`, and `Drive.open_view`
+takes that route — `stores/inside`, `store/<name>/runs`, `graph/blast`,
+`settings/about`, `welcome`, `new` — and waits for the page the router mounted,
+its own `.h1` and no loader. `Drive.ROUTES` lists them all. Where the old
+surfaces went:
+
+| Old surface | v6 surface |
+|---|---|
+| Index page run cards | a store's Runs tab (`#/store/<name>/runs`): live cards above History |
+| Index page pickers, URL panel, Scan | the store wizard (`#/new`, or a store's Add sources) |
+| Machine limits | Settings › Performance |
+| Files page | a store's Files tab |
+| Decisions tab | a store's Review tab |
+| Impact | Graph › Blast radius and Path & evidence |
+| Doctor | Agents › Health |
+| About, Cloud | Settings › About, Settings › Cloud |
+| `dialog.modal[open]` | `.modal-scrim > .modal[role=dialog]` (`Drive.MODAL`) |
+
+Where v6 deliberately reversed an old rule, the check asserts the new rule and
+carries a comment saying `0.35.0 owner decision`: v6 as drawn wins over older
+rules (bulk decisions in review, session replay on by default, a runtime ledger
+recording switch, three nav groups, 10 rows a page, and so on). That comment is
+the only way a check's meaning may change; grep for it to see every one.
+
+The `v6.*` checks are new: one or more per view and flow, each asserting the
+view renders without console errors, shows the daemon's numbers rather than
+sample values, and that its primary control works.
 
 ## When a check breaks because the markup moved
 

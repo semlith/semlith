@@ -16,7 +16,7 @@
 //!   have yielded, so a watched tree and an indexed tree are the same set of
 //!   files by construction rather than by two rules agreeing.
 
-use crate::{IndexReport, Semlith, canonical, lock, walk};
+use crate::{IndexReport, Semlith, canonical, lock, walk_allowing};
 use anyhow::{Context, Result};
 use notify::event::{AccessKind, AccessMode};
 use notify::{EventKind, RecursiveMode, Watcher};
@@ -249,7 +249,7 @@ pub fn run_held(
                 }
             }
             waiting_events.retain(|path| !stopped.iter().any(|root| path.starts_with(root)));
-            let paths = admissible(&roots, waiting_events);
+            let paths = admissible(&roots, waiting_events, store.gitignore);
             if !paths.is_empty() && !(held.defer)(&paths) {
                 let started = Instant::now();
                 let report =
@@ -292,7 +292,7 @@ pub fn run_held(
         collect(&mut batch, first.paths);
         drain(&rx, &mut batch, debounce, &mut progress);
 
-        let paths = admissible(&roots, batch);
+        let paths = admissible(&roots, batch, store.gitignore);
         if paths.is_empty() || (held.defer)(&paths) {
             continue;
         }
@@ -375,13 +375,16 @@ fn collect(batch: &mut BTreeSet<PathBuf>, paths: Vec<PathBuf>) {
 /// events fired. If it ever shows up in a profile, the upgrade is a
 /// `ignore::gitignore` matcher built once at startup — at the cost of two
 /// definitions of "which files count" that have to agree.
-fn admissible(roots: &[PathBuf], batch: BTreeSet<PathBuf>) -> Vec<PathBuf> {
+fn admissible(roots: &[PathBuf], batch: BTreeSet<PathBuf>, gitignore: bool) -> Vec<PathBuf> {
     let gone: Vec<PathBuf> = batch.iter().filter(|p| !p.exists()).cloned().collect();
     if batch.len() == gone.len() {
         return gone;
     }
 
-    let visible: BTreeSet<PathBuf> = walk(roots).files.into_iter().collect();
+    let visible: BTreeSet<PathBuf> = walk_allowing(roots, &[], gitignore)
+        .files
+        .into_iter()
+        .collect();
     batch
         .into_iter()
         .filter(|p| visible.contains(p) || gone.contains(p))
@@ -449,7 +452,7 @@ mod tests {
         let batch: BTreeSet<PathBuf> = [missing.clone()].into_iter().collect();
 
         assert_eq!(
-            admissible(&[dir.path().to_path_buf()], batch),
+            admissible(&[dir.path().to_path_buf()], batch, true),
             vec![missing]
         );
     }
@@ -468,7 +471,7 @@ mod tests {
         let batch: BTreeSet<PathBuf> = [canonical(&index), canonical(&dir.path().join("real.md"))]
             .into_iter()
             .collect();
-        let admitted = admissible(&[dir.path().to_path_buf()], batch);
+        let admitted = admissible(&[dir.path().to_path_buf()], batch, true);
 
         assert_eq!(admitted, vec![canonical(&dir.path().join("real.md"))]);
     }
