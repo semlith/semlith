@@ -5368,8 +5368,8 @@ td.c-why {
   transition: opacity 0.15s;
 }
 
-/* The path catcher over the drop zone (step2() in app.js): unseen, and only
-   in the way while something is being dragged over the zone. */
+/* The path catcher over the drop zone (step2() in app.js): unseen, over the
+   whole zone, so every drop lands in it first. */
 .drop-catch {
   position: absolute;
   inset: 0;
@@ -5382,21 +5382,22 @@ td.c-why {
   background: transparent;
   color: transparent;
   cursor: copy;
-  pointer-events: none;
   z-index: 2;
 }
-.dropzone.drag .drop-catch,
-.dropzone.safari .drop-catch {
-  pointer-events: auto;
-}
 .drop-catch {
+  pointer-events: auto;
   caret-color: transparent;
 }
-/* In Safari the catcher is live over the whole zone; the zone's buttons sit
-   above it so they stay pressable. */
-.dropzone.safari > .row {
+/* The catcher is live over the whole zone; the zone's buttons sit above it
+   so they stay pressable. */
+.dropzone > .row {
   position: relative;
   z-index: 3;
+}
+/* While something is dragged over the zone the catcher is on top of the
+   buttons too, so a drop is never taken by a button. */
+.dropzone.drag > .row {
+  z-index: 1;
 }
 /* A lane check's answer, in the row of the lane it is about. */
 .ok-ink {
