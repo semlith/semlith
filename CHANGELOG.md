@@ -67,12 +67,48 @@ The call stays under 2.5 s. On this M1 a README with many copies on disk was
 singled out by Spotlight and its fingerprint in 0.51 s.
 
 **"Index with semlith" in the file manager, when asked.** `semlith setup
---file-managers`, or `POST /api/helpers {"on": true}`, adds a Finder Quick
-Action, an Explorer verb and Send to entry through a windowless launcher, or a
-Nautilus script, a Dolphin service menu and a Thunar action merged beside the
-user's own. Each runs the installed binary's `index` on the selection.
-`--no-file-managers` removes them. `GET /api/helpers` lists them with whether
-each is installed.
+--file-managers` adds a Finder Quick Action, an Explorer verb and Send to entry
+through a windowless launcher, or a Nautilus script, a Dolphin service menu and
+a Thunar action merged beside the user's own. Each runs the installed binary's
+`index` on the selection. `--no-file-managers` removes them. It is the CLI's
+only: a drop on the page already does what it offers, so the portal has no
+card for it.
+
+**Safari drops take the real path.** Safari writes a dropped item's path into
+a text field, so in Safari the drop zone carries an unseen one and a drop is
+added from it exactly, with no lookup; the lookup runs only if nothing lands.
+Chrome and Firefox write no path into a field and go straight to the lookup.
+Every drop ends in the paste box when nothing finds it. On Windows a Windows
+Search answer on any drive counts, not only under the profile.
+
+### From the owner's walk
+
+**Read and decided the way people use it.** Every dropdown is the portal's
+own, drawn like the Graph's store picker. Long paths lose their start, never
+their end, with the whole path on hover, and text no longer runs out of its
+card. A store's Review tab filters by risk, applies suggestions and scrolls in
+its card; the wizard keeps its scroll on every decision, and its scan is shown
+over four to eight seconds unless the real scan is slower. A run's bar follows
+the whole run and never jumps back; its live log fills. Controls that wait on
+the daemon spin and keep their focus. Dialogs close by their buttons or Escape
+only. The folder picker selects on a click and opens a folder on a
+double-click. Path from here opens on what the symbol calls. Check each lane
+shows what it found, a lane's downloaded files can be removed, and lanes built
+for another OS are set apart. The graph moves as it did before 0.35.0, with
+the v6 lines. Phones and tablets get the clear breaks fixed: the search
+toolbar, wrapping tabs, stacked review and history rows, a graph sized to the
+canvas.
+
+**Index health reads each store once.** The report's unresolved-names pass
+groups by target before testing each, and both aggregates are kept per store
+until its graph changes: 16 s the first time on the 879k-chunk corpus, about
+1 s after.
+
+**`semlith start` and `semlith upgrade` say it once and say it right.**
+`start` against a running daemon prints one line and one link per daemon
+rather than per store. `upgrade` no longer reports a failed restart over a
+daemon that came up on the new binary: re-registering the login service had
+already replaced it, and the restart that followed raced the old one exiting.
 
 ### The portal's v6 backend
 
