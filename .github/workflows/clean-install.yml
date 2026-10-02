@@ -1,0 +1,157 @@
+name: clean-install
+
+# A published release, installed the way a user installs it: the installer
+# attached to that release, on machines that have never seen semlith. Then the
+# same installer handed an archive with one byte changed and a SHA256SUMS
+# rewritten to match it, which only the provenance check can catch.
+#
+# Run it after the release workflow has published the tag:
+#   gh workflow run clean-install.yml -f version=v0.36.0
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag to install, such as v0.36.0
+        required: true
+
+# Reading a public release and its attestations is all any job here does.
+permissions:
+  contents: read
+  attestations: read
+
+# The tag reaches every script through the environment, never pasted into one.
+env:
+  VERSION: ${{ inputs.version }}
+  GH_TOKEN: ${{ github.token }}
+  REPO: semlith/semlith
+
+jobs:
+  install:
+    name: install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Installer from the release
+        run: |
+          case "$VERSION" in v[0-9]*) ;; *) echo "::error::version must be a tag such as v0.36.0"; exit 1 ;; esac
+          gh release download "$VERSION" --repo "$REPO" --pattern install.sh
+          gh attestation verify install.sh --repo "$REPO"
+
+      - name: Install
+        env:
+          SEMLITH_VERSION: ${{ inputs.version }}
+          SEMLITH_YES: "1"
+          SEMLITH_NO_SERVICE: "1"
+        run: |
+          sh install.sh 2>&1 | tee install.log
+          if ! grep -q '^Provenance verified:' install.log; then
+            echo "::error::the installer did not report gh attestation verify passing"
+            exit 1
+          fi
+
+      - name: Version
+        run: |
+          got=$("$HOME/.semlith/bin/semlith" --version)
+          echo "$got"
+          if [ "$got" != "semlith ${VERSION#v}" ]; then
+            echo "::error::installed '$got', expected semlith ${VERSION#v}"
+            exit 1
+          fi
+
+  install-windows:
+    runs-on: windows-latest
+    steps:
+      # Windows PowerShell 5.1, which is what `irm ... | iex` runs on most
+      # machines. 'Continue' because 5.1 turns a native command's redirected
+      # stderr into errors; every exit code is checked by hand instead.
+      - name: Install
+        shell: powershell
+        env:
+          SEMLITH_VERSION: ${{ inputs.version }}
+          SEMLITH_YES: "1"
+          SEMLITH_NO_SERVICE: "1"
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if ($env:VERSION -notmatch '^v[0-9]') { throw 'version must be a tag such as v0.36.0' }
+          gh release download $env:VERSION --repo $env:REPO --pattern install.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'could not download install.ps1 from the release' }
+          gh attestation verify install.ps1 --repo $env:REPO
+          if ($LASTEXITCODE -ne 0) { throw 'install.ps1 has no valid attestation' }
+          $log = & powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 *>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Output $log
+          if ($code -ne 0) { throw "install.ps1 exited $code" }
+          if ($log -notmatch 'Provenance verified:') { throw 'the installer did not report gh attestation verify passing' }
+          $got = & "$HOME\.semlith\bin\semlith.exe" --version
+          $want = 'semlith ' + $env:VERSION.TrimStart('v')
+          Write-Output $got
+          if ($got -ne $want) { throw "installed '$got', expected $want" }
+
+  # The installer has one origin and takes no other from the environment, so a
+  # copy is pointed at a loopback server by rewriting that one line, as
+  # tests/install.rs does. The checksum passes because SHA256SUMS was rewritten
+  # with the archive; the attestation cannot be, so the install must fail there.
+  tamper:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tampered release refused
+        run: |
+          case "$VERSION" in v[0-9]*) ;; *) echo "::error::version must be a tag such as v0.36.0"; exit 1 ;; esac
+          archive="semlith-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          dir="srv/$REPO/releases/download/$VERSION"
+          mkdir -p "$dir" home
+          gh release download "$VERSION" --repo "$REPO" --pattern install.sh --pattern "$archive"
+          mv "$archive" "$dir/"
+          python3 -c 'import sys; p=sys.argv[1]; b=bytearray(open(p,"rb").read()); b[len(b)//2]^=1; open(p,"wb").write(b)' "$dir/$archive"
+          (cd "$dir" && sha256sum "$archive" > SHA256SUMS)
+          sed 's#^origin=https://github.com$#origin=http://127.0.0.1:8000#' install.sh > tampered.sh
+          grep -q '^origin=http://127.0.0.1:8000$' tampered.sh
+          python3 -m http.server 8000 --bind 127.0.0.1 --directory srv >/dev/null 2>&1 &
+          for _ in $(seq 50); do curl -fs http://127.0.0.1:8000/ >/dev/null && break; sleep 0.2; done
+          code=0
+          SEMLITH_VERSION="$VERSION" SEMLITH_HOME="$PWD/home" sh tampered.sh > out.log 2>&1 || code=$?
+          cat out.log
+          [ "$code" -ne 0 ] || { echo "::error::the installer accepted a tampered archive"; exit 1; }
+          grep -q "$archive: OK" out.log || { echo "::error::failed before the checksum passed, so the attestation was never tested"; exit 1; }
+          grep -q 'provenance check failed' out.log || { echo "::error::failed, but not on provenance"; exit 1; }
+          [ ! -e home/bin/semlith ] || { echo "::error::a binary was installed"; exit 1; }
+
+  tamper-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Tampered release refused
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if ($env:VERSION -notmatch '^v[0-9]') { throw 'version must be a tag such as v0.36.0' }
+          $archive = "semlith-$($env:VERSION)-x86_64-pc-windows-msvc.zip"
+          $dir = "srv/$($env:REPO)/releases/download/$($env:VERSION)"
+          New-Item -ItemType Directory -Path $dir, home -Force | Out-Null
+          gh release download $env:VERSION --repo $env:REPO --pattern install.ps1 --pattern $archive
+          if ($LASTEXITCODE -ne 0) { throw 'could not download the release files' }
+          Move-Item $archive $dir
+          $path = (Resolve-Path (Join-Path $dir $archive)).Path
+          $bytes = [IO.File]::ReadAllBytes($path)
+          $mid = [int][math]::Floor($bytes.Length / 2)
+          $bytes[$mid] = $bytes[$mid] -bxor 1
+          [IO.File]::WriteAllBytes($path, $bytes)
+          $hash = (Get-FileHash -Path $path -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path (Join-Path $dir 'SHA256SUMS') -Value "$hash  $archive" -Encoding ascii
+          $text = (Get-Content -Raw install.ps1) -replace "(?m)^\`$origin = 'https://github\.com'", "`$`$origin = 'http://127.0.0.1:8000'"
+          if ($text -notmatch "(?m)^\`$origin = 'http://127\.0\.0\.1:8000'") { throw 'the origin line was not rewritten' }
+          Set-Content -Path tampered.ps1 -Value $text -Encoding ascii
+          Start-Process python -ArgumentList '-m', 'http.server', '8000', '--bind', '127.0.0.1', '--directory', 'srv' -WindowStyle Hidden
+          foreach ($i in 1..50) {
+            try { Invoke-WebRequest http://127.0.0.1:8000/ -UseBasicParsing | Out-Null; break } catch { Start-Sleep -Milliseconds 200 }
+          }
+          $env:SEMLITH_VERSION = $env:VERSION
+          $env:SEMLITH_HOME = Join-Path $PWD 'home'
+          $log = & powershell -NoProfile -ExecutionPolicy Bypass -File tampered.ps1 *>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Output $log
+          if ($code -eq 0) { throw 'the installer accepted a tampered archive' }
+          if ($log -notmatch 'provenance check failed') { throw 'failed, but not on provenance' }
+          if (Test-Path home\bin\semlith.exe) { throw 'a binary was installed' }

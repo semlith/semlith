@@ -86,7 +86,7 @@ pub struct Status {
 pub const NO_SERVICE_ENV: &str = "SEMLITH_NO_SERVICE";
 
 pub const INSTALL_SH: &str =
-    "curl -fsSL https://raw.githubusercontent.com/semlith/semlith/main/install.sh | sh";
+    "curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/semlith/semlith/main/install.sh | sh";
 
 /// The Windows one-liner.
 pub const INSTALL_PS1: &str =

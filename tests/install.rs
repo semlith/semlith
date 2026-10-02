@@ -218,6 +218,10 @@ fn install(release: &Release) -> std::process::Output {
         .env("SEMLITH_VERSION", TAG)
         .env("SEMLITH_HOME", &release.semlith_home)
         .env("HOME", &release.home)
+        // A fixture has no attestation; a token in the developer's shell would
+        // log gh in and make the installer, correctly, refuse it.
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN")
         .output()
         .expect("run install.sh")
 }
