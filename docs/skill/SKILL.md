@@ -1,6 +1,6 @@
 ---
 name: semlith
-description: Use FIRST for any question about code in a folder semlith has indexed — where X is (semlith_search), who calls it (semlith_neighbors), what breaks if it changes (semlith_impact), every line matching a string or regex (semlith_search exact: true) — before grep, rg, find, cat or Read. Skip only for git history and the exact read right before an edit.
+description: Use FIRST for any question about code in a folder semlith has indexed — where X is (semlith_search), who calls it (semlith_neighbors), what breaks if it changes (semlith_impact), every line matching a string or regex (semlith_search exact: true), what a PDF, Word, PowerPoint or Excel file says — before grep, rg, find, cat or Read. Skip only for git history and the exact read right before an edit.
 ---
 
 # semlith
@@ -21,6 +21,11 @@ on the question with a `path:line` you can cite.
 | Where are these defined? | `semlith_symbol {names: [...]}`, up to 20 |
 | A span plus its callers and callees in one call | `semlith_brief {question}` |
 | What is in this directory? | `semlith_files {tree: true}` |
+| What does this PDF, Word, PowerPoint, Excel or EPUB file say? | `semlith_search {query, ext: ["pdf"]}`, then `semlith_read` |
+
+**Documents.** semlith indexes PDF, Word, PowerPoint, Excel, OpenDocument, EPUB
+and HTML as text. Grep and Read see those files' bytes, not their words: answer
+and quote from semlith, never from a guess about what such a file contains.
 
 A store that holds several repositories: pass `path: ["<repo>/**"]` to every
 call. Unscoped, a name defined in another repository can answer first; scoped,
@@ -38,10 +43,8 @@ product code unless the query names tests.
    grep." In Claude Code, pick `semlith-explorer` over `Explore`.
 3. **Fall back per question.** If an answer is thin, say so, use grep/Read for
    that question only, and return to semlith for the next.
-4. Not listed by default but callable by name: `semlith_path`, `semlith_trace`,
-   `semlith_pattern`, `semlith_report`, `semlith_languages`, and the writes
-   `semlith_index`, `semlith_add`, `semlith_forget` — never call a write unless
-   the user asked to change the index.
+4. Never change the index unless the user asked. The CLI does it:
+   `semlith index <path>`, `semlith forget <file>`.
 
 Only indexed paths are known: check `semlith_files` before concluding something
 does not exist.

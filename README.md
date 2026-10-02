@@ -191,7 +191,7 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 | `semlith scan [STORE]` | List every file the store holds that semlith would refuse today — a credential the name does not admit to, a rule that has widened. Exits non-zero while any remain; `--forget` evicts them. |
 | `semlith drop <STORE>` | Delete a store outright — its vectors, chunks, graph and ledger, and the registry entry naming it. The indexed files are untouched. |
 | `semlith symbol <NAME>...` | The definition, its callers and callees, and the ring two hops out, in one answer; several names give one row per definition. From the parsed syntax tree rather than a grep for `fn name`. `--history` gives what the name used to be: the definitions a re-index replaced, each with the content hash of the file version it was true for. |
-| `semlith neighbors <NAME>` | What calls it and what it calls, one hop each way. `--kind` to follow one edge kind, `--all` to expand collapsed rows. |
+| `semlith neighbors <NAME>` | What calls it and what it calls, one hop each way. `--kind` to follow one edge kind, `--all` to expand collapsed rows; `--path`/`--ext`/`--lang` keep it to one repository of a store that holds several, as on `symbol`, `impact` and `brief`. |
 | `semlith path <FROM> <TO>` | The shortest chain of edges between two symbols, or nothing if they are unconnected. `--depth` to search further. |
 | `semlith ledger` | Print what agents retrieved from this store, newest first. `--last N`, `--verify`. `--usage on\|off` turns on reading each AI client's own session log for the model, tokens and cost of its calls (off by default; read-only, numbers only), priced by `semlith prices`: a models.dev snapshot built in, which `semlith prices update` refreshes only when run. Needs no key. |
 | `semlith start [PATHS...]` | Own every registered store, keep them current, serve the portal on `127.0.0.1:7365` and answer MCP at `/mcp`. `--port`, `--debounce`, `--airgap`, `--no-ledger`, `--no-mcp-http`. |
@@ -412,8 +412,10 @@ would have served both. The command reproduces it against any store you have.
 `semlith mcp` speaks MCP over stdio, and `semlith start` answers the same sixteen
 tools over HTTP at `/mcp`. `tools/list` sends eight of them — search, brief,
 read, files, symbol, neighbors, impact, stats — because every definition is paid
-for on every request; the rest answer by name, and `SEMLITH_MCP_TOOLS=all` lists
-them too:
+for on every request. Clients offer an agent only the listed tools, so the other
+eight — writes, reports, pattern, path, trace, languages — stay on the CLI and
+the portal, and `SEMLITH_MCP_TOOLS=all` in the server's environment lists them
+again:
 
 | Tool | What it does |
 | --- | --- |

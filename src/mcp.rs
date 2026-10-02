@@ -535,8 +535,9 @@ pub fn locate_bytes(hits: &[crate::Hit], query: &str) -> usize {
 /// 4 524 without), about 9.5k over a session; in 150 agent sessions the
 /// agents called four of them. The eight below are the read tools an agent
 /// reaches for; the rest -- writes, reports, pattern, path, trace, languages
-/// -- stay callable by name and stay on the CLI and the portal, and come back
-/// to the list with the variable.
+/// -- stay on the CLI and the portal. A client offers its agent only listed
+/// tools, so the variable is how one gets them back over MCP; the server still
+/// answers a call to any of them.
 fn tool_defs(open: &str) -> Value {
     let all = all_tool_defs(open);
     if std::env::var("SEMLITH_MCP_TOOLS").is_ok_and(|v| v == "all") {

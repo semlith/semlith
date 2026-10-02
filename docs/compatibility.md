@@ -1403,6 +1403,17 @@ what was there, except the three marked as a change of shape.
 | `POST /api/agents/register` | Takes `{clients, action}` with `action` `register` or `unregister`. `GET /api/agents` client rows gain `id` and `registered`; `tools` rows gain `answers`, `typical_tokens` and `typical_source`. |
 | `semlith start --no-ledger` | Now stops the rows written by agents through `/mcp` too, not only the portal's. |
 
+## 0.36.0
+
+| Surface | Change |
+|---|---|
+| Search ranking | **Behaviour change:** search no longer builds the graph list. No hit's `lists` holds `graph`, and the `provenance` field is never sent. `neighbors`, `impact`, `path`, `trace` and brief's callers and callees still read the graph. |
+| `tools/list` | **Shape change:** eight tools are listed (`semlith_search`, `semlith_brief`, `semlith_read`, `semlith_files`, `semlith_symbol`, `semlith_neighbors`, `semlith_impact`, `semlith_stats`) and their schemas declare fewer arguments. The server still answers every tool and argument, but a client offers its agent only listed tools, so writes, reports, pattern, path, trace and languages leave agents unless `SEMLITH_MCP_TOOLS=all` is set in the server's environment; the CLI and portal keep them all. |
+| `semlith_brief`, `semlith_symbol`, `semlith_neighbors`, `semlith_impact` | Take `path`, `ext` and `lang` (a leading `!` excludes), as search does, on MCP, the CLI (`--path/--ext/--lang`) and `/api/brief`, `/api/symbol`, `/api/neighbors`, `/api/impact`. Scoped, only definitions, callers, callees and reached rows in selected files are answered. |
+| `GET /api/graph` | Answers 503 with a sentence naming how to scope it when the drawing takes longer than 15 s. |
+| `GET /api/corpus` | A store over 20 000 chunks may answer `{store, measuring: true}` while it is measured off the request; the measure is kept until the store changes. |
+| Release assets | Each release carries `install.sh` and `install.ps1`, and every asset has a GitHub artifact attestation. The installers verify the archive's with `gh attestation verify` when `gh` is installed and logged in, and refuse one that fails; a tag before `v0.36.0` has none and is installed as before. |
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:

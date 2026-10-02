@@ -40,8 +40,8 @@ makes. It runs a fixed set of 107 questions with ground-truth spans from
 multi-hop — and prints hit@1, hit@3, hit@8, bytes per answer, and from 0.23.0 calls and tokens per answered question for
 `brief` against the search-then-read path. It asserts two things: the wrong-yes
 count for `path` is zero, and `tools/list` costs under 675 tokens — from 0.36.0
-eight listed tools (`mcp::LISTED`; the other eight are callable by name and
-listed under `SEMLITH_MCP_TOOLS=all`), 2 633 bytes, where sixteen were 7 330 and
+eight listed tools (`mcp::LISTED`; clients offer agents only listed tools,
+so the other eight are the CLI's and portal's unless `SEMLITH_MCP_TOOLS=all`), 2 633 bytes, where sixteen were 7 330 and
 cost an Opus request 3 073 tokens against 1 323 now, measured; every array
 parameter carries an `items` type, which Copilot in VS Code requires. The
 byte proxy in `mcp::tests::the_tool_list_stays_small` is the same number said
