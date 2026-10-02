@@ -559,7 +559,7 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
                 .name_of(&handle.dir)
                 .and_then(|n| registry.stores.get(n))
                 .map(|e| e.roots.clone())
-                .unwrap_or_else(|| handle.roots.clone())
+                .unwrap_or_else(|| handle.roots())
                 .iter()
                 .map(|r| json!({
                 "path": crate::plain(&r.display().to_string()),
@@ -1130,7 +1130,6 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
                 "fresh": h.fresh,
                 "symbol": h.symbol,
                 "symbol_kind": h.symbol_kind,
-                "provenance": h.provenance,
             })
         })
         .collect();
@@ -2361,10 +2360,12 @@ fn tool_sizes(state: &Arc<State>) -> Vec<Value> {
             }
         }
     }
+    let listed = crate::mcp::listed_names();
     crate::mcp::tool_list()
         .into_iter()
         .map(|(name, about)| {
             let short = name.strip_prefix("semlith_").unwrap_or(&name).to_string();
+            let offered = listed.contains(&name);
             let (answers, estimate) = TYPICAL_ESTIMATES
                 .iter()
                 .find(|(n, _, _)| *n == name)
@@ -2383,6 +2384,9 @@ fn tool_sizes(state: &Arc<State>) -> Vec<Value> {
                 "answers": answers,
                 "typical_tokens": typical,
                 "typical_source": source,
+                // Whether `tools/list` sends it. A client offers its agent
+                // only those; the rest are the CLI's and this portal's.
+                "listed": offered,
             })
         })
         .collect()
@@ -2615,8 +2619,12 @@ fn reveal(state: &Arc<State>) -> Response {
 /// charge for having semlith connected at all, and a user should be able to
 /// read it rather than capture traffic to discover it.
 fn tool_list_tokens(state: &Arc<State>) -> (i64, &'static str) {
+    // The listed tools only: their bytes are what `tool_list_bytes` counts,
+    // and a ratio of sixteen tools' prose to eight tools' bytes is neither.
+    let listed = crate::mcp::listed_names();
     let text = crate::mcp::tool_list()
         .into_iter()
+        .filter(|(name, _)| listed.contains(name))
         .map(|(name, about)| format!("{name} {about}"))
         .collect::<Vec<_>>()
         .join(" ");
@@ -2900,6 +2908,10 @@ fn read(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn symbol(state: &Arc<State>, request: &Request) -> Response {
+    let filter = match filter_of(request) {
+        Ok(f) => f,
+        Err(e) => return Response::error(400, &e),
+    };
     // Several names: the definitions table `semlith symbol a b c` prints.
     if let Some(names) = request.query("names").filter(|n| n.contains(',')) {
         let names: Vec<String> = names
@@ -2912,7 +2924,7 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
         let only = request.query_all("store");
         return with_fleet(state, json!({ "table": [] }), move |fleet| {
             let only = (!only.is_empty()).then_some(only);
-            Ok(json!({ "table": fleet.signatures_in(only.as_deref(), &names)? }))
+            Ok(json!({ "table": fleet.signatures_in(only.as_deref(), &names, &filter)? }))
         });
     }
     let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
@@ -2933,6 +2945,7 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
             &crate::graph::dependency_kinds(),
             k,
             false,
+            &filter,
         )?;
         // `symbols` stays where it was so the portal's existing symbol lookup
         // is unchanged; the rest of the block is beside it rather than in
@@ -2953,6 +2966,10 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn neighbors(state: &Arc<State>, request: &Request) -> Response {
+    let filter = match filter_of(request) {
+        Ok(f) => f,
+        Err(e) => return Response::error(400, &e),
+    };
     let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
         return Response::error(400, "missing name");
     };
@@ -2975,7 +2992,8 @@ fn neighbors(state: &Arc<State>, request: &Request) -> Response {
             only.as_deref(),
             &name,
             &kinds,
-            all
+            all,
+            &filter
         )?))
     })
 }
@@ -3017,6 +3035,10 @@ fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
 /// reason: a caller that crosses a name with several definitions is a guess,
 /// so the default refuses and the page says so when it asks anyway.
 fn impact(state: &Arc<State>, request: &Request) -> Response {
+    let filter = match filter_of(request) {
+        Ok(f) => f,
+        Err(e) => return Response::error(400, &e),
+    };
     let Some(name) = request.query("name") else {
         return Response::error(400, "missing name");
     };
@@ -3033,7 +3055,7 @@ fn impact(state: &Arc<State>, request: &Request) -> Response {
         .is_some_and(|v| v == "1" || v == "true");
     with_fleet(state, json!({ "impact": null }), move |fleet| {
         let only = (!only.is_empty()).then_some(only);
-        let impact = fleet.impact_in(only.as_deref(), &name, &kinds, depth, all_edges)?;
+        let impact = fleet.impact_in(only.as_deref(), &name, &kinds, depth, all_edges, &filter)?;
         Ok(json!({
             "impact": impact,
             "headline": impact.headline(),
@@ -3163,6 +3185,12 @@ fn corpus(state: &Arc<State>) -> Response {
     // every other read route behind it (found 2026-09-30, `/api/stores` held
     // for about five minutes). The rows are the store's own, so a second
     // reader answers exactly what the fleet's would.
+    //
+    // And off the request (#175): a measure is kept per store until the store
+    // changes, and one that has to be taken is taken on a thread of its own
+    // while the page shows the last one, or `measuring`. A cold measure of the
+    // corpus store was 373 s of I/O and CPU on an HTTP worker, competing with
+    // every other route on every visit.
     let mut stores = Vec::new();
     // A store whose directory has gone is left out, as `open_fleet` leaves it.
     for store in state
@@ -3170,26 +3198,95 @@ fn corpus(state: &Arc<State>) -> Response {
         .into_iter()
         .filter(|s| s.dir.join("store.db").exists())
     {
-        let measured = crate::store::open(&store.dir.join("store.db")).and_then(|db| {
-            crate::store::corpus(&db, |path| {
-                language_of(std::path::Path::new(path)).to_string()
-            })
-        });
-        match measured {
-            Ok(measured) => {
-                let mut row = serde_json::to_value(&measured).unwrap_or_else(|_| json!({}));
-                if let Some(map) = row.as_object_mut() {
-                    map.insert("store".into(), json!(store.name));
-                }
-                stores.push(row);
+        let db_path = store.dir.join("store.db");
+        let key = crate::store::open(&db_path)
+            .and_then(|db| Ok((crate::store::stats(&db)?, crate::store::last_write(&db)?)));
+        let key = match key {
+            Ok(key) => key,
+            Err(e) => {
+                stores.push(json!({ "store": store.name, "error": format!("{e:#}") }));
+                continue;
             }
-            // One store that cannot be measured is not the whole page. It is
-            // reported as itself, the way an unreadable store is.
-            Err(e) => stores.push(json!({ "store": store.name, "error": format!("{e:#}") })),
+        };
+        let cached = MEASURED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&store.dir)
+            .cloned();
+        match cached {
+            Some((at, row)) if at == key => {
+                stores.push(row);
+                continue;
+            }
+            Some((_, row)) => stores.push(row),
+            None => stores.push(json!({ "store": store.name, "measuring": true })),
+        }
+        let (dir, name) = (store.dir.clone(), store.name.clone());
+        let measure = move || {
+            let measured = crate::store::open(&dir.join("store.db")).and_then(|db| {
+                crate::store::corpus(&db, |path| {
+                    language_of(std::path::Path::new(path)).to_string()
+                })
+            });
+            let row = match measured {
+                Ok(measured) => {
+                    let mut row = serde_json::to_value(&measured).unwrap_or_else(|_| json!({}));
+                    if let Some(map) = row.as_object_mut() {
+                        map.insert("store".into(), json!(name));
+                    }
+                    row
+                }
+                // One store that cannot be measured is not the whole page.
+                // It is reported as itself, the way an unreadable store is.
+                Err(e) => json!({ "store": name, "error": format!("{e:#}") }),
+            };
+            MEASURED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(dir.clone(), (key, row.clone()));
+            MEASURING
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&dir);
+            row
+        };
+        // A small store is measured here, in well under a second, so the page
+        // has its figures on the first read; only a large one goes to a thread.
+        let chunks = (key.0).1;
+        if chunks <= INLINE_MEASURE_CHUNKS {
+            let row = measure();
+            stores.pop();
+            stores.push(row);
+            continue;
+        }
+        let started = MEASURING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(store.dir.clone());
+        if started {
+            std::thread::spawn(move || {
+                measure();
+                daemon::changes::bump(daemon::changes::Domain::Stores);
+            });
         }
     }
     Response::json(&json!({ "stores": stores }))
 }
+
+/// The largest store measured on the request itself.
+const INLINE_MEASURE_CHUNKS: i64 = 20_000;
+
+/// What changes a store's measure: its counts and its last write.
+type MeasureKey = ((i64, i64, i64), Option<i64>);
+
+/// Each store's last measure for `Inside the index`, by store directory.
+static MEASURED: std::sync::Mutex<std::collections::BTreeMap<PathBuf, (MeasureKey, Value)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The stores being measured now, so a second visit does not start a second
+/// measure of the same store.
+static MEASURING: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
 
 /// One of the five reports, in one of the five formats, over a window and a
 /// scope.
@@ -3291,6 +3388,9 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
 /// drawable nor readable. The payload is a documented shape rather than
 /// whatever the renderer happened to want: `{ nodes, edges, total, shown }`,
 /// so another tool can draw the same graph and the renderer can be replaced.
+/// How long one Graph request may read before it is refused as too large.
+const GRAPH_LIMIT: std::time::Duration = std::time::Duration::from_secs(15);
+
 fn graph(state: &Arc<State>, request: &Request) -> Response {
     let focus = request.query("name").map(str::to_string);
     let prefix = request.query("path").map(str::to_string);
@@ -3344,7 +3444,22 @@ fn graph(state: &Arc<State>, request: &Request) -> Response {
     }
     let stores: Vec<(&str, &rusqlite::Connection)> =
         opened.iter().map(|(l, c)| (l.as_str(), c)).collect();
-    match crate::graph::scoped(&stores, focus.as_deref(), prefix.as_deref(), limit, many) {
+    // Bounded, because the fleet lock is not the only thing a drawing over
+    // every edge of a very large store can hold: it held a worker for twelve
+    // minutes and the page asked again (#173). Past the limit the answer says
+    // to scope it.
+    let conns: Vec<&rusqlite::Connection> = stores.iter().map(|(_, c)| *c).collect();
+    let drawn = crate::store::bounded(&conns, GRAPH_LIMIT, || {
+        crate::graph::scoped(&stores, focus.as_deref(), prefix.as_deref(), limit, many)
+    });
+    match drawn {
+        Err(e) if crate::store::is_interrupted(&e) => Response::error(
+            503,
+            &format!(
+                "the graph took longer than {} s to draw; pick one store, a path or a name",
+                GRAPH_LIMIT.as_secs()
+            ),
+        ),
         Ok(mut value) => {
             if !failed.is_empty()
                 && let Some(object) = value.as_object_mut()
@@ -3591,7 +3706,7 @@ fn reindex(state: &Arc<State>, name: &str, body: &Value) -> Response {
         } else {
             daemon::RunKind::Reindex
         };
-        (store.watched.clone(), kind)
+        (store.watched(), kind)
     } else {
         let mut found = Vec::new();
         let mut missing = Vec::new();
@@ -3601,7 +3716,7 @@ fn reindex(state: &Arc<State>, name: &str, body: &Value) -> Response {
                 given.exists().then(|| crate::canonical(given))
             } else {
                 store
-                    .roots
+                    .roots()
                     .iter()
                     .map(|root| root.join(given))
                     .find(|p| p.exists())
@@ -3872,11 +3987,8 @@ fn changes(state: &Arc<State>) -> Response {
     daemon::changes::notice_registry();
     // The same for a root folder deleted or restored underneath a store.
     let stores = state.stores();
-    daemon::changes::notice_roots(
-        stores
-            .iter()
-            .flat_map(|store| store.roots.iter().map(PathBuf::as_path)),
-    );
+    let roots: Vec<PathBuf> = stores.iter().flat_map(|store| store.roots()).collect();
+    daemon::changes::notice_roots(roots.iter().map(PathBuf::as_path));
     let mut out = serde_json::Map::new();
     for domain in daemon::changes::DOMAINS {
         out.insert(
@@ -4239,6 +4351,7 @@ fn adopt_roots(store: &Arc<Store>, paths: &[PathBuf]) {
         .map(|opened| opened.model().to_string())
         .unwrap_or_default();
     let _ = home::record(&choice, paths, &model);
+    store.add_roots(paths);
 }
 
 /// Create the store `path` belongs in and open it in this daemon.
@@ -5349,11 +5462,7 @@ fn drop_resolve(state: &Arc<State>, request: &Request) -> Response {
     if body.items.len() > DROP_ITEMS {
         return Response::error(400, &format!("at most {DROP_ITEMS} items per drop"));
     }
-    let roots = state
-        .stores()
-        .iter()
-        .flat_map(|s| s.roots.clone())
-        .collect();
+    let roots = state.stores().iter().flat_map(|s| s.roots()).collect();
     let last = DROP_CHANGE.load(Ordering::Relaxed);
     let answer = crate::drop::resolve(
         &body,

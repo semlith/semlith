@@ -108,6 +108,11 @@ pub enum Decision {
     Nudge(String),
     /// Refuse the call, and say the same thing.
     Refuse(String),
+    /// Refuse a read the tool cannot do: an Office or EPUB file, whose bytes
+    /// are a zip archive rather than its words. In every mode, and not counted
+    /// against the session, because this is not steering -- the read would
+    /// have failed or shown bytes, and semlith holds the text.
+    Block(String),
 }
 
 /// What one session has done so far, as the hook remembers it.
@@ -130,6 +135,41 @@ struct Lookup {
     call: String,
     /// A whole file read, which the ledger counts as a raw read.
     whole: Option<String>,
+    /// A document semlith reads as text, and whether the tool could read it.
+    doc: Option<Doc>,
+}
+
+/// A document file a raw read meets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Doc {
+    /// Word, PowerPoint, Excel, OpenDocument or EPUB: a zip archive, which
+    /// `Read` shows as bytes and grep cannot search.
+    Opaque,
+    /// A PDF, which `Read` can open; semlith holds its text all the same.
+    Pdf,
+}
+
+/// The document kind of `path`, by extension.
+fn doc_of(path: &str) -> Option<Doc> {
+    let ext = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "docx" | "pptx" | "xlsx" | "odt" | "odp" | "ods" | "epub" => Some(Doc::Opaque),
+        "pdf" => Some(Doc::Pdf),
+        _ => None,
+    }
+}
+
+/// What to say about a document read: semlith holds its text.
+fn doc_lookup(file: &str, doc: Doc) -> Lookup {
+    Lookup {
+        search: false,
+        call: format!(
+            "semlith_search {{query: \"<what you need>\", path: [\"{file}\"]}}, or semlith_read {{target: \"{file}:1-200\"}} for its text in order"
+        ),
+        paths: vec![file.to_string()],
+        whole: Some(file.to_string()),
+        doc: Some(doc),
+    }
 }
 
 /// Decide what to say about one event, without touching anything.
@@ -154,11 +194,39 @@ pub fn decide(
     if !targets.iter().any(|t| covers(t)) {
         return (Decision::Quiet, None);
     }
+    let refund = lookup.whole.as_ref().map(|p| cwd.join(p));
+    if lookup.doc == Some(Doc::Opaque) {
+        return (
+            Decision::Block(format!(
+                "This is a Word, PowerPoint, Excel, OpenDocument or EPUB file: its bytes are a zip \
+                 archive, not its words, so this read cannot show what it says. semlith indexed its \
+                 text: {}.",
+                lookup.call
+            )),
+            refund,
+        );
+    }
+    // Once a session has called semlith it knows what semlith is for, and
+    // saying it again on every read is noise it pays for in tokens.
+    let quiet = session.used || session.nudges >= NUDGES;
+    if lookup.doc == Some(Doc::Pdf) {
+        let said = format!(
+            "semlith indexed this PDF's text. Ask it: {}. Quote from its text, not from the page images.",
+            lookup.call
+        );
+        return (
+            if quiet {
+                Decision::Quiet
+            } else {
+                Decision::Nudge(said)
+            },
+            refund,
+        );
+    }
     let said = format!(
         "semlith indexes this folder. Ask it instead: {}. It answers with file:line and the definition around each, for a fraction of the tokens.",
         lookup.call
     );
-    let refund = lookup.whole.map(|p| cwd.join(p));
     let refuse = match mode {
         Mode::Soft => false,
         Mode::Gate => !session.used && session.refusals < GATE_REFUSALS,
@@ -167,7 +235,7 @@ pub fn decide(
     if refuse {
         return (Decision::Refuse(said), refund);
     }
-    if session.nudges >= NUDGES {
+    if quiet {
         return (Decision::Quiet, refund);
     }
     (Decision::Nudge(said), refund)
@@ -179,15 +247,17 @@ fn lookup_of(event: &Event) -> Option<Lookup> {
     match event.tool_name.as_str() {
         "Read" => {
             let file = input.file_path.clone()?;
+            if let Some(doc) = doc_of(&file) {
+                return Some(doc_lookup(&file, doc));
+            }
             let end = input.limit.map_or(80, |l| input.offset.unwrap_or(1) + l);
             let start = input.offset.unwrap_or(1).max(1);
             Some(Lookup {
                 search: false,
-                call: format!(
-                    "semlith_read {{target: \"{file}:{start}-{end}\"}}, or semlith_brief {{question: \"<what you need from it>\"}}"
-                ),
+                call: format!("semlith_read {{target: \"{file}:{start}-{end}\"}}"),
                 whole: (input.offset.is_none() && input.limit.is_none()).then(|| file.clone()),
                 paths: vec![file],
+                doc: None,
             })
         }
         "Grep" => {
@@ -197,6 +267,7 @@ fn lookup_of(event: &Event) -> Option<Lookup> {
                 call: search_call(&pattern),
                 paths: input.path.clone().into_iter().collect(),
                 whole: None,
+                doc: None,
             })
         }
         "Glob" => Some(Lookup {
@@ -204,6 +275,7 @@ fn lookup_of(event: &Event) -> Option<Lookup> {
             call: tree_call(input.path.as_deref()),
             paths: input.path.clone().into_iter().collect(),
             whole: None,
+            doc: None,
         }),
         "Bash" => bash_lookup(input.command.as_deref()?),
         _ => None,
@@ -255,6 +327,7 @@ fn bash_lookup(command: &str) -> Option<Lookup> {
                     call: search_call(rest.first().map(String::as_str).unwrap_or("")),
                     paths: rest.into_iter().skip(1).collect(),
                     whole: None,
+                    doc: None,
                 });
             }
             // A grep reading a pipe searches no file: `git status | grep x`.
@@ -266,6 +339,7 @@ fn bash_lookup(command: &str) -> Option<Lookup> {
                     call: search_call(&pattern),
                     paths: operands.into_iter().skip(1).collect(),
                     whole: None,
+                    doc: None,
                 });
             }
             "find" | "fd" => {
@@ -286,6 +360,7 @@ fn bash_lookup(command: &str) -> Option<Lookup> {
                     call: tree_call(at.as_deref()),
                     paths: at.into_iter().collect(),
                     whole: None,
+                    doc: None,
                 });
             }
             "tree" => {
@@ -294,6 +369,7 @@ fn bash_lookup(command: &str) -> Option<Lookup> {
                     call: tree_call(operands.first().map(String::as_str)),
                     paths: operands.into_iter().take(1).collect(),
                     whole: None,
+                    doc: None,
                 });
             }
             "ls" if flags("R") => {
@@ -302,19 +378,36 @@ fn bash_lookup(command: &str) -> Option<Lookup> {
                     call: tree_call(operands.first().map(String::as_str)),
                     paths: operands.into_iter().take(1).collect(),
                     whole: None,
+                    doc: None,
                 });
+            }
+            // Document extractors: what an agent reaches for when it knows a
+            // file is not text. semlith has already extracted it.
+            "pdftotext" | "textutil" | "docx2txt" | "antiword" | "catdoc" | "pandoc"
+            | "xlsx2csv" | "unzip" | "markitdown" => {
+                let Some(file) = operands.iter().find(|o| doc_of(o).is_some()).cloned() else {
+                    continue;
+                };
+                let doc = doc_of(&file).unwrap_or(Doc::Pdf);
+                // Converting a file is not reading it from the agent's side:
+                // a nudge for every kind, never a refusal.
+                let mut lookup = doc_lookup(&file, doc);
+                lookup.doc = Some(Doc::Pdf);
+                return Some(lookup);
             }
             "cat" | "head" | "tail" | "less" | "bat" => {
                 let Some(file) = operands.first().cloned() else {
                     continue;
                 };
+                if let Some(doc) = doc_of(&file) {
+                    return Some(doc_lookup(&file, doc));
+                }
                 return Some(Lookup {
                     search: false,
-                    call: format!(
-                        "semlith_read {{target: \"{file}:1-80\"}}, or semlith_brief {{question: \"<what you need from it>\"}}"
-                    ),
+                    call: format!("semlith_read {{target: \"{file}:1-80\"}}"),
                     whole: (program == "cat").then(|| file.clone()),
                     paths: vec![file],
+                    doc: None,
                 });
             }
             "sed" if flags("n") => {
@@ -327,6 +420,7 @@ fn bash_lookup(command: &str) -> Option<Lookup> {
                     call: format!("semlith_read {{target: \"{file}:{lines}\"}}"),
                     paths: vec![file],
                     whole: None,
+                    doc: None,
                 });
             }
             "awk" => {
@@ -336,6 +430,7 @@ fn bash_lookup(command: &str) -> Option<Lookup> {
                     call: format!("semlith_read {{target: \"{file}:1-80\"}}"),
                     paths: vec![file],
                     whole: None,
+                    doc: None,
                 });
             }
             _ => continue,
@@ -478,7 +573,7 @@ fn answer(decision: &Decision) -> Option<String> {
                 "additionalContext": said,
             }
         }),
-        Decision::Refuse(said) => serde_json::json!({
+        Decision::Refuse(said) | Decision::Block(said) => serde_json::json!({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
@@ -508,11 +603,17 @@ pub fn run(input: &str, mode: Mode, client: &str) -> String {
     }
     let state = load(&event.session_id);
     let (decision, refund) = decide(&event, mode, &state, covered);
+    // A document is refused only when the store really holds its text: a file
+    // the walk skipped, or one too large, is the tool's to read after all.
+    let decision = match decision {
+        Decision::Block(_) if !refund.as_deref().is_some_and(indexed) => Decision::Quiet,
+        other => other,
+    };
     let mut next = state.clone();
     match decision {
         Decision::Refuse(_) => next.refusals += 1,
         Decision::Nudge(_) => next.nudges += 1,
-        Decision::Quiet => {}
+        Decision::Quiet | Decision::Block(_) => {}
     }
     if next != state {
         save(&event.session_id, &next);
@@ -603,6 +704,25 @@ fn record(path: &Path, client: &str, session: &str, mode: Mode) {
     );
 }
 
+/// Whether the store covering `path` holds that file.
+fn indexed(path: &Path) -> bool {
+    let absolute = crate::canonical(path);
+    let Some(dir) = store_dir_for(&absolute) else {
+        return false;
+    };
+    rusqlite::Connection::open_with_flags(
+        dir.join("store.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()
+    .and_then(|db| {
+        crate::store::file_hash(&db, &absolute.to_string_lossy())
+            .ok()
+            .flatten()
+    })
+    .is_some()
+}
+
 fn store_dir_for(path: &Path) -> Option<PathBuf> {
     let registry = Registry::load().ok()?;
     let (name, _) = registry.covering(path)?;
@@ -630,6 +750,125 @@ mod tests {
 
     fn held(p: &Path) -> bool {
         p.starts_with("/proj")
+    }
+
+    fn read(file: &str) -> Event {
+        event("Read", serde_json::json!({ "file_path": file }))
+    }
+
+    /// An Office or EPUB file is refused in every mode, a PDF is a nudge, and
+    /// neither counts against the session's nudges or refusals.
+    #[test]
+    fn an_office_read_is_refused_and_a_pdf_read_is_nudged() {
+        for mode in [Mode::Soft, Mode::Gate, Mode::Hard] {
+            let (d, refund) = decide(&read("/proj/spec.docx"), mode, &Session::default(), held);
+            let Decision::Block(said) = d else {
+                panic!("{mode:?}: {d:?}")
+            };
+            assert!(
+                said.contains("semlith_search") && said.contains("spec.docx"),
+                "{said}"
+            );
+            assert_eq!(refund, Some(PathBuf::from("/proj/spec.docx")));
+        }
+        // Even after the session used semlith: the read cannot work.
+        let used = Session {
+            used: true,
+            ..Session::default()
+        };
+        assert!(matches!(
+            decide(&read("/proj/book.EPUB"), Mode::Soft, &used, held).0,
+            Decision::Block(_)
+        ));
+        let (d, _) = decide(
+            &read("/proj/paper.pdf"),
+            Mode::Soft,
+            &Session::default(),
+            held,
+        );
+        assert!(
+            matches!(d, Decision::Nudge(ref said) if said.contains("PDF")),
+            "{d:?}"
+        );
+        // Outside every root, nothing.
+        assert_eq!(
+            decide(
+                &read("/elsewhere/a.xlsx"),
+                Mode::Soft,
+                &Session::default(),
+                held
+            )
+            .0,
+            Decision::Quiet
+        );
+    }
+
+    /// A shell extractor on a document is a nudge toward the text semlith
+    /// already holds, never a refusal.
+    #[test]
+    fn a_document_extractor_is_nudged_toward_semlith() {
+        for command in [
+            "pdftotext report.pdf -",
+            "textutil -convert txt notes.docx",
+            "unzip -p deck.pptx ppt/slides/slide1.xml",
+            "cat sheet.xlsx | head",
+        ] {
+            let (d, _) = decide(&bash(command), Mode::Hard, &Session::default(), held);
+            match d {
+                Decision::Nudge(said) | Decision::Block(said) => {
+                    assert!(said.contains("semlith_search"), "{command}: {said}")
+                }
+                other => panic!("{command}: {other:?}"),
+            }
+        }
+        // `unzip` of something that is not a document is not a lookup.
+        assert_eq!(
+            decide(
+                &bash("unzip -l archive.zip"),
+                Mode::Soft,
+                &Session::default(),
+                held
+            )
+            .0,
+            Decision::Quiet
+        );
+    }
+
+    /// A session that has called semlith is not nudged again; refusals in
+    /// `hard` still apply, since that is what the mode was chosen for.
+    #[test]
+    fn a_session_that_used_semlith_is_not_nudged() {
+        let used = Session {
+            used: true,
+            ..Session::default()
+        };
+        assert_eq!(
+            decide(&bash("grep -rn x src"), Mode::Soft, &used, held).0,
+            Decision::Quiet
+        );
+        assert!(matches!(
+            decide(&bash("grep -rn x src"), Mode::Hard, &used, held).0,
+            Decision::Refuse(_)
+        ));
+    }
+
+    /// A plain read is pointed at `semlith_read` for the same span, and at
+    /// nothing else.
+    #[test]
+    fn a_read_nudge_names_semlith_read_only() {
+        let e = event(
+            "Read",
+            serde_json::json!({ "file_path": "/proj/src/a.rs", "offset": 10, "limit": 20 }),
+        );
+        let (d, _) = decide(&e, Mode::Soft, &Session::default(), held);
+        let Decision::Nudge(said) = d else {
+            panic!("{d:?}")
+        };
+        assert!(
+            said.contains("semlith_read {target: \"/proj/src/a.rs:10-30\"}"),
+            "{said}"
+        );
+        assert!(!said.contains("semlith_brief"), "{said}");
     }
 
     #[test]

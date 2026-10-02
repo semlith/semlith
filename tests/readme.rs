@@ -268,12 +268,16 @@ fn the_readme_credits_the_work_the_index_is_built_on() {
 /// one on the lanes, two measured rows for the service's rate and the daemon's
 /// memory, and the three limits a reader meets first on a Mac or a Windows
 /// NVIDIA card.
+///
+/// Moved from 580 to 625 in 0.36.0 for the Security section the installer
+/// hardening asked for by name: what the installer writes, what it checks,
+/// and how to read and verify it before running it.
 #[test]
 fn the_readme_is_short() {
     let lines = README.lines().count();
     assert!(
-        lines < 580,
-        "the README is {lines} lines; the ceiling is 580"
+        lines < 625,
+        "the README is {lines} lines; the ceiling is 625"
     );
 }
 

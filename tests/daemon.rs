@@ -822,6 +822,73 @@ fn a_daemon_with_no_store_still_serves_the_portal() {
     assert_eq!(daemon.get("/").status, 200);
 }
 
+/// Connections that are open but have sent nothing -- the sockets a browser
+/// opens ahead of the requests it will put on them -- hold up no request and
+/// push none over the limit. Eight of them held all eight workers for the 30 s
+/// read timeout, and the requests behind them queued past the limit into 503s
+/// and, on Windows, resets (#181).
+#[test]
+fn idle_connections_hold_up_no_request() {
+    let daemon = Daemon::start("idle", &[]);
+    let idle: Vec<TcpStream> = (0..12)
+        .map(|_| TcpStream::connect(("127.0.0.1", daemon.port)).expect("the daemon listens"))
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+
+    let started = std::time::Instant::now();
+    let answers: Vec<u16> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..20)
+            .map(|_| s.spawn(|| daemon.get("/api/stores").status))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let took = started.elapsed();
+    assert!(
+        answers.iter().all(|s| *s == 200),
+        "requests behind idle connections were refused: {answers:?}"
+    );
+    assert!(
+        took < Duration::from_secs(5),
+        "twenty requests behind twelve idle connections took {took:?}"
+    );
+    drop(idle);
+}
+
+/// A response is closed, not reset, even when the client sent bytes the
+/// request did not need. Closing a socket with unread data is a reset on
+/// Windows, macOS and Linux alike, and a browser that sees one discards the
+/// response it has already read: the Windows drive's ERR_CONNECTION_RESET on
+/// routes the trace shows answered 200 and written in full (#181).
+#[test]
+fn a_response_survives_bytes_the_request_did_not_need() {
+    let daemon = Daemon::start("linger", &[]);
+    for _ in 0..20 {
+        let mut stream =
+            TcpStream::connect(("127.0.0.1", daemon.port)).expect("the daemon listens");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let request = format!(
+            "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\r\n",
+            daemon.port, daemon.token
+        );
+        // The request, then bytes after it, as a client that pipelines or
+        // sends a late packet would.
+        stream.write_all(request.as_bytes()).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = stream.write_all(&[b'x'; 4096]);
+        std::thread::sleep(Duration::from_millis(100));
+        let mut raw = Vec::new();
+        let read = stream.read_to_end(&mut raw);
+        assert!(read.is_ok(), "the connection was reset: {read:?}");
+        assert!(
+            String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 200"),
+            "{}",
+            String::from_utf8_lossy(&raw)
+        );
+    }
+}
+
 /// The daemon is the writer for its whole life, so a second writer is refused
 /// — which is the conflict the daemon exists to make impossible rather than
 /// merely unlikely.
@@ -1085,6 +1152,32 @@ fn a_save_changes_the_file_count_with_no_manual_action() {
     );
 }
 
+/// A folder added to a running store is watched from that moment, the same
+/// as one present at start: the first index of it works, and a file saved
+/// into it afterwards is indexed without a restart (#180).
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_folder_added_while_running_is_watched_without_a_restart() {
+    let (dir, home, work) = sandbox("added-root");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+    let extra = home.join("extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::write(extra.join("lock.rs"), "pub struct StoreLock;\n").unwrap();
+    let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
+
+    let run = daemon.index_run(&extra);
+    let events = daemon.run_events("api", run, Duration::from_secs(120));
+    assert!(events.iter().any(|e| e["event"] == "done"), "{events:?}");
+    assert_eq!(daemon.get("/api/files").json()["total"], 2);
+
+    std::fs::write(extra.join("later.rs"), "pub fn added_after_the_run() {}\n").unwrap();
+    until(
+        "the watcher to index a file saved into the added folder",
+        Duration::from_secs(40),
+        || daemon.get("/api/files").json()["total"] == serde_json::json!(3),
+    );
+}
+
 // ---------------------------------------------------------------- T10
 
 /// The Privacy page's Rotate button has to actually invalidate: a token that
@@ -1319,7 +1412,7 @@ fn every_revision_proves_itself_through_the_proxy_too() {
         // reason, which is exactly what happened when the graph tools landed.
         assert_eq!(
             names,
-            semlith::mcp::tool_names(),
+            semlith::mcp::listed_names(),
             "wrong tool surface on {revision} through the proxy"
         );
 

@@ -40,6 +40,11 @@ impl Machine {
             "Sourdough starter needs flour and water and a warm shelf.\n",
         )
         .unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sheet.xlsx"),
+            corpus.join("src/sheet.xlsx"),
+        )
+        .unwrap();
         let machine = Self {
             store_home: home.join(".semlith"),
             home,
@@ -115,6 +120,36 @@ fn read_event(path: &str) -> Value {
     })
 }
 
+/// A spreadsheet the store holds is refused even under the default hook, with
+/// the call that reads its text; one the store does not hold is left to the
+/// tool, whatever folder it sits in.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn an_indexed_spreadsheet_read_is_refused_and_an_unindexed_one_is_not() {
+    let machine = Machine::new();
+    let sheet = machine.corpus.join("src/sheet.xlsx").display().to_string();
+    let out = machine.hook(&read_event(&sheet));
+    let answer: Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
+        .unwrap_or_else(|_| panic!("no answer: {}", said(&out)));
+    let specific = &answer["hookSpecificOutput"];
+    assert_eq!(specific["permissionDecision"], "deny", "{answer}");
+    assert!(
+        specific["permissionDecisionReason"]
+            .as_str()
+            .is_some_and(|r| r.contains("semlith_search") && r.contains("sheet.xlsx")),
+        "{answer}"
+    );
+
+    let later = machine.corpus.join("src/later.xlsx");
+    std::fs::copy(machine.corpus.join("src/sheet.xlsx"), &later).unwrap();
+    let out = machine.hook(&read_event(&later.display().to_string()));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "a file the store does not hold was refused: {}",
+        said(&out)
+    );
+}
+
 /// The whole of the default behaviour: one line naming a call, no decision of
 /// any kind, and an exit status a client reads as "carry on".
 #[test]
@@ -132,7 +167,7 @@ fn a_read_of_an_indexed_file_is_answered_with_one_line_and_no_decision() {
         .as_str()
         .unwrap_or_else(|| panic!("no line for the agent to read: {answer}"));
     assert!(
-        line.contains("semlith_brief"),
+        line.contains("semlith_read"),
         "the line names no call: {line}"
     );
     assert!(

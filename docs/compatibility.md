@@ -374,7 +374,7 @@ ledger that was supposed to measure both of those recorded nothing an agent did.
   `locate`, because the portal's own Search page is the caller and a person
   reading a panel is not paying by the token. A locate row is the
   store-relative path, the line span, the enclosing symbol and its kind, the
-  lists that found it, provenance for a row the graph reached, a freshness flag,
+  lists that found it, a freshness flag,
   and one line of the text; rows are grouped by file and cut to a `max_tokens`
   budget (default 1500, floor 200) that states `truncated: N of M` when it cuts.
   A client that parsed the reply for full chunk text gets a shorter reply than it
@@ -399,6 +399,8 @@ meanings.
   `tokenizer`.
 - **On a hit**: `fresh`, `symbol`, `symbol_kind` and `provenance`. `fresh` is
   present on every hit; the other three are omitted when there is nothing to say.
+  From 0.36.0 search has no graph list, so `provenance` is never sent and no
+  hit's `lists` holds `graph`.
 - **On an edge**: `definitions`, `from_path` and `from_line`.
 - **Two more confidence values.** An edge's confidence was `extracted` or
   `inferred`; it is now one of `extracted`, `resolved`, `inferred` or
@@ -1400,6 +1402,17 @@ what was there, except the three marked as a change of shape.
 | `POST /api/index` | `{store, files}` re-indexes those files forced; `{store}` with no path re-indexes the store (`force: true` re-embeds unchanged files too); `gitignore: false` walks past `.gitignore` and is kept on the store. |
 | `POST /api/agents/register` | Takes `{clients, action}` with `action` `register` or `unregister`. `GET /api/agents` client rows gain `id` and `registered`; `tools` rows gain `answers`, `typical_tokens` and `typical_source`. |
 | `semlith start --no-ledger` | Now stops the rows written by agents through `/mcp` too, not only the portal's. |
+
+## 0.36.0
+
+| Surface | Change |
+|---|---|
+| Search ranking | **Behaviour change:** search no longer builds the graph list. No hit's `lists` holds `graph`, and the `provenance` field is never sent. `neighbors`, `impact`, `path`, `trace` and brief's callers and callees still read the graph. |
+| `tools/list` | **Shape change:** eight tools are listed (`semlith_search`, `semlith_brief`, `semlith_read`, `semlith_files`, `semlith_symbol`, `semlith_neighbors`, `semlith_impact`, `semlith_stats`) and their schemas declare fewer arguments. The server still answers every tool and argument, but a client offers its agent only listed tools, so writes, reports, pattern, path, trace and languages leave agents unless `SEMLITH_MCP_TOOLS=all` is set in the server's environment; the CLI and portal keep them all. |
+| `semlith_brief`, `semlith_symbol`, `semlith_neighbors`, `semlith_impact` | Take `path`, `ext` and `lang` (a leading `!` excludes), as search does, on MCP, the CLI (`--path/--ext/--lang`) and `/api/brief`, `/api/symbol`, `/api/neighbors`, `/api/impact`. Scoped, only definitions, callers, callees and reached rows in selected files are answered. |
+| `GET /api/graph` | Answers 503 with a sentence naming how to scope it when the drawing takes longer than 15 s. |
+| `GET /api/corpus` | A store over 20 000 chunks may answer `{store, measuring: true}` while it is measured off the request; the measure is kept until the store changes. |
+| Release assets | Each release carries `install.sh` and `install.ps1`, and every asset has a GitHub artifact attestation. The installers verify the archive's with `gh attestation verify` when `gh` is installed and logged in, and refuse one that fails; a tag before `v0.36.0` has none and is installed as before. |
 
 ## What a break would look like
 

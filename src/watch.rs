@@ -131,6 +131,7 @@ pub fn run(
             catch_up: true,
             waiting: &|| false,
             defer: &|_| false,
+            roots_now: &Vec::new,
         },
         progress,
         |_| Ok(Vec::new()),
@@ -151,6 +152,10 @@ pub struct Held<'a> {
     /// caller has taken it — the daemon admits a large batch like a run — and
     /// the watcher leaves it alone.
     pub defer: &'a dyn Fn(&[PathBuf]) -> bool,
+    /// Asked once a loop: the roots the store has now. A root that is not
+    /// watched yet and exists is watched from then on, so a folder added to a
+    /// running store is followed without a restart (#180).
+    pub roots_now: &'a dyn Fn() -> Vec<PathBuf>,
 }
 
 /// [`run`] for a caller that already holds the store's write lock and has work
@@ -169,7 +174,7 @@ pub fn run_held(
     mut progress: impl FnMut(Progress),
     mut pump: impl FnMut(&mut Semlith) -> Result<Vec<PathBuf>>,
 ) -> Result<()> {
-    let roots: Vec<PathBuf> = roots.iter().map(|r| canonical(r)).collect();
+    let mut roots: Vec<PathBuf> = roots.iter().map(|r| canonical(r)).collect();
 
     let (tx, rx) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -223,6 +228,17 @@ pub fn run_held(
     });
 
     while !stop.load(Ordering::Relaxed) {
+        for root in (held.roots_now)() {
+            let root = canonical(&root);
+            if root.exists() && !roots.contains(&root) {
+                // Kept either way, so a root the backend refuses is reported
+                // once rather than on every loop.
+                if let Err(e) = watcher.watch(&root, RecursiveMode::Recursive) {
+                    progress(Progress::Error(format!("watching {}: {e}", root.display())));
+                }
+                roots.push(root);
+            }
+        }
         // Before waiting on the filesystem, not after: a request that arrived
         // while the last batch was embedding should not sit for another idle
         // tick behind a tree nobody is editing.

@@ -485,6 +485,11 @@ impl Server {
         refused: impl Fn(Refusal) + Send + Sync + 'static,
     ) -> Result<()> {
         let (tx, rx) = mpsc::channel::<(TcpStream, InFlight)>();
+        // Behind a slot, so shutdown can close the pool while a socket is
+        // still waiting for its first byte: a waiting thread holding a sender
+        // of its own would keep every worker's `recv` open until its read
+        // timed out.
+        let pool = Arc::new(Mutex::new(Some(tx)));
         let rx = Arc::new(Mutex::new(rx));
         let refused = Arc::new(refused);
         let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -586,7 +591,7 @@ impl Server {
 
         while !stop.load(Ordering::Relaxed) {
             match self.listener.accept() {
-                Ok((mut stream, _)) => {
+                Ok((stream, _)) => {
                     // The waker's own connection arrives here too; it carries
                     // no request, so `answer` reads nothing and closes it.
                     if stop.load(Ordering::Relaxed) {
@@ -600,18 +605,37 @@ impl Server {
                     // holding open, and the flood that matters never reaches a
                     // worker at all.
                     let taken = live.fetch_add(1, Ordering::Relaxed);
+                    trace(&stream, || format!("accepted, {} live", taken + 1));
                     let in_flight = InFlight(Arc::clone(&live), crate::priority::request());
                     if taken >= MAX_CONNECTIONS {
-                        let _ = write_response(
-                            &mut stream,
-                            Response::new(503, "text/plain", Vec::new()),
-                        );
-                        drop(in_flight);
+                        // Off the accept loop: it may wait for the request.
+                        std::thread::spawn(move || {
+                            refuse_busy(stream);
+                            drop(in_flight);
+                        });
                         continue;
                     }
-                    if tx.send((stream, in_flight)).is_err() {
-                        break;
-                    }
+                    // To the pool only once it has said something. A browser
+                    // opens sockets ahead of the requests it will put on them,
+                    // and a worker that took one sat in `read_head` until the
+                    // 30 s read timeout: eight of them held the whole pool, and
+                    // the requests behind them queued past the limit into 503s
+                    // and, on Windows, resets (#181). A sleeping thread per
+                    // waiting socket is what that costs now, and the limit
+                    // above bounds how many.
+                    let pool = Arc::clone(&pool);
+                    std::thread::spawn(move || {
+                        let mut first = [0u8; 1];
+                        let peeked = stream.peek(&mut first);
+                        if matches!(peeked, Ok(n) if n > 0)
+                            && let Some(tx) =
+                                pool.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                        {
+                            let _ = tx.send((stream, in_flight));
+                        } else {
+                            trace(&stream, || format!("closed before a request: {peeked:?}"));
+                        }
+                    });
                     // A worker that ended for any reason is replaced here, so
                     // the pool is eight threads for as long as the daemon runs
                     // rather than eight minus however many requests have gone
@@ -637,7 +661,7 @@ impl Server {
 
         // Dropping the sender ends every worker's `recv`, so shutdown finishes
         // the requests in flight and starts no more.
-        drop(tx);
+        pool.lock().unwrap_or_else(|e| e.into_inner()).take();
         for worker in workers {
             let _ = worker.join();
         }
@@ -687,6 +711,80 @@ impl Auth {
     }
 }
 
+/// Whether `SEMLITH_HTTP_TRACE=1`: one stderr line per connection event --
+/// accepted, closed before a request, answered (route, status, time, whether
+/// the write reached the client). A diagnostic for transport faults that only
+/// one platform shows, such as #181 on Windows; off by default.
+fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SEMLITH_HTTP_TRACE").is_ok_and(|v| v == "1"))
+}
+
+/// One trace line, when tracing is on.
+fn trace(stream: &TcpStream, what: impl FnOnce() -> String) {
+    if tracing() {
+        let port = stream.peer_addr().map(|a| a.port()).unwrap_or(0);
+        eprintln!("semlith http: {port} {}", what());
+    }
+}
+
+/// How long a connection past the limit may take to finish sending its
+/// request before it is answered anyway.
+const BUSY_READ: Duration = Duration::from_millis(50);
+
+/// The most of a refused request read before answering it.
+const BUSY_DRAIN: usize = 64 * 1024;
+
+/// Answer a connection past [`MAX_CONNECTIONS`] with 503, having read its
+/// request first.
+///
+/// Closing a socket whose request is still unread is a reset, not a close, on
+/// Windows and Linux alike, and a browser shows a reset as
+/// ERR_CONNECTION_RESET rather than the 503 -- the Windows drive's intermittent
+/// failure (#181). So the head and the body it declares are read off first,
+/// up to [`BUSY_DRAIN`], and the write side is shut so the client reads the
+/// 503 and then an end of stream. On loopback the request lands with the
+/// connect, so this is microseconds; [`BUSY_READ`] bounds what a slow sender
+/// can cost the accept loop.
+fn refuse_busy(mut stream: TcpStream) {
+    let started = std::time::Instant::now();
+    let _ = stream.set_read_timeout(Some(BUSY_READ));
+    let mut seen: Vec<u8> = Vec::new();
+    let mut want: Option<usize> = None;
+    let mut buf = [0u8; 8 * 1024];
+    // A socket that has sent nothing is closed rather than answered: it is a
+    // browser's spare, and a 503 sent before any request is bytes the browser
+    // reads as the answer to the request it later puts there. Closed, it opens
+    // another.
+    let mut first = [0u8; 1];
+    if !matches!(stream.peek(&mut first), Ok(n) if n > 0) {
+        trace(&stream, || "over the limit, closed: no request".to_string());
+        return;
+    }
+    trace(&stream, || "over the limit, answered 503".to_string());
+    while seen.len() < BUSY_DRAIN && started.elapsed() < BUSY_READ {
+        if want.is_some_and(|total| seen.len() >= total) {
+            break;
+        }
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => seen.extend_from_slice(&buf[..n]),
+        }
+        if want.is_none()
+            && let Some(end) = seen.windows(4).position(|w| w == b"\r\n\r\n")
+        {
+            let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
+            let body = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            want = Some(end + 4 + body);
+        }
+    }
+    let _ = write_response(&mut stream, Response::new(503, "text/plain", Vec::new()));
+}
+
 /// Answer one connection. Returns why it was refused, if it was.
 ///
 /// `hold` takes a connection whose credential was wrong and answers it later,
@@ -713,8 +811,12 @@ fn answer(
     // cross-origin attempts from costing a thousand bodies' worth of it.
     let mut request = match read_head(&mut reader) {
         Ok(Some(r)) => r,
-        Ok(None) => return None,
-        Err(_) => {
+        Ok(None) => {
+            trace(&stream, || "closed with no request".to_string());
+            return None;
+        }
+        Err(e) => {
+            trace(&stream, || format!("bad request head: {e:#}"));
             let _ = write_response(&mut stream, Response::new(400, "text/plain", Vec::new()));
             return Some(Refusal::Malformed);
         }
@@ -857,7 +959,17 @@ fn answer(
         return None;
     }
 
-    let _ = write_response(&mut stream, response);
+    let status = response.status;
+    let wrote = write_response(&mut stream, response);
+    trace(&stream, || {
+        format!(
+            "{} {} -> {status} in {} ms, write {:?}",
+            request.method,
+            request.path,
+            started.elapsed().as_millis(),
+            wrote.as_ref().map(|_| "ok")
+        )
+    });
     None
 }
 
@@ -1073,6 +1185,38 @@ fn percent_decode(raw: &str) -> String {
 }
 
 fn write_response(stream: &mut TcpStream, response: Response) -> std::io::Result<()> {
+    let written = write_whole(stream, response);
+    linger(stream);
+    written
+}
+
+/// How long a closing connection waits for the client to close its side.
+const LINGER: Duration = Duration::from_millis(500);
+
+/// Close the way a web server must when it closes after every response: shut
+/// the write side, so the client reads the response and then an end of
+/// stream, and read whatever it still sends until it closes or [`LINGER`]
+/// passes. Closing a socket with bytes unread in it sends a reset instead of
+/// a close on Windows, macOS and Linux, and a browser that receives one
+/// discards the response it has already read -- the Windows drive's
+/// ERR_CONNECTION_RESET on routes the daemon had answered 200 and written in
+/// full (#181).
+fn linger(stream: &mut TcpStream) {
+    if stream.shutdown(std::net::Shutdown::Write).is_err() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let _ = stream.set_read_timeout(Some(LINGER));
+    let mut sink = [0u8; 4096];
+    while started.elapsed() < LINGER {
+        match stream.read(&mut sink) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+    }
+}
+
+fn write_whole(stream: &mut TcpStream, response: Response) -> std::io::Result<()> {
     let Response {
         status,
         content_type,
@@ -1419,6 +1563,40 @@ mod tests {
         // where the entropy is.
         assert_eq!(token_from(Ok([0u8; 32])), "0".repeat(64));
         assert_eq!(&token_from(Ok([0xab; 32]))[..4], "abab");
+    }
+
+    /// A connection past the limit is answered 503 and closed cleanly, not
+    /// reset. Closing a socket whose request was never read sends a reset on
+    /// Windows and Linux, which a browser reports as ERR_CONNECTION_RESET and
+    /// never shows the 503 (#181).
+    #[test]
+    fn a_connection_past_the_limit_is_answered_not_reset() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = std::thread::spawn(move || {
+            let mut c = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+            let body = vec![b'x'; 8 * 1024];
+            let head = format!(
+                "POST /api/x HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            c.write_all(head.as_bytes()).unwrap();
+            c.write_all(&body).unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut answer = Vec::new();
+            c.read_to_end(&mut answer).map(|_| answer)
+        });
+        let (stream, _) = listener.accept().unwrap();
+        // Give the client's bytes time to land in the receive buffer, as they
+        // have under a real flood.
+        std::thread::sleep(Duration::from_millis(100));
+        refuse_busy(stream);
+        let answer = client.join().unwrap().expect("the client saw a reset");
+        assert!(
+            String::from_utf8_lossy(&answer).starts_with("HTTP/1.1 503"),
+            "{}",
+            String::from_utf8_lossy(&answer)
+        );
     }
 
     /// A mistyped URL costs a quarter of a second; a run of guesses costs more

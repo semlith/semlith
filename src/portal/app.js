@@ -4796,7 +4796,8 @@ function storesList() {
 const PALETTE = ["#F0A43C", "#4C7088", "#3E9A6E", "#2F4F68", "#B07A2A", "#8A9DAB"];
 
 function insideIndex() {
-  const corpus = (data.corpus?.stores || []).filter((c) => !c.error);
+  const corpus = (data.corpus?.stores || []).filter((c) => !c.error && !c.measuring);
+  const measuring = (data.corpus?.stores || []).filter((c) => c.measuring);
   const sum = (k) => corpus.reduce((a, c) => a + (c[k] || 0), 0);
   const files = sum("files");
   const lines = sum("lines");
@@ -4845,7 +4846,8 @@ function insideIndex() {
   return el(
     "div",
     { class: "stack" },
-    el("div", { class: "muted t-sm", text: `Measured from the stores themselves on every read, not estimated — ${plural(corpus.length, "store")}, ${n(files)} files.` }),
+    el("div", { class: "muted t-sm", text: `Measured from the stores themselves, again after every change, not estimated — ${plural(corpus.length, "store")}, ${n(files)} files.` }),
+    measuring.length ? el("div", { class: "notice" }, el("span", { class: "sub", text: `Measuring ${measuring.map((m) => m.store).join(", ")} — the figures appear here when it is done.` })) : null,
     errs.length ? el("div", { class: "notice red" }, el("span", { class: "sub", text: `${errs.map((e) => e.store).join(", ")} could not be measured: ${errs[0].error}` })) : null,
     el(
       "div",
@@ -6190,7 +6192,6 @@ function rankedView(r) {
                   el("span", { class: "sym", text: h.symbol ? `${h.symbol_kind ? `${h.symbol_kind} ` : ""}${h.symbol}` : "" }),
                   el("span", { class: "spacer" }),
                   listBadges(h.lists),
-                  h.provenance ? el("span", { class: "badge outline", "data-tip": `Reached through ${provenanceWord(h.provenance)}, not by its text`, text: provenanceShort(h.provenance) }) : null,
                   h.fresh === false ? el("span", { class: "dot amber", "data-tip": "changed since it was indexed — read it before quoting it" }) : el("span", { class: "dot green", "data-tip": "unchanged since it was indexed" }),
                 ),
                 el("div", { class: "snip", text: h.line || h.text || "" }),
@@ -6203,15 +6204,6 @@ function rankedView(r) {
     ),
     el("div", { class: "sr-detail", "data-scroll-keep": "sr-detail" }, detailPanel()),
   );
-}
-
-function provenanceWord(p) {
-  if (typeof p === "string") return p;
-  return p.via ? `a ${p.confidence || ""} graph edge from ${p.via}`.replace("  ", " ") : "the graph";
-}
-function provenanceShort(p) {
-  if (typeof p === "string") return p;
-  return p.confidence || "graph";
 }
 
 function hitPath(h) {
@@ -7646,7 +7638,7 @@ function agConnected(a) {
     el(
       "div",
       { class: "stack" },
-      el("div", { class: "card pad" }, el("span", { class: "eyebrow", text: "What the tool list costs" }), el("span", { class: "mono t-b big18", text: `${n(a.tool_list_tokens)} tokens` }), el("span", { class: "muted t-xs", text: `per session, read once before the agent asks anything · ${plural((a.tools || []).length, "tool")} · ${n(a.tool_list_bytes)} bytes · counted ${a.tool_list_tier === "tokenizer" ? "by the model's tokenizer" : `as ${a.tool_list_tier}`}` })),
+      el("div", { class: "card pad" }, el("span", { class: "eyebrow", text: "What the tool list costs" }), el("span", { class: "mono t-b big18", text: `${n(a.tool_list_tokens)} tokens` }), el("span", { class: "muted t-xs", text: `per session, read once before the agent asks anything · ${plural((a.tools || []).filter((t) => t.listed !== false).length, "tool")} listed · ${n(a.tool_list_bytes)} bytes · counted ${a.tool_list_tier === "tokenizer" ? "by the model's tokenizer" : `as ${a.tool_list_tier}`}` })),
       el("div", { class: "card pad" }, el("span", { class: "card-t", text: "After you register a client" }), el("span", { class: "muted t-sm pretty", text: "Restart it. Ask it something about your code — “use semlith to find where X happens”. The call lands in the Ledger with what it was sent." }), lnk("Open the ledger →", () => go("ledger"))),
     ),
   );
@@ -7743,11 +7735,15 @@ function agAdd(a, clients) {
 }
 
 function agTools(a) {
-  const tools = a.tools || [];
+  const all = a.tools || [];
+  // Listed first: those are what an agent is offered. The rest answer from
+  // the command line and this portal.
+  const tools = [...all.filter((t) => t.listed !== false), ...all.filter((t) => t.listed === false)];
+  const listed = all.filter((t) => t.listed !== false).length;
   return el(
     "div",
     { class: "card" },
-    el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "What an agent can call" }), meta(`${plural(tools.length, "tool")} · ${n(a.tool_list_bytes)} bytes · ${n(a.tool_list_tokens)} tokens per session, counted ${a.tool_list_tier === "tokenizer" ? "by the model" : `as ${a.tool_list_tier || "an estimate"}`}`)),
+    el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "What an agent can call" }), meta(`${listed} of ${plural(all.length, "tool")} offered to agents · ${n(a.tool_list_bytes)} bytes · ${n(a.tool_list_tokens)} tokens per session, counted ${a.tool_list_tier === "tokenizer" ? "by the model" : `as ${a.tool_list_tier || "an estimate"}`}`)),
     el(
       "div",
       { class: "tw" },
@@ -7762,7 +7758,7 @@ function agTools(a) {
             el(
               "tr",
               {},
-              el("td", { class: "mm nowrap", text: t.name }),
+              el("td", { class: "mm nowrap" }, t.name, t.listed === false ? " " : null, t.listed === false ? el("span", { class: "badge outline", "data-tip": "Not in the tool list agents are offered: run it from the command line or this portal, or set SEMLITH_MCP_TOOLS=all for the server", text: "CLI and portal" }) : null),
               el("td", { class: "ink2 t13", text: t.answers || t.about }),
               el("td", { class: "ms r nowrap", "data-tip": t.typical_source === "ledger" ? "Median of this machine's own answers" : t.typical_source === "estimate" ? "An estimate until this machine has five answers from it" : null }, t.typical_tokens ? `${t.typical_source === "ledger" ? "" : "~"}${n(t.typical_tokens)} tok` : "—"),
             ),

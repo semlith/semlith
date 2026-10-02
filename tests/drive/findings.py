@@ -5807,7 +5807,14 @@ def _(d):
     open_clean(d, "agents/tools", fresh=True)
     tools = d.api("/api/agents").get("tools") or []
     rows = d.eval("[...document.querySelectorAll('#main table tbody tr')].map(tr => [...tr.cells].map(c => c.innerText.trim()))")
-    want("the tools listed", [r[0] for r in rows], [t["name"] for t in tools])
+    # Listed tools first, then the ones agents are not offered, each of those
+    # marked so (0.36.0).
+    order = [t["name"] for t in tools if t.get("listed") is not False] + [t["name"] for t in tools if t.get("listed") is False]
+    want("the tools listed", [r[0].split()[0] for r in rows], order)
+    marked = [r[0].split()[0] for r in rows if "CLI and portal" in r[0]]
+    want("the tools marked as not offered to agents", marked, [t["name"] for t in tools if t.get("listed") is False])
+    if sum(1 for t in tools if t.get("listed") is not False) != 8:
+        fail("the daemon offers %d tools to agents, expected 8" % sum(1 for t in tools if t.get("listed") is not False))
     if len(rows) != 16:
         fail("Agents › Tools lists %d tools, expected 16" % len(rows))
     sized = [r for r in rows if re.match(r"^~?[\d,]+ tok$", r[2])]
