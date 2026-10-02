@@ -1506,7 +1506,9 @@ button.dial {
   line-height: 24px;
   border-radius: 5px;
   padding: 0 26px 0 9px;
-  background-position: right 7px center;
+  /* Both strokes of the chevron, apart: one position for the two layers
+     drew them on top of each other as an x. */
+  background-position: right 12px center, right 7px center;
 }
 .stepper {
   display: flex;
@@ -4796,7 +4798,7 @@ button.gl-row:hover,
 }
 .lane-row {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) auto;
+  grid-template-columns: 30px minmax(0, 1fr) auto 76px;
   gap: 12px;
   align-items: center;
   padding: 10px 14px;
@@ -4807,6 +4809,10 @@ button.gl-row:hover,
 }
 .lane-row.off {
   opacity: 0.6;
+}
+.lane-act {
+  display: flex;
+  justify-content: flex-end;
 }
 .exp {
   display: inline-flex;
@@ -5331,4 +5337,26 @@ td.cap-path .ell-start {
 td.c-why {
   min-width: 260px;
   max-width: 520px;
+}
+
+/* The portal's dropdown (dropdown() in app.js): a button drawn as the field
+   the system <select> was, with the same line chevron. */
+.sel.dd {
+  display: inline-flex;
+  align-items: center;
+  max-width: 260px;
+  min-width: 0;
+  font-family: inherit;
+  text-align: left;
+}
+.sel.dd.mono {
+  font-family: var(--mono);
+}
+.sel.dd[aria-expanded="true"] {
+  border-color: var(--accent);
+}
+/* A table waiting on its next page keeps the rows it has, dimmed. */
+.is-loading .tw {
+  opacity: 0.55;
+  transition: opacity 0.15s;
 }

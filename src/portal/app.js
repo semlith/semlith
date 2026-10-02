@@ -867,6 +867,16 @@ const menu = {
       this.close();
     });
     document.addEventListener("keydown", (e) => {
+      // Up and down move through the items, as they do in a system list.
+      if ((e.key === "ArrowDown" || e.key === "ArrowUp") && !this.node.hidden) {
+        const items = [...this.node.querySelectorAll(".menu-item:not([disabled])")];
+        const i = items.indexOf(document.activeElement);
+        const next = items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length];
+        if (next) {
+          next.focus();
+          e.preventDefault();
+        }
+      }
       if (e.key === "Escape" && !this.node.hidden) {
         const owner = this.owner;
         this.close();
@@ -922,6 +932,37 @@ const menu = {
     this.owner = null;
   },
 };
+
+/** The portal's dropdown: a button that reads like a field and opens the
+ * menu, in place of the system <select>, which draws differently on every
+ * OS and cannot be styled to match. `options` are `[value, label, hint?]`.
+ * The chosen value is on `data-value`; the label is what the button shows. */
+function dropdown({ label, value, options, onChange, cls, width }) {
+  const cur = options.find((o) => String(o[0]) === String(value)) || options[0] || ["", ""];
+  const b = btn(
+    {
+      class: `sel dd${cls ? ` ${cls}` : ""}`,
+      "aria-haspopup": "menu",
+      "aria-expanded": "false",
+      "aria-label": label,
+      "data-value": String(cur[0]),
+      onclick: (e) => {
+        e.stopPropagation();
+        menu.open(
+          b,
+          options.map(([v, text, hint]) => ({ label: text, hint, checked: String(v) === String(b.getAttribute("data-value")), onclick: () => {
+            b.setAttribute("data-value", String(v));
+            b.firstChild.textContent = text;
+            onChange(v);
+          } })),
+          { width: width || Math.max(160, b.offsetWidth), alignLeft: true },
+        );
+      },
+    },
+    el("span", { class: "ell", text: cur[1] }),
+  );
+  return b;
+}
 
 /** The row menu's three-dot control. */
 function moreButton(items, label) {
@@ -1160,25 +1201,41 @@ function grid(spec) {
       node,
       selbar,
       el("div", { class: "tw" }, el("table", { class: spec.cls || null }, spec.caption ? el("caption", { class: "sr-only", text: spec.caption }) : null, el("thead", {}, head), body)),
-      !total() ? el("div", { class: "empty lg tb" }, spec.empty || "Nothing here yet.", spec.onClear ? [" ", lnk("Clear the filters", spec.onClear)] : null) : null,
+      // A server-paged grid is waiting on its first answer until it has one:
+      // "No file matches" there read as an empty store.
+      !total() && spec.loading
+        ? el("div", { class: "empty lg tb row gap10", role: "status" }, el("span", { class: "spinner" }), spec.loadingText || "Loading…")
+        : !total()
+          ? el("div", { class: "empty lg tb" }, spec.empty || "Nothing here yet.", spec.onClear ? [" ", lnk("Clear the filters", spec.onClear)] : null)
+          : null,
       spec.noFoot
         ? null
         : el(
             "div",
             { class: "card-foot" },
-            el("span", { class: "grow", text: `${n(from)}–${n(to)} of ${n(total())}${spec.foot && total() ? ` · ${spec.foot}` : ""}` }),
+            el("span", { class: "grow", text: spec.loading && !total() ? "reading…" : `${n(from)}–${n(to)} of ${n(total())}${spec.foot && total() ? ` · ${spec.foot}` : ""}` }),
             pager(view, pages(), changed),
           ),
     );
   }
 
+  if (spec.server && spec.loading === undefined) spec.loading = true;
   paint();
   return {
     node,
     update(next, totalCount) {
       rowsIn = next || [];
       if (totalCount !== undefined) spec.total = totalCount;
+      spec.loading = false;
+      node.classList.remove("is-loading");
       paint();
+    },
+    // A new query is on its way: rows already shown stay, dimmed, rather than
+    // the table emptying under the reader.
+    loading() {
+      spec.loading = true;
+      node.classList.add("is-loading");
+      if (!rowsIn.length) paint();
     },
     selected: () => [...view.sel],
     // Every row the filters let through, in the order on screen: what an
@@ -1210,23 +1267,22 @@ function pager(view, pages, changed) {
     if (hi < pages - 1) nums.push(el("span", { class: "gap", text: "…" }));
     add(pages);
   }
-  const select = el(
-    "select",
-    {
-      class: "sel mono",
-      "aria-label": "Rows per page",
-      onchange: (e) => {
-        view.per = Number(e.target.value);
-        view.page = 1;
-        changed();
-      },
+  const select = dropdown({
+    label: "Rows per page",
+    value: view.per,
+    options: [10, 25, 50, 100].map((v) => [v, String(v)]),
+    cls: "mono",
+    width: 90,
+    onChange: (v) => {
+      view.per = Number(v);
+      view.page = 1;
+      changed();
     },
-    [10, 25, 50, 100].map((v) => el("option", { value: String(v), selected: v === view.per ? true : null, text: String(v) })),
-  );
+  });
   return el(
     "div",
     { class: "pager" },
-    el("label", {}, "Rows", select),
+    el("span", { class: "row gap6" }, "Rows", select),
     el(
       "div",
       { class: "nums" },
@@ -4944,12 +5000,7 @@ function sdFiles(s, holder) {
     },
   });
   const langs = Object.keys(detailOf(s).languages_count || {}).sort();
-  const langSel = el(
-    "select",
-    { class: "sel", "aria-label": "Language", onchange: (e) => ((sdUi.lang = e.target.value), reload()) },
-    el("option", { value: "all", text: "All languages" }),
-    langs.map((l) => el("option", { value: l, selected: sdUi.lang === l ? true : null, text: l })),
-  );
+  const langSel = dropdown({ label: "Language", value: sdUi.lang || "all", options: [["all", "All languages"], ...langs.map((l) => [l, l])], onChange: (v) => ((sdUi.lang = v), reload()) });
   const listHost = el("div", {});
   const chipsHost = el("div", { class: "row gap6" });
   const segHost = el("div", {});
@@ -4987,6 +5038,7 @@ function sdFiles(s, holder) {
     id: (r) => r.path,
     caption: `Files in ${s.name}`,
     empty: "No file matches.",
+    loadingText: "Reading the file list…",
     onClear: () => {
       sdUi.glob = "";
       sdUi.type = "all";
@@ -5046,8 +5098,11 @@ function sdFiles(s, holder) {
       return;
     }
     fill(listHost, el("div", { class: "card" }, g.node));
+    g.loading();
+    const mine = (sdFiles.gen = (sdFiles.gen || 0) + 1);
     try {
       const out = await api(`/api/files?${filesParams((view.page - 1) * view.per, view.per)}`);
+      if (mine !== sdFiles.gen) return;
       rowsNow = out.files || [];
       total = out.total || 0;
       g.update(rowsNow, total);
@@ -5338,11 +5393,12 @@ function sdReview(s, holder) {
         "div",
         { class: "filterbar" },
         el("div", { class: "box h28 w220 full-sm" }, icon(I.searchSm, 13, { w: 1.8 }), qInput),
-        el(
-          "select",
-          { class: "sel", "aria-label": "Outcome", onchange: (e) => ((sdUi.decOut = e.target.value), repaint()) },
-          ["all", "never indexed", "skipped", "read as image", "accepted", "redacted · indexed", "kept out"].map((o) => el("option", { value: o, selected: sdUi.decOut === o ? true : null, text: o === "all" ? "All outcomes" : o })),
-        ),
+        dropdown({
+          label: "Outcome",
+          value: sdUi.decOut,
+          options: ["all", "never indexed", "skipped", "read as image", "accepted", "redacted · indexed", "kept out"].map((o) => [o, o === "all" ? "All outcomes" : o]),
+          onChange: (v) => ((sdUi.decOut = v), repaint()),
+        }),
         seg(
           [
             ["all", "All"],
@@ -5718,12 +5774,7 @@ VIEWS.search = {
     const pathChip = sr.path || sr.pathOpen
       ? el("span", { class: "filter-chip" }, "path", pathInput, btn({ "aria-label": "Remove path filter", onclick: () => ((sr.path = ""), (sr.pathOpen = false), repaint(), sr.query && runSearch()) }, icon(I.x, 10, { w: 2.4 })))
       : btn({ class: "chip dashed", onclick: () => ((sr.pathOpen = true), repaint(), setTimeout(() => shell.main.querySelector('[data-keep="sr-path"]')?.focus(), 0)) }, "+ path");
-    const patternLang = el(
-      "select",
-      { class: "sel", "aria-label": "Pattern language", onchange: (e) => (sr.patternLang = e.target.value) },
-      el("option", { value: "", text: "language…" }),
-      (data.about?.graph_languages || langs).map((l) => el("option", { value: l, selected: sr.patternLang === l ? true : null, text: l })),
-    );
+    const patternLang = dropdown({ label: "Pattern language", value: sr.patternLang || "", options: [["", "language…"], ...(data.about?.graph_languages || langs).map((l) => [l, l])], onChange: (v) => (sr.patternLang = v) });
     fill(
       bar,
       el(
@@ -6885,7 +6936,7 @@ function exploreTab(picker) {
             "div",
             { class: "two" },
             btn({ class: "btn sm primary t125", disabled: gr.sel ? null : true, onclick: () => ((gr.br.sym = gr.sel), (gr.br.out = null), go("graph", "blast"), runReach()) }, "Blast radius"),
-            btn({ class: "btn sm t125", disabled: gr.sel ? null : true, onclick: () => ((gr.pt.from = gr.sel), (gr.pt.out = null), go("graph", "path")) }, "Path from here"),
+            btn({ class: "btn sm t125", disabled: gr.sel ? null : true, onclick: () => ((gr.pt.from = gr.sel), (gr.pt.to = ""), (gr.pt.out = null), go("graph", "path")) }, "Path from here"),
           ),
         ),
         tabs(
@@ -7114,15 +7165,16 @@ function blastResult(imp, headline) {
             b.hop,
             (v) => ((b.hop = v), repaint()),
           ),
-          el(
-            "select",
-            { class: "sel", "aria-label": "Edge", onchange: (e) => ((b.edge = e.target.value), repaint()) },
-            [
+          dropdown({
+            label: "Edge",
+            value: b.edge,
+            options: [
               ["all", "All edges"],
               ["resolved", "Resolved"],
               ["inferred", "Inferred"],
-            ].map(([v, label]) => el("option", { value: v, selected: b.edge === v ? true : null, text: label })),
-          ),
+            ],
+            onChange: (v) => ((b.edge = v), repaint()),
+          }),
         ),
         g.node,
       ),
@@ -7160,6 +7212,25 @@ async function runPath(showInferred) {
   if (current.view === VIEWS.graph) repaint();
 }
 
+// What a symbol calls, for the Path tab when only its start is known: "Path
+// from here" opens with the places the walk can go, one press from a trace.
+async function loadLeads() {
+  const p = gr.pt;
+  const name = p.from.trim();
+  const key = `${gr.store}|${name}`;
+  if (!name || p.leadFor === key) return;
+  p.leadFor = key;
+  p.leads = null;
+  try {
+    const sym = await api(`/api/symbol?${new URLSearchParams({ name, store: gr.store, k: "40" })}`);
+    if (p.leadFor !== key) return;
+    p.leads = { callees: sym.callees || [], error: sym.error || null };
+  } catch (e) {
+    if (p.leadFor === key) p.leads = { callees: [], error: e.message };
+  }
+  if (current.view === VIEWS.graph) repaint();
+}
+
 function pathTab(picker) {
   const p = gr.pt;
   const from = el("input", { class: "inp mono h34", value: p.from, spellcheck: "false", "aria-label": "From", "data-keep": "pt-from", placeholder: "from", oninput: (e) => (p.from = e.target.value), onkeydown: (e) => e.key === "Enter" && runPath() });
@@ -7180,6 +7251,34 @@ function pathTab(picker) {
     ),
   ];
   const t = p.out && p.out.trace;
+  if (!p.busy && !p.out && p.from.trim() && !p.to.trim()) {
+    loadLeads();
+    const L = p.leads;
+    parts.push(
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "card-h" }, el("span", { class: "card-t grow" }, "Where ", el("span", { class: "mono", text: p.from.trim() }), " leads"), meta("pick a destination, or type one in To")),
+        !L
+          ? el("div", { class: "row gap10 muted pad" }, el("span", { class: "spinner" }), "Reading what it calls…")
+          : L.error
+            ? errorBox(L.error)
+            : !L.callees.length
+              ? empty(`${p.from.trim()} calls nothing this store defines. Type a destination in To to look for a path the other way round, or swap.`)
+              : el(
+                  "div",
+                  { class: "col gap4 pad8" },
+                  L.callees.map((c) =>
+                    btn(
+                      { class: "edge-row", onclick: () => ((p.to = c.name), runPath()) },
+                      el("span", { class: "col" }, el("span", { class: "n", text: c.name }), c.path ? pathSpan(`${tilde(c.path)}:${c.start_line}`, "w", `${c.path}:${c.start_line}`) : null),
+                      confBadge(c.confidence),
+                    ),
+                  ),
+                ),
+      ),
+    );
+  }
   if (p.busy) parts.push(el("div", { class: "row gap10 muted" }, el("span", { class: "spinner" }), "Walking the edges…"));
   else if (p.out && p.out.error) parts.push(el("div", { class: "card" }, errorBox(p.out.error)));
   else if (t) {
@@ -7733,22 +7832,12 @@ async function reverify() {
 }
 
 function storeSelect(value, onPick) {
-  return el(
-    "select",
-    { class: "sel", "aria-label": "Store", onchange: (e) => onPick(e.target.value) },
-    el("option", { value: "all", text: "All stores" }),
-    liveStores().map((s) => el("option", { value: s.name, selected: value === s.name ? true : null, text: s.name })),
-  );
+  return dropdown({ label: "Store", value, options: [["all", "All stores"], ...liveStores().map((s) => [s.name, s.name])], onChange: onPick });
 }
 
 function clientSelect(rowsList) {
   const names = [...new Set(rowsList.map((r) => r.client))].sort();
-  return el(
-    "select",
-    { class: "sel", "aria-label": "Client", onchange: (e) => ((lg.filter = e.target.value === "all" ? null : e.target.value), repaint()) },
-    el("option", { value: "all", text: "All clients" }),
-    names.map((c) => el("option", { value: c, selected: lg.filter === c ? true : null, text: c })),
-  );
+  return dropdown({ label: "Client", value: lg.filter || "all", options: [["all", "All clients"], ...names.map((c) => [c, c])], onChange: (v) => ((lg.filter = v === "all" ? null : v), repaint()) });
 }
 
 function ledgerSessions(list) {
@@ -7786,15 +7875,16 @@ function ledgerSessions(list) {
       el("div", { class: "box h28 w220 full-sm" }, icon(I.searchSm, 13, { w: 1.8 }), qInput),
       clientSelect(all),
       storeSelect(lg.store, (v) => ((lg.store = v), repaint())),
-      el(
-        "select",
-        { class: "sel", "aria-label": "Tier", onchange: (e) => ((lg.tier = e.target.value), repaint()) },
-        [
+      dropdown({
+        label: "Tier",
+        value: lg.tier,
+        options: [
           ["all", "Any tier"],
           ["measured", "measured"],
           ["modelled", "modelled"],
-        ].map(([v, label]) => el("option", { value: v, selected: lg.tier === v ? true : null, text: label })),
-      ),
+        ],
+        onChange: (v) => ((lg.tier = v), repaint()),
+      }),
     ),
     g.node,
   ];
@@ -8037,12 +8127,8 @@ VIEWS.reports = {
             { class: "card-h" },
             el("span", { class: "card-t grow", text: "The savings, line by line" }),
             el("span", { class: "eyebrow sm", text: "PRICED AT" }),
-            // One plain dropdown with every model the savings can be priced at.
-            el(
-              "select",
-              { class: "sel", "aria-label": "Price the savings at", onchange: (e) => ((rp.model = e.target.value), generate()) },
-              models.map((m) => el("option", { value: m.name, selected: rp.model === m.name ? true : null, text: `${m.name} · $${m.input}/Mtok` })),
-            ),
+            // One dropdown with every model the savings can be priced at.
+            dropdown({ label: "Price the savings at", value: rp.model, options: models.map((m) => [m.name, m.name, `$${m.input}/Mtok`]), width: 280, onChange: (v) => ((rp.model = v), generate()) }),
             el("span", { class: "t-mono-sm", text: model ? `$${Number(model.input).toFixed(2)} / Mtok input · prices from ${prices.source || "the built-in table"}${prices.fetched ? ` · ${prices.fetched}` : ""}` : "" }),
             btn({ class: "btn xs", onclick: updatePrices, "data-tip": `One request to ${prices.url || "models.dev"}, made now because you asked` }, "Update prices"),
           ),
@@ -8498,12 +8584,10 @@ function sePerf() {
             el("span", { class: "row gap8 t-m t13" }, `${l.label || laneName(l.lane)}${l.variant ? ` · ${l.variant}` : ""}`, l.experimental ? el("span", { class: "exp", text: "experimental" }) : null),
             el("span", { class: "muted t-xs", text: `${l.device || (na ? "no device found" : "named when it starts")} · ${laneState(l.status)}${(data.accel.bytes || {})[l.lane] ? ` · ${bytes(data.accel.bytes[l.lane])} on disk` : ""}` }),
           ),
-          el(
-            "span",
-            { class: "row gap8 nowrap" },
-            el("span", { class: "t-mono-sm ink2 right nowrap", text: check ? `${check.cosine ? `cosine ${Number(check.cosine).toFixed(4)}` : check.ok ? "agrees" : "differs"}${check.rate ? ` · ${perSecond(check.rate)}/s` : ""}` : `${Math.round(l.share || 0)}% of the work` }),
-            (data.accel.bytes || {})[l.lane] ? btn({ class: "btn xs", "aria-label": `Remove ${l.label || laneName(l.lane)}'s downloaded files`, onclick: () => laneRemove(l) }, "Remove") : null,
-          ),
+          el("span", { class: "t-mono-sm ink2 right nowrap", text: check ? `${check.cosine ? `cosine ${Number(check.cosine).toFixed(4)}` : check.ok ? "agrees" : "differs"}${check.rate ? ` · ${perSecond(check.rate)}/s` : ""}` : `${Math.round(l.share || 0)}% of the work` }),
+          // Its own column at the far right, kept on every row, so the share
+          // column lines up whether or not a lane has files to remove.
+          el("span", { class: "lane-act" }, (data.accel.bytes || {})[l.lane] ? btn({ class: "btn xs", "aria-label": `Remove ${l.label || laneName(l.lane)}'s downloaded files`, onclick: () => laneRemove(l) }, "Remove") : null),
         );
       }),
     ),

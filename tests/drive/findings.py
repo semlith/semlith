@@ -442,12 +442,24 @@ def stores_widest(d):
     The list opens at 10 rows a page (0.35.0, v6 as drawn), and this drive makes
     more stores than that, so a check looking for one row asks for 100 first.
     """
-    d.eval(
-        "(() => { const s = document.querySelector('#main .pager select');"
-        " if (s && s.value !== '100') { s.value = '100';"
-        " s.dispatchEvent(new Event('change', {bubbles: true})); } })()"
-    )
+    if d.eval("(() => { const s = document.querySelector('#main .pager .dd'); return !!s && s.dataset.value !== '100'; })()"):
+        pick(d, "#main .pager .dd", "100")
     pause(d, 150)
+
+
+def pick(d, selector, label):
+    """Choose `label` in the portal's dropdown at `selector`, the way a person
+    does: open it, press the item. From 0.35.0 every dropdown is the portal's
+    own (a button and the menu), not a system <select>."""
+    d.eval("document.querySelector(%s).click()" % json.dumps(selector))
+    d.wait_for("!!document.querySelector('.menu:not([hidden]) .menu-item')", timeout=5, what="the dropdown at %s to open" % selector)
+    hit = d.eval(
+        "(() => { const b = [...document.querySelectorAll('.menu:not([hidden]) .menu-item')]"
+        ".find(x => (x.querySelector('.ell') || x).textContent.trim() === %s);"
+        " if (b) b.click(); return !!b; })()" % json.dumps(label)
+    )
+    if not hit:
+        fail("the dropdown at %s offers no %r" % (selector, label))
 
 
 def open_wizard_for(d, store):
@@ -3094,9 +3106,9 @@ def _(d):
     # 0.35.0 owner decision (v6 as drawn): three filters — client, store and
     # tier — where there were two. Still no one model picked for every row: a
     # session's saving is priced at the model it ran on.
-    selects = d.eval("[...document.querySelectorAll('#main .filterbar select')].map(s => s.getAttribute('aria-label'))")
+    selects = d.eval("[...document.querySelectorAll('#main .filterbar .dd')].map(s => s.getAttribute('aria-label'))")
     want("the sessions table's filters", selects, ["Client", "Store", "Tier"])
-    if d.eval("!!document.querySelector('select[aria-label=\"Cost at\"]')"):
+    if d.eval("!!document.querySelector('[aria-label=\"Cost at\"]')"):
         fail("the sessions table still prices every session at one chosen model")
     # The Model column comes with the Usage-from-client-logs switch, which is
     # where the model each session ran on is read from (0.35.0 owner decision:
@@ -4539,7 +4551,7 @@ def _(d):
             "[...document.querySelectorAll('#main .pager')].map(p => {"
             " const card = p.closest('.card') || p.closest('.grid-wrap');"
             " const rows = card.querySelectorAll('tbody tr, .gl-row.gl-stores').length;"
-            " return {per: (p.querySelector('select') || {}).value, rows}; })"
+            " return {per: (p.querySelector('.dd') || {dataset: {}}).dataset.value, rows}; })"
         )
         if not seen:
             fail("%s draws no paginated table" % route)
@@ -5619,8 +5631,7 @@ def search_mode(d, mode, query, lang=None):
     open_clean(d, "search", fresh=True)
     press_text(d, "#main .seg button", mode)
     if lang:
-        d.eval("(() => { const s = document.querySelector('#main select[aria-label=\"Pattern language\"]');"
-               " s.value = %s; s.dispatchEvent(new Event('change', {bubbles: true})); })()" % json.dumps(lang))
+        pick(d, '#main .dd[aria-label="Pattern language"]', lang)
     d.type(SEARCH_BOX, query)
     d.press("Enter")
     d.wait_for("!document.querySelector('#main .spinner') && (document.querySelectorAll('#main .hit-group, #main .card .lines, #main .error-box').length > 0"

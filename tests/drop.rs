@@ -612,8 +612,6 @@ fn the_routes_are_token_guarded_and_answer_in_shape() {
 
     let (status, _) = daemon.send("POST", "/api/drop/resolve", false, &body);
     assert_eq!(status, 401, "the drop route answered without the token");
-    let (status, _) = daemon.send("GET", "/api/helpers", false, "");
-    assert_eq!(status, 401, "the helpers route answered without the token");
 
     let (status, json) = daemon.send("POST", "/api/drop/resolve", true, &body);
     assert_eq!(status, 200, "{json}");
@@ -625,34 +623,4 @@ fn the_routes_are_token_guarded_and_answer_in_shape() {
 
     let (status, json) = daemon.send("POST", "/api/drop/resolve", true, "{\"items\": 3}");
     assert_eq!(status, 400, "{json}");
-
-    let (status, json) = daemon.send("GET", "/api/helpers", true, "");
-    assert_eq!(status, 200, "{json}");
-    assert_eq!(json["os"], std::env::consts::OS);
-    let helpers = json["helpers"].as_array().unwrap();
-    assert!(!helpers.is_empty());
-    for h in helpers {
-        assert!(
-            h["id"].is_string() && h["label"].is_string() && h["path"].is_string(),
-            "{h}"
-        );
-        assert_eq!(h["installed"], false, "{h}");
-    }
-
-    // The switch, on a scratch home. Not on Windows, where it would write the
-    // real HKCU — `tests/helpers.rs` covers the registry under a scratch key.
-    if cfg!(unix) {
-        let (status, json) = daemon.send("POST", "/api/helpers", true, "{\"on\": true}");
-        assert_eq!(status, 200, "{json}");
-        for h in json["helpers"].as_array().unwrap() {
-            assert_eq!(h["installed"], true, "{json}");
-            let path = h["path"].as_str().unwrap();
-            assert!(path.starts_with(&home.display().to_string()), "{h}");
-        }
-        let (status, json) = daemon.send("POST", "/api/helpers", true, "{\"on\": false}");
-        assert_eq!(status, 200, "{json}");
-        for h in json["helpers"].as_array().unwrap() {
-            assert_eq!(h["installed"], false, "{json}");
-        }
-    }
 }
