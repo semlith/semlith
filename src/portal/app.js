@@ -7601,11 +7601,11 @@ function agAdd(a, clients) {
           ? el(
               "div",
               { class: "one-click" },
-              el("div", { class: "col gap2 grow" }, el("span", { class: "t-m t-sm", text: sel.registered ? `Registered${sel.report.scope ? ` at ${sel.report.scope} scope` : ""} — every project sees it` : registerCmd ? "Semlith runs the client's own command for you" : "Semlith writes the file, after backing it up beside itself" }), el("span", { class: "t-mono-sm anywhere", text: sel.write })),
+              el("div", { class: "col gap2 grow" }, el("span", { class: "t-m t-sm", text: sel.registered ? `Registered${sel.report.scope ? ` at ${sel.report.scope} scope` : ""} — every project sees it` : registerCmd ? "Semlith runs the client's own command for you" : "Semlith writes the file, after backing it up beside itself" }), el("span", { class: "t-mono-sm anywhere", text: shortPaths(sel.write, 40), "data-tip": sel.write })),
               btn({ class: `btn ${sel.registered ? "" : "primary"}`, onclick: () => register([sel.name], sel.registered ? "unregister" : "register") }, sel.registered ? "Unregister" : "Register"),
             )
           : el("div", { class: "notice plain", text: "Not installed on this machine. Install it and come back — or paste the config below wherever it lives." }),
-        sel.client.note ? el("span", { class: "muted t-xs", text: sel.client.note }) : null,
+        sel.client.note ? clientNote(sel.client.note) : null,
         tabs(
           [
             ["json", "Config file"],
@@ -8712,6 +8712,15 @@ async function checkLanes() {
   }
   await load("accel", true);
   repaint();
+}
+
+// A client's note, as its first sentence: the rest (file formats, flags,
+// where the source says so) is a press away, not a wall of text by default.
+function clientNote(note) {
+  const first = (note.match(/^.*?[.!?](?=\s|$)/) || [note])[0];
+  if (first.length >= note.length - 2) return el("span", { class: "muted t-xs", text: note });
+  const open = ag.noteOpen === note;
+  return el("span", { class: "muted t-xs" }, open ? note : first, " ", lnk(open ? "Less" : "More", () => ((ag.noteOpen = open ? null : note), repaint())));
 }
 
 function seAccess() {

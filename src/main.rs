@@ -3143,13 +3143,27 @@ fn run() -> Result<()> {
             // the login service starts one, the error chain this used to print
             // fired on the most ordinary command there is.
             let (held, free) = semlith::daemon::held_by_daemon(&dirs);
+            // Once per daemon, not once per store: ten stores served by one
+            // daemon printed the same line and the same link ten times.
+            let mut daemons: Vec<(&semlith::daemon::Discovery, Vec<&std::path::PathBuf>)> =
+                Vec::new();
             for (dir, found) in &held {
+                match daemons
+                    .iter_mut()
+                    .find(|(d, _)| d.pid == found.pid && d.port == found.port)
+                {
+                    Some((_, dirs)) => dirs.push(dir),
+                    None => daemons.push((found, vec![dir])),
+                }
+            }
+            for (found, dirs) in &daemons {
+                let what = match dirs.as_slice() {
+                    [one] => format!("{} is", one.display()),
+                    many => format!("{} stores are", many.len()),
+                };
                 println!(
-                    "semlith: {} is already served by a running daemon — pid {}, port {}, semlith {}",
-                    dir.display(),
-                    found.pid,
-                    found.port,
-                    found.version
+                    "semlith: {what} already served by a running daemon — pid {}, port {}, semlith {}",
+                    found.pid, found.port, found.version
                 );
                 // Alone on its line so a terminal makes it clickable, and on
                 // stdout for the reason `daemon::run` prints its own URL there:

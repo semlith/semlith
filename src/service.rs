@@ -491,6 +491,13 @@ fn run(program: &str, args: &[&str]) -> Result<String> {
         } else {
             said.trim().to_string()
         };
+        // Some launchctl failures print nothing at all; the exit status is
+        // then the only thing that says what happened.
+        let said = if said.is_empty() {
+            out.status.to_string()
+        } else {
+            said
+        };
         anyhow::bail!("{program} {}: {said}", args.join(" "));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
@@ -664,6 +671,14 @@ pub fn restart_if_stale() -> Result<Option<String>> {
         return Ok(None);
     }
     let previous = running.unwrap_or_default();
+    // Re-registering (bootout and bootstrap) already replaces the daemon, and
+    // the old one answers for a moment while it exits. Kicking the job in
+    // that moment fails with no message — which `semlith upgrade` printed as
+    // a failure over an upgrade that had worked — so the new daemon gets a
+    // few seconds to answer by itself first.
+    if answers_current_within(std::time::Duration::from_secs(5)) {
+        return Ok(Some(previous));
+    }
     let status = status();
     if !status.installed {
         anyhow::bail!(
@@ -680,16 +695,19 @@ pub fn restart_if_stale() -> Result<Option<String>> {
         let args: Vec<&str> = command[1..].iter().map(String::as_str).collect();
         // `/End` on a task that already stopped fails and is fine.
         let result = run(&command[0], &args);
-        if command.get(1).map(String::as_str) != Some("/End") {
-            result.with_context(|| format!("restarting the {} service", status.mechanism))?;
+        if command.get(1).map(String::as_str) != Some("/End")
+            && let Err(e) = result
+        {
+            // A restart that reports failure while the daemon comes up at
+            // this version anyway has done what it was for.
+            if answers_current_within(std::time::Duration::from_secs(10)) {
+                return Ok(Some(previous));
+            }
+            return Err(e).with_context(|| format!("restarting the {} service", status.mechanism));
         }
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        if running_version().as_deref() == Some(env!("CARGO_PKG_VERSION")) {
-            return Ok(Some(previous));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
+    if answers_current_within(std::time::Duration::from_secs(10)) {
+        return Ok(Some(previous));
     }
     anyhow::bail!(
         "restarted the {} service, and no daemon answered at {} within 10 s; see {}",
@@ -700,6 +718,20 @@ pub fn restart_if_stale() -> Result<Option<String>> {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "the service log".into())
     )
+}
+
+/// Whether a daemon answers at this binary's version within `wait`.
+fn answers_current_within(wait: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if running_version().as_deref() == Some(env!("CARGO_PKG_VERSION")) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
 }
 
 /// Whether a binary lives under the system's temporary directory.
