@@ -131,13 +131,15 @@ jobs:
       # they stay short enough to read. Raised from 170 in 0.14.0, when
       # install.sh took on placing the ONNX Runtime that ships beside the
       # binary — a real second responsibility rather than a few more lines.
+      # Raised from 185 in 0.36.0 for the third: checking the archive's
+      # GitHub attestation with gh, and saying when it could not.
       - name: Line budget
         run: |
           for f in install.sh install.ps1; do
             lines=$(wc -l < "$f")
             echo "$f: $lines lines"
-            if [ "$lines" -ge 185 ]; then
-              echo "::error::$f is $lines lines; the budget is under 185"
+            if [ "$lines" -ge 235 ]; then
+              echo "::error::$f is $lines lines; the budget is under 235"
               exit 1
             fi
           done

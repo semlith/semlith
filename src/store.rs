@@ -637,6 +637,49 @@ fn glob_predicate(groups: &[Vec<String>]) -> (String, Vec<String>) {
     (clauses.join(" AND "), binds)
 }
 
+/// Run `work` over `conns`, interrupting their queries once `limit` passes.
+///
+/// For the reads a person asks for on a store of any size -- the Graph page's
+/// drawing over every edge of a 879k-chunk store did not answer in twelve
+/// minutes and held a worker the whole time (#173). An interrupted query fails
+/// with SQLite's "interrupted", which [`is_interrupted`] recognises, so the
+/// caller can say the request was too large rather than that it broke.
+pub fn bounded<T>(
+    conns: &[&Connection],
+    limit: std::time::Duration,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let handles: Vec<rusqlite::InterruptHandle> =
+        conns.iter().map(|c| c.get_interrupt_handle()).collect();
+    let (done, wait) = std::sync::mpsc::channel::<()>();
+    let timer = std::thread::spawn(move || {
+        if wait.recv_timeout(limit) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+            for handle in &handles {
+                handle.interrupt();
+            }
+        }
+    });
+    let out = work();
+    let _ = done.send(());
+    let _ = timer.join();
+    out
+}
+
+/// Whether an error is a query [`bounded`] interrupted.
+pub fn is_interrupted(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            == Some(rusqlite::ErrorCode::OperationInterrupted)
+    })
+}
+
+/// The highest chunk id, or 0 for none. One step down the rowid b-tree.
+pub fn newest_chunk(db: &Connection) -> Result<i64> {
+    Ok(db.query_row("SELECT COALESCE(MAX(id), 0) FROM chunks", [], |r| r.get(0))?)
+}
+
 /// Ids of every chunk whose file matches `groups`.
 ///
 /// This is the single source of the subset. The vector index gets these ids as
@@ -645,8 +688,12 @@ fn glob_predicate(groups: &[Vec<String>]) -> (String, Vec<String>) {
 /// see.
 pub fn filtered_chunk_ids(db: &Connection, groups: &[Vec<String>]) -> Result<Vec<u64>> {
     let (predicate, binds) = glob_predicate(groups);
-    let sql =
-        format!("SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE {predicate}");
+    // Files first, then their chunks through `chunks_file_id`. A join planned
+    // the other way scanned every chunk and tested its file's path, 250-680 ms
+    // on the 879k-chunk corpus; this is 24-48 ms for the same rows (#170).
+    let sql = format!(
+        "SELECT id FROM chunks WHERE file_id IN (SELECT f.id FROM files f WHERE {predicate})"
+    );
     let mut stmt = db.prepare(&sql)?;
     let args = binds.into_iter().map(Value::Text);
     let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, i64>(0))?;
@@ -686,49 +733,93 @@ const UNFILTERED_SQL: &str =
 /// bare `AND` is an operator — a search for "index AND search" would silently
 /// mean something the user did not type, and a search for `foo(` would fail
 /// outright.
+/// English words too common to say what a chunk is about.
+const STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do", "does", "for", "from",
+    "has", "have", "how", "i", "if", "in", "into", "is", "it", "its", "of", "on", "or", "not",
+    "no", "so", "that", "the", "their", "then", "there", "these", "this", "to", "was", "were",
+    "what", "when", "where", "which", "who", "why", "will", "with", "you", "your", "we", "our",
+    "they", "them", "he", "she", "my", "me", "than", "also", "any", "all",
+];
+
 pub fn keyword_search(
     db: &Connection,
     query: &str,
     limit: usize,
     groups: &[Vec<String>],
 ) -> Result<Vec<u64>> {
-    let terms: Vec<String> = query
+    let Some(match_expr) = match_expr(query) else {
+        return Ok(Vec::new());
+    };
+    if groups.is_empty() {
+        let mut stmt = db.prepare(UNFILTERED_SQL)?;
+        let rows = stmt.query_map(params![match_expr, limit as i64], |r| r.get::<_, i64>(0))?;
+        return Ok(rows
+            .collect::<Result<Vec<i64>, _>>()?
+            .into_iter()
+            .map(|i| i as u64)
+            .collect());
+    }
+    let allowed: std::collections::HashSet<u64> =
+        filtered_chunk_ids(db, groups)?.into_iter().collect();
+    keyword_search_within(db, query, limit, &allowed)
+}
+
+/// The FTS5 expression for `query`: its words, quoted, OR-ed. `None` when it
+/// has no word at all.
+fn match_expr(query: &str) -> Option<String> {
+    let words: Vec<&str> = query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{t}\""))
         .collect();
-    if terms.is_empty() {
+    // Stopwords out of the MATCH: an OR over "the" and "of" asks FTS5 to rank
+    // nearly every chunk of a large store. On the 879k-chunk corpus that took
+    // the keyword list from 884 to 226 ms at the median, and the 727-question
+    // benchmark scored the same either way (408 against 407 scoped, 340 and
+    // 340 unscoped, development split). A query of nothing but stopwords keeps
+    // them all, so it still finds something.
+    let content: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|w| !STOPWORDS.contains(&w.to_ascii_lowercase().as_str()))
+        .collect();
+    let kept = if content.is_empty() { &words } else { &content };
+    let terms: Vec<String> = kept.iter().map(|t| format!("\"{t}\"")).collect();
+    (!terms.is_empty()).then(|| terms.join(" OR "))
+}
+
+/// The keyword list inside a set of chunk ids, for a filtered search that has
+/// the set already.
+///
+/// Every match is read with its rank and the set is applied here. Joining the
+/// matches to their files in SQL stopped FTS5 applying its own `LIMIT`, so it
+/// ranked and joined every match: 81-688 ms on the 879k-chunk corpus against
+/// 14 ms unfiltered, which is most of why a scoped search was slower than an
+/// unscoped one (#170). Reading the matches is the 14 ms, the filter well
+/// under one, and the order is the same.
+pub fn keyword_search_within(
+    db: &Connection,
+    query: &str,
+    limit: usize,
+    allowed: &std::collections::HashSet<u64>,
+) -> Result<Vec<u64>> {
+    let Some(match_expr) = match_expr(query) else {
         return Ok(Vec::new());
-    }
-    let match_expr = terms.join(" OR ");
-
-    let (sql, mut args) = if groups.is_empty() {
-        (UNFILTERED_SQL.to_string(), vec![Value::Text(match_expr)])
-    } else {
-        let (predicate, binds) = glob_predicate(groups);
-        let mut args = vec![Value::Text(match_expr)];
-        args.extend(binds.into_iter().map(Value::Text));
-        (
-            format!(
-                "SELECT x.rowid FROM chunks_fts x
-                 JOIN chunks c ON c.id = x.rowid
-                 JOIN files f ON f.id = c.file_id
-                 WHERE x.chunks_fts MATCH ? AND {predicate}
-                 ORDER BY x.rank LIMIT ?"
-            ),
-            args,
-        )
     };
-    // Bound last because `LIMIT` is the final placeholder in either statement.
-    args.push(Value::Integer(limit as i64));
-
-    let mut stmt = db.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, i64>(0))?;
-    Ok(rows
-        .collect::<Result<Vec<i64>, _>>()?
-        .into_iter()
-        .map(|i| i as u64)
-        .collect())
+    let mut stmt = db.prepare("SELECT rowid, rank FROM chunks_fts WHERE chunks_fts MATCH ?")?;
+    let rows = stmt.query_map(params![match_expr], |r| {
+        Ok((r.get::<_, i64>(0)? as u64, r.get::<_, f64>(1)?))
+    })?;
+    let mut kept: Vec<(u64, f64)> = Vec::new();
+    for row in rows {
+        let (id, rank) = row?;
+        if allowed.contains(&id) {
+            kept.push((id, rank));
+        }
+    }
+    // FTS5's rank is ascending-is-better; ties by id, as the index gives them.
+    kept.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    Ok(kept.into_iter().take(limit).map(|(id, _)| id).collect())
 }
 
 pub fn get_meta(db: &Connection, k: &str) -> Result<Option<String>> {
@@ -1828,20 +1919,6 @@ pub fn symbols_by_names(
     Ok(out)
 }
 
-/// Whether more than `limit` definitions answer to `name`, not counting the
-/// navigational kinds, which nothing can point at.
-///
-/// Counts at most `limit + 1` rows, so asking about `get` in a store holding
-/// seven hundred of them costs what asking about a name with two does.
-pub fn defined_more_than(db: &Connection, name: &str, limit: usize) -> Result<bool> {
-    let target = crate::graph::not_navigational("s.kind");
-    let sql = format!(
-        "SELECT COUNT(*) FROM (SELECT 1 FROM symbols s WHERE s.name = ?1 AND {target} LIMIT ?2)"
-    );
-    let found: i64 = db.query_row(&sql, params![name, limit as i64 + 1], |r| r.get(0))?;
-    Ok(found as usize > limit)
-}
-
 /// What the symbols named `name` point at: callees, imports, references out.
 ///
 /// One hop. `kinds` empty means every edge kind.
@@ -2492,29 +2569,6 @@ fn kind_predicate(kinds: &[String], column: &str) -> String {
     }
     let holes = vec!["?"; kinds.len()].join(", ");
     format!("{column} IN ({holes})")
-}
-
-/// The names of every symbol whose defining lines overlap one of `chunk_ids`.
-///
-/// The seed of graph expansion: search returns chunks, the graph knows symbols,
-/// and this is the join between them.
-pub fn symbols_in_chunks(db: &Connection, chunk_ids: &[u64]) -> Result<Vec<String>> {
-    if chunk_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let holes = vec!["?"; chunk_ids.len()].join(", ");
-    // The one caller is the seed of the ranked walk, and the walk runs over
-    // dependency edges. A heading or a configuration key has none, so seeding
-    // it spends the walk's node budget to reach nothing — and where its name
-    // collides with a real symbol's, it spends the seed's mass on the wrong
-    // one.
-    let navigational = crate::graph::not_navigational("kind");
-    let sql =
-        format!("SELECT DISTINCT name FROM symbols WHERE chunk_id IN ({holes}) AND {navigational}");
-    let mut stmt = db.prepare(&sql)?;
-    let args = chunk_ids.iter().map(|i| Value::Integer(*i as i64));
-    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, String>(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// One recorded retrieval.
@@ -4540,6 +4594,53 @@ mod tests {
     /// More names than SQLite takes variables in one statement. 0.32.0 bound
     /// them all into one `IN (...)`, and on the 70-repository benchmark corpus
     /// every search failed with "too many SQL variables".
+    /// Stopwords leave the keyword list's query unless they are all there is.
+    #[test]
+    fn stopwords_leave_the_keyword_query_unless_nothing_else_is_there() {
+        let db = Connection::open_in_memory().unwrap();
+        prepare_for_tests(&db);
+        let file = insert_file(&db, "a.md", "h", 1, 0).unwrap();
+        for (ord, text) in ["the parser recovers", "of the and the of"]
+            .iter()
+            .enumerate()
+        {
+            insert_chunk(&db, file, ord, ord as u32 + 1, ord as u32 + 1, text).unwrap();
+        }
+        let ids = keyword_search(&db, "how does the parser recover", 10, &[]).unwrap();
+        assert_eq!(ids.len(), 1, "a chunk of stopwords matched: {ids:?}");
+        let only = keyword_search(&db, "the of", 10, &[]).unwrap();
+        assert_eq!(
+            only.len(),
+            2,
+            "a query of stopwords found nothing: {only:?}"
+        );
+    }
+
+    /// A read that runs past its limit is interrupted and says so; one that
+    /// finishes inside it is untouched.
+    #[test]
+    fn a_bounded_read_is_interrupted_at_its_limit() {
+        let db = Connection::open_in_memory().unwrap();
+        let started = std::time::Instant::now();
+        let slow = bounded(&[&db], std::time::Duration::from_millis(100), || {
+            let n: i64 = db.query_row(
+                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) \
+                 SELECT COUNT(*) FROM (SELECT x FROM c LIMIT 10000000000)",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(n)
+        });
+        let err = slow.expect_err("a ten-billion-row count finished");
+        assert!(is_interrupted(&err), "{err:#}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+        let quick = bounded(&[&db], std::time::Duration::from_secs(5), || {
+            Ok(db.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?)
+        });
+        assert_eq!(quick.unwrap(), 1);
+    }
+
     #[test]
     fn symbols_by_names_takes_more_names_than_sqlite_takes_variables() {
         let db = Connection::open_in_memory().unwrap();
@@ -4559,31 +4660,6 @@ mod tests {
             .map(|s| (s.path.as_str(), s.start_line))
             .collect();
         assert_eq!(got, [("a.rs", 1), ("a.rs", 5), ("b.rs", 1)]);
-    }
-
-    /// Seeding the walk looks symbols up by chunk. Without an index on
-    /// `chunk_id` that was a scan of every symbol per seed chunk, minutes per
-    /// search on the benchmark corpus.
-    #[test]
-    fn symbols_in_chunks_uses_the_chunk_index() {
-        let db = Connection::open_in_memory().unwrap();
-        one_symbol(&db, "a.rs", "seed");
-        let navigational = crate::graph::not_navigational("kind");
-        let plan: Vec<String> = db
-            .prepare(&format!(
-                "EXPLAIN QUERY PLAN SELECT DISTINCT name FROM symbols \
-                 WHERE chunk_id IN (?) AND {navigational}"
-            ))
-            .unwrap()
-            .query_map([1], |r| r.get::<_, String>(3))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        assert!(
-            plan.iter().any(|step| step.contains("symbols_chunk_id")),
-            "the seed lookup does not use the chunk index: {plan:?}"
-        );
-        assert_eq!(symbols_in_chunks(&db, &[1]).unwrap(), ["seed"]);
     }
 
     /// The walk's variant drops an edge whose target is a hub, and only that
@@ -4618,26 +4694,6 @@ mod tests {
             targets(edges_out(&db, "caller", &[]).unwrap()),
             ["common", "rare"]
         );
-    }
-
-    /// A configuration key or a heading that shares a name is not a definition
-    /// anything can call, so it does not make the name a hub.
-    #[test]
-    fn defined_more_than_counts_definitions_not_navigational_symbols() {
-        let db = Connection::open_in_memory().unwrap();
-        one_symbol(&db, "a.rs", "path");
-        let config = insert_file(&db, "config.toml", "h", 1, 0).unwrap();
-        for line in 1..=5 {
-            let mut key = at(sym("path"), line, line);
-            key.kind = "key".to_string();
-            insert_symbol(&db, config, None, &key).unwrap();
-        }
-        assert!(!defined_more_than(&db, "path", 1).unwrap());
-
-        let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
-        insert_symbol(&db, b, None, &sym("path")).unwrap();
-        assert!(defined_more_than(&db, "path", 1).unwrap());
-        assert!(!defined_more_than(&db, "path", 2).unwrap());
     }
 
     /// Forgetting a file takes its symbols and its outgoing edges with it.

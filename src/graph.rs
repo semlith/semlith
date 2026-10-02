@@ -1575,139 +1575,6 @@ pub fn not_navigational(column: &str) -> String {
     format!("{column} NOT IN ({holes})")
 }
 
-/// How much of a symbol's score flows on to its neighbours each round.
-///
-/// PageRank's own default, and there is no reason here to disagree with it.
-/// The 0.15 that does not flow is what keeps the walk anchored to the chunks
-/// the query actually found — the whole difference between a personalised
-/// PageRank and a plain one, which would rank the repository's most-called
-/// utility first for every query ever asked.
-const DAMPING: f32 = 0.85;
-
-/// How many rounds the score is pushed outward from the seeds.
-///
-/// Three carries mass two hops out and leaves a third of it there. Each extra
-/// round costs another pass over the frontier and moves the ordering less than
-/// the one before it.
-const ROUNDS: usize = 3;
-
-/// Rank the neighbourhood of a set of seed symbols by personalised PageRank.
-///
-/// `personal` is the seed mass per symbol name — for search, the fusion
-/// contribution of the chunks each name was found in. `neighbours` is asked for
-/// one name's dependency edges at a time, as `(name, weight, confidence)`, and
-/// is asked at most once per name however many rounds run: the walk holds the
-/// frontier it has visited and never the whole graph, which is what keeps peak
-/// memory flat as the corpus grows.
-///
-/// Returns the reached names, best first, with the confidence of the best edge
-/// that reached each. A name the walk never reached through an edge is not in
-/// the result, however much seed mass it started with: the third list is about
-/// what the code says, and a seed nothing points at is only what the query
-/// said.
-///
-/// Why this rather than the flat hop it replaces: one hop treats every
-/// neighbour of every seed as equally related, so a symbol reached once from a
-/// weak seed ranks with one reached from three strong ones. That is not a
-/// ranking, it is a set.
-///
-/// Every map here is a `BTreeMap` rather than a `HashMap`, and that is the
-/// whole of issue #88. A `HashMap`'s iteration order is seeded randomly per
-/// process, so `for (name, mass) in &score` visited the frontier in a
-/// different order on every run. Three things followed. The mass arriving at a
-/// name is a sum of `f32`s, and floating-point addition is not associative, so
-/// the same walk produced slightly different scores and the ranking moved by a
-/// question between identical runs. `tiers` keeps the first edge of equal
-/// weight, so the confidence a name was labelled with depended on which edge
-/// arrived first. And `edges.len() >= MAX_NODES` cut off whichever names the
-/// order had not reached yet, so the set of names visited — and the graph-only
-/// denominator the harness reports — moved as well. An ordered map costs a
-/// `log n` lookup over a set already bounded by `MAX_NODES` and buys a walk
-/// that answers the same thing twice.
-///
-/// `max_nodes` is how many names may be asked about. When it binds, the
-/// heaviest names of each round are the ones asked, ties by name. Until
-/// the fix for the 879k-chunk corpus it was `MAX_NODES` taken in name order,
-/// so the names a search could not afford to visit were the ones late in the
-/// alphabet rather than the ones the seeds cared least about. Below the budget
-/// the same names are visited either way and the result is unchanged.
-pub fn expand(
-    personal: &std::collections::BTreeMap<String, f32>,
-    max_nodes: usize,
-    mut neighbours: impl FnMut(&str) -> Result<Vec<(String, f32, String)>>,
-) -> Result<Vec<(String, f32, String)>> {
-    if personal.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut edges: std::collections::BTreeMap<String, Vec<(String, f32, String)>> =
-        std::collections::BTreeMap::new();
-    // The best edge that reached each name, which is what it is labelled with.
-    let mut tiers: std::collections::BTreeMap<String, (f32, String)> =
-        std::collections::BTreeMap::new();
-    let mut score = personal.clone();
-
-    for _ in 0..ROUNDS {
-        // The budget is on names visited, not on rows read, because that is
-        // what bounds both the queries and the memory.
-        let mut frontier: Vec<(&String, f32)> = score
-            .iter()
-            .filter(|(name, mass)| **mass > 0.0 && !edges.contains_key(*name))
-            .map(|(name, mass)| (name, *mass))
-            .collect();
-        frontier.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        let room = max_nodes.saturating_sub(edges.len());
-        for (name, _) in frontier.into_iter().take(room) {
-            edges.insert(name.clone(), neighbours(name)?);
-        }
-
-        let mut next: std::collections::BTreeMap<String, f32> = personal
-            .iter()
-            .map(|(name, mass)| (name.clone(), (1.0 - DAMPING) * mass))
-            .collect();
-
-        for (name, mass) in &score {
-            if *mass <= 0.0 {
-                continue;
-            }
-            let Some(out) = edges.get(name) else {
-                continue;
-            };
-            let total: f32 = out.iter().map(|(_, weight, _)| *weight).sum();
-            if total <= 0.0 {
-                continue;
-            }
-            for (to, weight, confidence) in out {
-                *next.entry(to.clone()).or_default() += DAMPING * mass * weight / total;
-                match tiers.get(to) {
-                    Some((best, _)) if *best >= *weight => {}
-                    _ => {
-                        tiers.insert(to.clone(), (*weight, confidence.clone()));
-                    }
-                }
-            }
-        }
-        score = next;
-    }
-
-    // Reached through an edge, which `tiers` is the record of. A seed the walk
-    // never left and came back to is not a neighbour of anything and carries no
-    // confidence to label it with; a seed that *is* reached — the query matched
-    // a chunk and the code points at it as well — stays, because the graph
-    // really did find it and the badge on the hit says so.
-    let mut ranked: Vec<(String, f32, String)> = score
-        .into_iter()
-        .filter_map(|(name, mass)| {
-            let (weight, confidence) = tiers.get(&name)?.clone();
-            Some((name, mass, (weight, confidence)))
-        })
-        .map(|(name, mass, (_, confidence))| (name, mass, confidence))
-        .collect();
-    // Ties break by name so two runs over one store return one order.
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    Ok(ranked)
-}
-
 /// One edge of a path, as the path finder renders it.
 ///
 /// Both ends carry a file and a line, and that is not decoration. A hop
@@ -2001,6 +1868,67 @@ pub fn not_connected(from: &str, to: &str, depth: u32, all_edges: bool) -> Strin
     }
 }
 
+/// Which files a graph answer may name: all of them, or the ones a path,
+/// extension or language filter selects.
+///
+/// A store that holds many repositories holds many `run`s and `get`s, and on
+/// the 727-question benchmark of 2026-10-01 caller precision was lost to
+/// exactly that: definitions and callers from the other repositories. A scope
+/// narrows the definitions in SQL (`symbols_by_names` takes the filter's own
+/// predicate, so a name defined five hundred times outside the scope is not
+/// read at all) and keeps out every caller, callee and reached row whose file
+/// the filter does not select. `impact` checks it per hop, so a scoped walk
+/// never expands from outside the scope.
+#[derive(Debug, Default, Clone)]
+pub struct Scope {
+    groups: Vec<Vec<String>>,
+    paths: Option<std::collections::HashSet<String>>,
+}
+
+impl Scope {
+    /// Every file in the store.
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    /// The files `filter` selects in this store; [`Scope::all`] for an empty
+    /// filter, with no query.
+    pub fn of(db: &rusqlite::Connection, filter: &crate::filter::Filter) -> Result<Self> {
+        if filter.is_empty() {
+            return Ok(Self::all());
+        }
+        let paths = crate::store::filtered_paths(db, filter.groups())?;
+        Ok(Self {
+            groups: filter.groups().to_vec(),
+            paths: Some(paths.into_iter().collect()),
+        })
+    }
+
+    /// Whether a row in `path` belongs in the answer.
+    pub fn holds(&self, path: &str) -> bool {
+        self.paths.as_ref().is_none_or(|p| p.contains(path))
+    }
+
+    /// The definitions of `name` inside the scope, at most `limit`.
+    fn definitions(
+        &self,
+        db: &rusqlite::Connection,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::store::SymbolRow>> {
+        if self.paths.is_none() {
+            return crate::store::symbols_named(db, name, limit);
+        }
+        let mut rows = crate::store::symbols_by_names(
+            db,
+            std::slice::from_ref(&name.to_string()),
+            &self.groups,
+        )?;
+        rows.truncate(limit);
+        Ok(rows)
+    }
+}
+
 /// One hop in each direction around `name`.
 ///
 /// `all` widens the answer in the two ways it is narrow. Without it, callees
@@ -2017,9 +1945,12 @@ pub fn neighbours(
     name: &str,
     kinds: &[String],
     all: bool,
+    scope: &Scope,
 ) -> Result<Neighbours> {
     let (qualifier, bare) = split_qualified(name);
-    let definitions = crate::store::symbols_named(db, bare, 64)?;
+    let definitions = scope.definitions(db, bare, 64)?;
+    let scoped = scope.paths.is_some();
+    let defined: Vec<i64> = definitions.iter().map(|d| d.id).collect();
     // A qualifier that owns nothing is ignored rather than answered with
     // nothing: the bare name is the nearest true answer.
     let owned: Vec<&crate::store::SymbolRow> = match qualifier {
@@ -2031,6 +1962,14 @@ pub fn neighbours(
     let mut callers = Vec::new();
     for incoming in crate::store::edges_in_resolved(db, bare, kinds)? {
         if !owned_ids.is_empty() && !incoming.means.iter().any(|m| owned_ids.contains(m)) {
+            continue;
+        }
+        // In scope means the caller's file is selected and what it called is
+        // one of the definitions the scope holds, not a namesake elsewhere.
+        if scoped
+            && (!scope.holds(&incoming.end.symbol.path)
+                || !incoming.means.iter().any(|m| defined.contains(m)))
+        {
             continue;
         }
         let mut end = incoming.end;
@@ -2049,6 +1988,11 @@ pub fn neighbours(
     }
 
     let mut callees = crate::store::edges_out(db, bare, kinds)?;
+    if scoped {
+        callees.retain(|e| {
+            e.from_path.as_deref().is_some_and(|p| scope.holds(p)) && scope.holds(&e.symbol.path)
+        });
+    }
     if !owned.is_empty() {
         callees.retain(|e| {
             owned.iter().any(|d| {
@@ -2086,11 +2030,15 @@ pub struct Signature {
 /// like" — three `semlith_symbol` calls before 0.30.0, each carrying callers,
 /// callees and a second ring the question did not ask for. Headings, keys and
 /// selectors are left out: they are places in a document, not definitions.
-pub fn signatures(db: &rusqlite::Connection, names: &[String]) -> Result<Vec<Signature>> {
+pub fn signatures(
+    db: &rusqlite::Connection,
+    names: &[String],
+    scope: &Scope,
+) -> Result<Vec<Signature>> {
     let mut out = Vec::new();
     for asked in names.iter().take(NAMES_LIMIT) {
         let (qualifier, bare) = split_qualified(asked);
-        let mut rows = crate::store::symbols_named(db, bare, 64)?;
+        let mut rows = scope.definitions(db, bare, 64)?;
         rows.retain(|r| !NAVIGATIONAL_KINDS.contains(&r.kind.as_str()));
         if let Some(q) = qualifier
             && rows.iter().any(|r| owned_by(r, q))
@@ -2247,15 +2195,16 @@ pub fn evidence(
     kinds: &[String],
     limit: usize,
     all: bool,
+    scope: &Scope,
 ) -> Result<Evidence> {
     let (qualifier, bare) = split_qualified(name);
-    let mut definitions = crate::store::symbols_named(db, bare, limit)?;
+    let mut definitions = scope.definitions(db, bare, limit)?;
     if let Some(q) = qualifier
         && definitions.iter().any(|d| owned_by(d, q))
     {
         definitions.retain(|d| owned_by(d, q));
     }
-    let ring = neighbours(db, name, kinds, all)?;
+    let ring = neighbours(db, name, kinds, all, scope)?;
 
     let mut ego: Vec<Hop> = Vec::new();
     let settled: Vec<(&str, &crate::store::EdgeEnd)> = ring
@@ -2279,6 +2228,9 @@ pub fn evidence(
         {
             if ego.len() >= EGO_LIMIT {
                 break;
+            }
+            if !scope.holds(&end.symbol.path) {
+                continue;
             }
             // The centre is not two hops from itself, and a name already in
             // the first ring is context the reader has.
@@ -2939,6 +2891,7 @@ pub fn impact(
     kinds: &[String],
     depth: u32,
     all_edges: bool,
+    scope: &Scope,
 ) -> Result<Impact> {
     // Dependency edges by default, for the reason `shortest_path` walks only
     // those: every symbol is one hop from the file that defines it, so a
@@ -2951,7 +2904,7 @@ pub fn impact(
         kinds
     };
     let (qualifier, bare) = split_qualified(name);
-    let mut definitions = crate::store::symbols_named(db, bare, 64)?;
+    let mut definitions = scope.definitions(db, bare, 64)?;
     let mut unqualified = false;
     if let Some(q) = qualifier {
         let owned: Vec<_> = definitions
@@ -3014,6 +2967,9 @@ pub fn impact(
                     continue;
                 }
                 let caller = &edge.end.symbol;
+                if !scope.holds(&caller.path) {
+                    continue;
+                }
                 let node = Node {
                     name: caller.name.clone(),
                     path: caller.path.clone(),
@@ -4853,156 +4809,6 @@ mod tests {
         );
     }
 
-    /// The defect the flat hop had: `near` is one hop from a single weak seed
-    /// and `hub` is two hops from three strong ones, and one hop ranked them
-    /// the same because both were simply "reached". The walk has to prefer the
-    /// one the query's own hits agree about.
-    #[test]
-    fn a_symbol_three_seeds_agree_on_outranks_one_a_single_seed_reached() {
-        let adjacency: std::collections::HashMap<&str, Vec<&str>> = [
-            ("a", vec!["mid_a"]),
-            ("b", vec!["mid_b"]),
-            ("c", vec!["mid_c"]),
-            ("mid_a", vec!["hub"]),
-            ("mid_b", vec!["hub"]),
-            ("mid_c", vec!["hub"]),
-            ("weak", vec!["near"]),
-            ("hub", vec![]),
-            ("near", vec![]),
-        ]
-        .into_iter()
-        .collect();
-
-        let personal: std::collections::BTreeMap<String, f32> = [
-            ("a".to_string(), 1.0),
-            ("b".to_string(), 1.0),
-            ("c".to_string(), 1.0),
-            ("weak".to_string(), 0.2),
-        ]
-        .into_iter()
-        .collect();
-
-        let ranked = expand(&personal, MAX_NODES, |name| {
-            Ok(adjacency
-                .get(name)
-                .into_iter()
-                .flatten()
-                .map(|to| (to.to_string(), 1.0, EXTRACTED.to_string()))
-                .collect())
-        })
-        .unwrap();
-
-        let place = |name: &str| ranked.iter().position(|(n, _, _)| n == name);
-        let hub = place("hub").unwrap_or_else(|| panic!("hub was not reached: {ranked:?}"));
-        let near = place("near").unwrap_or_else(|| panic!("near was not reached: {ranked:?}"));
-        assert!(
-            hub < near,
-            "two hops from three seeds must outrank one hop from a weak seed: {ranked:?}"
-        );
-        // Nothing points at a seed in this fixture, so no seed is reached and
-        // none is in the result. A seed the code *does* point at would stay —
-        // see `a_seed_the_code_points_at_is_still_reached`.
-        assert!(
-            ranked.iter().all(|(n, _, _)| !personal.contains_key(n)),
-            "no edge reaches a seed in this fixture: {ranked:?}"
-        );
-    }
-
-    /// The query matched a chunk and the code points at it as well. That is
-    /// two independent reasons to return it, and the hit has to say so — a
-    /// two-file corpus where every name is a seed is exactly where an
-    /// exclude-the-seeds rule silently empties the third list.
-    #[test]
-    fn a_seed_the_code_points_at_is_still_reached() {
-        let personal: std::collections::BTreeMap<String, f32> =
-            [("knead".to_string(), 1.0), ("autolyse".to_string(), 1.0)]
-                .into_iter()
-                .collect();
-        let ranked = expand(&personal, MAX_NODES, |name| {
-            Ok(match name {
-                "knead" => vec![("autolyse".to_string(), 1.0, EXTRACTED.to_string())],
-                _ => Vec::new(),
-            })
-        })
-        .unwrap();
-        assert!(
-            ranked.iter().any(|(n, _, _)| n == "autolyse"),
-            "a seed an edge reaches is still a neighbour: {ranked:?}"
-        );
-        assert!(
-            ranked.iter().all(|(n, _, _)| n != "knead"),
-            "nothing points at knead, so the walk did not reach it: {ranked:?}"
-        );
-    }
-
-    /// A name is asked about once however many rounds run. Without the cache
-    /// the walk would re-query the whole frontier every round, which is the
-    /// cost that would have made this unshippable.
-    #[test]
-    fn the_walk_asks_about_each_name_once() {
-        let mut asked: Vec<String> = Vec::new();
-        let personal: std::collections::BTreeMap<String, f32> =
-            [("a".to_string(), 1.0)].into_iter().collect();
-        expand(&personal, MAX_NODES, |name| {
-            asked.push(name.to_string());
-            Ok(match name {
-                "a" => vec![("b".to_string(), 1.0, EXTRACTED.to_string())],
-                "b" => vec![("c".to_string(), 1.0, INFERRED.to_string())],
-                _ => Vec::new(),
-            })
-        })
-        .unwrap();
-        let mut unique = asked.clone();
-        unique.sort();
-        unique.dedup();
-        assert_eq!(asked.len(), unique.len(), "asked twice: {asked:?}");
-    }
-
-    /// Under a budget the heaviest names are the ones asked about. Name order
-    /// would ask about `aardvark`, the weakest seed, and skip `zebra`, the
-    /// strongest, which is what 0.32.0 did on a store big enough for the budget
-    /// to bind.
-    #[test]
-    fn a_budget_spends_its_visits_on_the_heaviest_names() {
-        let personal: std::collections::BTreeMap<String, f32> = [
-            ("aardvark".to_string(), 0.1),
-            ("middle".to_string(), 0.5),
-            ("zebra".to_string(), 1.0),
-        ]
-        .into_iter()
-        .collect();
-        let mut asked: Vec<String> = Vec::new();
-        expand(&personal, 2, |name| {
-            asked.push(name.to_string());
-            Ok(Vec::new())
-        })
-        .unwrap();
-        assert_eq!(asked, ["zebra", "middle"]);
-    }
-
-    /// The label on a reached name is the best edge that reached it, not the
-    /// last one read.
-    #[test]
-    fn a_reached_name_is_labelled_by_the_best_edge_that_reached_it() {
-        let personal: std::collections::BTreeMap<String, f32> =
-            [("weak".to_string(), 1.0), ("strong".to_string(), 1.0)]
-                .into_iter()
-                .collect();
-        let ranked = expand(&personal, MAX_NODES, |name| {
-            Ok(match name {
-                "weak" => vec![("target".to_string(), 0.5, INFERRED.to_string())],
-                "strong" => vec![("target".to_string(), 1.0, EXTRACTED.to_string())],
-                _ => Vec::new(),
-            })
-        })
-        .unwrap();
-        let (_, _, tier) = ranked
-            .iter()
-            .find(|(n, _, _)| n == "target")
-            .expect("target reached");
-        assert_eq!(tier, EXTRACTED);
-    }
-
     #[test]
     fn recursion_does_not_produce_a_self_edge() {
         let e = run("a.rs", "fn loops() { loops(); }\n");
@@ -5036,6 +4842,66 @@ mod tests {
         db
     }
 
+    /// Two repositories in one store, each with its own `run` and its own
+    /// caller of it. Scoped to one, every graph answer names that repository
+    /// only -- the definition, the caller, the reached row -- and unscoped it
+    /// names both, as before.
+    #[test]
+    fn a_scope_keeps_a_namesake_in_another_repository_out() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::store::prepare_for_tests(&db);
+        for repo in ["one", "two"] {
+            let file =
+                crate::store::insert_file(&db, &format!("/w/{repo}/x.rs"), "h", 1, 0).unwrap();
+            let mut ids = Vec::new();
+            for (name, line) in [("run", 1), (format!("go_{repo}").as_str(), 5)] {
+                let symbol = Symbol {
+                    kind: "function".to_string(),
+                    name: name.to_string(),
+                    qualified: name.to_string(),
+                    start_line: line,
+                    end_line: line + 2,
+                };
+                ids.push(crate::store::insert_symbol(&db, file, None, &symbol).unwrap());
+            }
+            crate::store::insert_edge(&db, ids[1], "run", "calls", EXTRACTED, None, None).unwrap();
+        }
+        let filter = crate::filter::Filter::new(&["one/**".to_string()], &[], &[]).unwrap();
+        let scope = Scope::of(&db, &filter).unwrap();
+        let names = |ends: &[crate::store::EdgeEnd]| {
+            let mut n: Vec<String> = ends.iter().map(|e| e.symbol.name.clone()).collect();
+            n.sort();
+            n
+        };
+
+        let around = neighbours(&db, "run", &[], true, &scope).unwrap();
+        assert_eq!(names(&around.callers), ["go_one"]);
+        let everywhere = neighbours(&db, "run", &[], true, &Scope::all()).unwrap();
+        assert_eq!(names(&everywhere.callers), ["go_one", "go_two"]);
+
+        let reach = impact(&db, "run", &[], 3, false, &scope).unwrap();
+        assert!(
+            reach.definitions.iter().all(|d| d.path.contains("/one/")),
+            "{reach:?}"
+        );
+        assert!(
+            reach.reached.iter().all(|r| r.path.contains("/one/")),
+            "{reach:?}"
+        );
+        assert!(
+            reach.reached.iter().any(|r| r.name == "go_one"),
+            "{reach:?}"
+        );
+
+        let rows = signatures(&db, &["run".to_string()], &scope).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].symbol.path.contains("/one/"));
+
+        let found = evidence(&db, "run", &[], 20, true, &scope).unwrap();
+        assert!(found.definitions.iter().all(|d| d.path.contains("/one/")));
+        assert_eq!(names(&found.callers), ["go_one"]);
+    }
+
     /// The block is one reply where 0.15.0 needed three, and the second ring
     /// is walked only through names the first ring settled — an ambiguous name
     /// is several unrelated definitions, and expanding one would put somebody
@@ -5043,7 +4909,7 @@ mod tests {
     #[test]
     fn the_evidence_block_carries_the_definition_both_rings_and_no_ambiguity() {
         let db = chain();
-        let found = evidence(&db, "b", &dependency_kinds(), 20, false).unwrap();
+        let found = evidence(&db, "b", &dependency_kinds(), 20, false, &Scope::all()).unwrap();
 
         assert_eq!(found.name, "b");
         assert!(!found.definitions.is_empty(), "{found:?}");
@@ -5087,7 +4953,7 @@ mod tests {
     #[test]
     fn neighbours_separates_the_two_directions() {
         let db = chain();
-        let n = neighbours(&db, "d", &[], false).unwrap();
+        let n = neighbours(&db, "d", &[], false, &Scope::all()).unwrap();
         let mut callers: Vec<&str> = n.callers.iter().map(|e| e.symbol.name.as_str()).collect();
         callers.sort_unstable();
         assert_eq!(callers, ["c", "e"], "both callers of d");

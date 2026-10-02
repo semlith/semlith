@@ -136,6 +136,7 @@ pub fn resident_bytes(n: usize, dim: usize, bit_width: usize) -> usize {
 }
 
 /// What the vector index is allowed to look at for one query.
+#[derive(Clone)]
 pub enum Allowlist {
     /// No filter, or one that selects everything the index holds.
     All,

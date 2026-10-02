@@ -1086,9 +1086,10 @@ pub struct Store {
     pub name: String,
     pub dir: PathBuf,
     /// Roots as the registry records them, including any that no longer exist.
-    pub roots: Vec<PathBuf>,
+    /// Behind a lock because a root can be added while the daemon runs.
+    roots: Mutex<Vec<PathBuf>>,
     /// The subset of `roots` that is actually on disk and being watched.
-    pub watched: Vec<PathBuf>,
+    watched: Mutex<Vec<PathBuf>>,
     queue: Mutex<VecDeque<Queued>>,
     events: Mutex<VecDeque<Event>>,
     /// This store's runs, oldest first.
@@ -1145,6 +1146,34 @@ pub struct Store {
 }
 
 impl Store {
+    /// Every root the registry records for this store, present or not.
+    pub fn roots(&self) -> Vec<PathBuf> {
+        self.roots.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The roots that are on disk, which the writer watches.
+    pub fn watched(&self) -> Vec<PathBuf> {
+        self.watched
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Roots added while the daemon runs: recorded, and the ones on disk
+    /// watched by the writer from its next loop, without a restart (#180).
+    pub fn add_roots(&self, paths: &[PathBuf]) {
+        let mut roots = self.roots.lock().unwrap_or_else(|e| e.into_inner());
+        let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
+        for path in paths {
+            if !roots.contains(path) {
+                roots.push(path.clone());
+            }
+            if path.exists() && !watched.contains(path) {
+                watched.push(path.clone());
+            }
+        }
+    }
+
     /// A store's record with nothing going on yet. One constructor, so a field
     /// added here is a field every caller gets.
     fn new(
@@ -1158,8 +1187,8 @@ impl Store {
         Self {
             name,
             dir,
-            roots,
-            watched,
+            roots: Mutex::new(roots),
+            watched: Mutex::new(watched),
             queue: Mutex::new(VecDeque::new()),
             events: Mutex::new(VecDeque::new()),
             runs: Mutex::new(Vec::new()),
@@ -2432,6 +2461,12 @@ pub struct State {
     /// daemon they only just started. Readers take a snapshot rather than hold
     /// the guard, so a slow search never blocks a store being opened.
     stores: RwLock<Vec<Arc<Store>>>,
+    /// Store directories a delete is taking down. Between leaving the served
+    /// set and leaving the registry a store is registered and unserved, which
+    /// is exactly what `reconcile` opens -- and an open there recreated the
+    /// store a stop had just deleted and caught it up again (the macOS drive's
+    /// 8.6). `reconcile` passes these over.
+    deleting: Mutex<std::collections::BTreeSet<PathBuf>>,
     /// The writer threads of stores opened after startup, joined at shutdown
     /// with the startup ones. They were detached until 0.33.0, so a stop while
     /// one was embedding let `main` return and tear ONNX Runtime down under a
@@ -2607,7 +2642,13 @@ impl State {
                 continue;
             };
             let dir = crate::canonical(&dir);
-            if open.contains(&dir) {
+            if open.contains(&dir)
+                || self
+                    .deleting
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&dir)
+            {
                 continue;
             }
             if !dir.exists() {
@@ -2868,6 +2909,22 @@ impl State {
         let Some(store) = self.store(name) else {
             anyhow::bail!("this daemon is not serving a store called {name}");
         };
+        // Held until the registry entry is gone, whichever way this returns.
+        struct Deleting<'a>(&'a Mutex<std::collections::BTreeSet<PathBuf>>, PathBuf);
+        impl Drop for Deleting<'_> {
+            fn drop(&mut self) {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&self.1);
+            }
+        }
+        let dir = crate::canonical(&store.dir);
+        self.deleting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(dir.clone());
+        let _deleting = Deleting(&self.deleting, dir);
 
         store.stop.store(true, Ordering::SeqCst);
         // The watcher checks the flag between filesystem events, so this is a
@@ -2915,10 +2972,9 @@ impl State {
         let settings = crate::home::store_settings(&store.dir);
         let was_watching = store.watch_events.load(Ordering::Relaxed);
         store.apply_settings(&settings);
-        if settings.watch && !was_watching && !store.watched.is_empty() {
-            let _ = self
-                .admission
-                .submit(store, store.watched.clone(), RunKind::CatchUp);
+        let watched = store.watched();
+        if settings.watch && !was_watching && !watched.is_empty() {
+            let _ = self.admission.submit(store, watched, RunKind::CatchUp);
         }
         refresh_unrecorded();
         self.reopen_readers();
@@ -3661,6 +3717,7 @@ pub fn run(
         server: Arc::clone(&server),
         fleet: Mutex::new(fleet),
         stores: RwLock::new(stores),
+        deleting: Mutex::new(std::collections::BTreeSet::new()),
         late_writers: Mutex::new(Vec::new()),
         admission: Arc::new(Admission::new(limits.runs_at_once.value)),
         airgap,
@@ -3893,7 +3950,7 @@ fn tend(
     // that really owns those files. The old boundary rule let the whole home
     // directory into every store, so this is the one-time cost of tightening
     // it. The files on disk are untouched.
-    match writer.prune_out_of_root(&store.roots) {
+    match writer.prune_out_of_root(&store.roots()) {
         Ok(0) => {}
         Ok(dropped) => {
             store.pruned.store(dropped, Ordering::Relaxed);
@@ -3910,7 +3967,7 @@ fn tend(
     // A store with no root on disk still gets a thread, because it still has a
     // queue: the portal can index a new path into it even though there is
     // nothing to watch yet.
-    let roots = store.watched.clone();
+    let roots = store.watched();
 
     // The catch-up is a run, admitted like any other. It used to be the
     // watcher's own walk, which the admission queue could not see: three
@@ -3933,6 +3990,7 @@ fn tend(
         stop,
         watch::Held {
             catch_up: false,
+            roots_now: &|| store.watched(),
             waiting: &|| false,
             // A burst larger than a save is admitted like a run, so a `git
             // checkout` of thousands of files waits its turn and shows as a
@@ -5229,12 +5287,15 @@ mod tests {
     /// a store's writer ending are three writes of one domain, and there is no
     /// single function they go through — `open_store` takes a lock and spawns
     /// a watcher, `delete_store` stops one and removes the directory, and
-    /// `keep_writing` is the thread itself ending. `runs`: a store's own runs,
+    /// `keep_writing` is the thread itself ending; and from 0.36.0 a large
+    /// store's `Inside the index` measure finishing on its own thread, which
+    /// is a new reading of the store rather than a write anyone else makes
+    /// (#175). `runs`: a store's own runs,
     /// and the cards of runs whose stop deleted their store, which no store is
     /// left to hold. Every other domain has exactly one writer and a second
     /// site would be a second source of truth.
     const BUMP_SITES: &[(&str, usize)] = &[
-        ("stores", 3),
+        ("stores", 4),
         ("runs", 2),
         ("clients", 1),
         ("ledger", 1),
@@ -5545,6 +5606,7 @@ mod tests {
             debounce: Duration::from_millis(500),
             report: Arc::new(|_| {}),
             refusals: Mutex::new(BTreeMap::new()),
+            deleting: Mutex::new(std::collections::BTreeSet::new()),
             late_writers: Mutex::new(Vec::new()),
             awaiting: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),

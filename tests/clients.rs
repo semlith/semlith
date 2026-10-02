@@ -632,7 +632,7 @@ fn the_agent_skill_validates_against_the_format() {
         description.len()
     );
     assert!(
-        description.contains("semlith_brief"),
+        description.contains("semlith_search"),
         "the description must name the call the skill exists to promote: {description:?}"
     );
 

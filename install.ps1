@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
     Install semlith from a GitHub release: download the Windows binary, verify
-    it against SHA256SUMS, install it into ~\.semlith\bin and hand off to
-    `semlith setup`.
+    it against SHA256SUMS and its build provenance, install it into
+    ~\.semlith\bin and hand off to `semlith setup`.
 
         irm https://raw.githubusercontent.com/semlith/semlith/main/install.ps1 | iex
 .DESCRIPTION
@@ -23,10 +23,23 @@ $ErrorActionPreference = 'Stop'
 # ASCII only, deliberately: PSScriptAnalyzer asks for a byte-order mark the
 # moment this file stops being ASCII, and a BOM on a script people pipe into
 # `iex` is a thing to avoid.
-[Net.ServicePointManager]::SecurityProtocol =
-    [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+#
+# Assigned rather than OR-ed in, so SSL 3.0, TLS 1.0 and TLS 1.1 are not left
+# enabled beside it. PowerShell 7's Invoke-WebRequest does not read this
+# setting, so there the same floor goes on every request as -SslProtocol.
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$web = @{ UseBasicParsing = $true }
+if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey('SslProtocol')) {
+    $web.SslProtocol = 'Tls12'
+    if ([enum]::GetNames([Microsoft.PowerShell.Commands.WebSslProtocol]) -contains 'Tls13') {
+        $web.SslProtocol = 'Tls12, Tls13'
+    }
+}
 
 $repo = 'semlith/semlith'
+# One origin, with no way to be told another, as in install.sh: the clean
+# install workflow rewrites this line in a copy rather than setting a variable.
+$origin = 'https://github.com'
 $arch = $env:PROCESSOR_ARCHITECTURE
 if ($arch -ne 'AMD64' -and $arch -ne 'ARM64') {
     throw "semlith has no prebuilt Windows binary for $arch."
@@ -42,7 +55,7 @@ if ($env:SEMLITH_VERSION) {
 }
 else {
     Write-Information 'Resolving the latest semlith release...' -InformationAction Continue
-    $latest = Invoke-WebRequest -Uri "https://github.com/$repo/releases/latest" -UseBasicParsing
+    $latest = Invoke-WebRequest -Uri "$origin/$repo/releases/latest" @web
     $response = $latest.BaseResponse
     if ($response.ResponseUri) {
         $resolved = $response.ResponseUri.AbsoluteUri
@@ -58,7 +71,7 @@ if ($tag -notmatch '^v') {
 
 $name = "semlith-$tag-$target"
 $archive = "$name.zip"
-$base = "https://github.com/$repo/releases/download/$tag"
+$base = "$origin/$repo/releases/download/$tag"
 Write-Information "Installing semlith $tag for $target" -InformationAction Continue
 
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('semlith-' + [Guid]::NewGuid().ToString('N'))
@@ -68,9 +81,9 @@ try {
     $sumsPath = Join-Path $tmp 'SHA256SUMS'
 
     Write-Information "Downloading $archive" -InformationAction Continue
-    Invoke-WebRequest -Uri "$base/$archive" -OutFile $archivePath -UseBasicParsing
+    Invoke-WebRequest -Uri "$base/$archive" -OutFile $archivePath @web
     Write-Information 'Downloading SHA256SUMS' -InformationAction Continue
-    Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sumsPath -UseBasicParsing
+    Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sumsPath @web
 
     Write-Information 'Verifying checksum' -InformationAction Continue
     $pattern = '\s' + [regex]::Escape($archive) + '$'
@@ -82,6 +95,40 @@ try {
     $actual = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash
     if ($actual -ne $expected) {
         throw "checksum mismatch: $archive hashes to $actual but SHA256SUMS says $expected; nothing was installed"
+    }
+
+    # The checksum proves the archive matches SHA256SUMS, and both came from the
+    # same place. The attestation proves who built it: signed for the archive's
+    # digest by this repository's release workflow. gh is optional, so its
+    # absence is said rather than fatal; a gh that checks and does not confirm
+    # is fatal.
+    $manual = "To check it yourself: gh attestation verify $archive --repo $repo"
+    # Attestations start with v0.36.0: an older tag has none to check.
+    if ($tag -match '^v0\.([0-9]|[12][0-9]|3[0-5])\.') {
+        Write-Information "Provenance not verified: $tag predates release attestations (v0.36.0)" -InformationAction Continue
+    }
+    elseif (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        Write-Information "Provenance not verified: gh is not installed. $manual" -InformationAction Continue
+    }
+    else {
+        Write-Information 'Verifying provenance with gh attestation verify' -InformationAction Continue
+        # Continue around the native call: Windows PowerShell can turn a native
+        # command's stderr into errors, and 'Stop' would end the script on gh's
+        # first line of output instead of on its exit code.
+        $ErrorActionPreference = 'Continue'
+        & gh attestation verify $archivePath --repo $repo
+        $status = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        if ($status -eq 0) {
+            Write-Information "Provenance verified: $archive was built by $repo's release workflow" -InformationAction Continue
+        }
+        elseif ($status -eq 4) {
+            # gh's documented "needs authentication" code: the check never ran.
+            Write-Information "Provenance not verified: gh is not logged in (gh auth login). $manual" -InformationAction Continue
+        }
+        else {
+            throw "provenance check failed: gh could not confirm $repo built $archive (gh 2.49+ needed); nothing was installed"
+        }
     }
 
     Write-Information 'Unpacking' -InformationAction Continue

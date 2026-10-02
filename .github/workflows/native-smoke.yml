@@ -291,7 +291,9 @@ jobs:
           export SEMLITH_HOME="$PWD/drive-home"
           export SEMLITH_PORTAL_URL=http://127.0.0.1:7466
           mkdir -p "$SEMLITH_HOME"
-          semlith start --port 7466 > drive-daemon.log 2>&1 &
+          # One line per connection in drive-daemon.log, so a transport fault
+          # seen on one platform only (#181) leaves its trace behind.
+          SEMLITH_HTTP_TRACE=1 semlith start --port 7466 > drive-daemon.log 2>&1 &
           for _ in $(seq 1 90); do
             grep -q 'token=' drive-daemon.log && break
             sleep 1

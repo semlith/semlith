@@ -685,9 +685,8 @@ are compared against pictures.
 Neither list is the answer. Each is searched deeper than you asked for, and the
 two are then **fused** by reciprocal rank — a chunk's place in each list
 contributes, and a chunk both lists ranked well beats one that only a single list
-liked. A third list is then built by walking the code graph outward from what the
-first two found, so a function that is not itself a match but is called by one can
-still arrive.
+liked. The code graph is not part of search: a function that is related to a match
+but does not match itself is what Graph's neighbours and blast radius find.
 
 Scores are fusion scores. They order one result set and mean nothing across two
 of them. Above the results a line reads something like `identifier-shaped ·

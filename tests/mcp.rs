@@ -31,7 +31,7 @@ const BREAD: &str = "Sourdough rises because a starter of flour and water fermen
 /// hand-written copy only means a release that adds a tool fails here for the
 /// wrong reason.
 fn tools() -> Vec<String> {
-    semlith::mcp::tool_names()
+    semlith::mcp::listed_names()
 }
 
 // ---------------------------------------------------------------- T01

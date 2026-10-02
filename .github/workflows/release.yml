@@ -205,9 +205,13 @@ jobs:
   release:
     needs: [verify, build]
     runs-on: ubuntu-latest
-    # The one job that writes: it creates the Release and uploads the assets.
+    # The one job that writes: it creates the Release and uploads the assets,
+    # and signs a provenance attestation for each of them. `id-token` is the
+    # OIDC token the signature is issued against; `attestations` stores it.
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -216,11 +220,24 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The installers ride along as assets of the release they shipped with, so
+      # "download it, read it, run it" has a fixed, attested copy to download
+      # rather than whatever `main` holds today.
+      - name: Installers
+        run: cp install.sh install.ps1 dist/
+
       - name: Checksums
         run: |
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
+
+      # Every file the release publishes: the archives, SHA256SUMS and both
+      # installers. `gh attestation verify <file> --repo semlith/semlith` checks
+      # any of them, and the installers do exactly that for the archive.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
 
       # Release titles drop the tag's leading "v": "Semlith 0.1.0".
       - name: Version
@@ -248,7 +265,8 @@ jobs:
           `semlith` on your `PATH`. Intel macOS has no prebuilt binary: ONNX
           Runtime no longer publishes x86_64 macOS builds.
 
-          Verify a download against `SHA256SUMS` before running it.
+          Verify a download against `SHA256SUMS` before running it, and its
+          provenance with `gh attestation verify <file> --repo semlith/semlith`.
           EOF
           } >> notes.md
           cat notes.md

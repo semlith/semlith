@@ -788,11 +788,14 @@ impl Fleet {
         &self,
         only: Option<&[String]>,
         names: &[String],
+        filter: &Filter,
     ) -> Result<Vec<crate::graph::Signature>> {
         let label_rows = self.members.len() > 1;
         let mut out = Vec::new();
         for i in self.chosen(only)? {
-            let mut rows = crate::graph::signatures(self.members[i].store.db(), names)?;
+            let db = self.members[i].store.db();
+            let mut rows =
+                crate::graph::signatures(db, names, &crate::graph::Scope::of(db, filter)?)?;
             if label_rows {
                 for row in &mut rows {
                     row.symbol.store = Some(self.members[i].label.clone());
@@ -823,10 +826,12 @@ impl Fleet {
         kinds: &[String],
         limit: usize,
         all: bool,
+        filter: &Filter,
     ) -> Result<crate::graph::Evidence> {
         let mut merged: Option<crate::graph::Evidence> = None;
         for part in self.graph_each(only, |s| {
-            crate::graph::evidence(s.db(), name, kinds, limit, all)
+            let scope = crate::graph::Scope::of(s.db(), filter)?;
+            crate::graph::evidence(s.db(), name, kinds, limit, all, &scope)
         })? {
             match &mut merged {
                 None => merged = Some(part),
@@ -854,6 +859,7 @@ impl Fleet {
         name: &str,
         kinds: &[String],
         all: bool,
+        filter: &Filter,
     ) -> Result<crate::graph::Neighbours> {
         // Each store resolves its own callers against its own definitions —
         // which `Type::method` a call means is a fact inside one store — and
@@ -861,7 +867,9 @@ impl Fleet {
         let label_rows = self.members.len() > 1;
         let (mut callers, mut callees, mut unresolved) = (Vec::new(), Vec::new(), Vec::new());
         for i in self.chosen(only)? {
-            let mut part = crate::graph::neighbours(self.members[i].store.db(), name, kinds, true)?;
+            let db = self.members[i].store.db();
+            let scope = crate::graph::Scope::of(db, filter)?;
+            let mut part = crate::graph::neighbours(db, name, kinds, true, &scope)?;
             if label_rows {
                 let label = &self.members[i].label;
                 for row in part.callers.iter_mut().chain(part.callees.iter_mut()) {
@@ -962,9 +970,11 @@ impl Fleet {
         kinds: &[String],
         depth: u32,
         all_edges: bool,
+        filter: &Filter,
     ) -> Result<crate::graph::Impact> {
         let parts = self.graph_each(only, |s| {
-            crate::graph::impact(s.db(), name, kinds, depth, all_edges)
+            let scope = crate::graph::Scope::of(s.db(), filter)?;
+            crate::graph::impact(s.db(), name, kinds, depth, all_edges, &scope)
         })?;
         let mut merged = crate::graph::Impact {
             name: name.to_string(),
@@ -1467,7 +1477,6 @@ mod tests {
             symbol: None,
             symbol_kind: None,
             symbol_line: None,
-            provenance: None,
             copies: Vec::new(),
         }
     }

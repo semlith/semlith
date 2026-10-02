@@ -37,13 +37,13 @@ cargo test --release --test retrieval -- --ignored --nocapture # retrieval quali
 `tests/retrieval.rs` is the harness behind every retrieval claim this repository
 makes. It runs a fixed set of 107 questions with ground-truth spans from
 `tests/fixtures/retrieval/questions.yaml` — identifier-shaped, concept-shaped and
-multi-hop — and prints hit@1, hit@3, hit@8, bytes per answer, the graph list's
-marginal contribution, and from 0.23.0 calls and tokens per answered question for
+multi-hop — and prints hit@1, hit@3, hit@8, bytes per answer, and from 0.23.0 calls and tokens per answered question for
 `brief` against the search-then-read path. It asserts two things: the wrong-yes
-count for `path` is zero, and `tools/list` costs under 1 685 tokens — sixteen
-tools from 0.26.0, where thirteen measured 4 441 bytes and about 1 111, and from
-0.33.0 an `items` type on every array parameter, which Copilot in VS Code
-requires. The
+count for `path` is zero, and `tools/list` costs under 675 tokens — from 0.36.0
+eight listed tools (`mcp::LISTED`; clients offer agents only listed tools,
+so the other eight are the CLI's and portal's unless `SEMLITH_MCP_TOOLS=all`), 2 633 bytes, where sixteen were 7 330 and
+cost an Opus request 3 073 tokens against 1 323 now, measured; every array
+parameter carries an `items` type, which Copilot in VS Code requires. The
 byte proxy in `mcp::tests::the_tool_list_stays_small` is the same number said
 in bytes, so a list that would fail the criterion fails in seconds rather than
 eight minutes into an indexing run.
@@ -303,23 +303,18 @@ Module responsibilities:
   `mcp::SUPPORTED` has a session in `tests/mcp.rs` proving it — adding a
   revision means adding that session.
 - `filter.rs` derives both the vector allowlist and the FTS5 predicate from one
-  id set, so the three halves can never disagree about eligibility — graph
-  expansion resolves its neighbours through `store::symbols_by_names`, which
-  takes the same predicate, so a chunk outside the filter cannot arrive through
-  the graph either.
-- **The graph list is a ranked walk, not a hop.** From 0.16.0 `graph::expand` is
-  a personalised PageRank seeded with each fused hit's own contribution: a chunk
-  both lists found seeds twice as hard as one only a single list found, and a
-  chunk holding three symbols splits its mass between them rather than seeding
-  each as though it were a hit of its own. Neighbours are read through a closure,
-  one name at a time, and cached — a name is asked about once however many rounds
-  run, so the walk holds the frontier and never the whole graph, and `MAX_NODES`
-  is still the bound. The maths takes a closure rather than a database handle
-  precisely so it is unit-tested against a literal adjacency map with no store
-  and no model.
+  id set, so the halves can never disagree about eligibility.
+- **Search has no graph list (0.36.0).** It fuses the vector, keyword and image
+  lists and lifts definitions for an identifier. The graph walk that was a third
+  list from 0.12.0 to 0.35.0 scored the same as no walk on the 727-question
+  benchmark of 2026-10-01 and cost a third of a search on a large store, so it
+  was removed with its proximity tiebreak and the `provenance` field.
+  `neighbors`, `impact`, `path`, `trace` and brief's one-hop callers and callees
+  are where the graph answers.
 - **The rerank has no model and no learned weights, and its factors are
-  tiebreaks.** Graph distance from the seeds, and freshness. The whole span is
-  under 1.5x — asserted, not intended — so a chunk the query matched badly cannot
+  tiebreaks.** Freshness and test paths (graph distance went with the graph list
+  in 0.36.0). Each is
+  under 1.6x — asserted, not intended — so a chunk the query matched badly cannot
   climb over one it matched well. A third factor, a lift for a chunk inside a
   named definition, was specified, built, measured and removed in the same
   release: in a code repository it is a second and blunter `prefer: code` applied
@@ -493,8 +488,8 @@ Module responsibilities:
   different facts.
 - **`semlith_search` answers where by default; the CLI still answers with text.**
   Over MCP and `/api/search`, `format: locate` returns one line per hit — path,
-  span, enclosing symbol and kind, the lists that found it, provenance for a
-  graph-reached row, a freshness flag, one line of text — grouped by file and cut
+  span, enclosing symbol and kind, the lists that found it, a freshness flag,
+  one line of text — grouped by file and cut
   to `max_tokens` (default 1500, floor 200) with `truncated: N of M`. Ask for
   `format: "excerpt"` when you actually need the body; that is what 0.14.0
   returned. `semlith search` in a terminal is unchanged. Every hit carries

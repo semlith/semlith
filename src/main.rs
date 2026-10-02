@@ -715,6 +715,18 @@ enum Command {
         #[arg(long)]
         history: bool,
 
+        /// Only files matching this glob. Repeatable; a leading `!` excludes.
+        #[arg(long, short)]
+        path: Vec<String>,
+
+        /// Only files with this extension. Repeatable; a leading `!` excludes.
+        #[arg(long, short)]
+        ext: Vec<String>,
+
+        /// Only files of this language. Repeatable; a leading `!` excludes.
+        #[arg(long, short)]
+        lang: Vec<String>,
+
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -740,6 +752,18 @@ enum Command {
         /// this codebase.
         #[arg(long)]
         all: bool,
+
+        /// Only files matching this glob. Repeatable; a leading `!` excludes.
+        #[arg(long, short)]
+        path: Vec<String>,
+
+        /// Only files with this extension. Repeatable; a leading `!` excludes.
+        #[arg(long, short)]
+        ext: Vec<String>,
+
+        /// Only files of this language. Repeatable; a leading `!` excludes.
+        #[arg(long, short)]
+        lang: Vec<String>,
 
         /// Emit JSON instead of formatted text.
         #[arg(long)]
@@ -777,6 +801,18 @@ enum Command {
         /// When both this and --all-edges are given, this one wins.
         #[arg(long)]
         strict: bool,
+
+        /// Only files matching this glob. Repeatable; a leading `!` excludes.
+        #[arg(long, short)]
+        path: Vec<String>,
+
+        /// Only files with this extension. Repeatable; a leading `!` excludes.
+        #[arg(long, short)]
+        ext: Vec<String>,
+
+        /// Only files of this language. Repeatable; a leading `!` excludes.
+        #[arg(long, short)]
+        lang: Vec<String>,
 
         /// Emit JSON instead of formatted text.
         #[arg(long)]
@@ -2102,8 +2138,12 @@ fn run() -> Result<()> {
             names,
             k,
             history,
+            path,
+            ext,
+            lang,
             json,
         } => {
+            let filter = Filter::new(&path, &ext, &lang)?;
             let fleet = read_fleet(&cli.store, &cwd, false)?;
             if names.len() > 1 && !history {
                 if names.len() > semlith::graph::NAMES_LIMIT {
@@ -2113,7 +2153,7 @@ fn run() -> Result<()> {
                         names.len()
                     );
                 }
-                let rows = fleet.signatures_in(None, &names)?;
+                let rows = fleet.signatures_in(None, &names, &filter)?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&rows)?);
                 } else if rows.is_empty() {
@@ -2162,8 +2202,14 @@ fn run() -> Result<()> {
             // it calls, and the ring beyond that. Asking for a definition and
             // then having to ask twice more to know whether it was the right
             // one is what this replaces.
-            let found =
-                fleet.evidence_in(None, &name, &semlith::graph::dependency_kinds(), k, false)?;
+            let found = fleet.evidence_in(
+                None,
+                &name,
+                &semlith::graph::dependency_kinds(),
+                k,
+                false,
+                &filter,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&found)?);
             } else if found.definitions.is_empty() {
@@ -2314,8 +2360,12 @@ fn run() -> Result<()> {
             name,
             kind,
             all,
+            path,
+            ext,
+            lang,
             json,
         } => {
+            let filter = Filter::new(&path, &ext, &lang)?;
             for k in &kind {
                 if !semlith::graph::KINDS.contains(&k.as_str()) {
                     anyhow::bail!(
@@ -2326,7 +2376,7 @@ fn run() -> Result<()> {
             }
             let fleet = read_fleet(&cli.store, &cwd, false)?;
             let started = Instant::now();
-            let neighbours = fleet.neighbours_in(None, &name, &kind, all)?;
+            let neighbours = fleet.neighbours_in(None, &name, &kind, all, &filter)?;
             let found = !neighbours.callers.is_empty() || !neighbours.callees.is_empty();
             semlith::ledger::graph(
                 &fleet,
@@ -2379,8 +2429,12 @@ fn run() -> Result<()> {
             depth,
             all_edges,
             strict,
+            path,
+            ext,
+            lang,
             json,
         } => {
+            let filter = Filter::new(&path, &ext, &lang)?;
             for k in &kind {
                 if !semlith::graph::KINDS.contains(&k.as_str()) {
                     anyhow::bail!(
@@ -2392,7 +2446,7 @@ fn run() -> Result<()> {
             let all_edges = all_edges && !strict;
             let fleet = read_fleet(&cli.store, &cwd, false)?;
             let started = Instant::now();
-            let impact = fleet.impact_in(None, &name, &kind, depth, all_edges)?;
+            let impact = fleet.impact_in(None, &name, &kind, depth, all_edges, &filter)?;
             semlith::ledger::graph(
                 &fleet,
                 &CLI_LEDGER,

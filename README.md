@@ -81,7 +81,7 @@ One command. No Rust toolchain, no package manager, nothing installed first.
 **macOS and Linux**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/semlith/semlith/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/semlith/semlith/main/install.sh | sh
 ```
 
 **Windows**
@@ -112,6 +112,46 @@ nothing but glibc and libstdc++ — no OpenBLAS, no OpenSSL. Its floor is
 build, which covers Debian 12, Ubuntu 22.04 LTS, RHEL 9 and Amazon Linux 2023.
 Intel macOS is not supported: ONNX Runtime no longer publishes `osx-x86_64`, so
 the embedding backend cannot link there.
+
+### Security
+
+**What the installer writes.** The binary to `~/.semlith/bin/semlith`
+(`~\.semlith\bin\semlith.exe` on Windows, `$SEMLITH_HOME/bin` if you set it),
+and on Linux `libonnxruntime.so` beside it. On macOS and Linux that directory
+is made private to you (mode 700). The download goes to a temporary directory that is removed on exit, and
+nothing is written before the archive has passed both checks below. Everything
+after that is `semlith setup`'s, as listed under [Commands](#commands).
+
+**What it checks.** The archive against the release's `SHA256SUMS`, then its
+provenance: every release file carries a GitHub artifact attestation signed by
+this repository's release workflow, and when `gh` is on your `PATH` the
+installer runs `gh attestation verify` and refuses to install if it does not
+confirm one. Without `gh`, or with a `gh` that is not logged in, it says the
+provenance was not verified and how to check it yourself. curl may use only
+https at TLS 1.2 or later, and the shell script is wrapped in a function called
+on its last line, so a download cut off part-way runs nothing. Releases before
+v0.36.0 carry no attestations.
+
+**Read it before you run it.** Each release has its own installer attached, so
+you can download that copy, read it and verify it first:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSLO https://github.com/semlith/semlith/releases/latest/download/install.sh
+less install.sh
+gh attestation verify install.sh --repo semlith/semlith
+sh install.sh
+```
+
+On Windows, `irm https://github.com/semlith/semlith/releases/latest/download/install.ps1 -OutFile install.ps1`,
+read it, then `powershell -ExecutionPolicy Bypass -File install.ps1`.
+
+**Verify an archive by hand.** Download the archive for your platform and
+`SHA256SUMS` from [the releases page](https://github.com/semlith/semlith/releases), then:
+
+```sh
+grep "  semlith-<tag>-<target>.tar.gz$" SHA256SUMS | shasum -a 256 -c
+gh attestation verify semlith-<tag>-<target>.tar.gz --repo semlith/semlith
+```
 
 ## Quick start
 
@@ -151,7 +191,7 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 | `semlith scan [STORE]` | List every file the store holds that semlith would refuse today — a credential the name does not admit to, a rule that has widened. Exits non-zero while any remain; `--forget` evicts them. |
 | `semlith drop <STORE>` | Delete a store outright — its vectors, chunks, graph and ledger, and the registry entry naming it. The indexed files are untouched. |
 | `semlith symbol <NAME>...` | The definition, its callers and callees, and the ring two hops out, in one answer; several names give one row per definition. From the parsed syntax tree rather than a grep for `fn name`. `--history` gives what the name used to be: the definitions a re-index replaced, each with the content hash of the file version it was true for. |
-| `semlith neighbors <NAME>` | What calls it and what it calls, one hop each way. `--kind` to follow one edge kind, `--all` to expand collapsed rows. |
+| `semlith neighbors <NAME>` | What calls it and what it calls, one hop each way. `--kind` to follow one edge kind, `--all` to expand collapsed rows; `--path`/`--ext`/`--lang` keep it to one repository of a store that holds several, as on `symbol`, `impact` and `brief`. |
 | `semlith path <FROM> <TO>` | The shortest chain of edges between two symbols, or nothing if they are unconnected. `--depth` to search further. |
 | `semlith ledger` | Print what agents retrieved from this store, newest first. `--last N`, `--verify`. `--usage on\|off` turns on reading each AI client's own session log for the model, tokens and cost of its calls (off by default; read-only, numbers only), priced by `semlith prices`: a models.dev snapshot built in, which `semlith prices update` refreshes only when run. Needs no key. |
 | `semlith start [PATHS...]` | Own every registered store, keep them current, serve the portal on `127.0.0.1:7365` and answer MCP at `/mcp`. `--port`, `--debounce`, `--airgap`, `--no-ledger`, `--no-mcp-http`. |
@@ -370,7 +410,12 @@ would have served both. The command reproduces it against any store you have.
 ## Using it from an agent
 
 `semlith mcp` speaks MCP over stdio, and `semlith start` answers the same sixteen
-tools over HTTP at `/mcp`:
+tools over HTTP at `/mcp`. `tools/list` sends eight of them — search, brief,
+read, files, symbol, neighbors, impact, stats — because every definition is paid
+for on every request. Clients offer an agent only the listed tools, so the other
+eight — writes, reports, pattern, path, trace, languages — stay on the CLI and
+the portal, and `SEMLITH_MCP_TOOLS=all` in the server's environment lists them
+again:
 
 | Tool | What it does |
 | --- | --- |
@@ -484,7 +529,7 @@ of these drifts from its source:
 | daemon memory 60 s after a run, seven stores open | **465 MB** | `footprint -p <pid>` |
 | idle watcher CPU, over 60 s | **under 1.0 s** | the same |
 | one changed file | **1 shard rewritten** | `cargo test --release --test shards -- --ignored --nocapture` |
-| `tools/list` | **5 840 bytes**, ~1 460 tokens, sixteen tools | `cargo test --release --test retrieval -- --ignored` |
+| `tools/list` | **2 633 bytes**, eight listed tools; 1 323 tokens added to an Opus request, from 3 073 | `cargo test --release --test retrieval -- --ignored` |
 | retrieval, on 30 sealed questions of 107 | **hit@1 24/30, hit@3 27/30, hit@8 29/30**, median of three with zero spread, identifiers **11 of 11** in the top three, wrong-yes **0** | the same |
 | one search, rescoring off / on | **8.2 ms** / 132.2 ms on a 300-file store | the same |
 | one answered question, `brief` against search-then-read | **1.00 calls vs 2.54**, 1 112 tokens vs 725 | the same |

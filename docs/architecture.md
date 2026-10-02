@@ -390,7 +390,7 @@ Silently returning nothing would teach an agent that the corpus is empty.
 
 From 0.15.0 it answers *where* by default. `format: locate` returns one line per
 hit — store-relative path, line span, the enclosing symbol and its kind, the
-lists that found it, provenance for a row the graph reached, whether the file has
+lists that found it, whether the file has
 changed since it was indexed, and one line of the text — grouped by file and cut
 to a `max_tokens` budget that states `truncated: N of M` when it cuts. An agent
 that knows the identifier it is looking for wants the address, not the building:
@@ -873,7 +873,10 @@ promises.
 Three things happen between the fused list and the answer, and none of them
 involves a model.
 
-**The graph list is a walk, not a hop.** 0.12.0 added a third list: the symbols
+**The graph list is a walk, not a hop** (removed from search in 0.36.0: on the
+727-question benchmark of 2026-10-01 search scored the same without it, 398
+against 397 of 507, while it took 112 of 328 ms at the median on the 879k-chunk
+corpus; what follows is the history). 0.12.0 added a third list: the symbols
 inside the top hits, one hop out, and the chunks those neighbours live in. That
 list was a set. Everything one hop from any seed was in it, weighted only by how
 well the *edge* was supported, so a symbol reached once from a weak hit sat

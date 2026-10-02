@@ -182,12 +182,18 @@ fn the_agent_key_opens_mcp_and_nothing_else() {
         .as_array()
         .map(|t| t.iter().filter_map(|x| x["name"].as_str()).collect())
         .unwrap_or_default();
-    assert!(names.len() >= 16, "no tools parsed: {json}");
+    assert_eq!(
+        names,
+        semlith::mcp::listed_names(),
+        "the listed tools were not parsed: {json}"
+    );
+    // Listed or not: the server answers every tool it defines.
+    let defined = semlith::mcp::tool_names();
     assert!(
-        !names
+        !defined
             .iter()
             .any(|n| n.contains("accept") || n.contains("refus")),
-        "a tool can accept: {names:?}"
+        "a tool can accept: {defined:?}"
     );
 
     // And no credential, or the wrong one, opens nothing.
