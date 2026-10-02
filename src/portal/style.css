@@ -3180,6 +3180,7 @@ button.gl-row:hover,
   flex-wrap: wrap;
 }
 .dropzone {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -5359,4 +5360,25 @@ td.c-why {
 .is-loading .tw {
   opacity: 0.55;
   transition: opacity 0.15s;
+}
+
+/* The path catcher over the drop zone (step2() in app.js): unseen, and only
+   in the way while something is being dragged over the zone. */
+.drop-catch {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  border: 0;
+  padding: 0;
+  resize: none;
+  background: transparent;
+  color: transparent;
+  cursor: copy;
+  pointer-events: none;
+  z-index: 2;
+}
+.dropzone.drag .drop-catch {
+  pointer-events: auto;
 }

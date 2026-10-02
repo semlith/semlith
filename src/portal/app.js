@@ -2649,6 +2649,25 @@ function wizardScreen() {
 
   // ---- step 2: sources
   function step2() {
+    // The path catcher: a text field laid over the zone, unseen, that takes
+    // the drop while something is dragged over it. Safari writes a dropped
+    // item's real path (or file:// URL) into a text field, which is the one
+    // way a page learns where a file sits, so what lands here is added as it
+    // is: no lookup, no guess. Where nothing lands, the daemon lookup runs.
+    const catcher = el("textarea", {
+      class: "drop-catch",
+      tabindex: "-1",
+      "aria-hidden": "true",
+      spellcheck: "false",
+      oninput: () => {
+        const text = catcher.value;
+        catcher.value = "";
+        if (!/(^|\s)(file:\/\/|\/|~\/|[A-Za-z]:\\)/.test(text)) return;
+        clearTimeout(w.dropWait);
+        w.dropWait = null;
+        addPasted(splitDropped(text));
+      },
+    });
     const zone = el(
       "div",
       {
@@ -2668,11 +2687,34 @@ function wizardScreen() {
           setText(zoneTitle, "Drop folders or files here");
         },
         ondrop: (e) => {
-          e.preventDefault();
           w.drag = false;
-          onDrop(e.dataTransfer);
+          zone.classList.remove("drag");
+          setText(zoneTitle, "Drop folders or files here");
+          // Paths the drag carries as text are exact, in every browser.
+          const text = e.dataTransfer && (e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain"));
+          if (text && /^(file:\/\/|\/|~\/|[A-Za-z]:\\)/m.test(text)) {
+            e.preventDefault();
+            return addPasted(splitDropped(text));
+          }
+          // What the lookup needs has to be read now, while the drop lasts.
+          const taken = takeDrop(e.dataTransfer);
+          if (e.target === catcher && writesDroppedPaths()) {
+            // Not prevented: Safari writes the paths into the catcher, and
+            // its input event adds them. The lookup waits a moment for that,
+            // and runs only if nothing arrived.
+            catcher.value = "";
+            clearTimeout(w.dropWait);
+            w.dropWait = setTimeout(() => {
+              w.dropWait = null;
+              resolveDrop(taken);
+            }, 400);
+            return;
+          }
+          e.preventDefault();
+          resolveDrop(taken);
         },
       },
+      catcher,
       el("span", { class: "icon-tile" }, icon(I.upload, 19, { w: 1.7 })),
     );
     const zoneTitle = el("span", { class: "t", text: w.drag ? "Let go to add" : "Drop folders or files here" });
@@ -2978,8 +3020,26 @@ function wizardScreen() {
    * size, time and — for a folder — its first-level names and a few file sizes,
    * and the daemon finds the one place on this machine that matches. One match
    * is added; several give a picker; none points at the path box. */
-  async function onDrop(transfer) {
-    const items = [];
+  // Several dropped items written into one field: one per line, or file://
+  // URLs one after another on a line.
+  function splitDropped(text) {
+    return String(text || "")
+      .split(/\r?\n/)
+      .flatMap((line) => line.trim().split(/\s+(?=file:\/\/)/))
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  // Safari (WebKit without Chromium's file handles) writes a dropped file's
+  // path into a text field; Chromium may open the file in the tab instead, so
+  // it keeps the lookup.
+  function writesDroppedPaths() {
+    return /Apple/.test(navigator.vendor || "") && !("getAsFileSystemHandle" in (window.DataTransferItem ? DataTransferItem.prototype : {}));
+  }
+
+  // The drop's items, read while the event lasts: a DataTransfer is emptied
+  // the moment its event returns.
+  function takeDrop(transfer) {
     const entries = [];
     for (const it of Array.from((transfer && transfer.items) || [])) {
       if (it.kind !== "file") continue;
@@ -2987,11 +3047,12 @@ function wizardScreen() {
       const file = it.getAsFile ? it.getAsFile() : null;
       entries.push({ entry, file });
     }
-    if (!entries.length) {
-      const text = transfer && (transfer.getData("text/uri-list") || transfer.getData("text/plain"));
-      if (text) return addPasted(text);
-      return;
-    }
+    return entries;
+  }
+
+  async function resolveDrop(entries) {
+    const items = [];
+    if (!entries.length) return;
     for (const { entry, file } of entries) {
       const name = entry ? entry.name : file ? file.name : "";
       if (!name) continue;
