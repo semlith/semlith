@@ -155,3 +155,7 @@ jobs:
           if ($code -eq 0) { throw 'the installer accepted a tampered archive' }
           if ($log -notmatch 'provenance check failed') { throw 'failed, but not on provenance' }
           if (Test-Path home\bin\semlith.exe) { throw 'a binary was installed' }
+          # The refusal above is the pass. A powershell step exits with the
+          # last native command's code, which is the installer's 1, so the step
+          # says so itself once every assertion has held.
+          exit 0
