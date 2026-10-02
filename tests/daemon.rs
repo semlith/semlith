@@ -1085,6 +1085,32 @@ fn a_save_changes_the_file_count_with_no_manual_action() {
     );
 }
 
+/// A folder added to a running store is watched from that moment, the same
+/// as one present at start: the first index of it works, and a file saved
+/// into it afterwards is indexed without a restart (#180).
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_folder_added_while_running_is_watched_without_a_restart() {
+    let (dir, home, work) = sandbox("added-root");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+    let extra = home.join("extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::write(extra.join("lock.rs"), "pub struct StoreLock;\n").unwrap();
+    let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
+
+    let run = daemon.index_run(&extra);
+    let events = daemon.run_events("api", run, Duration::from_secs(120));
+    assert!(events.iter().any(|e| e["event"] == "done"), "{events:?}");
+    assert_eq!(daemon.get("/api/files").json()["total"], 2);
+
+    std::fs::write(extra.join("later.rs"), "pub fn added_after_the_run() {}\n").unwrap();
+    until(
+        "the watcher to index a file saved into the added folder",
+        Duration::from_secs(40),
+        || daemon.get("/api/files").json()["total"] == serde_json::json!(3),
+    );
+}
+
 // ---------------------------------------------------------------- T10
 
 /// The Privacy page's Rotate button has to actually invalidate: a token that

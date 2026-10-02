@@ -559,7 +559,7 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
                 .name_of(&handle.dir)
                 .and_then(|n| registry.stores.get(n))
                 .map(|e| e.roots.clone())
-                .unwrap_or_else(|| handle.roots.clone())
+                .unwrap_or_else(|| handle.roots())
                 .iter()
                 .map(|r| json!({
                 "path": crate::plain(&r.display().to_string()),
@@ -3604,7 +3604,7 @@ fn reindex(state: &Arc<State>, name: &str, body: &Value) -> Response {
         } else {
             daemon::RunKind::Reindex
         };
-        (store.watched.clone(), kind)
+        (store.watched(), kind)
     } else {
         let mut found = Vec::new();
         let mut missing = Vec::new();
@@ -3614,7 +3614,7 @@ fn reindex(state: &Arc<State>, name: &str, body: &Value) -> Response {
                 given.exists().then(|| crate::canonical(given))
             } else {
                 store
-                    .roots
+                    .roots()
                     .iter()
                     .map(|root| root.join(given))
                     .find(|p| p.exists())
@@ -3885,11 +3885,8 @@ fn changes(state: &Arc<State>) -> Response {
     daemon::changes::notice_registry();
     // The same for a root folder deleted or restored underneath a store.
     let stores = state.stores();
-    daemon::changes::notice_roots(
-        stores
-            .iter()
-            .flat_map(|store| store.roots.iter().map(PathBuf::as_path)),
-    );
+    let roots: Vec<PathBuf> = stores.iter().flat_map(|store| store.roots()).collect();
+    daemon::changes::notice_roots(roots.iter().map(PathBuf::as_path));
     let mut out = serde_json::Map::new();
     for domain in daemon::changes::DOMAINS {
         out.insert(
@@ -4252,6 +4249,7 @@ fn adopt_roots(store: &Arc<Store>, paths: &[PathBuf]) {
         .map(|opened| opened.model().to_string())
         .unwrap_or_default();
     let _ = home::record(&choice, paths, &model);
+    store.add_roots(paths);
 }
 
 /// Create the store `path` belongs in and open it in this daemon.
@@ -5362,11 +5360,7 @@ fn drop_resolve(state: &Arc<State>, request: &Request) -> Response {
     if body.items.len() > DROP_ITEMS {
         return Response::error(400, &format!("at most {DROP_ITEMS} items per drop"));
     }
-    let roots = state
-        .stores()
-        .iter()
-        .flat_map(|s| s.roots.clone())
-        .collect();
+    let roots = state.stores().iter().flat_map(|s| s.roots()).collect();
     let last = DROP_CHANGE.load(Ordering::Relaxed);
     let answer = crate::drop::resolve(
         &body,
