@@ -933,15 +933,16 @@ const menu = {
   },
 };
 
-/** The portal's dropdown: a button that reads like a field and opens the
- * menu, in place of the system <select>, which draws differently on every
- * OS and cannot be styled to match. `options` are `[value, label, hint?]`.
- * The chosen value is on `data-value`; the label is what the button shows. */
+/** The portal's dropdown, drawn like the Graph's store picker (a button with
+ * a thin chevron, and the menu): in place of the system <select>, which draws
+ * differently on every OS and cannot be styled to match. `options` are
+ * `[value, label, hint?]`; `cls` sizes it (sm by default, beside 28px
+ * fields). The chosen value is on `data-value`. */
 function dropdown({ label, value, options, onChange, cls, width }) {
   const cur = options.find((o) => String(o[0]) === String(value)) || options[0] || ["", ""];
   const b = btn(
     {
-      class: `sel dd${cls ? ` ${cls}` : ""}`,
+      class: `btn dd ${cls || "sm"}`,
       "aria-haspopup": "menu",
       "aria-expanded": "false",
       "aria-label": label,
@@ -960,6 +961,7 @@ function dropdown({ label, value, options, onChange, cls, width }) {
       },
     },
     el("span", { class: "ell", text: cur[1] }),
+    icon(I.chevDown, 12, { w: 2 }),
   );
   return b;
 }
@@ -1271,7 +1273,7 @@ function pager(view, pages, changed) {
     label: "Rows per page",
     value: view.per,
     options: [10, 25, 50, 100].map((v) => [v, String(v)]),
-    cls: "mono",
+    cls: "xs mono",
     width: 90,
     onChange: (v) => {
       view.per = Number(v);
@@ -7144,7 +7146,7 @@ function blastTab(picker) {
       el(
         "div",
         { class: "auto-fit m240" },
-        (hubs.length ? hubs : gr.sel ? [{ name: gr.sel }] : []).map((h) => btn({ class: "kind-card", onclick: () => ((b.sym = h.name), runReach()) }, el("span", { class: "mono t-m", text: h.name }), el("span", { class: "d", text: h.path ? `A hub in ${tilde(h.path)} — what depends on it?` : "What depends on it?" }))),
+        (hubs.length ? hubs : gr.sel ? [{ name: gr.sel }] : []).map((h) => btn({ class: "kind-card", onclick: () => ((b.sym = h.name), runReach()) }, el("span", { class: "mono t-m", text: h.name }), h.path ? el("span", { class: "d col min0" }, pathSpan(store(gr.store) ? relTo(store(gr.store), h.path) : tilde(h.path), "mono", h.path), "A hub here — what depends on it?") : el("span", { class: "d", text: "What depends on it?" }))),
       ),
     );
   } else parts.push(blastResult(imp, b.out.headline));

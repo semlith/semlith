@@ -152,6 +152,10 @@ p {
   margin: 0;
 }
 body {
+  /* A string with no space in it (a path, a hash, a long identifier) breaks
+     where it must rather than running out of its card. Words still wrap at
+     spaces; nowrap and ellipsis elements are untouched. */
+  overflow-wrap: anywhere;
   font-family: var(--sans);
   font-size: 13.5px;
   line-height: 1.45;
@@ -5340,20 +5344,22 @@ td.c-why {
   max-width: 520px;
 }
 
-/* The portal's dropdown (dropdown() in app.js): a button drawn as the field
-   the system <select> was, with the same line chevron. */
-.sel.dd {
-  display: inline-flex;
-  align-items: center;
+/* The portal's dropdown (dropdown() in app.js): the Graph store picker's
+   look, a button with its value and a thin chevron, everywhere. */
+.btn.dd {
+  gap: 8px;
   max-width: 260px;
   min-width: 0;
-  font-family: inherit;
-  text-align: left;
+  justify-content: space-between;
 }
-.sel.dd.mono {
+.btn.dd svg {
+  flex: none;
+  color: var(--muted);
+}
+.btn.dd.mono {
   font-family: var(--mono);
 }
-.sel.dd[aria-expanded="true"] {
+.btn.dd[aria-expanded="true"] {
   border-color: var(--accent);
 }
 /* A table waiting on its next page keeps the rows it has, dimmed. */
