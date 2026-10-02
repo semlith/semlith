@@ -5388,3 +5388,10 @@ td.c-why {
 .dropzone.drag .drop-catch {
   pointer-events: auto;
 }
+/* A lane check's answer, in the row of the lane it is about. */
+.ok-ink {
+  color: var(--green);
+}
+.red-ink {
+  color: var(--red);
+}

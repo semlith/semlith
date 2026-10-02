@@ -8636,7 +8636,7 @@ function sePerf() {
       data.accel?.cpu_fallback ? el("div", { class: "card-note", text: "The CPU is carrying the work: no other lane can." }) : null,
       lanes.map((l) => {
         const na = ["unavailable"].includes(l.status?.state);
-        const check = seUi.gpu && (seUi.gpu.lanes || []).find((x) => x.lane === l.lane);
+        const check = seUi.gpu && (seUi.gpu.checks || []).find((x) => x.lane === l.lane);
         return el(
           "div",
           { class: `lane-row${na ? " off" : ""}` },
@@ -8647,7 +8647,7 @@ function sePerf() {
             el("span", { class: "row gap8 t-m t13" }, `${l.label || laneName(l.lane)}${l.variant ? ` · ${l.variant}` : ""}`, l.experimental ? el("span", { class: "exp", text: "experimental" }) : null),
             el("span", { class: "muted t-xs", text: `${l.device || (na ? "no device found" : "named when it starts")} · ${laneState(l.status)}${(data.accel.bytes || {})[l.lane] ? ` · ${bytes(data.accel.bytes[l.lane])} on disk` : ""}` }),
           ),
-          el("span", { class: "t-mono-sm ink2 right nowrap", text: check ? `${check.cosine ? `cosine ${Number(check.cosine).toFixed(4)}` : check.ok ? "agrees" : "differs"}${check.rate ? ` · ${perSecond(check.rate)}/s` : ""}` : `${Math.round(l.share || 0)}% of the work` }),
+          check ? laneCheck(check) : el("span", { class: "t-mono-sm ink2 right nowrap", text: `${Math.round(l.share || 0)}% of the work` }),
           // Its own column at the far right, kept on every row, so the share
           // column lines up whether or not a lane has files to remove.
           el("span", { class: "lane-act" }, (data.accel.bytes || {})[l.lane] ? btn({ class: "btn xs", "aria-label": `Remove ${l.label || laneName(l.lane)}'s downloaded files`, onclick: () => laneRemove(l) }, "Remove") : null),
@@ -8702,11 +8702,25 @@ async function laneRemove(l) {
   if (out || l.enabled) await load("accel", true), repaint();
 }
 
+// One lane's answer from the known-answer check, where its share sits: it
+// agrees with the reference (cosine, speed), it failed, or why it was not run.
+function laneCheck(c) {
+  if (c.passed) return el("span", { class: "t-mono-sm right nowrap ok-ink", "data-tip": `Embeds the known sentences as the reference does · ${c.variant || ""}` }, `agrees · cosine ${Number(c.cosine).toFixed(4)}${c.chunks_per_s ? ` · ${perSecond(c.chunks_per_s)}/s` : ""}`);
+  if (c.passed === false) return el("span", { class: "t-mono-sm right nowrap red-ink", "data-tip": c.reason || "" }, "failed");
+  const why = String(c.reason || "").replace(/ — .*$/, "");
+  return el("span", { class: "t-mono-sm muted right nowrap", "data-tip": c.reason || "" }, why === "off" ? "off · not checked" : "not checked");
+}
+
+// Every lane that is on embeds a few known sentences and is compared with
+// the CPU's answer. A lane's first check starts its worker, which can take a
+// while on a cold machine, so the button spins and the toast says so.
 async function checkLanes() {
-  toast("Checking each lane against the CPU…");
+  toast("Checking each lane that is on against the CPU — a few seconds per lane");
   try {
     seUi.gpu = await post("/api/doctor/gpu", {});
-    toast("Checked the lanes");
+    const ran = (seUi.gpu.checks || []).filter((c) => c.passed !== undefined);
+    const bad = ran.filter((c) => !c.passed);
+    toast(bad.length ? `${plural(bad.length, "lane")} failed: ${bad.map((c) => c.label || c.lane).join(", ")}` : `${plural(ran.length, "lane")} checked — every one agrees with the CPU`, bad.length > 0);
   } catch (e) {
     toast(e.message, true);
   }
