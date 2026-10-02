@@ -3273,6 +3273,12 @@ def _(d):
     # beside the switch that pauses recording, which 6.6 and v6.29 assert.
     open_welcome(d)
     about = d.api("/api/about")
+    # The chip is drawn when /api/about answers, which a slow runner gives a
+    # moment after the screen itself.
+    try:
+        d.wait_for("!!document.querySelector('header.top .count-chip')", timeout=15, what="the version beside the wordmark")
+    except cdp.ProtocolError:
+        pass
     version = text_of(d, "header.top .count-chip", "the version beside the wordmark")
     if version.lstrip("v") != about["version"]:
         fail("the welcome names version %r and the daemon is %s" % (version, about["version"]))

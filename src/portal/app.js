@@ -7245,7 +7245,7 @@ function blastTab(picker) {
       el(
         "div",
         { class: "auto-fit m240" },
-        (hubs.length ? hubs : gr.sel ? [{ name: gr.sel }] : []).map((h) => btn({ class: "kind-card", onclick: () => ((b.sym = h.name), runReach()) }, el("span", { class: "mono t-m", text: h.name }), h.path ? el("span", { class: "d col min0" }, pathSpan(store(gr.store) ? relTo(store(gr.store), h.path) : tilde(h.path), "mono", h.path), "A hub here — what depends on it?") : el("span", { class: "d", text: "What depends on it?" }))),
+        (hubs.length ? hubs : gr.sel ? [{ name: gr.sel }] : []).map((h) => btn({ class: "kind-card", onclick: () => ((b.sym = h.name), runReach()) }, el("span", { class: "mono t-m", text: h.name }), h.path ? el("span", { class: "d col min0" }, pathSpan(store(gr.store) ? relTo(store(gr.store), h.path) : tilde(h.path), "t-mono-sm", h.path), "A hub here — what depends on it?") : el("span", { class: "d", text: "What depends on it?" }))),
       ),
     );
   } else parts.push(blastResult(imp, b.out.headline));

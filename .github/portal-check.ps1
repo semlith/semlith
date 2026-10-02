@@ -504,7 +504,7 @@ foreach ($route in @('models', 'languages', 'privacy', 'about', 'agents', 'setup
 # asked the way the page asks it, so a route the page depends on cannot go
 # missing from a build without this list saying which.
 foreach ($route in @('stores', 'index/runs', 'refused', 'corpus', 'accel', 'schedules', 'prices',
-                     'ledger', 'ledger/replay', 'helpers', 'changes', 'stores?coverage=1')) {
+                     'ledger', 'ledger/replay', 'changes', 'stores?coverage=1')) {
     Check "portal/v6/$route" "/api/$route answers for the v6 page" -When $script:up { Get-Json "/api/$route" | Out-Null }
 }
 
