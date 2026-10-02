@@ -5385,8 +5385,18 @@ td.c-why {
   pointer-events: none;
   z-index: 2;
 }
-.dropzone.drag .drop-catch {
+.dropzone.drag .drop-catch,
+.dropzone.safari .drop-catch {
   pointer-events: auto;
+}
+.drop-catch {
+  caret-color: transparent;
+}
+/* In Safari the catcher is live over the whole zone; the zone's buttons sit
+   above it so they stay pressable. */
+.dropzone.safari > .row {
+  position: relative;
+  z-index: 3;
 }
 /* A lane check's answer, in the row of the lane it is about. */
 .ok-ink {

@@ -2657,13 +2657,22 @@ function wizardScreen() {
     // way a page learns where a file sits, so what lands here is added as it
     // is: no lookup, no guess. Where nothing lands, the daemon lookup runs.
     // An <input>, the same kind of field the paste box is: the one a Safari
-    // drop was seen to write a path into.
+    // drop was seen to write a path into. In Safari it is live over the zone
+    // from the start and the zone never accepts the drag itself: Safari
+    // decides while the drag moves whether a drop is text for a field, and a
+    // page that accepted the drag on the way in got a drop with no path in it
+    // (dropEffect none, no input event), where the paste box, with nothing
+    // above it accepting anything, was given the path.
+    const safari = writesDroppedPaths();
     const catcher = el("input", {
       type: "text",
       class: "drop-catch",
       tabindex: "-1",
       "aria-hidden": "true",
       spellcheck: "false",
+      autocomplete: "off",
+      // Not a place to type: a click on the zone lands here.
+      onkeydown: (e) => !(e.metaKey || e.ctrlKey) && e.preventDefault(),
       oninput: () => {
         const text = catcher.value;
         catcher.value = "";
@@ -2682,13 +2691,11 @@ function wizardScreen() {
     const zone = el(
       "div",
       {
-        class: `dropzone${w.drag ? " drag" : ""}`,
+        class: `dropzone${w.drag ? " drag" : ""}${safari ? " safari" : ""}`,
         ondragover: (e) => {
-          // Over the catcher in Safari the drag is left to the field: a page
-          // that accepts the drag itself (preventDefault here) makes WebKit
-          // treat the drop as the page's, and it then writes no path into
-          // the field. Everywhere else the zone accepts it.
-          if (!(e.target === catcher && writesDroppedPaths())) e.preventDefault();
+          // In Safari the drag is left to the field (see the catcher);
+          // everywhere else the zone accepts it.
+          if (!safari) e.preventDefault();
           if (!w.drag) {
             w.drag = true;
             zone.classList.add("drag");
@@ -2706,12 +2713,14 @@ function wizardScreen() {
           // Paths the drag carries as text are exact, in every browser.
           const text = e.dataTransfer && (e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain"));
           if (text && /^(file:\/\/|\/|~\/|[A-Za-z]:\\)/m.test(text)) {
-            e.preventDefault();
+            if (!safari) e.preventDefault();
+            else catcher.value = "";
+            clearTimeout(w.dropWait);
             return addPasted(splitDropped(text));
           }
           // What the lookup needs has to be read now, while the drop lasts.
           const taken = takeDrop(e.dataTransfer);
-          if (e.target === catcher && writesDroppedPaths()) {
+          if (safari) {
             // Not prevented: Safari writes the paths into the catcher, and
             // its input event adds them. The lookup waits a moment for that,
             // and runs only if nothing arrived.
