@@ -2360,10 +2360,12 @@ fn tool_sizes(state: &Arc<State>) -> Vec<Value> {
             }
         }
     }
+    let listed = crate::mcp::listed_names();
     crate::mcp::tool_list()
         .into_iter()
         .map(|(name, about)| {
             let short = name.strip_prefix("semlith_").unwrap_or(&name).to_string();
+            let offered = listed.contains(&name);
             let (answers, estimate) = TYPICAL_ESTIMATES
                 .iter()
                 .find(|(n, _, _)| *n == name)
@@ -2382,6 +2384,9 @@ fn tool_sizes(state: &Arc<State>) -> Vec<Value> {
                 "answers": answers,
                 "typical_tokens": typical,
                 "typical_source": source,
+                // Whether `tools/list` sends it. A client offers its agent
+                // only those; the rest are the CLI's and this portal's.
+                "listed": offered,
             })
         })
         .collect()
@@ -2614,8 +2619,12 @@ fn reveal(state: &Arc<State>) -> Response {
 /// charge for having semlith connected at all, and a user should be able to
 /// read it rather than capture traffic to discover it.
 fn tool_list_tokens(state: &Arc<State>) -> (i64, &'static str) {
+    // The listed tools only: their bytes are what `tool_list_bytes` counts,
+    // and a ratio of sixteen tools' prose to eight tools' bytes is neither.
+    let listed = crate::mcp::listed_names();
     let text = crate::mcp::tool_list()
         .into_iter()
+        .filter(|(name, _)| listed.contains(name))
         .map(|(name, about)| format!("{name} {about}"))
         .collect::<Vec<_>>()
         .join(" ");

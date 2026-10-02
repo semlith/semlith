@@ -7638,7 +7638,7 @@ function agConnected(a) {
     el(
       "div",
       { class: "stack" },
-      el("div", { class: "card pad" }, el("span", { class: "eyebrow", text: "What the tool list costs" }), el("span", { class: "mono t-b big18", text: `${n(a.tool_list_tokens)} tokens` }), el("span", { class: "muted t-xs", text: `per session, read once before the agent asks anything · ${plural((a.tools || []).length, "tool")} · ${n(a.tool_list_bytes)} bytes · counted ${a.tool_list_tier === "tokenizer" ? "by the model's tokenizer" : `as ${a.tool_list_tier}`}` })),
+      el("div", { class: "card pad" }, el("span", { class: "eyebrow", text: "What the tool list costs" }), el("span", { class: "mono t-b big18", text: `${n(a.tool_list_tokens)} tokens` }), el("span", { class: "muted t-xs", text: `per session, read once before the agent asks anything · ${plural((a.tools || []).filter((t) => t.listed !== false).length, "tool")} listed · ${n(a.tool_list_bytes)} bytes · counted ${a.tool_list_tier === "tokenizer" ? "by the model's tokenizer" : `as ${a.tool_list_tier}`}` })),
       el("div", { class: "card pad" }, el("span", { class: "card-t", text: "After you register a client" }), el("span", { class: "muted t-sm pretty", text: "Restart it. Ask it something about your code — “use semlith to find where X happens”. The call lands in the Ledger with what it was sent." }), lnk("Open the ledger →", () => go("ledger"))),
     ),
   );
@@ -7735,11 +7735,15 @@ function agAdd(a, clients) {
 }
 
 function agTools(a) {
-  const tools = a.tools || [];
+  const all = a.tools || [];
+  // Listed first: those are what an agent is offered. The rest answer from
+  // the command line and this portal.
+  const tools = [...all.filter((t) => t.listed !== false), ...all.filter((t) => t.listed === false)];
+  const listed = all.filter((t) => t.listed !== false).length;
   return el(
     "div",
     { class: "card" },
-    el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "What an agent can call" }), meta(`${plural(tools.length, "tool")} · ${n(a.tool_list_bytes)} bytes · ${n(a.tool_list_tokens)} tokens per session, counted ${a.tool_list_tier === "tokenizer" ? "by the model" : `as ${a.tool_list_tier || "an estimate"}`}`)),
+    el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "What an agent can call" }), meta(`${listed} of ${plural(all.length, "tool")} offered to agents · ${n(a.tool_list_bytes)} bytes · ${n(a.tool_list_tokens)} tokens per session, counted ${a.tool_list_tier === "tokenizer" ? "by the model" : `as ${a.tool_list_tier || "an estimate"}`}`)),
     el(
       "div",
       { class: "tw" },
@@ -7754,7 +7758,7 @@ function agTools(a) {
             el(
               "tr",
               {},
-              el("td", { class: "mm nowrap", text: t.name }),
+              el("td", { class: "mm nowrap" }, t.name, t.listed === false ? " " : null, t.listed === false ? el("span", { class: "badge outline", "data-tip": "Not in the tool list agents are offered: run it from the command line or this portal, or set SEMLITH_MCP_TOOLS=all for the server", text: "CLI and portal" }) : null),
               el("td", { class: "ink2 t13", text: t.answers || t.about }),
               el("td", { class: "ms r nowrap", "data-tip": t.typical_source === "ledger" ? "Median of this machine's own answers" : t.typical_source === "estimate" ? "An estimate until this machine has five answers from it" : null }, t.typical_tokens ? `${t.typical_source === "ledger" ? "" : "~"}${n(t.typical_tokens)} tok` : "—"),
             ),
