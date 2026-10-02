@@ -623,17 +623,19 @@ fn the_json_output_matches_what_the_library_returns() {
     assert_eq!(printed, direct);
 }
 
-/// The third list earns its place: a chunk that shares no vocabulary with the
-/// query is still returned, because a symbol in the top hit points at it — and
-/// it says it arrived through the graph rather than passing as a match.
+/// Search fuses the vector, keyword and image lists and nothing else. Until
+/// 0.36.0 a graph walk out of the top hits was a third list; the 727-question
+/// benchmark scored the same without it and it cost a third of a search on a
+/// large store, so a chunk the query's text does not reach is no longer
+/// returned for it -- `neighbors` and `impact` are where that question goes.
 #[test]
 #[ignore = "downloads an embedding model on first run"]
-fn a_chunk_reachable_only_through_the_graph_is_returned_and_badged() {
+fn search_returns_no_hit_found_only_through_the_graph() {
     let corpus = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
 
     // The query's words are all in `mixing.rs`. `proving.rs` shares none of
-    // them, and is reachable only because `knead` calls `autolyse`.
+    // them, and is related only because `knead` calls `autolyse`.
     write(
         corpus.path(),
         "mixing.rs",
@@ -653,61 +655,16 @@ fn a_chunk_reachable_only_through_the_graph_is_returned_and_badged() {
         .search("combine flour and water for the sourdough loaf", 8)
         .unwrap();
 
-    let reached = hits
-        .iter()
-        .find(|h| h.path.ends_with("proving.rs"))
-        .unwrap_or_else(|| {
-            panic!(
-                "the graph-reached chunk is missing; got {:?}",
-                hits.iter().map(|h| (&h.path, &h.lists)).collect::<Vec<_>>()
-            )
-        });
     assert!(
-        reached.lists.contains(&"graph"),
-        "the chunk came back without saying the graph found it: {:?}",
-        reached.lists
+        hits.iter().all(|h| !h.lists.is_empty() && !h.lists.contains(&"graph")),
+        "a hit says the graph found it: {:?}",
+        hits.iter().map(|h| (&h.path, &h.lists)).collect::<Vec<_>>()
     );
+    assert!(hits[0].path.ends_with("mixing.rs"), "{:?}", hits[0].path);
 
-    // Every hit says how it was found, and the top hit is a real match.
-    assert!(hits.iter().all(|h| !h.lists.is_empty()));
-    assert!(
-        hits[0].path.ends_with("mixing.rs"),
-        "expansion outranked the actual match"
-    );
-}
-
-/// The filter gates all three lists, not two. A chunk outside it must not
-/// arrive through the graph by the back door.
-#[test]
-#[ignore = "downloads an embedding model on first run"]
-fn the_filter_constrains_the_graph_list_too() {
-    let corpus = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
-    write(
-        corpus.path(),
-        "mixing.rs",
-        "/// Combine flour and water for the sourdough loaf.\n\
-         fn knead() { autolyse(); }\n",
-    );
-    write(
-        corpus.path(),
-        "proving.rs",
-        "fn autolyse() { let _ = 1; }\n",
-    );
-    index(store.path(), corpus.path());
-
-    let mut s = Semlith::open(store.path(), None).unwrap();
-    s.quiet = true;
-    let filter = semlith::filter::Filter::new(&["**/mixing.rs".to_string()], &[], &[]).unwrap();
-    let hits = s
-        .search_filtered("combine flour and water for the sourdough loaf", 8, &filter)
-        .unwrap();
-
-    assert!(
-        hits.iter().all(|h| h.path.ends_with("mixing.rs")),
-        "graph expansion reached outside the filter: {:?}",
-        hits.iter().map(|h| &h.path).collect::<Vec<_>>()
-    );
+    // The relation is still there for the tool that answers it.
+    let callers = cli(store.path(), &["neighbors", "autolyse"]);
+    assert!(callers.contains("knead"), "{callers}");
 }
 
 // ----------------------------------------------------------------- helpers

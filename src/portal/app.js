@@ -6190,7 +6190,6 @@ function rankedView(r) {
                   el("span", { class: "sym", text: h.symbol ? `${h.symbol_kind ? `${h.symbol_kind} ` : ""}${h.symbol}` : "" }),
                   el("span", { class: "spacer" }),
                   listBadges(h.lists),
-                  h.provenance ? el("span", { class: "badge outline", "data-tip": `Reached through ${provenanceWord(h.provenance)}, not by its text`, text: provenanceShort(h.provenance) }) : null,
                   h.fresh === false ? el("span", { class: "dot amber", "data-tip": "changed since it was indexed — read it before quoting it" }) : el("span", { class: "dot green", "data-tip": "unchanged since it was indexed" }),
                 ),
                 el("div", { class: "snip", text: h.line || h.text || "" }),
@@ -6203,15 +6202,6 @@ function rankedView(r) {
     ),
     el("div", { class: "sr-detail", "data-scroll-keep": "sr-detail" }, detailPanel()),
   );
-}
-
-function provenanceWord(p) {
-  if (typeof p === "string") return p;
-  return p.via ? `a ${p.confidence || ""} graph edge from ${p.via}`.replace("  ", " ") : "the graph";
-}
-function provenanceShort(p) {
-  if (typeof p === "string") return p;
-  return p.confidence || "graph";
 }
 
 function hitPath(h) {

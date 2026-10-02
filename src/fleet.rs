@@ -1467,7 +1467,6 @@ mod tests {
             symbol: None,
             symbol_kind: None,
             symbol_line: None,
-            provenance: None,
             copies: Vec::new(),
         }
     }

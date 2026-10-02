@@ -288,15 +288,15 @@ type CandidateList = (&'static str, bool, Vec<(u64, f32)>);
 /// its fused score.
 type Scored = ((bool, u64), f32);
 
-/// Reciprocal-rank fusion over the candidate lists, with the derived list
-/// adding candidates and never amplifying them.
+/// Reciprocal-rank fusion over the candidate lists.
 ///
 /// Lists in, one fused score and one provenance badge set per candidate out,
-/// in the order the lists were given. Pulled out of `search_preferring` so the
-/// one rule that is easy to state and easy to lose — the graph list is derived
-/// from the other two, so a chunk they already found takes nothing from it —
-/// can be asserted on three lists with a known overlap rather than inferred
-/// from a store.
+/// in the order the lists were given. Until 0.36.0 a fourth list, the graph
+/// walk, was derived from the vector and keyword lists and only ever added
+/// candidates; the 727-question benchmark of 2026-10-01 scored the same with
+/// and without it (398 against 397 of 507) while it took a third of a search's
+/// time on a large store, so search no longer builds it. `neighbors`,
+/// `impact`, `path` and `trace` still walk the graph.
 ///
 /// A candidate's score is the sum of `weight / (constant + rank + 1)` over the
 /// lists that found it first-hand. `constant_of` is the shape's own curve for
@@ -311,27 +311,12 @@ fn fuse(
 
     for (name, is_image, ranking) in lists {
         let constant = constant_of(name);
-        // The graph list brings candidates and never votes on them.
-        //
-        // It is derived from the other two: `graph_expansion` walks out from
-        // what the dense and keyword lists already found. So when it returns a
-        // chunk those lists also returned, its contribution is not a second
-        // opinion — it is the first opinion counted twice, and a chunk two
-        // lists ranked mediocrely beats the one an authoritative list ranked
-        // first partly on that double count.
-        //
-        // It earns its place by reaching chunks neither list found, and that
-        // half is kept: a candidate only this list holds enters with its own
-        // score, and the rescoring stage is what sorts those.
-        let derived = *name == "graph";
         for (rank, (id, weight)) in ranking.iter().enumerate() {
             let key = (*is_image, *id);
             let contribution = weight / (constant + rank as f32 + 1.0);
             match seen.get(&key) {
                 Some(&slot) => {
-                    if !derived {
-                        fused[slot].1 += contribution;
-                    }
+                    fused[slot].1 += contribution;
                     badges[slot].push(name);
                 }
                 None => {
@@ -487,21 +472,6 @@ impl Prefer {
     }
 }
 
-/// How much a chunk the graph walk ranked first is lifted over one it barely
-/// reached.
-///
-/// Small on purpose. The fusion already knows what the query matched; this is
-/// the code's opinion about what else is relevant, and it is a tiebreak rather
-/// than a second ranking. There is no model behind either of these and there is
-/// not going to be one — every input is something the store already holds.
-///
-/// Measured: removing this factor costs two hits at k@1 and one at k@3 on the
-/// harness's question set, so it stays. A third factor, a lift for a chunk
-/// inside a named definition, was measured out of the release — in a code
-/// repository it is a second and blunter `prefer: code` applied to every query,
-/// and it fights the real one (US-SEMLITH-0.16.0-I02).
-const GRAPH_PROXIMITY: f32 = 0.15;
-
 /// How much a chunk from a file edited since it was indexed is pushed down.
 ///
 /// Not removed: the excerpt may still be the best answer there is, and 0.15.0
@@ -618,30 +588,6 @@ fn checkpoint_files() -> usize {
     }
 }
 
-/// What a chunk reached through a bare-name edge is worth against one reached
-/// through an edge the source resolved.
-const INFERRED_EXPANSION: f32 = 0.5;
-
-/// A chunk the third list reached, with how it got there.
-struct Reached {
-    id: u64,
-    weight: f32,
-    tier: String,
-    /// Where the walk put this chunk, as a share of the best one it found.
-    ///
-    /// 1.0 for the chunk the PageRank ranked first, falling away from there.
-    /// This is the "distance from the seeds" the rerank reads: a chunk the
-    /// walk barely reached should not be lifted as though the code insisted
-    /// on it.
-    proximity: f32,
-}
-
-/// The tier of the edge that reached `id`, if the graph list reached it at all.
-fn provenance_of(graph: &[Reached], id: u64) -> Option<String> {
-    graph.iter().find(|r| r.id == id).map(|r| r.tier.clone())
-}
-
-/// What `read` was asked for: a span of a file, or a symbol by name.
 ///
 /// Parsed rather than guessed at, so `src/store.rs:1041-1080` and
 /// `record_retrieval` are told apart by shape and a caller is never handed the
@@ -777,14 +723,6 @@ pub struct Hit {
     /// long function, and "line 3290" of a 40-line method is not where it is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol_line: Option<u32>,
-    /// For a hit the graph list reached: how well supported the edge that
-    /// reached it was.
-    ///
-    /// A chunk that arrives through a `resolved` edge is a neighbour the
-    /// source vouches for. One that arrives through a bare-name match is a
-    /// guess about a neighbour, and an agent should weigh it as one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provenance: Option<String>,
     /// Other files holding exactly this chunk's text — a vendored or fixture
     /// copy — shown once here instead of spending a result slot each.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -3855,35 +3793,6 @@ impl Semlith {
         self.commit_hashes(completed)
     }
 
-    /// Chunks reached from the top hits by one hop through the graph.
-    ///
-    /// Seeded from the chunks the other two lists already found, mapped to the
-    /// symbols defined in them, expanded one hop in both directions, and
-    /// resolved back to the chunks those neighbours live in — ranked, from
-    /// 0.16.0, by a personalised PageRank seeded with each hit's own fusion
-    /// contribution rather than by one flat hop. 0.15.0 left this as "a real
-    /// idea and a change to be justified by a recall measurement"; the
-    /// measurement is `tests/retrieval.rs`, and the marginal contribution of
-    /// this list is one of the numbers it prints.
-    ///
-    /// Everything here is gated by the same `Filter` the other two halves use,
-    /// through the same `symbols_by_names` predicate — so the one-id-set
-    /// invariant `filter.rs` documents holds across all three lists rather than
-    /// two. A chunk outside the filter cannot arrive through the graph.
-    /// What a chunk reached through one edge is worth in the fusion.
-    ///
-    /// The third list is evidence about the code, not about the query, and how
-    /// good the evidence is varies: an edge the syntax tree resolved says this
-    /// chunk really is related, and an edge matched by bare name says it might
-    /// be. Ranking both at 1.0, as 0.14.0 did, spends the same confidence on
-    /// both claims.
-    fn expansion_weight(confidence: &str) -> f32 {
-        match confidence {
-            graph::EXTRACTED | graph::RESOLVED => 1.0,
-            _ => INFERRED_EXPANSION,
-        }
-    }
-
     /// The vector list with up to [`PENDING_EMBED`] of the keyword list's
     /// chunks that have no vector yet embedded now and merged in by their
     /// similarity. Unchanged when nothing in the store is pending.
@@ -3962,169 +3871,6 @@ impl Semlith {
         exact.sort_by(|a, b| b.1.total_cmp(&a.1));
         let (rescored_ids, rescored_scores): (Vec<u64>, Vec<f32>) = exact.into_iter().unzip();
         (rescored_scores, rescored_ids)
-    }
-
-    fn graph_expansion(
-        &self,
-        dense: &[u64],
-        keyword: &[u64],
-        depth: usize,
-        filter: &Filter,
-    ) -> Result<Vec<Reached>> {
-        // Seeded from the best of each list rather than all of it. Expanding
-        // from a chunk ranked fortieth is expansion from noise.
-        const SEEDS: usize = 8;
-        // How many names the walk may ask about, heaviest first. 0.32.0 used
-        // the traversal budget of 2 000 in name order: 638 to 2 000 visits and
-        // 1.8 to 4.6 s on this repository's own store, and on the 879k-chunk
-        // benchmark corpus a visit is tens of milliseconds, so minutes. At 128
-        // the walk there took 513 ms at the median and 925 ms at worst over
-        // seven questions, and the retrieval harness's development set ranked
-        // every question exactly as the unbounded walk did; 256 doubled the
-        // walk, and 64 moved four questions' ranks.
-        const VISITS: usize = 128;
-        // More definitions than this and a name is a hub, not walked through
-        // and not walked into. On the corpus, 64 doubled the walk and 16 was
-        // no faster than 32.
-        const HUB: usize = 32;
-        // Names resolved to chunks per query, well under SQLite's variable cap.
-        const RESOLVE_BATCH: usize = 256;
-
-        // The seed mass is the fusion contribution each chunk is about to
-        // carry, so the walk starts out already knowing which hits the query
-        // answered best. A chunk both lists found seeds twice as hard as one
-        // only a single list found, which is the same judgement the fusion
-        // makes a few lines later.
-        // Ordered, not hashed. The walk this seeds sums `f32` masses, and a
-        // random iteration order made those sums differ between runs of one
-        // binary over one store — issue #88. `graph::expand` says the rest.
-        let mut mass: std::collections::BTreeMap<u64, f32> = std::collections::BTreeMap::new();
-        for list in [dense, keyword] {
-            for (rank, id) in list.iter().take(SEEDS).enumerate() {
-                *mass.entry(*id).or_default() += 1.0 / (RRF_K + rank as f32 + 1.0);
-            }
-        }
-        if mass.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Per chunk rather than in one query, because which symbol carries
-        // which chunk's mass is the whole point of a personalised walk. A
-        // chunk holding three symbols splits its mass between them rather than
-        // seeding each of them as though it were a hit of its own.
-        let mut personal: std::collections::BTreeMap<String, f32> =
-            std::collections::BTreeMap::new();
-        for (id, mass) in &mass {
-            let names = store::symbols_in_chunks(&self.db, &[*id])?;
-            if names.is_empty() {
-                continue;
-            }
-            let share = mass / names.len() as f32;
-            for name in names {
-                *personal.entry(name).or_default() += share;
-            }
-        }
-        if personal.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Only the kinds that mean "depends on". `defines` and `contains` say
-        // a symbol sits inside a file or another symbol, which is true and
-        // useless here: following them pulls in every symbol that shares a
-        // file with a hit, so the third list fills with neighbours-by-accident
-        // and the two lists that answered the question get diluted.
-        let kinds = graph::dependency_kinds();
-        let ranked = graph::expand(&personal, VISITS, |name| {
-            // A name defined in more places than this is many unrelated
-            // definitions wearing one label, the same reason an ambiguous edge
-            // is not crossed below. Walking through `get` on the benchmark
-            // corpus merged 712 functions' edges into one node and read 384k
-            // candidate rows out and 5.4M in, for one visit.
-            if store::defined_more_than(&self.db, name, HUB)? {
-                return Ok(Vec::new());
-            }
-            let mut out = Vec::new();
-            for end in store::edges_out_short_of_hubs(&self.db, name, &kinds, HUB)?
-                .into_iter()
-                .chain(store::edges_in(&self.db, name, &kinds)?)
-            {
-                // An ambiguous name is several unrelated definitions wearing
-                // one label. Expanding through it returns whichever chunk the
-                // join reached first, as a hit that claims the code says it is
-                // related — which is the same wrong answer the path finder
-                // used to give, in the search results instead.
-                if end.confidence == graph::AMBIGUOUS {
-                    continue;
-                }
-                // Expansion answers "what else does the code say is related to
-                // this". A prose or configuration file reached through the
-                // graph is not that: 0.17.0 gave every language symbols, and
-                // the third list filled with headings, keys and selectors that
-                // the harness scored at zero satisfied spans out of nineteen
-                // reached. They stay symbols, and `neighbors`, `path` and the
-                // blast radius still walk them — a Dockerfile stage or a table
-                // a view reads is exactly the edge those answer. It is the
-                // search's third list they do not belong in.
-                if !crate::filter::is_code(&end.symbol.path) {
-                    continue;
-                }
-                let weight = Self::expansion_weight(&end.confidence);
-                out.push((end.symbol.name, weight, end.confidence));
-            }
-            Ok(out)
-        })?;
-
-        let best = ranked.first().map(|(_, mass, _)| *mass);
-        let mut ids: Vec<Reached> = Vec::new();
-        // Best names first, a batch at a time, until `depth` chunks are found.
-        // Only the head of the walk is ever used, and resolving all of it cost
-        // a query over every name reached: thousands on the benchmark corpus.
-        'names: for batch in ranked.chunks(RESOLVE_BATCH) {
-            let names: Vec<String> = batch.iter().map(|(name, _, _)| name.clone()).collect();
-            let place: std::collections::HashMap<&str, usize> = names
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.as_str(), i))
-                .collect();
-
-            // The store answers in its own order; the walk's order is the
-            // answer, so the rows are put back into it before the budget is
-            // applied.
-            let mut symbols = store::symbols_by_names(&self.db, &names, filter.groups())?;
-            symbols.sort_by_key(|s| place.get(s.name.as_str()).copied().unwrap_or(usize::MAX));
-
-            for symbol in symbols {
-                let Some(chunk_id) = symbol.chunk_id else {
-                    continue;
-                };
-                let id = chunk_id as u64;
-                let found = batch.iter().find(|(name, _, _)| *name == symbol.name);
-                let tier = found
-                    .map(|(_, _, tier)| tier.clone())
-                    .unwrap_or_else(|| graph::INFERRED.to_string());
-                let weight = Self::expansion_weight(&tier);
-                // As a share of the best score the walk produced, so the number
-                // means the same thing whatever the absolute masses came out at.
-                let proximity = match (found, best) {
-                    (Some((_, mass, _)), Some(best)) if best > 0.0 => mass / best,
-                    _ => 0.0,
-                };
-                // A chunk the other two lists already ranked gains nothing from
-                // being re-ranked here; the fusion adds the contribution anyway.
-                if !ids.iter().any(|r| r.id == id) {
-                    ids.push(Reached {
-                        id,
-                        weight,
-                        tier,
-                        proximity,
-                    });
-                }
-                if ids.len() >= depth {
-                    break 'names;
-                }
-            }
-        }
-        Ok(ids)
     }
 
     /// Extract one file's symbols and outgoing edges, and write them.
@@ -4891,21 +4637,6 @@ impl Semlith {
         };
 
         let (dense_scores, dense_ids) = self.search_vectors(vector, depth, &allowlist)?;
-        // The graph list seeds from what the *index* found, in the order the
-        // index found it, which is not the order rescoring leaves behind.
-        //
-        // Rescoring reorders the vector list by the vectors themselves, and
-        // `graph_expansion` below takes its seeds from that same list. So
-        // feeding it the rescored order silently changed which symbols the
-        // third list expanded from, and that cost two questions at hit@8 on the
-        // sealed thirty -- 25 of 30 against 27 -- while gaining nothing at any
-        // depth. Measured by turning the pass off and on with everything else
-        // held still.
-        //
-        // The ordering a caller sees is the rescored one; the seeds stay the
-        // index's. One list's improvement has no business changing another
-        // list's input.
-        let seeds = dense_ids.clone();
         let (dense_scores, dense_ids) = self.rescored(vector, dense_scores, dense_ids);
         let keyword_ids = store::keyword_search(&self.db, query, depth, filter.groups())?;
         // Mid-run, the keyword half already holds chunks the vector half has
@@ -4927,23 +4658,6 @@ impl Semlith {
         // rather than the store's own model, and a store of source code should
         // not pay for a model it has nothing to compare against.
         let images = self.image_search(query, depth, filter)?;
-
-        // The third list. The two lists above are what the query said; this is
-        // what the code says about what they found — the symbols inside the top
-        // hits, one hop out, and the chunks those neighbours live in. It costs
-        // no embedding and no model call, and it is what pulls together a
-        // concept spread across files that share no vocabulary.
-        //
-        // Contained, as the rescoring pass is: the two lists above already
-        // answered, and a third that failed makes a thinner answer, not none.
-        // 0.32.0 let it fail the whole search, which on the 70-repository
-        // benchmark corpus meant every search.
-        let graph_ids = self
-            .graph_expansion(&seeds, &keyword_ids, depth, filter)
-            .unwrap_or_else(|e| {
-                eprintln!("the graph list failed, searching without it: {e:#}");
-                Vec::new()
-            });
 
         // Two id spaces — a chunk id and an image id both count from one — so
         // the fusion is keyed by which space an id belongs to as well as by the
@@ -5007,11 +4721,6 @@ impl Semlith {
                     .map(|id| (*id, shape.keyword_weight()))
                     .collect(),
             ),
-            (
-                "graph",
-                false,
-                graph_ids.iter().map(|r| (r.id, r.weight)).collect(),
-            ),
         ];
 
         let (mut fused, lists) = fuse(&candidate_lists, |name| shape.list_constant(name));
@@ -5060,11 +4769,6 @@ impl Semlith {
         ranked.truncate(depth.max(k));
 
         let mut hits = Vec::with_capacity(ranked.len());
-        // Kept beside the hits rather than on them: how near the graph walk
-        // put a chunk is an input to the ranking, not something a caller of
-        // `search` has any use for. Index-aligned with `hits`, which nothing
-        // between here and the rerank reorders.
-        let mut proximity: Vec<f32> = Vec::with_capacity(ranked.len());
         for (((is_image, id), score), found_by) in ranked {
             if is_image {
                 // An image hit carries its path and pixel size where a chunk
@@ -5089,12 +4793,10 @@ impl Semlith {
                             symbol: None,
                             symbol_kind: None,
                             symbol_line: None,
-                            provenance: None,
-                            copies: Vec::new(),
+                                copies: Vec::new(),
                         },
                         0.0,
                     ));
-                    proximity.push(0.0);
                 }
                 continue;
             }
@@ -5122,18 +4824,10 @@ impl Semlith {
                         symbol: None,
                         symbol_kind: None,
                         symbol_line: None,
-                        provenance: provenance_of(&graph_ids, id),
                         copies: Vec::new(),
                     },
                     similarity,
                 ));
-                proximity.push(
-                    graph_ids
-                        .iter()
-                        .find(|r| r.id == id)
-                        .map(|r| r.proximity)
-                        .unwrap_or(0.0),
-                );
             }
         }
         self.mark_freshness(&mut hits)?;
@@ -5150,7 +4844,7 @@ impl Semlith {
         //
         // The scores are permuted rather than replaced. Each candidate in the
         // head keeps one of the head's own fused scores and the cross-encoder
-        // decides which, so the tiebreaks below — proximity, staleness, the
+        // decides which, so the tiebreaks below — staleness, test paths, the
         // caller's preference — still apply to a fused-scale number, and a
         // hit outside the head is never reordered against one inside it.
         if shape != Shape::Identifier && rerank::enabled() && hits.len() > 1 {
@@ -5230,8 +4924,7 @@ impl Semlith {
         // chunk the query matched badly does not climb over one it matched
         // well because it happens to sit in a function.
         let about_tests = names_tests(query);
-        for ((hit, _), proximity) in hits.iter_mut().zip(&proximity) {
-            hit.score *= 1.0 + GRAPH_PROXIMITY * proximity;
+        for (hit, _) in hits.iter_mut() {
             if !hit.fresh {
                 hit.score *= 1.0 - STALE_PENALTY;
             }
@@ -6713,7 +6406,6 @@ mod tests {
                     symbol: None,
                     symbol_kind: None,
                     symbol_line: None,
-                    provenance: None,
                     copies: Vec::new(),
                 },
                 1.0,
@@ -6760,54 +6452,6 @@ mod tests {
         let corpus = root.join("tests/fixtures/corpus");
         let inside = walk(std::slice::from_ref(&corpus)).files;
         assert_eq!(inside, vec![corpus.join("src/lib.rs")], "{inside:?}");
-    }
-
-    /// The graph list adds candidates and never amplifies them.
-    ///
-    /// The structural defect 0.25.0 exists to hold still: reciprocal-rank
-    /// fusion is only justified over independent evidence, and the graph list
-    /// is walked out of the other two. A chunk both text lists found must
-    /// score exactly what those two lists gave it, whatever the graph says
-    /// about it afterwards.
-    #[test]
-    fn the_graph_list_adds_candidates_and_does_not_amplify_them() {
-        let both = 10u64;
-        let only_graph = 99u64;
-        let lists: [CandidateList; 3] = [
-            ("vector", false, vec![(both, 1.0), (11, 1.0)]),
-            ("keyword", false, vec![(both, 1.0)]),
-            ("graph", false, vec![(both, 1.0), (only_graph, 1.0)]),
-        ];
-        let text_only: [CandidateList; 2] = [lists[0].clone(), lists[1].clone()];
-
-        let (with_graph, badges) = fuse(&lists, |_| RRF_K);
-        let (without_graph, _) = fuse(&text_only, |_| RRF_K);
-
-        let score = |fused: &[Scored], id: u64| {
-            fused
-                .iter()
-                .find(|(key, _)| *key == (false, id))
-                .map(|(_, score)| *score)
-                .expect("the candidate is in the fused set")
-        };
-        assert_eq!(
-            score(&with_graph, both),
-            score(&without_graph, both),
-            "a chunk both text lists found was scored a third time by the graph"
-        );
-        // It still says where it came from, and it still reaches what the
-        // other two missed — that half is the graph's whole job.
-        let slot = with_graph
-            .iter()
-            .position(|(key, _)| *key == (false, both))
-            .unwrap();
-        assert_eq!(badges[slot], vec!["vector", "keyword", "graph"]);
-        assert!(
-            with_graph
-                .iter()
-                .any(|(key, _)| *key == (false, only_graph)),
-            "the graph list stopped adding candidates of its own"
-        );
     }
 
     /// The rule is crude on purpose, so these are the whole of it.
@@ -6878,19 +6522,19 @@ mod tests {
     /// it matched well, and large enough to separate two that matched equally.
     #[test]
     fn every_rerank_factor_is_a_tiebreak_rather_than_a_ranking() {
-        // The lift against any one penalty stays under 1.5x. The two
-        // penalties are about different properties — a file edited since,
-        // a file under tests/ — and a stale test is the one case both reach.
-        let strongest = 1.0 + GRAPH_PROXIMITY;
+        // Each penalty stays under 1.6x on its own. The two penalties are
+        // about different properties — a file edited since, a file under
+        // tests/ — and a stale test is the one case both reach. 0.36.0 removed
+        // the third factor, the graph walk's proximity lift, with the graph
+        // list it came from.
         for penalty in [STALE_PENALTY, TEST_PENALTY] {
             let weakest = 1.0 - penalty;
             assert!(
-                strongest / weakest < 1.6,
-                "the rerank spans {strongest}/{weakest}, which is a ranking rather than a \
-                 tiebreak"
+                1.0 / weakest < 1.6,
+                "the rerank spans 1/{weakest}, which is a ranking rather than a tiebreak"
             );
         }
-        const { assert!(GRAPH_PROXIMITY > 0.0 && STALE_PENALTY > 0.0 && TEST_PENALTY > 0.0) };
+        const { assert!(STALE_PENALTY > 0.0 && TEST_PENALTY > 0.0) };
         // A stale hit is pushed down, never removed: the excerpt in hand may
         // still be the best answer there is.
         const { assert!(STALE_PENALTY < 1.0 && TEST_PENALTY < 1.0) };

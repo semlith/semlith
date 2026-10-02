@@ -374,7 +374,7 @@ ledger that was supposed to measure both of those recorded nothing an agent did.
   `locate`, because the portal's own Search page is the caller and a person
   reading a panel is not paying by the token. A locate row is the
   store-relative path, the line span, the enclosing symbol and its kind, the
-  lists that found it, provenance for a row the graph reached, a freshness flag,
+  lists that found it, a freshness flag,
   and one line of the text; rows are grouped by file and cut to a `max_tokens`
   budget (default 1500, floor 200) that states `truncated: N of M` when it cuts.
   A client that parsed the reply for full chunk text gets a shorter reply than it
@@ -399,6 +399,8 @@ meanings.
   `tokenizer`.
 - **On a hit**: `fresh`, `symbol`, `symbol_kind` and `provenance`. `fresh` is
   present on every hit; the other three are omitted when there is nothing to say.
+  From 0.36.0 search has no graph list, so `provenance` is never sent and no
+  hit's `lists` holds `graph`.
 - **On an edge**: `definitions`, `from_path` and `from_line`.
 - **Two more confidence values.** An edge's confidence was `extracted` or
   `inferred`; it is now one of `extracted`, `resolved`, `inferred` or

@@ -660,9 +660,8 @@ fn index_and_score(root: &Path, questions: &[Question], check_determinism: bool)
             "the harness does not reproduce its own hit@k within one run"
         );
         assert_eq!(
-            (report.graph_only, report.graph_only_hits, report.wrong_yes),
-            (again.graph_only, again.graph_only_hits, again.wrong_yes),
-            "the harness does not reproduce its own graph-only denominator within one run"
+            report.wrong_yes, again.wrong_yes,
+            "the harness does not reproduce its own wrong-yes count within one run"
         );
         assert_eq!(
             report.bytes, again.bytes,
@@ -694,8 +693,6 @@ struct Report {
     scored: usize,
     hit_at: BTreeMap<usize, usize>,
     bytes: Vec<usize>,
-    graph_only: usize,
-    graph_only_hits: usize,
     wrong_yes: usize,
     /// How many lines each `read` answer came back as. The locate-then-read
     /// claim is about size as much as about correctness.
@@ -1017,11 +1014,6 @@ impl Summary {
             None => String::new(),
         };
         println!("\n  bytes per answer   median {bytes}{against}");
-        println!(
-            "  graph-only hits    {} of {} satisfied a span",
-            self.median(|r| r.graph_only_hits),
-            self.median(|r| r.graph_only)
-        );
         let preferred = self.median(|r| r.preferred);
         if preferred > 0 {
             println!(
@@ -1292,13 +1284,6 @@ fn score_search(semlith: &mut Semlith, root: &Path, question: &Question, report:
         dump(question, rank + 1, hit, satisfies);
         if satisfies && first.is_none() {
             first = Some(rank + 1);
-        }
-        // The third list's own contribution: a hit no other list ranked.
-        if hit.lists == ["graph"] {
-            report.graph_only += 1;
-            if satisfies {
-                report.graph_only_hits += 1;
-            }
         }
     }
     report.ranks.push((question.id.clone(), first));

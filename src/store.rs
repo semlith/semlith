@@ -1828,20 +1828,6 @@ pub fn symbols_by_names(
     Ok(out)
 }
 
-/// Whether more than `limit` definitions answer to `name`, not counting the
-/// navigational kinds, which nothing can point at.
-///
-/// Counts at most `limit + 1` rows, so asking about `get` in a store holding
-/// seven hundred of them costs what asking about a name with two does.
-pub fn defined_more_than(db: &Connection, name: &str, limit: usize) -> Result<bool> {
-    let target = crate::graph::not_navigational("s.kind");
-    let sql = format!(
-        "SELECT COUNT(*) FROM (SELECT 1 FROM symbols s WHERE s.name = ?1 AND {target} LIMIT ?2)"
-    );
-    let found: i64 = db.query_row(&sql, params![name, limit as i64 + 1], |r| r.get(0))?;
-    Ok(found as usize > limit)
-}
-
 /// What the symbols named `name` point at: callees, imports, references out.
 ///
 /// One hop. `kinds` empty means every edge kind.
@@ -2492,29 +2478,6 @@ fn kind_predicate(kinds: &[String], column: &str) -> String {
     }
     let holes = vec!["?"; kinds.len()].join(", ");
     format!("{column} IN ({holes})")
-}
-
-/// The names of every symbol whose defining lines overlap one of `chunk_ids`.
-///
-/// The seed of graph expansion: search returns chunks, the graph knows symbols,
-/// and this is the join between them.
-pub fn symbols_in_chunks(db: &Connection, chunk_ids: &[u64]) -> Result<Vec<String>> {
-    if chunk_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let holes = vec!["?"; chunk_ids.len()].join(", ");
-    // The one caller is the seed of the ranked walk, and the walk runs over
-    // dependency edges. A heading or a configuration key has none, so seeding
-    // it spends the walk's node budget to reach nothing — and where its name
-    // collides with a real symbol's, it spends the seed's mass on the wrong
-    // one.
-    let navigational = crate::graph::not_navigational("kind");
-    let sql =
-        format!("SELECT DISTINCT name FROM symbols WHERE chunk_id IN ({holes}) AND {navigational}");
-    let mut stmt = db.prepare(&sql)?;
-    let args = chunk_ids.iter().map(|i| Value::Integer(*i as i64));
-    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, String>(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// One recorded retrieval.
@@ -4561,31 +4524,6 @@ mod tests {
         assert_eq!(got, [("a.rs", 1), ("a.rs", 5), ("b.rs", 1)]);
     }
 
-    /// Seeding the walk looks symbols up by chunk. Without an index on
-    /// `chunk_id` that was a scan of every symbol per seed chunk, minutes per
-    /// search on the benchmark corpus.
-    #[test]
-    fn symbols_in_chunks_uses_the_chunk_index() {
-        let db = Connection::open_in_memory().unwrap();
-        one_symbol(&db, "a.rs", "seed");
-        let navigational = crate::graph::not_navigational("kind");
-        let plan: Vec<String> = db
-            .prepare(&format!(
-                "EXPLAIN QUERY PLAN SELECT DISTINCT name FROM symbols \
-                 WHERE chunk_id IN (?) AND {navigational}"
-            ))
-            .unwrap()
-            .query_map([1], |r| r.get::<_, String>(3))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        assert!(
-            plan.iter().any(|step| step.contains("symbols_chunk_id")),
-            "the seed lookup does not use the chunk index: {plan:?}"
-        );
-        assert_eq!(symbols_in_chunks(&db, &[1]).unwrap(), ["seed"]);
-    }
-
     /// The walk's variant drops an edge whose target is a hub, and only that
     /// edge; `edges_out` itself still settles every edge.
     #[test]
@@ -4618,26 +4556,6 @@ mod tests {
             targets(edges_out(&db, "caller", &[]).unwrap()),
             ["common", "rare"]
         );
-    }
-
-    /// A configuration key or a heading that shares a name is not a definition
-    /// anything can call, so it does not make the name a hub.
-    #[test]
-    fn defined_more_than_counts_definitions_not_navigational_symbols() {
-        let db = Connection::open_in_memory().unwrap();
-        one_symbol(&db, "a.rs", "path");
-        let config = insert_file(&db, "config.toml", "h", 1, 0).unwrap();
-        for line in 1..=5 {
-            let mut key = at(sym("path"), line, line);
-            key.kind = "key".to_string();
-            insert_symbol(&db, config, None, &key).unwrap();
-        }
-        assert!(!defined_more_than(&db, "path", 1).unwrap());
-
-        let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
-        insert_symbol(&db, b, None, &sym("path")).unwrap();
-        assert!(defined_more_than(&db, "path", 1).unwrap());
-        assert!(!defined_more_than(&db, "path", 2).unwrap());
     }
 
     /// Forgetting a file takes its symbols and its outgoing edges with it.

@@ -1130,7 +1130,6 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
                 "fresh": h.fresh,
                 "symbol": h.symbol,
                 "symbol_kind": h.symbol_kind,
-                "provenance": h.provenance,
             })
         })
         .collect();

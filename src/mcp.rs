@@ -2169,12 +2169,7 @@ fn locate_row(hit: &crate::Hit, terms: &[String], shorten: &dyn Fn(&str) -> Stri
     }
     let mut marks = Vec::new();
     if !hit.lists.is_empty() {
-        // A hit the graph reached says how well supported the edge was. A hit
-        // the query matched needs no such qualifier.
-        match (&hit.provenance, hit.lists.as_slice()) {
-            (Some(tier), ["graph"]) => marks.push(format!("graph({tier})")),
-            _ => marks.push(hit.lists.join("+")),
-        }
+        marks.push(hit.lists.join("+"));
     }
     if !hit.fresh {
         marks.push("stale".to_string());
@@ -2481,7 +2476,6 @@ mod tests {
             symbol: Some("edges_out".to_string()),
             symbol_kind: Some("fn".to_string()),
             symbol_line: None,
-            provenance: None,
             copies: Vec::new(),
         }
     }
@@ -2568,16 +2562,13 @@ mod tests {
     /// A stale hit says so. An agent quoting a chunk from a file that has moved
     /// under it is the same class of defect as a wrong path, and just as quiet.
     #[test]
-    fn a_stale_hit_is_marked_and_a_graph_reached_one_carries_its_tier() {
+    fn a_stale_hit_is_marked() {
         let mut stale = hit("src/lib.rs", 10, 20, "fn a() {}\n");
         stale.fresh = false;
-        let mut reached = hit("src/graph.rs", 30, 40, "fn b() {}\n");
-        reached.lists = vec!["graph"];
-        reached.provenance = Some(crate::graph::RESOLVED.to_string());
+        let fresh = hit("src/graph.rs", 30, 40, "fn b() {}\n");
 
-        let reply = locate(&[stale, reached], "a", DEFAULT_LOCATE_TOKENS, &crate::plain);
-        assert!(reply.contains("stale"), "{reply}");
-        assert!(reply.contains("graph(resolved)"), "{reply}");
+        let reply = locate(&[stale, fresh], "a", DEFAULT_LOCATE_TOKENS, &crate::plain);
+        assert_eq!(reply.matches("stale").count(), 1, "{reply}");
     }
 
     /// The tool list is the first thing every agent pays for, once per session,
