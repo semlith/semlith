@@ -783,7 +783,6 @@ fn refuse_busy(mut stream: TcpStream) {
         }
     }
     let _ = write_response(&mut stream, Response::new(503, "text/plain", Vec::new()));
-    let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
 /// Answer one connection. Returns why it was refused, if it was.
@@ -1186,6 +1185,38 @@ fn percent_decode(raw: &str) -> String {
 }
 
 fn write_response(stream: &mut TcpStream, response: Response) -> std::io::Result<()> {
+    let written = write_whole(stream, response);
+    linger(stream);
+    written
+}
+
+/// How long a closing connection waits for the client to close its side.
+const LINGER: Duration = Duration::from_millis(500);
+
+/// Close the way a web server must when it closes after every response: shut
+/// the write side, so the client reads the response and then an end of
+/// stream, and read whatever it still sends until it closes or [`LINGER`]
+/// passes. Closing a socket with bytes unread in it sends a reset instead of
+/// a close on Windows, macOS and Linux, and a browser that receives one
+/// discards the response it has already read -- the Windows drive's
+/// ERR_CONNECTION_RESET on routes the daemon had answered 200 and written in
+/// full (#181).
+fn linger(stream: &mut TcpStream) {
+    if stream.shutdown(std::net::Shutdown::Write).is_err() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let _ = stream.set_read_timeout(Some(LINGER));
+    let mut sink = [0u8; 4096];
+    while started.elapsed() < LINGER {
+        match stream.read(&mut sink) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+    }
+}
+
+fn write_whole(stream: &mut TcpStream, response: Response) -> std::io::Result<()> {
     let Response {
         status,
         content_type,

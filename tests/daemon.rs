@@ -854,6 +854,41 @@ fn idle_connections_hold_up_no_request() {
     drop(idle);
 }
 
+/// A response is closed, not reset, even when the client sent bytes the
+/// request did not need. Closing a socket with unread data is a reset on
+/// Windows, macOS and Linux alike, and a browser that sees one discards the
+/// response it has already read: the Windows drive's ERR_CONNECTION_RESET on
+/// routes the trace shows answered 200 and written in full (#181).
+#[test]
+fn a_response_survives_bytes_the_request_did_not_need() {
+    let daemon = Daemon::start("linger", &[]);
+    for _ in 0..20 {
+        let mut stream =
+            TcpStream::connect(("127.0.0.1", daemon.port)).expect("the daemon listens");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let request = format!(
+            "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\r\n",
+            daemon.port, daemon.token
+        );
+        // The request, then bytes after it, as a client that pipelines or
+        // sends a late packet would.
+        stream.write_all(request.as_bytes()).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = stream.write_all(&[b'x'; 4096]);
+        std::thread::sleep(Duration::from_millis(100));
+        let mut raw = Vec::new();
+        let read = stream.read_to_end(&mut raw);
+        assert!(read.is_ok(), "the connection was reset: {read:?}");
+        assert!(
+            String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 200"),
+            "{}",
+            String::from_utf8_lossy(&raw)
+        );
+    }
+}
+
 /// The daemon is the writer for its whole life, so a second writer is refused
 /// — which is the conflict the daemon exists to make impossible rather than
 /// merely unlikely.
