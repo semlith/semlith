@@ -1534,7 +1534,7 @@ function load(key, force) {
       data[key] = value;
       loadedAt[key] = Date.now();
       if (key === "stores" || key === "coverage") noteStores(value);
-      if (key === "runs") noteRuns();
+      if (key === "runs") holdPausing(value), noteRuns();
       if (key === "about") noteAbout(value);
       return value;
     })
@@ -1543,6 +1543,21 @@ function load(key, force) {
     });
   loading[key] = p;
   return p;
+}
+
+// Runs a Pause was just pressed on, until when. A poll that left before the
+// click answers "running" after it; for a few seconds that is read as the
+// "pausing" the click already showed, until the daemon says otherwise.
+const PAUSING = new Map();
+function holdPausing(value) {
+  const now = Date.now();
+  for (const r of (value && value.runs) || []) {
+    const key = `${r.store}:${r.id}`;
+    const until = PAUSING.get(key);
+    if (!until) continue;
+    if (r.status !== "running" || now > until) PAUSING.delete(key);
+    else r.status = "pausing";
+  }
 }
 
 function loadMany(keys, force) {
@@ -4153,6 +4168,7 @@ async function runControl(r, action) {
   // Pressing Pause says "pausing" at once: the request is on its way, and a
   // poll that lands meanwhile must not be the first to speak.
   if (action === "pause") {
+    PAUSING.set(`${r.store}:${r.id}`, Date.now() + 5000);
     const now = (data.runs?.runs || []).find((x) => x.id === r.id && x.store === r.store);
     if (now && now.status === "running") {
       now.status = "pausing";
@@ -4166,6 +4182,7 @@ async function runControl(r, action) {
     mine.status = out.state;
     repaint();
   }
+  if (action !== "pause") PAUSING.delete(`${r.store}:${r.id}`);
   await load("runs", true);
   for (const fn of [...runsListeners]) fn();
   paintChrome();
@@ -9057,7 +9074,15 @@ async function boot() {
   // The change counters' baseline first, so a change landing while the page
   // loads is one the first poll sees move.
   await pollChanges();
-  const first = await loadMany(["stores", "about", "runs", "refused"]);
+  // One dropped connection is not a daemon that is down: the first fetches
+  // are asked again, with a growing pause, for about ten seconds before the
+  // page says it could not reach it.
+  let first = await loadMany(["stores", "about", "runs", "refused"]);
+  for (const wait of [400, 800, 1600, 3000, 4000]) {
+    if (data.stores) break;
+    await new Promise((r) => setTimeout(r, wait));
+    first = await loadMany(["stores", "about", "runs", "refused"], true);
+  }
   done();
   const failed = first.find((x) => x && x.__error);
   if (failed && !data.stores) {
@@ -9067,9 +9092,22 @@ async function boot() {
         "div",
         { id: "app" },
         el("header", { class: "top wide-pad" }, logo(), el("span", { class: "wordmark", text: "Semlith" })),
-        el("div", { class: "welcome-body" }, el("div", { class: "welcome-card max560" }, el("div", { class: "welcome-h", text: "The portal could not reach the daemon" }), el("div", { class: "welcome-lead", text: failed.__error.message }), btn({ class: "btn primary", onclick: () => location.reload() }, "Try again"))),
+        el("div", { class: "welcome-body" }, el("div", { class: "welcome-card max560" }, el("div", { class: "welcome-h", text: "The portal could not reach the daemon" }), el("div", { class: "welcome-lead", text: `${failed.__error.message} — trying again every few seconds.` }), btn({ class: "btn primary", onclick: () => location.reload() }, "Try again"))),
       ),
     );
+    // It keeps asking, and loads the portal the moment the daemon answers,
+    // so a daemon that was restarting needs no reload by hand; a move to
+    // another page asks at once.
+    const retry = async () => {
+      try {
+        await api("/api/stores");
+        location.reload();
+      } catch (_) {
+        /* still down */
+      }
+    };
+    setInterval(retry, 3000);
+    window.addEventListener("hashchange", retry);
     return;
   }
   render();
