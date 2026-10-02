@@ -306,6 +306,9 @@ svg.i {
   white-space: nowrap;
   min-width: 0;
 }
+/* A path that does not fit loses its start, never its end: the end is what
+   tells two paths apart. Used through pathSpan(), with a <bdi> inside so the
+   slashes keep their places. */
 .ell-start {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -313,6 +316,7 @@ svg.i {
   direction: rtl;
   text-align: left;
   min-width: 0;
+  max-width: 100%;
 }
 .nowrap {
   white-space: nowrap;

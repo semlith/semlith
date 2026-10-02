@@ -161,8 +161,6 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/schedules") => schedule_write(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
         (_, true, "/api/drop/resolve") => drop_resolve(state, request),
-        (true, _, "/api/helpers") => helpers_status(),
-        (_, true, "/api/helpers") => helpers_change(request),
 
         // A route that exists on another verb is worth telling apart from one
         // that does not exist at all: the first is a bug in the page, the
@@ -5366,40 +5364,6 @@ fn drop_resolve(state: &Arc<State>, request: &Request) -> Response {
         DROP_CHANGE.store(change, Ordering::Relaxed);
     }
     Response::json(&json!(answer))
-}
-
-/// `GET /api/helpers`: the file-manager entries for this OS and whether each
-/// is installed (`crate::helpers`).
-fn helpers_status() -> Response {
-    match crate::helpers::Env::current() {
-        Ok(env) => Response::json(&json!({
-            "os": env.os,
-            "helpers": crate::helpers::status(&env),
-        })),
-        Err(e) => Response::error(500, &format!("{e:#}")),
-    }
-}
-
-/// `POST /api/helpers {on}`: install or remove every helper for this OS, the
-/// same thing `semlith setup --file-managers` / `--no-file-managers` does.
-fn helpers_change(request: &Request) -> Response {
-    let on = match request.json().map(|v| v.get("on").and_then(Value::as_bool)) {
-        Ok(Some(on)) => on,
-        Ok(None) => return Response::error(400, r#"send {"on": true} or {"on": false}"#),
-        Err(e) => return Response::error(400, &format!("{e:#}")),
-    };
-    let result = crate::helpers::Env::current().and_then(|env| {
-        let helpers = if on {
-            crate::helpers::install(&env)?
-        } else {
-            crate::helpers::remove(&env)?
-        };
-        Ok(json!({ "os": env.os, "helpers": helpers }))
-    });
-    match result {
-        Ok(value) => Response::json(&value),
-        Err(e) => Response::error(500, &format!("{e:#}")),
-    }
 }
 
 #[cfg(test)]

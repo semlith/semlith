@@ -96,8 +96,9 @@ const VIEWS: &[(&str, &str)] = &[
     // the portal that is Agents › Add a client and the wizard's Connect step,
     // both of which post here. The other steps have their own surfaces: Start
     // at login (Settings › Agent access, `/api/login-item`), the model download
-    // (Welcome and the wizard), and the file-manager helpers (Settings ›
-    // About, `/api/helpers`).
+    // (Welcome and the wizard). The file-manager helpers are the CLI's only
+    // (`semlith setup --file-managers`): the owner dropped the portal card in
+    // 0.35.0, since a drop onto the page already does what they offered.
     ("setup", "/api/agents/register"),
     // Settings › About: Check for updates, then Install. Both reach the
     // network, so neither is something a route answers to a GET that a
@@ -602,12 +603,6 @@ const NOT_PROBED: &[(&str, &str, &str)] = &[
         "/api/login-item",
         "installs or removes the login service; launchd, systemd and schtasks are not \
          redirected by HOME, so a probe could reach the owner's real service",
-    ),
-    (
-        "POST",
-        "/api/helpers",
-        "installs or removes the file-manager helpers; the Finder services cache and the \
-         Windows registry are not redirected by HOME either",
     ),
 ];
 

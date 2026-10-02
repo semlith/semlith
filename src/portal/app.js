@@ -357,18 +357,28 @@ function tilde(path, home) {
 // A long path, shortened for the page: home as ~, then the middle cut so the
 // start (where it lives) and the end (what it is) both stay. The full path
 // goes in the element's tooltip; see pathEl.
+// A long path keeps its end, which is the part that tells two apart: the
+// start is cut, at a folder boundary where one is near.
 function shortPath(path, max) {
   const t = tilde(path);
   const limit = max || 52;
   if (t.length <= limit) return t;
-  const head = Math.max(8, Math.floor(limit * 0.35));
-  return `${t.slice(0, head)}…${t.slice(t.length - (limit - head - 1))}`;
+  let tail = t.slice(t.length - (limit - 1));
+  const cut = tail.search(/[\\/]/);
+  if (cut > 0 && cut < tail.length / 3) tail = tail.slice(cut);
+  return `…${tail}`;
 }
 
-/** A path as a span: shortened, with the whole of it on hover. */
+/** Any path-shaped text as a span that, when it does not fit, loses its start
+ * rather than its end; the whole value is on hover. */
+function pathSpan(text, cls, tip) {
+  return el("span", { class: `${cls ? `${cls} ` : ""}ell-start`, "data-tip": String(tip ?? text) }, el("bdi", { text: String(text) }));
+}
+
+/** A path as a span: cut from the start to fit, with the whole of it on hover. */
 function pathEl(path, max, cls) {
   const short = shortPath(path, max);
-  return el("span", { class: cls || "t-mono-sm", text: short, "data-tip": short !== String(path) ? String(path) : null });
+  return el("span", { class: `${cls || "t-mono-sm"} ell-start`, "data-tip": String(path) }, el("bdi", { text: short }));
 }
 
 // Every absolute path inside a sentence, shortened the same way.
@@ -1445,7 +1455,6 @@ const SOURCES = {
   prices: "/api/prices",
   replay: "/api/ledger/replay",
   languages: "/api/languages",
-  helpers: "/api/helpers",
   graphpeek: () => `/api/graph?${new URLSearchParams({ store: (graphPeekFor = graphStore()), limit: "12" })}`,
   graphmap: () => `/api/map?${new URLSearchParams({ store: (graphMapFor = graphStore()), shown: "12" })}`,
   coverage: "/api/stores?coverage=1",
@@ -2821,7 +2830,7 @@ function wizardScreen() {
             "div",
             { class: "col" },
             el("span", { class: "eyebrow sm", text: "Folders other stores already read" }),
-            known.map((p) => btn({ class: "suggest-row", onclick: () => addSources([{ path: p, type: "folder" }]) }, icon(I.folder, 13, { w: 1.6 }), el("span", { class: "grow ell", text: tilde(p) }), el("span", { class: "note", text: "folder" }))),
+            known.map((p) => btn({ class: "suggest-row", onclick: () => addSources([{ path: p, type: "folder" }]) }, icon(I.folder, 13, { w: 1.6 }), pathSpan(tilde(p), "grow", p), el("span", { class: "note", text: "folder" }))),
           )
         : null,
     );
@@ -2974,7 +2983,7 @@ function wizardScreen() {
       const ok = await ask({
         title: add.length === 1 ? "Add this path?" : `Add these ${add.length} paths?`,
         body: "Found on this machine from what was dropped. Nothing was uploaded.",
-        extra: el("div", { class: "col gap4" }, add.map((a) => el("div", { class: "copyfield" }, el("span", { class: "t", text: a.path })))),
+        extra: el("div", { class: "col gap4" }, add.map((a) => el("div", { class: "copyfield" }, pathSpan(a.path, "t")))),
         ok: add.length === 1 ? "Add it" : "Add them",
       });
       if (ok) addSources(add);
@@ -3219,7 +3228,7 @@ function wizardScreen() {
       el(
         "div",
         { class: "col gap4" },
-        el("div", { class: "row" }, el("span", { class: "p", text: rel(d.path) }), d.likely ? pill(d.likely, d.tone || "grey", { dot: false }) : null),
+        el("div", { class: "row" }, pathSpan(rel(d.path), "p", d.path), d.likely ? pill(d.likely, d.tone || "grey", { dot: false }) : null),
         el("span", { class: "why" }, el("b", { text: d.kind || classWord(d.class) }), ` · ${d.why || d.rule || ""}`),
         d.evidence || (d.matches || [])[0] ? el("span", { class: "evidence", text: d.evidence || maskedOf(d.matches[0]) }) : null,
       ),
@@ -3272,7 +3281,7 @@ function wizardScreen() {
             ? el(
                 "div",
                 { class: "group-paths" },
-                g.paths.length ? g.paths.slice(0, 50).map((p) => el("span", { text: rel(p) })) : el("span", { text: "The list is written when the run ends; the count is the scan's." }),
+                g.paths.length ? g.paths.slice(0, 50).map((p) => pathSpan(rel(p), "", p)) : el("span", { text: "The list is written when the run ends; the count is the scan's." }),
                 g.count > g.paths.length && g.paths.length ? el("span", { text: `…and ${n(g.count - g.paths.length)} more` }) : null,
               )
             : null,
@@ -4533,7 +4542,7 @@ function storesList() {
             onclick: () => go("store", s.name),
             onkeydown: (e) => (e.key === "Enter" ? go("store", s.name) : null),
           },
-          el("span", { class: "cellname" }, el("span", { class: "a" }, s.name, " ", el("span", { class: "k", text: kindOf(s) })), el("span", { class: "b", text: rootsLine(s), "data-tip": rootsAll(s) })),
+          el("span", { class: "cellname" }, el("span", { class: "a" }, s.name, " ", el("span", { class: "k", text: kindOf(s) })), el("span", { class: "b ell-start", "data-tip": rootsAll(s) }, el("bdi", { text: rootsLine(s) }))),
           statePill(s),
           el("span", { class: "num c-files", text: s.files ? n(s.files) : "—" }),
           el("span", { class: "num c-chunks", text: s.chunks ? n(s.chunks) : "—" }),
@@ -4797,7 +4806,7 @@ VIEWS.store = {
         "div",
         { class: "row gap12" },
         el("span", { class: "icon-tile s38" }, icon(I.layers, 18, { w: 1.6 })),
-        el("div", { class: "col gap2 grow" }, el("div", { class: "row nowrap gap10" }, el("span", { class: "sd-name", text: s.name }), statePill(s)), el("span", { class: "t-mono-sm ell", text: `${rootsLine(s)} · ${kindOf(s)}`, "data-tip": rootsAll(s) })),
+        el("div", { class: "col gap2 grow" }, el("div", { class: "row nowrap gap10" }, el("span", { class: "sd-name", text: s.name }), statePill(s)), el("span", { class: "row gap6 min0 t-mono-sm" }, el("span", { class: "ell-start min0", "data-tip": rootsAll(s) }, el("bdi", { text: rootsLine(s) })), el("span", { class: "nowrap", text: `· ${kindOf(s)}` }))),
         el(
           "div",
           { class: "row" },
@@ -4867,7 +4876,7 @@ function sdOverview(s) {
                 "div",
                 { class: "root-row" },
                 el("span", { class: "icon-tile s28" }, icon(I.folder, 14, { w: 1.6 })),
-                el("span", { class: "col" }, el("span", { class: "mono t-sm ell", text: tilde(r.path), "data-tip": r.path }), el("span", { class: "muted t-xs", text: !r.present ? "this folder is not there any more" : s.last_write ? `last change ${ago(s.last_write)}` : "not indexed yet" })),
+                el("span", { class: "col" }, pathSpan(tilde(r.path), "mono t-sm", r.path), el("span", { class: "muted t-xs", text: !r.present ? "this folder is not there any more" : s.last_write ? `last change ${ago(s.last_write)}` : "not indexed yet" })),
                 pill(!r.present ? "missing" : watching ? "watching" : s.files ? "not watching" : "waiting", !r.present ? "red" : watching ? "green" : "grey"),
               );
             })
@@ -4988,7 +4997,7 @@ function sdFiles(s, holder) {
     foot: "Forget drops a file's chunks; the file on disk is untouched",
     onQuery: () => reload(true),
     columns: [
-      { key: "path", label: "Path", cls: "m", sort: (r) => r.path, render: (r) => el("span", { class: "ell", text: relTo(s, r.path), "data-tip": r.path }) },
+      { key: "path", label: "Path", cls: "m", sort: (r) => r.path, render: (r) => pathSpan(relTo(s, r.path), "", r.path) },
       { key: "reader", label: "Read as", sort: (r) => r.reader, render: (r) => el("span", { class: "tag", text: readAs(r) }) },
       { key: "lang", label: "Language", cls: "ms", sort: (r) => r.lang, render: (r) => r.lang || "—" },
       { key: "lines", label: "Lines", cls: "m r", sort: (r) => r.lines, render: (r) => n(r.lines) },
@@ -5261,7 +5270,7 @@ function sdReview(s, holder) {
                   el(
                     "div",
                     { class: "col gap4 min0" },
-                    el("div", { class: "row min0" }, el("span", { class: "p ell", text: relTo(s, d.path), "data-tip": d.path }), d.likely ? pill(d.likely, d.tone || "amber", { dot: false }) : null),
+                    el("div", { class: "row min0" }, pathSpan(relTo(s, d.path), "p", d.path), d.likely ? pill(d.likely, d.tone || "amber", { dot: false }) : null),
                     el("span", { class: "why" }, el("b", { text: d.kind || classWord(d.class) }), ` · ${d.why || d.rule}`),
                     d.evidence || (d.matches || [])[0] ? el("span", { class: "evidence", text: d.evidence || maskedOf(d.matches[0]) }) : null,
                   ),
@@ -5299,7 +5308,7 @@ function sdReview(s, holder) {
     empty: "No decision matches.",
     onClear: () => ((sdUi.decQ = ""), (sdUi.decOut = "all"), (sdUi.decBy = "all"), repaint()),
     columns: [
-      { key: "path", label: "Path", cls: "m cap-path", sort: (d) => d.path.toLowerCase(), render: (d) => el("span", { class: "ell-start" }, el("bdi", { text: relTo(s, d.path), "data-tip": d.path })) },
+      { key: "path", label: "Path", cls: "m cap-path", sort: (d) => d.path.toLowerCase(), render: (d) => pathSpan(relTo(s, d.path), "", d.path) },
       { key: "outcome", label: "Outcome", sort: (d) => d.outcome, render: (d) => pill(d.outcome, OUTCOME_TONE[d.outcome] || "grey", { dot: false }) },
       { key: "why", label: "Why", cls: "dim c-why", sort: (d) => (d.why || "").toLowerCase(), render: (d) => d.why || "" },
       { key: "by", label: "By", cls: "ms nowrap", sort: (d) => d.by, render: (d) => (d.at && d.by === "you" ? `you · ${ago(d.at)}` : d.by) },
@@ -5951,7 +5960,7 @@ function rankedView(r) {
           el(
             "div",
             { class: "card hit-group" },
-            el("div", { class: "hit-head" }, el("span", { class: "p", text: hitPath(g), "data-tip": g.path }), el("span", { class: "t-mono-sm grow", text: g.store || "" }), el("span", { class: "t-mono-sm nowrap", text: g.spans.length > 1 ? `${g.spans.length} spans` : `${g.spans[0].start_line}-${g.spans[0].end_line}` })),
+            el("div", { class: "hit-head" }, pathSpan(hitPath(g), "p", g.path), el("span", { class: "t-mono-sm grow", text: g.store || "" }), el("span", { class: "t-mono-sm nowrap", text: g.spans.length > 1 ? `${g.spans.length} spans` : `${g.spans[0].start_line}-${g.spans[0].end_line}` })),
             g.spans.map((h) =>
               btn(
                 { class: `hit${sr.sel === h.i ? " on" : ""}`, onclick: () => openHit(h) },
@@ -6067,7 +6076,7 @@ function detailPanel() {
       el(
         "div",
         { class: "card-b line-row gap8" },
-        el("div", { class: "row nowrap" }, el("span", { class: "mono t-b t-sm ell", text: hitPath(h), "data-tip": h.path }), el("span", { class: "t-mono-sm grow", text: span ? `${span.start_line}-${span.end_line}` : `${h.start_line}-${h.end_line}` }), pill(fresh ? (span && span.from_disk ? "read from disk" : "fresh") : "stale", fresh ? "green" : "amber")),
+        el("div", { class: "row nowrap" }, pathSpan(hitPath(h), "mono t-b t-sm", h.path), el("span", { class: "t-mono-sm grow", text: span ? `${span.start_line}-${span.end_line}` : `${h.start_line}-${h.end_line}` }), pill(fresh ? (span && span.from_disk ? "read from disk" : "fresh") : "stale", fresh ? "green" : "amber")),
         el("div", { class: "title-strip", text: h.symbol ? `${h.symbol_kind || ""} ${h.symbol}`.trim() : h.line || h.path }),
       ),
       d.error ? errorBox(d.error) : lines ? el("div", { class: "lines scroll" }, lines) : el("div", { class: "empty" }, "Reading…"),
@@ -6201,7 +6210,7 @@ function linesView(r) {
           el(
             "div",
             { class: "card hit-group" },
-            el("div", { class: "hit-head" }, el("span", { class: "p", text: hitPath(g), "data-tip": g.path }), el("span", { class: "t-mono-sm grow", text: g.store || "" }), el("span", { class: "t-mono-sm", text: plural(g.spans.length, "line") })),
+            el("div", { class: "hit-head" }, pathSpan(hitPath(g), "p", g.path), el("span", { class: "t-mono-sm grow", text: g.store || "" }), el("span", { class: "t-mono-sm", text: plural(g.spans.length, "line") })),
             g.spans.map((m) =>
               btn(
                 { class: `hit${sr.sel === m.i ? " on" : ""}`, onclick: () => openHit({ ...m, path: m.path, start_line: m.start_line, end_line: m.end_line || m.start_line, store: m.store, symbol: null, line: m.text }) },
@@ -6347,11 +6356,21 @@ function layout(nodes, edges, centre) {
   return pos;
 }
 
-/* The live canvas, after the design: DOM labels over an SVG of lines, each
- * label floating gently around its laid-out place, draggable, with hover
- * dimming the edges that do not touch it. Positions go through the CSSOM. */
+/* The live canvas: DOM labels over an SVG of lines, with hover dimming the
+ * edges that do not touch it. Positions go through the CSSOM.
+ *
+ * The motion is the force layout the portal had before 0.35.0, kept on
+ * purpose: every node pushes every other away, an edge pulls its two ends to
+ * a resting length, the layout cools from hot to still, and a slow sine drift
+ * keeps it alive. Dragging a node re-heats it, so its neighbours follow and
+ * the rest makes room. Positions are percentages of the host; the forces are
+ * worked in pixels, which is the unit their constants were tuned in. */
+const G_MAX_STEP = 1.2; // % of the host a node may move in one frame
+const G_DRIFT = 0.003; // % per frame, the wander's push
+const G_REST = 138; // px, the length an edge relaxes to
+
 function makeLive(host) {
-  const g = { nodes: {}, raf: 0, drag: null, hover: null, first: true, tick: 0 };
+  const g = { nodes: {}, raf: 0, drag: null, hover: null, tick: 0, alpha: 1, settle: 0 };
   const still = stillness();
   const pt = (e) => {
     const r = host.getBoundingClientRect();
@@ -6367,6 +6386,7 @@ function makeLive(host) {
     if (!nd) return;
     const p = pt(e);
     g.drag = { nd, dx: nd.x - p[0], dy: nd.y - p[1], sx: e.clientX, sy: e.clientY, moved: false };
+    g.alpha = Math.max(g.alpha, 0.35);
     graphDragging = true;
     nd.el.style.cursor = "grabbing";
     e.preventDefault();
@@ -6378,10 +6398,9 @@ function makeLive(host) {
     const p = pt(e);
     d.nd.x = Math.max(3, Math.min(97, p[0] + d.dx));
     d.nd.y = Math.max(4, Math.min(96, p[1] + d.dy));
-    d.nd.bx = d.nd.x;
-    d.nd.by = d.nd.y;
     d.nd.vx = 0;
     d.nd.vy = 0;
+    g.alpha = Math.max(g.alpha, 0.2);
   };
   const up = () => {
     const d = g.drag;
@@ -6410,13 +6429,100 @@ function makeLive(host) {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
   };
+  // Fit: every node back to its laid-out place, and the heat back in so the
+  // layout settles from there in view.
   g.reset = () => {
     for (const nd of Object.values(g.nodes)) {
-      nd.bx = nd.ox;
-      nd.by = nd.oy;
-      nd.vx += (Math.random() - 0.5) * 1.5;
-      nd.vy += (Math.random() - 0.5) * 1.5;
+      nd.x = nd.ox;
+      nd.y = nd.oy;
+      nd.vx = 0;
+      nd.vy = 0;
     }
+    g.alpha = 0.6;
+  };
+  // One frame of the simulation. `arr` are the nodes, `links` the edges.
+  const step = (arr, links, W, H, t, dn) => {
+    const a0 = g.alpha;
+    for (let i = 0; i < arr.length; i++) {
+      const a = arr[i];
+      for (let j = i + 1; j < arr.length; j++) {
+        const b = arr[j];
+        let dx = ((b.x - a.x) * W) / 100;
+        let dy = ((b.y - a.y) * H) / 100;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1) {
+          // Coincident nodes have no direction to separate along.
+          d2 = 1;
+          dx = 0.6;
+          dy = 0.4;
+        }
+        const d = Math.sqrt(d2);
+        const f = (5200 / d2) * a0;
+        a.vx -= ((dx / d) * f * 100) / W;
+        a.vy -= ((dy / d) * f * 100) / H;
+        b.vx += ((dx / d) * f * 100) / W;
+        b.vy += ((dy / d) * f * 100) / H;
+      }
+    }
+    for (const [a, b] of links) {
+      const dx = ((b.x - a.x) * W) / 100;
+      const dy = ((b.y - a.y) * H) / 100;
+      const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+      const pull = (d - G_REST) * 0.0025 * a0 * 0.02;
+      // Shared out by degree at each end, so a hub is not dragged about by
+      // every edge it carries.
+      const ka = pull / Math.sqrt(a.deg || 1);
+      const kb = pull / Math.sqrt(b.deg || 1);
+      a.vx += (dx * ka * 100) / W;
+      a.vy += (dy * ka * 100) / H;
+      b.vx -= (dx * kb * 100) / W;
+      b.vy -= (dy * kb * 100) / H;
+    }
+    const drift = still ? 0 : G_DRIFT;
+    const clock = t * 0.28;
+    for (const nd of arr) {
+      nd.vx += (50 - nd.x) * 0.006 * a0;
+      nd.vy += (50 - nd.y) * 0.008 * a0;
+      nd.vx += Math.cos(clock + nd.ph) * drift;
+      nd.vy += Math.sin(clock * 0.9 + nd.ph * 1.7) * drift;
+    }
+    // Labels are boxes, not points: two that overlap are nudged apart along
+    // whichever axis needs the smaller move.
+    for (let i = 0; i < arr.length; i++)
+      for (let j = i + 1; j < arr.length; j++) {
+        const a = arr[i];
+        const b = arr[j];
+        const dx = ((b.x - a.x) * W) / 100;
+        const dy = ((b.y - a.y) * H) / 100;
+        const mx = (a.w + b.w) / 2 + 6 - Math.abs(dx);
+        const my = (a.h + b.h) / 2 + 5 - Math.abs(dy);
+        if (mx > 0 && my > 0) {
+          if (mx < my) {
+            const f = (mx * 0.04 * (dx < 0 ? -1 : 1) * 100) / W;
+            a.vx -= f;
+            b.vx += f;
+          } else {
+            const f = (my * 0.04 * (dy < 0 ? -1 : 1) * 100) / H;
+            a.vy -= f;
+            b.vy += f;
+          }
+        }
+      }
+    for (const nd of arr) {
+      if (nd === dn) {
+        nd.vx = 0;
+        nd.vy = 0;
+        continue;
+      }
+      nd.vx = Math.max(-G_MAX_STEP, Math.min(G_MAX_STEP, nd.vx * 0.86));
+      nd.vy = Math.max(-G_MAX_STEP, Math.min(G_MAX_STEP, nd.vy * 0.86));
+      // Kept inside the frame by half its own size, so no label is cut.
+      const mx = Math.min(45, (((nd.w || 80) / 2 + 4) / W) * 100);
+      const my = Math.min(45, (((nd.h || 28) / 2 + 4) / H) * 100);
+      nd.x = Math.max(mx, Math.min(100 - mx, nd.x + nd.vx));
+      nd.y = Math.max(my, Math.min(100 - my, nd.y + nd.vy));
+    }
+    g.alpha = Math.max(0, g.alpha * 0.985);
   };
   const frame = (now) => {
     if (!host.isConnected) return stop();
@@ -6434,9 +6540,11 @@ function makeLive(host) {
       const oy = parseFloat(ne.getAttribute("data-gy"));
       let nd = g.nodes[id];
       if (!nd) {
-        const sx = g.first ? 50 + (ox - 50) * 0.15 : ox;
-        const sy = g.first ? 50 + (oy - 50) * 0.15 : oy;
-        nd = g.nodes[id] = { x: sx, y: sy, vx: 0, vy: 0, ox, oy, bx: ox, by: oy, ph: Math.random() * 6.283, sp: 0.35 + Math.random() * 0.45, hv: 0 };
+        // A node that appears starts where the layout put it, and the
+        // simulation warms up to settle the new shape.
+        nd = g.nodes[id] = { x: ox, y: oy, vx: 0, vy: 0, ox, oy, ph: Math.random() * 6.283, hv: 0, deg: 0 };
+        g.settle = 1;
+        g.alpha = 1;
       }
       if (nd.el !== ne || remeasure) {
         nd.w = ne.offsetWidth;
@@ -6446,7 +6554,6 @@ function makeLive(host) {
       seen[id] = nd;
       arr.push(nd);
     });
-    if (arr.length) g.first = false;
     const links = [];
     host.querySelectorAll("[data-ge]").forEach((le) => {
       const k = (le.getAttribute("data-ge") || "").split("|");
@@ -6454,56 +6561,20 @@ function makeLive(host) {
       const b = seen[k[1]];
       if (a && b) links.push([a, b, le]);
     });
-    const amp = still ? 0 : 0.6;
     const dn = g.drag ? g.drag.nd : null;
-    for (const nd of arr) {
-      if (nd === dn) continue;
-      const ax = nd.bx + Math.sin(t * nd.sp + nd.ph) * amp;
-      const ay = nd.by + Math.cos(t * nd.sp * 0.8 + nd.ph * 1.3) * amp;
-      nd.vx += (ax - nd.x) * 0.04;
-      nd.vy += (ay - nd.y) * 0.04;
+    for (const nd of arr) nd.deg = 0;
+    for (const [a, b] of links) {
+      a.deg++;
+      b.deg++;
     }
-    if (dn)
-      for (const [a, b] of links) {
-        const ex = b.x - a.x - (b.bx - a.bx);
-        const ey = b.y - a.y - (b.by - a.by);
-        const k = a === dn || b === dn ? 0.03 : 0.012;
-        if (a !== dn) {
-          a.vx += ex * k;
-          a.vy += ey * k;
-        }
-        if (b !== dn) {
-          b.vx -= ex * k;
-          b.vy -= ey * k;
-        }
-      }
-    for (let i = 0; i < arr.length; i++)
-      for (let j = i + 1; j < arr.length; j++) {
-        const a = arr[i];
-        const b = arr[j];
-        const dx = ((b.x - a.x) * W) / 100;
-        const dy = ((b.y - a.y) * H) / 100;
-        const mx = (a.w + b.w) / 2 + 6 - Math.abs(dx);
-        const my = (a.h + b.h) / 2 + 5 - Math.abs(dy);
-        if (mx > 0 && my > 0) {
-          if (mx < my) {
-            const f = (mx * 0.04 * (dx < 0 ? -1 : 1) * 100) / W;
-            if (a !== dn) a.vx -= f;
-            if (b !== dn) b.vx += f;
-          } else {
-            const f = (my * 0.04 * (dy < 0 ? -1 : 1) * 100) / H;
-            if (a !== dn) a.vy -= f;
-            if (b !== dn) b.vy += f;
-          }
-        }
-      }
+    // A new shape is settled before it is shown moving, as the old layout
+    // was: two hundred quiet steps, then the drift from there.
+    if (g.settle && arr.every((nd) => nd.w)) {
+      for (let i = 0; i < 220; i++) step(arr, links, W, H, t, dn);
+      g.settle = 0;
+    }
+    step(arr, links, W, H, t, dn);
     for (const nd of arr) {
-      if (nd !== dn) {
-        nd.vx *= 0.82;
-        nd.vy *= 0.82;
-        nd.x = Math.max(3, Math.min(97, nd.x + nd.vx));
-        nd.y = Math.max(4, Math.min(96, nd.y + nd.vy));
-      }
       nd.hv += ((g.hover === nd || nd === dn ? 1 : 0) - nd.hv) * 0.2;
       if (nd.hv < 0.003) nd.hv = 0;
       const s = nd.el.style;
@@ -6798,7 +6869,7 @@ function exploreTab(picker) {
           { class: "g-sel" },
           el("span", { class: "eyebrow sm wide", text: "SELECTED" }),
           el("span", { class: "nm", text: gr.sel || "nothing yet" }),
-          el("span", { class: "t-mono-sm", text: def ? `${tilde(def.path)}:${def.start_line}-${def.end_line}` : s && s.error ? s.error : s ? "no definition in this store" : "reading…" }),
+          def ? pathSpan(`${tilde(def.path)}:${def.start_line}-${def.end_line}`, "t-mono-sm", `${def.path}:${def.start_line}-${def.end_line}`) : el("span", { class: "t-mono-sm", text: s && s.error ? s.error : s ? "no definition in this store" : "reading…" }),
           gr.defs && gr.defs.length > 1
             ? el(
                 "div",
@@ -6842,7 +6913,7 @@ function exploreTab(picker) {
                   loadExplore();
                 },
               },
-              el("span", { class: "col" }, el("span", { class: "n", text: c.name }), el("span", { class: "w", text: c.confidence === "ambiguous" ? `${c.definitions} definitions ▸` : `${tilde(c.path)}:${c.start_line}` })),
+              el("span", { class: "col" }, el("span", { class: "n", text: c.name }), c.confidence === "ambiguous" ? el("span", { class: "w", text: `${c.definitions} definitions ▸` }) : pathSpan(`${tilde(c.path)}:${c.start_line}`, "w", `${c.path}:${c.start_line}`)),
               confBadge(c.confidence),
             ),
           ),
@@ -7066,7 +7137,7 @@ function blastResult(imp, headline) {
         el("div", { class: "card-h tight" }, el("span", { class: "card-t sm grow", text: "Files to look at" }), lnk("Copy list", () => copy(files.map((f) => f.path).join("\n"), `Copied ${plural(files.length, "path")}`))),
         files.slice(0, 12).map((f) => {
           const b2 = bar((f.symbols / top) * 100, "h5 accent");
-          return el("div", { class: "file-bar-row", "data-tip": f.path, "data-tip-rows": rows([["definitions reached", String(f.symbols)], ["nearest hop", String(f.nearest)]]) }, el("span", { class: "ell", text: tilde(f.path) }), b2, el("span", { class: "right muted", text: String(f.symbols) }));
+          return el("div", { class: "file-bar-row", "data-tip": f.path, "data-tip-rows": rows([["definitions reached", String(f.symbols)], ["nearest hop", String(f.nearest)]]) }, pathSpan(tilde(f.path), "", f.path), b2, el("span", { class: "right muted", text: String(f.symbols) }));
         }),
       ),
     ),
@@ -7166,7 +7237,7 @@ function pathTab(picker) {
             el(
               "div",
               { class: "support" },
-              el("div", { class: "row nowrap" }, el("span", { class: "mono t-m t-xs grow ell", text: tilde(l.at) }), pill(l.mark, /supporting/.test(l.mark) ? "blue" : "grey", { dot: false })),
+              el("div", { class: "row nowrap" }, pathSpan(tilde(l.at), "mono t-m t-xs grow", l.at), pill(l.mark, /supporting/.test(l.mark) ? "blue" : "grey", { dot: false })),
               el("div", { class: "code sm", text: l.code }),
               el("span", { class: "t-mono-sm", text: l.hop }),
             ),
@@ -8299,7 +8370,7 @@ async function fixRule(id) {
 VIEWS.settings = {
   needs: (route) => {
     const sec = route.parts[0] || "perf";
-    return sec === "perf" ? ["runs", "accel"] : sec === "access" ? ["about", "agents", "privacy"] : sec === "about" ? ["about", "languages", "prices", "helpers"] : ["about"];
+    return sec === "perf" ? ["runs", "accel"] : sec === "access" ? ["about", "agents", "privacy"] : sec === "about" ? ["about", "languages", "prices"] : ["about"];
   },
   live: ["runs"],
   morph: (route) => (route.parts[0] || "perf") === "perf",
@@ -8427,14 +8498,19 @@ function sePerf() {
             el("span", { class: "row gap8 t-m t13" }, `${l.label || laneName(l.lane)}${l.variant ? ` · ${l.variant}` : ""}`, l.experimental ? el("span", { class: "exp", text: "experimental" }) : null),
             el("span", { class: "muted t-xs", text: `${l.device || (na ? "no device found" : "named when it starts")} · ${laneState(l.status)}${(data.accel.bytes || {})[l.lane] ? ` · ${bytes(data.accel.bytes[l.lane])} on disk` : ""}` }),
           ),
-          el("span", { class: "t-mono-sm ink2 right nowrap", text: check ? `${check.cosine ? `cosine ${Number(check.cosine).toFixed(4)}` : check.ok ? "agrees" : "differs"}${check.rate ? ` · ${perSecond(check.rate)}/s` : ""}` : `${Math.round(l.share || 0)}% of the work` }),
+          el(
+            "span",
+            { class: "row gap8 nowrap" },
+            el("span", { class: "t-mono-sm ink2 right nowrap", text: check ? `${check.cosine ? `cosine ${Number(check.cosine).toFixed(4)}` : check.ok ? "agrees" : "differs"}${check.rate ? ` · ${perSecond(check.rate)}/s` : ""}` : `${Math.round(l.share || 0)}% of the work` }),
+            (data.accel.bytes || {})[l.lane] ? btn({ class: "btn xs", "aria-label": `Remove ${l.label || laneName(l.lane)}'s downloaded files`, onclick: () => laneRemove(l) }, "Remove") : null,
+          ),
         );
       }),
     ),
   ];
 }
 
-const seUi = { gpu: null, reveal: null, update: null, helpers: null };
+const seUi = { gpu: null, reveal: null, update: null };
 
 function cacheWord(vc) {
   if (!vc.cap_mb) return "off";
@@ -8460,6 +8536,23 @@ async function laneSwitch(l) {
   }
   const out = await act(() => post("/api/accel", { lane: l.lane, action: on ? "on" : "off" }), (o) => o.said || `${l.label || l.lane} ${on ? "on" : "off"}`);
   if (out) await load("accel", true), repaint();
+}
+
+// A lane's downloaded files, taken off the disk. A lane that is on is turned
+// off first: its files are in use, and the CPU (or another lane) carries on.
+async function laneRemove(l) {
+  const name = l.label || laneName(l.lane);
+  const size = bytes((data.accel.bytes || {})[l.lane] || 0);
+  const ok = await ask({
+    title: `Remove ${name}'s files?`,
+    body: `${l.enabled ? `${name} is turned off first, and the other lanes carry the work. ` : ""}${size} comes off the disk. Turning it on again downloads it again.`,
+    ok: "Remove",
+    danger: true,
+  });
+  if (!ok) return;
+  if (l.enabled && !(await act(() => post("/api/accel", { lane: l.lane, action: "off" }), null))) return;
+  const out = await act(() => post("/api/accel", { lane: l.lane, action: "remove" }), (o) => o.said || `${name}'s files removed`);
+  if (out || l.enabled) await load("accel", true), repaint();
 }
 
 async function checkLanes() {
@@ -8587,7 +8680,6 @@ function seAbout() {
   const langs = data.languages?.languages || [];
   const withGraph = new Set(a.graph_languages || []);
   const prices = data.prices || {};
-  const helpers = data.helpers || {};
   const up = seUi.update;
   return [
     el(
@@ -8626,21 +8718,6 @@ function seAbout() {
           el("span", { class: "card-t", text: "Prices" }),
           el("span", { class: "muted t-sm pretty", text: `${n(prices.models)} models priced, from ${prices.source || "the built-in table"}${prices.fetched ? ` (${prices.fetched})` : ""}. Savings in Reports and the Ledger are priced from this table.` }),
           btn({ class: "btn sm", onclick: updatePrices }, "Update prices"),
-        ),
-        el(
-          "div",
-          { class: "card pad" },
-          el("span", { class: "card-t", text: "Index from your file manager" }),
-          el("span", { class: "muted t-sm pretty", text: (helpers.helpers || []).length ? `${(helpers.helpers || []).map((h) => `${h.label} — ${h.installed ? "installed" : "off"}`).join(" · ")}. Each runs \`semlith index\` on what you select.` : "Not offered on this system." }),
-          (helpers.helpers || []).length
-            ? (() => {
-                const on = (helpers.helpers || []).every((h) => h.installed);
-                return toggle(on, on ? "Installed" : "Off", async (v) => {
-                  const out = await act(() => post("/api/helpers", { on: v }), v ? "Added to your file manager" : "Removed from your file manager");
-                  if (out) await load("helpers", true), repaint();
-                }, { cls: "t125" });
-              })()
-            : null,
         ),
         el("div", { class: "card pad dashed" }, el("span", { class: "card-t", text: "First-run screen" }), el("span", { class: "muted t-sm", text: "See the welcome and the machine checks again. Nothing is deleted." }), btn({ class: "btn sm dark", onclick: () => go("welcome") }, "Open the first-run screen")),
       ),
