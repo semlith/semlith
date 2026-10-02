@@ -2664,18 +2664,28 @@ function wizardScreen() {
       oninput: () => {
         const text = catcher.value;
         catcher.value = "";
+        endDrag();
         if (!/(^|\s)(file:\/\/|\/|~\/|[A-Za-z]:\\)/.test(text)) return;
         clearTimeout(w.dropWait);
         w.dropWait = null;
         addPasted(splitDropped(text));
       },
     });
+    const endDrag = () => {
+      w.drag = false;
+      zone.classList.remove("drag");
+      setText(zoneTitle, "Drop folders or files here");
+    };
     const zone = el(
       "div",
       {
         class: `dropzone${w.drag ? " drag" : ""}`,
         ondragover: (e) => {
-          e.preventDefault();
+          // Over the catcher in Safari the drag is left to the field: a page
+          // that accepts the drag itself (preventDefault here) makes WebKit
+          // treat the drop as the page's, and it then writes no path into
+          // the field. Everywhere else the zone accepts it.
+          if (!(e.target === catcher && writesDroppedPaths())) e.preventDefault();
           if (!w.drag) {
             w.drag = true;
             zone.classList.add("drag");
@@ -2689,9 +2699,7 @@ function wizardScreen() {
           setText(zoneTitle, "Drop folders or files here");
         },
         ondrop: (e) => {
-          w.drag = false;
-          zone.classList.remove("drag");
-          setText(zoneTitle, "Drop folders or files here");
+          endDrag();
           // Paths the drag carries as text are exact, in every browser.
           const text = e.dataTransfer && (e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain"));
           if (text && /^(file:\/\/|\/|~\/|[A-Za-z]:\\)/m.test(text)) {
@@ -3027,7 +3035,9 @@ function wizardScreen() {
   function splitDropped(text) {
     return String(text || "")
       .split(/\r?\n/)
-      .flatMap((line) => line.trim().split(/\s+(?=file:\/\/)/))
+      // Written one after another on a line: file:// URLs, or absolute paths,
+      // each starting where a space is followed by a slash or a drive.
+      .flatMap((line) => line.trim().split(/\s+(?=file:\/\/|\/|[A-Za-z]:\\)/))
       .filter(Boolean)
       .join("\n");
   }
