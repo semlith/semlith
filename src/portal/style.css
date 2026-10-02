@@ -5291,7 +5291,7 @@ button.gl-row:hover,
 /* The search page's mode switch stands beside a 44px field and matches it. */
 .sr-bar .seg.lg {
   height: 44px;
-  align-self: stretch;
+  align-self: center;
   flex-wrap: nowrap;
 }
 .sr-bar .seg.lg > button {
@@ -5435,4 +5435,117 @@ td.c-why {
 }
 .lane-row.na .switch {
   cursor: not-allowed;
+}
+
+/* Where breaking a word anywhere does harm: a table column would shrink to
+   one letter ("Forget" stood a letter per line and every row 127px tall),
+   and a control would break its own label. */
+td,
+th,
+button,
+.btn,
+.lnk,
+.pill,
+.tag,
+.chip,
+.meta,
+.nowrap {
+  overflow-wrap: normal;
+}
+
+/* The search toolbar is a block, its rows spaced by margin: as a column
+   flexbox it sized a row that wraps (the field, then the mode switch) as if
+   it did not, and the row below drew over the switch. */
+.sr-bar {
+  display: block;
+}
+.sr-bar > * + * {
+  margin-top: 10px;
+}
+
+/* A run's history: the opened detail stays inside its card. */
+.hist-open {
+  min-width: 0;
+  overflow: hidden;
+}
+
+@container app (max-width: 759px) {
+  /* Tabs and the Settings sections wrap instead of sliding out of sight. */
+  .tabs {
+    flex-wrap: wrap;
+    row-gap: 0;
+    column-gap: 16px;
+  }
+  .subnav {
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+  /* Graph's Path and Blast radius controls: each field takes the row, and
+     the swap goes to the end with the switches. */
+  .ctrl-card .inp {
+    flex: 1 1 calc(100% - 64px);
+  }
+  .ctrl-card .eyebrow {
+    min-width: 44px;
+  }
+  .ctrl-card > .btn.icon {
+    order: 10;
+  }
+  /* A run's history row: the time over the title rather than a 150px column. */
+  .hist-row {
+    grid-template-columns: 16px minmax(0, 1fr) auto;
+    row-gap: 2px;
+  }
+  .hist-row > :nth-child(2) {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .hist-row > :nth-child(3) {
+    grid-column: 2;
+    grid-row: 2;
+  }
+  .hist-row > :nth-child(4) {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+  .hist-open {
+    padding-left: 14px;
+  }
+  .log .ln,
+  .log.rounded .ln {
+    grid-template-columns: 52px 54px minmax(0, 1fr);
+    gap: 6px;
+  }
+}
+@container app (max-width: 759px) {
+  /* A review row on a phone: the file and why, then its risk, then the
+     decision, stacked, instead of a 780px row to scroll sideways. */
+  .gl-scroll > .minw780 {
+    min-width: 0;
+  }
+  .dec-grid {
+    grid-template-columns: 26px minmax(0, 1fr);
+    row-gap: 8px;
+  }
+  .dec-grid > :nth-child(3),
+  .dec-grid > :nth-child(4) {
+    grid-column: 2;
+  }
+  .dec-grid.head > :nth-child(3),
+  .dec-grid.head > :nth-child(4) {
+    display: none;
+  }
+  .dec-grid .acts .row {
+    flex-wrap: wrap;
+  }
+}
+/* A log's long lines are cut inside it rather than widening it past its
+   card. */
+.log,
+.hist-open > * {
+  min-width: 0;
+  max-width: 100%;
+}
+.log .ln {
+  min-width: 0;
 }

@@ -5921,13 +5921,10 @@ VIEWS.search = {
       ? el("span", { class: "filter-chip" }, "path", pathInput, btn({ "aria-label": "Remove path filter", onclick: () => ((sr.path = ""), (sr.pathOpen = false), repaint(), sr.query && runSearch()) }, icon(I.x, 10, { w: 2.4 })))
       : btn({ class: "chip dashed", onclick: () => ((sr.pathOpen = true), repaint(), setTimeout(() => shell.main.querySelector('[data-keep="sr-path"]')?.focus(), 0)) }, "+ path");
     const patternLang = dropdown({ label: "Pattern language", value: sr.patternLang || "", options: [["", "language…"], ...(data.about?.graph_languages || langs).map((l) => [l, l])], onChange: (v) => (sr.patternLang = v) });
-    fill(
-      bar,
-      el(
-        "div",
-        { class: "row top" },
-        el("div", { class: "sr-field" }, icon(I.searchSm, 16, { w: 1.8 }), input, clearBtn, el("span", { class: "vrule hide-sm" }), scopeBtn, btn({ class: "btn dark tight-sm", onclick: runSearch }, "Search")),
-        seg(
+    // Beside the field where there is room; on a narrow page at the start of
+    // the row below, as a row that wraps put it over that row.
+    const narrow = ((shell.main && shell.main.clientWidth) || 1200) < 760;
+    const modeSeg = seg(
           [
             ["ranked", "Ranked", null, "Spans ranked by meaning, words and the graph"],
             ["brief", "Brief", null, "What an agent's semlith_brief call returns"],
@@ -5943,11 +5940,19 @@ VIEWS.search = {
             if (sr.query && m !== "pattern") runSearch();
           },
           { cls: "lg", label: "Mode" },
-        ),
+        );
+    fill(
+      bar,
+      el(
+        "div",
+        { class: "row top" },
+        el("div", { class: "sr-field" }, icon(I.searchSm, 16, { w: 1.8 }), input, clearBtn, el("span", { class: "vrule hide-sm" }), scopeBtn, btn({ class: "btn dark tight-sm", onclick: runSearch }, "Search")),
+        narrow ? null : modeSeg,
       ),
       el(
         "div",
         { class: "row" },
+        narrow ? modeSeg : null,
         sr.mode === "pattern"
           ? [patternLang, el("span", { class: "muted t-xs", text: "Captures every node the query matches in that language's indexed files." })]
           : [
@@ -7016,6 +7021,17 @@ function exploreTab(picker) {
       deg[e.to] = (deg[e.to] || 0) + 1;
     }
     const near = new Set(keep.filter((e) => e.from === selIdx || e.to === selIdx).flatMap((e) => [e.from, e.to]));
+    // As many labels as the canvas has room for: sixty-three in a phone's
+    // width were a pile. The selected symbol, its neighbours, then the best
+    // connected, up to a count that grows with the width.
+    const width = live.clientWidth || 900;
+    const room = width < 520 ? 14 : width < 760 ? 24 : width < 1000 ? 40 : d.nodes.length;
+    const shown = new Set(
+      d.nodes
+        .map((_, i) => i)
+        .sort((a, b) => (b === selIdx) - (a === selIdx) || near.has(b) - near.has(a) || (deg[b] || 0) - (deg[a] || 0))
+        .slice(0, room),
+    );
     const nodes = d.nodes.map((nd, i) => ({
       id: String(i),
       label: nd.name,
@@ -7031,8 +7047,8 @@ function exploreTab(picker) {
         loadSymbol();
       },
     }));
-    const edges = keep.map((e) => ({ a: String(e.from), b: String(e.to), ...edgeStyle(e, isDark()) }));
-    liveCtl = drawLive(live, nodes, edges);
+    const edges = keep.filter((e) => shown.has(e.from) && shown.has(e.to)).map((e) => ({ a: String(e.from), b: String(e.to), ...edgeStyle(e, isDark()) }));
+    liveCtl = drawLive(live, nodes.filter((_, i) => shown.has(i)), edges);
     fill(
       foot,
       el(
@@ -7043,7 +7059,7 @@ function exploreTab(picker) {
         el("span", {}, el("i", { class: "dash" }), "ambiguous"),
       ),
       el("span", { class: "spacer" }),
-      el("span", { class: "muted", text: `${n(d.shown || d.nodes.length)} of ${n(d.total)} symbols · ${n(keep.length)} edges · drag or click a node` }),
+      el("span", { class: "muted", text: `${n(Math.min(shown.size, d.shown || d.nodes.length))} of ${n(d.total)} symbols · ${n(edges.length)} edges · drag or click a node` }),
     );
   }
 
