@@ -101,9 +101,13 @@ counted over the eight it is sent with.
 
 - A folder added to a running store is watched from that moment; it used to be
   indexed once and then not watched until the daemon restarted (#180).
-- A connection over the daemon's limit is answered 503 after its request is
-  read, instead of being dropped unread, which Windows and Linux turn into a
-  reset the portal showed as ERR_CONNECTION_RESET (#181).
+- A socket a browser opens ahead of its requests no longer holds a worker. One
+  sat in the request reader until the 30 s timeout, eight held the whole pool,
+  and the requests behind them queued past the connection limit into 503s and,
+  on Windows, resets the portal showed as ERR_CONNECTION_RESET (#181). A
+  connection now joins the pool when it has sent something; one over the limit
+  that has sent nothing is closed, and one that has is answered 503 after its
+  request is read.
 - The Graph route reads under a 15 s limit and answers 503 naming how to scope
   it past that, so no request holds a worker for minutes on a very large store
   (#173).

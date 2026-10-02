@@ -485,6 +485,11 @@ impl Server {
         refused: impl Fn(Refusal) + Send + Sync + 'static,
     ) -> Result<()> {
         let (tx, rx) = mpsc::channel::<(TcpStream, InFlight)>();
+        // Behind a slot, so shutdown can close the pool while a socket is
+        // still waiting for its first byte: a waiting thread holding a sender
+        // of its own would keep every worker's `recv` open until its read
+        // timed out.
+        let pool = Arc::new(Mutex::new(Some(tx)));
         let rx = Arc::new(Mutex::new(rx));
         let refused = Arc::new(refused);
         let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -602,13 +607,31 @@ impl Server {
                     let taken = live.fetch_add(1, Ordering::Relaxed);
                     let in_flight = InFlight(Arc::clone(&live), crate::priority::request());
                     if taken >= MAX_CONNECTIONS {
-                        refuse_busy(stream);
-                        drop(in_flight);
+                        // Off the accept loop: it may wait for the request.
+                        std::thread::spawn(move || {
+                            refuse_busy(stream);
+                            drop(in_flight);
+                        });
                         continue;
                     }
-                    if tx.send((stream, in_flight)).is_err() {
-                        break;
-                    }
+                    // To the pool only once it has said something. A browser
+                    // opens sockets ahead of the requests it will put on them,
+                    // and a worker that took one sat in `read_head` until the
+                    // 30 s read timeout: eight of them held the whole pool, and
+                    // the requests behind them queued past the limit into 503s
+                    // and, on Windows, resets (#181). A sleeping thread per
+                    // waiting socket is what that costs now, and the limit
+                    // above bounds how many.
+                    let pool = Arc::clone(&pool);
+                    std::thread::spawn(move || {
+                        let mut first = [0u8; 1];
+                        if matches!(stream.peek(&mut first), Ok(n) if n > 0)
+                            && let Some(tx) =
+                                pool.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                        {
+                            let _ = tx.send((stream, in_flight));
+                        }
+                    });
                     // A worker that ended for any reason is replaced here, so
                     // the pool is eight threads for as long as the daemon runs
                     // rather than eight minus however many requests have gone
@@ -634,7 +657,7 @@ impl Server {
 
         // Dropping the sender ends every worker's `recv`, so shutdown finishes
         // the requests in flight and starts no more.
-        drop(tx);
+        pool.lock().unwrap_or_else(|e| e.into_inner()).take();
         for worker in workers {
             let _ = worker.join();
         }
@@ -708,6 +731,14 @@ fn refuse_busy(mut stream: TcpStream) {
     let mut seen: Vec<u8> = Vec::new();
     let mut want: Option<usize> = None;
     let mut buf = [0u8; 8 * 1024];
+    // A socket that has sent nothing is closed rather than answered: it is a
+    // browser's spare, and a 503 sent before any request is bytes the browser
+    // reads as the answer to the request it later puts there. Closed, it opens
+    // another.
+    let mut first = [0u8; 1];
+    if !matches!(stream.peek(&mut first), Ok(n) if n > 0) {
+        return;
+    }
     while seen.len() < BUSY_DRAIN && started.elapsed() < BUSY_READ {
         if want.is_some_and(|total| seen.len() >= total) {
             break;

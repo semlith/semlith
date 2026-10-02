@@ -822,6 +822,38 @@ fn a_daemon_with_no_store_still_serves_the_portal() {
     assert_eq!(daemon.get("/").status, 200);
 }
 
+/// Connections that are open but have sent nothing -- the sockets a browser
+/// opens ahead of the requests it will put on them -- hold up no request and
+/// push none over the limit. Eight of them held all eight workers for the 30 s
+/// read timeout, and the requests behind them queued past the limit into 503s
+/// and, on Windows, resets (#181).
+#[test]
+fn idle_connections_hold_up_no_request() {
+    let daemon = Daemon::start("idle", &[]);
+    let idle: Vec<TcpStream> = (0..12)
+        .map(|_| TcpStream::connect(("127.0.0.1", daemon.port)).expect("the daemon listens"))
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+
+    let started = std::time::Instant::now();
+    let answers: Vec<u16> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..20)
+            .map(|_| s.spawn(|| daemon.get("/api/stores").status))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let took = started.elapsed();
+    assert!(
+        answers.iter().all(|s| *s == 200),
+        "requests behind idle connections were refused: {answers:?}"
+    );
+    assert!(
+        took < Duration::from_secs(5),
+        "twenty requests behind twelve idle connections took {took:?}"
+    );
+    drop(idle);
+}
+
 /// The daemon is the writer for its whole life, so a second writer is refused
 /// — which is the conflict the daemon exists to make impossible rather than
 /// merely unlikely.
