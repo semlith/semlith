@@ -4402,11 +4402,21 @@ def _(d):
     cpu = rows[names.index("CPU")]
     if "active" not in cpu["state"]:
         fail("the CPU row reads %r; the CPU lane is always active" % cpu["state"])
-    for row, lane in zip(rows, lanes):
+    # Matched by name: from 0.35.0 the lanes this machine cannot run are
+    # listed after the others, under their own line, and read "off".
+    by_label = {(l.get("label") or l["lane"]): l for l in lanes}
+    for row, name in zip(rows, names):
+        lane = by_label.get(name)
+        if lane is None:
+            fail("the lanes card lists %r, which /api/accel does not report" % name)
         if row["on"] != ("true" if lane.get("enabled") else "false"):
             fail("the %s switch reads %s and the daemon has it %s"
                  % (row["title"], row["on"], "on" if lane.get("enabled") else "off"))
-        if not re.match(r"^\d+% of the work$", row["share"]) and not row["share"].startswith(("cosine", "agrees", "differs")):
+        unavailable = (lane.get("status") or {}).get("state") == "unavailable"
+        if unavailable:
+            if row["share"] != "off":
+                fail("the %s row cannot run here and reads %r, not 'off'" % (row["title"], row["share"]))
+        elif not re.match(r"^\d+% of the work$", row["share"]) and not row["share"].startswith(("cosine", "agrees", "differs")):
             fail("the %s row's share of the work reads %r, not 'N%% of the work'" % (row["title"], row["share"]))
 
     # A lane that downloads before it runs asks first, naming the size.

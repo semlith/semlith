@@ -5012,9 +5012,9 @@ VIEWS.store = {
         el(
           "div",
           { class: "row" },
-          btn({ class: "btn", onclick: () => searchStore(name) }, icon(I.searchSm, 14, { w: 1.8 }), "Search it"),
-          btn({ class: "btn", disabled: r || isEmpty || s.missing || rootsGone(s) ? true : null, "data-tip": rootsGone(s) ? "Every folder this store reads from is gone — re-point it on Settings" : null, onclick: () => reindexStore(name) }, "Re-index"),
-          btn({ class: "btn dark", onclick: () => openWizard({ store: name }) }, icon(I.plus, 14, { w: 2.2 }), "Add sources"),
+          btn({ class: "btn md", onclick: () => searchStore(name) }, icon(I.searchSm, 16, { w: 1.9 }), "Search it"),
+          btn({ class: "btn md", disabled: r || isEmpty || s.missing || rootsGone(s) ? true : null, "data-tip": rootsGone(s) ? "Every folder this store reads from is gone — re-point it on Settings" : null, onclick: () => reindexStore(name) }, "Re-index"),
+          btn({ class: "btn md dark", onclick: () => openWizard({ store: name }) }, icon(I.plus, 15, { w: 2.2 }), "Add sources"),
         ),
       ),
       tabs(
@@ -8717,24 +8717,31 @@ function sePerf() {
       { class: "card" },
       el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Where embedding runs" }), btn({ class: "btn sm t125", onclick: checkLanes }, seUi.gpu ? "Run the check again" : "Check each lane against the CPU")),
       data.accel?.cpu_fallback ? el("div", { class: "card-note", text: "The CPU is carrying the work: no other lane can." }) : null,
-      lanes.map((l) => {
+      // Lanes this machine can run first; the ones built for another OS or
+      // hardware after them, under their own line, switched off and said so
+      // in a few words rather than a row that reads like the others.
+      [...lanes.filter((l) => l.status?.state !== "unavailable"), ...lanes.filter((l) => l.status?.state === "unavailable")].map((l, i, all) => {
         const na = ["unavailable"].includes(l.status?.state);
+        const firstNa = na && (i === 0 || all[i - 1].status?.state !== "unavailable");
         const check = seUi.gpu && (seUi.gpu.checks || []).find((x) => x.lane === l.lane);
-        return el(
+        const row = el(
           "div",
-          { class: `lane-row${na ? " off" : ""}` },
+          { class: `lane-row${na ? " off na" : ""}`, "aria-disabled": na ? "true" : null },
           btn({ class: `switch${l.enabled ? " on" : ""}`, role: "switch", "aria-checked": String(!!l.enabled), "aria-label": `${l.label || l.lane} lane`, disabled: na ? true : null, onclick: () => laneSwitch(l) }, el("span", { class: "tg" })),
           el(
             "span",
             { class: "col" },
             el("span", { class: "row gap8 t-m t13" }, `${l.label || laneName(l.lane)}${l.variant ? ` · ${l.variant}` : ""}`, l.experimental ? el("span", { class: "exp", text: "experimental" }) : null),
-            el("span", { class: "muted t-xs", text: `${l.device || (na ? "no device found" : "named when it starts")} · ${laneState(l.status)}${(data.accel.bytes || {})[l.lane] ? ` · ${bytes(data.accel.bytes[l.lane])} on disk` : ""}` }),
+            na
+              ? el("span", { class: "muted t-xs", text: `Not available on this ${osWord()}: ${String(l.status?.reason || "").replace(/^the .*? lane (is )?/i, "").replace(/^unavailable — /, "")}` })
+              : el("span", { class: "muted t-xs", text: `${l.device || "named when it starts"} · ${laneState(l.status)}${(data.accel.bytes || {})[l.lane] ? ` · ${bytes(data.accel.bytes[l.lane])} on disk` : ""}` }),
           ),
-          check ? laneCheck(check) : el("span", { class: "t-mono-sm ink2 right nowrap", text: `${Math.round(l.share || 0)}% of the work` }),
+          na ? el("span", { class: "t-mono-sm muted right nowrap", text: "off" }) : check ? laneCheck(check) : el("span", { class: "t-mono-sm ink2 right nowrap", text: `${Math.round(l.share || 0)}% of the work` }),
           // Its own column at the far right, kept on every row, so the share
           // column lines up whether or not a lane has files to remove.
           el("span", { class: "lane-act" }, (data.accel.bytes || {})[l.lane] ? btn({ class: "btn xs", "aria-label": `Remove ${l.label || laneName(l.lane)}'s downloaded files`, onclick: () => laneRemove(l) }, "Remove") : null),
         );
+        return firstNa ? [el("div", { class: "lane-group", text: `Not for this ${osWord()}` }), row] : row;
       }),
     ),
   ];
@@ -8783,6 +8790,12 @@ async function laneRemove(l) {
   if (l.enabled && !(await act(() => post("/api/accel", { lane: l.lane, action: "off" }), null))) return;
   const out = await act(() => post("/api/accel", { lane: l.lane, action: "remove" }), (o) => o.said || `${name}'s files removed`);
   if (out || l.enabled) await load("accel", true), repaint();
+}
+
+// "Mac", "Windows" or "Linux", for the lanes this machine cannot run.
+function osWord() {
+  const ua = navigator.userAgent || "";
+  return /Mac/.test(ua) ? "Mac" : /Windows/.test(ua) ? "Windows PC" : /Linux|X11/.test(ua) ? "Linux machine" : "machine";
 }
 
 // One lane's answer from the known-answer check, where its share sits: it

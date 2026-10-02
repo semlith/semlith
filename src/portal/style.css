@@ -5419,3 +5419,20 @@ td.c-why {
 .bitem .open {
   user-select: none;
 }
+/* Lanes built for another OS or hardware: under their own line, and plainly
+   off rather than a row that reads like the others. */
+.lane-group {
+  padding: 8px 14px 6px;
+  font: 500 11px var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+.lane-row.na {
+  opacity: 0.5;
+}
+.lane-row.na .switch {
+  cursor: not-allowed;
+}
