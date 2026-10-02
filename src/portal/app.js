@@ -1014,7 +1014,10 @@ function ask({ title, body, ok, cancel, danger, extra, wide }) {
       extra || null,
       el("div", { class: "acts" }, btn({ class: "btn", onclick: () => done(false) }, cancel || "Cancel"), okButton),
     );
-    const scrim = el("div", { class: "modal-scrim", onclick: (e) => e.target === scrim && done(false) }, modal);
+    // Closed by its buttons or Escape only: a click outside, or one that
+    // starts inside (selecting the path, say) and ends outside, is not an
+    // answer.
+    const scrim = el("div", { class: "modal-scrim" }, modal);
     document.body.append(scrim);
     document.addEventListener("keydown", onKey, true);
     okButton.focus();
@@ -2272,7 +2275,9 @@ function pickFolder({ title, ok, hint, start, confirm }) {
       err,
       el("div", { class: "acts" }, btn({ class: "btn", onclick: () => done(null) }, "Cancel"), btn({ class: "btn primary", onclick: (e) => listing && choose(e.currentTarget) }, ok || "Use this folder")),
     );
-    const scrim = el("div", { class: "modal-scrim", onclick: (e) => e.target === scrim && done(null) }, modal);
+    // Closed by Cancel, its close button or Escape only: a click outside, or
+    // one that starts inside and ends outside, is not a choice.
+    const scrim = el("div", { class: "modal-scrim" }, modal);
     const onKey = (e) => e.key === "Escape" && done(null);
     function done(v) {
       scrim.remove();
@@ -2652,17 +2657,18 @@ function wizardScreen() {
   // ---- step 2: sources
   function step2() {
     // A drop goes through three ways of finding where it sits, in order:
-    //  1. The path catcher: an unseen text field over the whole zone. A
-    //     browser that writes a dropped item's real path into a text field
-    //     (Safari does) hands it over here, exactly, with no lookup.
-    //  2. The daemon lookup, from the item's name, size and time, when
-    //     nothing was written into the catcher (Chrome writes nothing).
+    //  1. The real path, when the browser gives one: a drag that carries
+    //     path text (any browser), or Safari, which writes a dropped item's
+    //     path into a text field — the unseen catcher over the whole zone.
+    //  2. The daemon lookup, from the item's name, size and time.
     //  3. The paste box, when the lookup finds nothing.
-    // The zone never accepts the drag itself: a browser decides while the
-    // drag moves whether a drop is text for a field, and a page that accepted
-    // it on the way in got a drop with no path in it (dropEffect none, no
-    // input event), where the paste box, with nothing above it accepting
-    // anything, was given the path. The zone's buttons sit above the catcher.
+    // In Safari the zone never accepts the drag itself: Safari decides while
+    // the drag moves whether a drop is text for a field, and a page that
+    // accepted it on the way in got a drop with no path in it. Chrome and
+    // Firefox write no path into a field and, unless the page accepts the
+    // drag, deliver no drop at all, so there the zone accepts it and goes
+    // straight to the lookup.
+    const native = /^Apple/.test(navigator.vendor || "");
     const catcher = el("input", {
       type: "text",
       class: "drop-catch",
@@ -2690,8 +2696,9 @@ function wizardScreen() {
     const zone = el(
       "div",
       {
-        class: `dropzone${w.drag ? " drag" : ""}`,
-        ondragover: () => {
+        class: `dropzone${w.drag ? " drag" : ""}${native ? " native" : ""}`,
+        ondragover: (e) => {
+          if (!native) e.preventDefault();
           if (!w.drag) {
             w.drag = true;
             zone.classList.add("drag");
@@ -2715,12 +2722,14 @@ function wizardScreen() {
           }
           // What the lookup needs has to be read now, while the drop lasts.
           const taken = takeDrop(e.dataTransfer);
-          // Not prevented, so a browser that writes paths into a field can:
-          // the catcher's input event adds them and cancels the lookup, which
-          // otherwise runs after a moment. A browser that would open a file
-          // dropped on a field it does not fill is asked to stay instead.
+          if (!native) {
+            e.preventDefault();
+            return resolveDrop(taken);
+          }
+          // Safari: not prevented, so it writes the paths into the catcher,
+          // whose input event adds them and cancels the lookup that otherwise
+          // runs after a moment.
           catcher.value = "";
-          guardDropNavigation();
           clearTimeout(w.dropWait);
           w.dropWait = setTimeout(() => {
             w.dropWait = null;
@@ -3073,18 +3082,7 @@ function wizardScreen() {
       .join("\n");
   }
 
-  // For a moment after a drop the page asks before it is left: a browser
-  // that opens a dropped file it could not write into the catcher would
-  // otherwise navigate away from the wizard. Chrome was seen not to; this is
-  // for any that do.
-  function guardDropNavigation() {
-    const stay = (e) => {
-      e.preventDefault();
-      e.returnValue = "";
-    };
-    window.addEventListener("beforeunload", stay);
-    setTimeout(() => window.removeEventListener("beforeunload", stay), 1500);
-  }
+
 
   // The drop's items, read while the event lasts: a DataTransfer is emptied
   // the moment its event returns.

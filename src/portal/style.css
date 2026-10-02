@@ -5385,18 +5385,21 @@ td.c-why {
   z-index: 2;
 }
 .drop-catch {
-  pointer-events: auto;
+  pointer-events: none;
   caret-color: transparent;
 }
-/* The catcher is live over the whole zone; the zone's buttons sit above it
-   so they stay pressable. */
-.dropzone > .row {
+/* In Safari the catcher is live over the whole zone, so a drop lands in it;
+   the zone's buttons sit above it so they stay pressable, and below it while
+   something is dragged, so a drop is never taken by a button. Elsewhere the
+   zone itself takes the drop. */
+.dropzone.native .drop-catch {
+  pointer-events: auto;
+}
+.dropzone.native > .row {
   position: relative;
   z-index: 3;
 }
-/* While something is dragged over the zone the catcher is on top of the
-   buttons too, so a drop is never taken by a button. */
-.dropzone.drag > .row {
+.dropzone.native.drag > .row {
   z-index: 1;
 }
 /* A lane check's answer, in the row of the lane it is about. */
