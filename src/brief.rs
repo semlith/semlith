@@ -288,7 +288,7 @@ pub fn brief_leaning(
         // From the span's own store: across a fleet, a name shared by two
         // repositories would otherwise mix their edges under one heading.
         let own = hit.store.as_ref().map(std::slice::from_ref);
-        let mut found = fleet.neighbours_in(own.or(only), name, &[], false)?;
+        let mut found = fleet.neighbours_in(own.or(only), name, &[], false, filter)?;
         if code {
             found.callers.retain(|e| !navigational(&e.symbol.kind));
             found.callees.retain(|e| !navigational(&e.symbol.kind));

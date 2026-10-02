@@ -2899,6 +2899,10 @@ fn read(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn symbol(state: &Arc<State>, request: &Request) -> Response {
+    let filter = match filter_of(request) {
+        Ok(f) => f,
+        Err(e) => return Response::error(400, &e),
+    };
     // Several names: the definitions table `semlith symbol a b c` prints.
     if let Some(names) = request.query("names").filter(|n| n.contains(',')) {
         let names: Vec<String> = names
@@ -2911,7 +2915,7 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
         let only = request.query_all("store");
         return with_fleet(state, json!({ "table": [] }), move |fleet| {
             let only = (!only.is_empty()).then_some(only);
-            Ok(json!({ "table": fleet.signatures_in(only.as_deref(), &names)? }))
+            Ok(json!({ "table": fleet.signatures_in(only.as_deref(), &names, &filter)? }))
         });
     }
     let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
@@ -2932,6 +2936,7 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
             &crate::graph::dependency_kinds(),
             k,
             false,
+            &filter,
         )?;
         // `symbols` stays where it was so the portal's existing symbol lookup
         // is unchanged; the rest of the block is beside it rather than in
@@ -2952,6 +2957,10 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn neighbors(state: &Arc<State>, request: &Request) -> Response {
+    let filter = match filter_of(request) {
+        Ok(f) => f,
+        Err(e) => return Response::error(400, &e),
+    };
     let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
         return Response::error(400, "missing name");
     };
@@ -2974,7 +2983,8 @@ fn neighbors(state: &Arc<State>, request: &Request) -> Response {
             only.as_deref(),
             &name,
             &kinds,
-            all
+            all,
+            &filter
         )?))
     })
 }
@@ -3016,6 +3026,10 @@ fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
 /// reason: a caller that crosses a name with several definitions is a guess,
 /// so the default refuses and the page says so when it asks anyway.
 fn impact(state: &Arc<State>, request: &Request) -> Response {
+    let filter = match filter_of(request) {
+        Ok(f) => f,
+        Err(e) => return Response::error(400, &e),
+    };
     let Some(name) = request.query("name") else {
         return Response::error(400, "missing name");
     };
@@ -3032,7 +3046,7 @@ fn impact(state: &Arc<State>, request: &Request) -> Response {
         .is_some_and(|v| v == "1" || v == "true");
     with_fleet(state, json!({ "impact": null }), move |fleet| {
         let only = (!only.is_empty()).then_some(only);
-        let impact = fleet.impact_in(only.as_deref(), &name, &kinds, depth, all_edges)?;
+        let impact = fleet.impact_in(only.as_deref(), &name, &kinds, depth, all_edges, &filter)?;
         Ok(json!({
             "impact": impact,
             "headline": impact.headline(),

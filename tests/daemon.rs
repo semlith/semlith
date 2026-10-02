@@ -1319,7 +1319,7 @@ fn every_revision_proves_itself_through_the_proxy_too() {
         // reason, which is exactly what happened when the graph tools landed.
         assert_eq!(
             names,
-            semlith::mcp::tool_names(),
+            semlith::mcp::listed_names(),
             "wrong tool surface on {revision} through the proxy"
         );
 

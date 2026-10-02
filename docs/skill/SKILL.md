@@ -1,98 +1,47 @@
 ---
 name: semlith
-description: Use FIRST for any question about code in a folder semlith has indexed — how something works (semlith_brief), where it is defined or used, what calls it, what breaks if it changes, how A reaches B, what a directory holds, or where a planned change would land — before grep, rg, git grep, find, cat, sed, awk or Read — including every-occurrence sweeps (every TODO, every use of a string or regex: semlith_search with exact: true). Also use when handing code research to a subagent. Skip only for git history and the exact read right before an edit.
+description: Use FIRST for any question about code in a folder semlith has indexed — where X is (semlith_search), who calls it (semlith_neighbors), what breaks if it changes (semlith_impact), every line matching a string or regex (semlith_search exact: true) — before grep, rg, find, cat or Read. Skip only for git history and the exact read right before an edit.
 ---
 
 # semlith
 
 The `semlith_*` MCP tools hold a pre-built index of the folders semlith covers:
-chunks, embeddings, parsed symbols and call edges. One call replaces a round of
-grep + read, returns only the lines that bear on the question, and gives
-`path:line` you can cite. Make a semlith call your first lookup for every code
-question, and keep using it until the question is answered.
+chunks, embeddings, symbols and call edges. One call returns the lines that bear
+on the question with a `path:line` you can cite.
 
 ## Pick the tool by the question
 
 | The question | Call |
 |---|---|
-| How does X work? / explain X | `semlith_brief {question}`, in the user's words |
-| Where is X? / which files handle X? | `semlith_search {query}` |
-| Every line containing a string or regex (every TODO, every `Hit {`) | `semlith_search {query, exact: true}` |
-| What breaks if X changes? / who calls X? / every call site | `semlith_impact {name}` |
-| What does X call, one hop either way? | `semlith_neighbors {name}` |
-| How does A reach B? / trace the flow | `semlith_trace {from, to}` (`semlith_path` for yes or no) |
-| This span / this whole function | `semlith_read {target}`: `path:start-end` or a symbol name |
-| Several definitions at once | `semlith_symbol {names: [...]}`, up to 20 |
-| What is in this directory? / where would X live? | `semlith_files {tree: true}` |
-| Every construct of shape Y | `semlith_pattern {query, lang}`, a tree-sitter query |
+| Where is X? / how does X work? / which files handle X? | `semlith_search {query}` |
+| Every line matching a string or regex (every TODO) | `semlith_search {query, exact: true}` |
+| Who calls X? / every call site of X | `semlith_neighbors {name}` |
+| What breaks if X changes? | `semlith_impact {name}` |
+| This span / this whole function | `semlith_read {target}`: `path:start-end` or a symbol |
+| Where are these defined? | `semlith_symbol {names: [...]}`, up to 20 |
+| A span plus its callers and callees in one call | `semlith_brief {question}` |
+| What is in this directory? | `semlith_files {tree: true}` |
 
-Planning a change or tracing a flow: `semlith_brief` for the core, then
-`semlith_impact` or `semlith_trace` on the central symbols it names, then read
-each central symbol whole (`semlith_read` by name) before you answer.
+A store that holds several repositories: pass `path: ["<repo>/**"]` to every
+call. Unscoped, a name defined in another repository can answer first; scoped,
+search, symbol, neighbors, impact and brief see only that repository.
 
-A repository you have not looked at yet: `semlith_files {tree: true, store}`
-first, then read the map it keeps, if the tree shows one (README, AGENTS.md,
-docs/architecture). What depends on code in another repository: the graph
-covers one store, so add an exact search for the depended-on name in each other
-store; it finds the manifest line that pins the version as well as the uses.
-
-## What the tools take and return
-
-- `semlith_impact` accepts `Type::method`, `module::function` and `Type.method`.
-  Rows carry call-site lines. Past 16 000 characters it gives per-file counts
-  and a `more:` line. `semlith_symbol` and `semlith_neighbors` share that cap; a
-  caller of a name with several definitions shows `→ Type::method`.
-- `semlith_read` takes paths relative to the store root. A bare path reads the
-  file, or past 8 000 characters lists its definitions to read. A symbol name returns
-  every definition whole (`Type::method` narrows), up to 32 000 characters. A
-  file edited since indexing is read from disk and marked.
-- `semlith_search` rows read `start-end name kind @defline · lists | best line`,
-  with paths relative to the `root …` header. Identical copies collapse to
-  `also in N copies`. `format: "excerpt"` adds text.
-- `semlith_search {exact: true}` is grep -E over every indexed file: a count
-  line, then each file once and its matching lines as `line definition | text`,
-  so the enclosing function comes with the hit. A query that is not a valid
-  regex is searched as literal text. Past `max_tokens` (default 1500) the rest
-  are per-file counts, with the `offset` that continues. `path`, `ext` and `lang` narrow it like any search.
-- `semlith_brief` gives text for one span, the best code span for a code
-  question, plus one-hop edges. `semlith_read` the other spans you need.
-- `semlith_files {tree: true, depth, sort: name|size|symbols|recent}` shows
-  directories with counts and languages, per-file lines, symbols and first
-  definitions, and what is on disk but not indexed, and why. Capped at 8 000
-  characters.
-
-`path`, `ext` and `lang` filter search, files and pattern: globs, repeats
-union, kinds intersect, a leading `!` excludes. Tests and fixtures rank below
-product code unless the query names tests. For a question about product code,
-add `path: ["src/**"]` (or the repo's source root) to keep them out entirely.
-Filtering happens before ranking, so narrowing improves the answer too.
+`path`, `ext` and `lang` take globs; a leading `!` excludes. Tests rank below
+product code unless the query names tests.
 
 ## Rules
 
-1. **First lookup is semlith.** Do not open with grep, rg, find, cat, sed or
-   Read on indexed source. Bash `grep`/`rg` is the same habit as the Grep tool,
-   and `sed -n`/`awk` to see lines or find the enclosing function is the same
-   habit as Read: `semlith_read` and exact search answer both.
-2. **Read spans, not files.** Use the host `Read` (with `offset`/`limit`) only
-   for the exact text right before an edit, or for a file that is not indexed.
-3. **Delegating?** Subagents do not see this skill. Put this line in their
-   prompt: "Use the semlith MCP tools (semlith_brief, semlith_search,
-   semlith_impact, semlith_read) for every code lookup, and semlith_search with
-   exact: true in place of grep." In Claude Code, pick `semlith-explorer` over `Explore`.
-4. **Fall back per question, not per session.** If an answer is thin or wrong,
-   say so in one line, use grep/Read for that question only, and return to
-   semlith for the next.
-5. **Never call `semlith_index`, `semlith_add` or `semlith_forget`** unless the
-   user asked to change the index. They write; a refusal is not a reason to.
+1. **First lookup is semlith**, not grep, rg, find, cat, sed or Read on indexed
+   source. Use Read only for the exact text right before an edit.
+2. **Delegating?** Subagents do not see this skill. Tell them: "Use the semlith
+   MCP tools for every code lookup, semlith_search with exact: true in place of
+   grep." In Claude Code, pick `semlith-explorer` over `Explore`.
+3. **Fall back per question.** If an answer is thin, say so, use grep/Read for
+   that question only, and return to semlith for the next.
+4. Not listed by default but callable by name: `semlith_path`, `semlith_trace`,
+   `semlith_pattern`, `semlith_report`, `semlith_languages`, and the writes
+   `semlith_index`, `semlith_add`, `semlith_forget` — never call a write unless
+   the user asked to change the index.
 
-## Limits
-
-- 16 tools: `semlith_search`, `semlith_brief`, `semlith_read`, `semlith_symbol`,
-  `semlith_neighbors`, `semlith_path`, `semlith_trace`, `semlith_impact`,
-  `semlith_files`, `semlith_pattern`, `semlith_stats`, `semlith_languages`,
-  `semlith_report`, `semlith_index`, `semlith_add`, `semlith_forget`.
-- Exact search reads what the index holds: a file edited since the last index
-  pass answers as it was, and a file that is not indexed is not searched.
-- Multi-store search merges on rank, so never compare scores across stores.
-- Only indexed paths are known. Check `semlith_files` before concluding that
-  something does not exist.
+Only indexed paths are known: check `semlith_files` before concluding something
+does not exist.

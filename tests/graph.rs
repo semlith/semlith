@@ -381,7 +381,14 @@ fn the_three_commands_answer_and_neighbours_agrees_with_a_sweep() {
         .iter()
         .map(|k| k.to_string())
         .collect();
-    let around = semlith::graph::neighbours(s.db(), "release", &kinds, false).unwrap();
+    let around = semlith::graph::neighbours(
+        s.db(),
+        "release",
+        &kinds,
+        false,
+        &semlith::graph::Scope::all(),
+    )
+    .unwrap();
     let names: Vec<String> = around
         .callers
         .iter()
@@ -656,7 +663,8 @@ fn search_returns_no_hit_found_only_through_the_graph() {
         .unwrap();
 
     assert!(
-        hits.iter().all(|h| !h.lists.is_empty() && !h.lists.contains(&"graph")),
+        hits.iter()
+            .all(|h| !h.lists.is_empty() && !h.lists.contains(&"graph")),
         "a hit says the graph found it: {:?}",
         hits.iter().map(|h| (&h.path, &h.lists)).collect::<Vec<_>>()
     );

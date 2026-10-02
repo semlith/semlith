@@ -505,8 +505,10 @@ fn the_retrieval_metrics_are_measured() {
     // 0.33.0 moved it by exactly what `"items": {"type": "string"}` on
     // thirteen array parameters costs — 338 bytes, 85 tokens — because Copilot
     // in VS Code refuses a whole chat over an array without it.
+    // 0.36.0 cut it to 2 633 bytes, eight listed tools; see
+    // `the_tool_list_stays_small`.
     assert!(
-        tool_tokens < 1_685,
+        tool_tokens < 675,
         "tools/list is {tool_list} bytes, about {tool_tokens} tokens, and every agent \
          pays it once per session"
     );
@@ -1429,8 +1431,15 @@ fn score_read(semlith: &Semlith, root: &Path, question: &Question, report: &mut 
 fn score_symbol(semlith: &Semlith, root: &Path, question: &Question, report: &mut Report) {
     report.scored += 1;
     let kinds = semlith::graph::dependency_kinds();
-    let evidence = semlith::graph::evidence(semlith.db(), &question.name, &kinds, 8, false)
-        .unwrap_or_else(|e| panic!("{}: symbol failed: {e}", question.id));
+    let evidence = semlith::graph::evidence(
+        semlith.db(),
+        &question.name,
+        &kinds,
+        8,
+        false,
+        &semlith::graph::Scope::all(),
+    )
+    .unwrap_or_else(|e| panic!("{}: symbol failed: {e}", question.id));
     report.bytes.push(
         evidence
             .render("", "", &|path: &str| path.to_string())
@@ -1464,8 +1473,14 @@ fn score_neighbors(semlith: &Semlith, root: &Path, question: &Question, report: 
     } else {
         question.kinds.clone()
     };
-    let ring = semlith::graph::neighbours(semlith.db(), &question.name, &kinds, false)
-        .unwrap_or_else(|e| panic!("{}: neighbors failed: {e}", question.id));
+    let ring = semlith::graph::neighbours(
+        semlith.db(),
+        &question.name,
+        &kinds,
+        false,
+        &semlith::graph::Scope::all(),
+    )
+    .unwrap_or_else(|e| panic!("{}: neighbors failed: {e}", question.id));
     let side = match question.want.as_str() {
         "callers" => &ring.callers,
         "callees" => &ring.callees,

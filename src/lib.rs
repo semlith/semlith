@@ -4793,7 +4793,7 @@ impl Semlith {
                             symbol: None,
                             symbol_kind: None,
                             symbol_line: None,
-                                copies: Vec::new(),
+                            copies: Vec::new(),
                         },
                         0.0,
                     ));

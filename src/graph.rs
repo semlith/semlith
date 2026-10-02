@@ -1868,6 +1868,67 @@ pub fn not_connected(from: &str, to: &str, depth: u32, all_edges: bool) -> Strin
     }
 }
 
+/// Which files a graph answer may name: all of them, or the ones a path,
+/// extension or language filter selects.
+///
+/// A store that holds many repositories holds many `run`s and `get`s, and on
+/// the 727-question benchmark of 2026-10-01 caller precision was lost to
+/// exactly that: definitions and callers from the other repositories. A scope
+/// narrows the definitions in SQL (`symbols_by_names` takes the filter's own
+/// predicate, so a name defined five hundred times outside the scope is not
+/// read at all) and keeps out every caller, callee and reached row whose file
+/// the filter does not select. `impact` checks it per hop, so a scoped walk
+/// never expands from outside the scope.
+#[derive(Debug, Default, Clone)]
+pub struct Scope {
+    groups: Vec<Vec<String>>,
+    paths: Option<std::collections::HashSet<String>>,
+}
+
+impl Scope {
+    /// Every file in the store.
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    /// The files `filter` selects in this store; [`Scope::all`] for an empty
+    /// filter, with no query.
+    pub fn of(db: &rusqlite::Connection, filter: &crate::filter::Filter) -> Result<Self> {
+        if filter.is_empty() {
+            return Ok(Self::all());
+        }
+        let paths = crate::store::filtered_paths(db, filter.groups())?;
+        Ok(Self {
+            groups: filter.groups().to_vec(),
+            paths: Some(paths.into_iter().collect()),
+        })
+    }
+
+    /// Whether a row in `path` belongs in the answer.
+    pub fn holds(&self, path: &str) -> bool {
+        self.paths.as_ref().is_none_or(|p| p.contains(path))
+    }
+
+    /// The definitions of `name` inside the scope, at most `limit`.
+    fn definitions(
+        &self,
+        db: &rusqlite::Connection,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::store::SymbolRow>> {
+        if self.paths.is_none() {
+            return crate::store::symbols_named(db, name, limit);
+        }
+        let mut rows = crate::store::symbols_by_names(
+            db,
+            std::slice::from_ref(&name.to_string()),
+            &self.groups,
+        )?;
+        rows.truncate(limit);
+        Ok(rows)
+    }
+}
+
 /// One hop in each direction around `name`.
 ///
 /// `all` widens the answer in the two ways it is narrow. Without it, callees
@@ -1884,9 +1945,12 @@ pub fn neighbours(
     name: &str,
     kinds: &[String],
     all: bool,
+    scope: &Scope,
 ) -> Result<Neighbours> {
     let (qualifier, bare) = split_qualified(name);
-    let definitions = crate::store::symbols_named(db, bare, 64)?;
+    let definitions = scope.definitions(db, bare, 64)?;
+    let scoped = scope.paths.is_some();
+    let defined: Vec<i64> = definitions.iter().map(|d| d.id).collect();
     // A qualifier that owns nothing is ignored rather than answered with
     // nothing: the bare name is the nearest true answer.
     let owned: Vec<&crate::store::SymbolRow> = match qualifier {
@@ -1898,6 +1962,14 @@ pub fn neighbours(
     let mut callers = Vec::new();
     for incoming in crate::store::edges_in_resolved(db, bare, kinds)? {
         if !owned_ids.is_empty() && !incoming.means.iter().any(|m| owned_ids.contains(m)) {
+            continue;
+        }
+        // In scope means the caller's file is selected and what it called is
+        // one of the definitions the scope holds, not a namesake elsewhere.
+        if scoped
+            && (!scope.holds(&incoming.end.symbol.path)
+                || !incoming.means.iter().any(|m| defined.contains(m)))
+        {
             continue;
         }
         let mut end = incoming.end;
@@ -1916,6 +1988,11 @@ pub fn neighbours(
     }
 
     let mut callees = crate::store::edges_out(db, bare, kinds)?;
+    if scoped {
+        callees.retain(|e| {
+            e.from_path.as_deref().is_some_and(|p| scope.holds(p)) && scope.holds(&e.symbol.path)
+        });
+    }
     if !owned.is_empty() {
         callees.retain(|e| {
             owned.iter().any(|d| {
@@ -1953,11 +2030,15 @@ pub struct Signature {
 /// like" — three `semlith_symbol` calls before 0.30.0, each carrying callers,
 /// callees and a second ring the question did not ask for. Headings, keys and
 /// selectors are left out: they are places in a document, not definitions.
-pub fn signatures(db: &rusqlite::Connection, names: &[String]) -> Result<Vec<Signature>> {
+pub fn signatures(
+    db: &rusqlite::Connection,
+    names: &[String],
+    scope: &Scope,
+) -> Result<Vec<Signature>> {
     let mut out = Vec::new();
     for asked in names.iter().take(NAMES_LIMIT) {
         let (qualifier, bare) = split_qualified(asked);
-        let mut rows = crate::store::symbols_named(db, bare, 64)?;
+        let mut rows = scope.definitions(db, bare, 64)?;
         rows.retain(|r| !NAVIGATIONAL_KINDS.contains(&r.kind.as_str()));
         if let Some(q) = qualifier
             && rows.iter().any(|r| owned_by(r, q))
@@ -2114,15 +2195,16 @@ pub fn evidence(
     kinds: &[String],
     limit: usize,
     all: bool,
+    scope: &Scope,
 ) -> Result<Evidence> {
     let (qualifier, bare) = split_qualified(name);
-    let mut definitions = crate::store::symbols_named(db, bare, limit)?;
+    let mut definitions = scope.definitions(db, bare, limit)?;
     if let Some(q) = qualifier
         && definitions.iter().any(|d| owned_by(d, q))
     {
         definitions.retain(|d| owned_by(d, q));
     }
-    let ring = neighbours(db, name, kinds, all)?;
+    let ring = neighbours(db, name, kinds, all, scope)?;
 
     let mut ego: Vec<Hop> = Vec::new();
     let settled: Vec<(&str, &crate::store::EdgeEnd)> = ring
@@ -2146,6 +2228,9 @@ pub fn evidence(
         {
             if ego.len() >= EGO_LIMIT {
                 break;
+            }
+            if !scope.holds(&end.symbol.path) {
+                continue;
             }
             // The centre is not two hops from itself, and a name already in
             // the first ring is context the reader has.
@@ -2806,6 +2891,7 @@ pub fn impact(
     kinds: &[String],
     depth: u32,
     all_edges: bool,
+    scope: &Scope,
 ) -> Result<Impact> {
     // Dependency edges by default, for the reason `shortest_path` walks only
     // those: every symbol is one hop from the file that defines it, so a
@@ -2818,7 +2904,7 @@ pub fn impact(
         kinds
     };
     let (qualifier, bare) = split_qualified(name);
-    let mut definitions = crate::store::symbols_named(db, bare, 64)?;
+    let mut definitions = scope.definitions(db, bare, 64)?;
     let mut unqualified = false;
     if let Some(q) = qualifier {
         let owned: Vec<_> = definitions
@@ -2881,6 +2967,9 @@ pub fn impact(
                     continue;
                 }
                 let caller = &edge.end.symbol;
+                if !scope.holds(&caller.path) {
+                    continue;
+                }
                 let node = Node {
                     name: caller.name.clone(),
                     path: caller.path.clone(),
@@ -4753,6 +4842,66 @@ mod tests {
         db
     }
 
+    /// Two repositories in one store, each with its own `run` and its own
+    /// caller of it. Scoped to one, every graph answer names that repository
+    /// only -- the definition, the caller, the reached row -- and unscoped it
+    /// names both, as before.
+    #[test]
+    fn a_scope_keeps_a_namesake_in_another_repository_out() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::store::prepare_for_tests(&db);
+        for repo in ["one", "two"] {
+            let file =
+                crate::store::insert_file(&db, &format!("/w/{repo}/x.rs"), "h", 1, 0).unwrap();
+            let mut ids = Vec::new();
+            for (name, line) in [("run", 1), (format!("go_{repo}").as_str(), 5)] {
+                let symbol = Symbol {
+                    kind: "function".to_string(),
+                    name: name.to_string(),
+                    qualified: name.to_string(),
+                    start_line: line,
+                    end_line: line + 2,
+                };
+                ids.push(crate::store::insert_symbol(&db, file, None, &symbol).unwrap());
+            }
+            crate::store::insert_edge(&db, ids[1], "run", "calls", EXTRACTED, None, None).unwrap();
+        }
+        let filter = crate::filter::Filter::new(&["one/**".to_string()], &[], &[]).unwrap();
+        let scope = Scope::of(&db, &filter).unwrap();
+        let names = |ends: &[crate::store::EdgeEnd]| {
+            let mut n: Vec<String> = ends.iter().map(|e| e.symbol.name.clone()).collect();
+            n.sort();
+            n
+        };
+
+        let around = neighbours(&db, "run", &[], true, &scope).unwrap();
+        assert_eq!(names(&around.callers), ["go_one"]);
+        let everywhere = neighbours(&db, "run", &[], true, &Scope::all()).unwrap();
+        assert_eq!(names(&everywhere.callers), ["go_one", "go_two"]);
+
+        let reach = impact(&db, "run", &[], 3, false, &scope).unwrap();
+        assert!(
+            reach.definitions.iter().all(|d| d.path.contains("/one/")),
+            "{reach:?}"
+        );
+        assert!(
+            reach.reached.iter().all(|r| r.path.contains("/one/")),
+            "{reach:?}"
+        );
+        assert!(
+            reach.reached.iter().any(|r| r.name == "go_one"),
+            "{reach:?}"
+        );
+
+        let rows = signatures(&db, &["run".to_string()], &scope).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].symbol.path.contains("/one/"));
+
+        let found = evidence(&db, "run", &[], 20, true, &scope).unwrap();
+        assert!(found.definitions.iter().all(|d| d.path.contains("/one/")));
+        assert_eq!(names(&found.callers), ["go_one"]);
+    }
+
     /// The block is one reply where 0.15.0 needed three, and the second ring
     /// is walked only through names the first ring settled — an ambiguous name
     /// is several unrelated definitions, and expanding one would put somebody
@@ -4760,7 +4909,7 @@ mod tests {
     #[test]
     fn the_evidence_block_carries_the_definition_both_rings_and_no_ambiguity() {
         let db = chain();
-        let found = evidence(&db, "b", &dependency_kinds(), 20, false).unwrap();
+        let found = evidence(&db, "b", &dependency_kinds(), 20, false, &Scope::all()).unwrap();
 
         assert_eq!(found.name, "b");
         assert!(!found.definitions.is_empty(), "{found:?}");
@@ -4804,7 +4953,7 @@ mod tests {
     #[test]
     fn neighbours_separates_the_two_directions() {
         let db = chain();
-        let n = neighbours(&db, "d", &[], false).unwrap();
+        let n = neighbours(&db, "d", &[], false, &Scope::all()).unwrap();
         let mut callers: Vec<&str> = n.callers.iter().map(|e| e.symbol.name.as_str()).collect();
         callers.sort_unstable();
         assert_eq!(callers, ["c", "e"], "both callers of d");

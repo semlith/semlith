@@ -39,10 +39,11 @@ makes. It runs a fixed set of 107 questions with ground-truth spans from
 `tests/fixtures/retrieval/questions.yaml` — identifier-shaped, concept-shaped and
 multi-hop — and prints hit@1, hit@3, hit@8, bytes per answer, and from 0.23.0 calls and tokens per answered question for
 `brief` against the search-then-read path. It asserts two things: the wrong-yes
-count for `path` is zero, and `tools/list` costs under 1 685 tokens — sixteen
-tools from 0.26.0, where thirteen measured 4 441 bytes and about 1 111, and from
-0.33.0 an `items` type on every array parameter, which Copilot in VS Code
-requires. The
+count for `path` is zero, and `tools/list` costs under 675 tokens — from 0.36.0
+eight listed tools (`mcp::LISTED`; the other eight are callable by name and
+listed under `SEMLITH_MCP_TOOLS=all`), 2 633 bytes, where sixteen were 7 330 and
+cost an Opus request 3 073 tokens against 1 323 now, measured; every array
+parameter carries an `items` type, which Copilot in VS Code requires. The
 byte proxy in `mcp::tests::the_tool_list_stays_small` is the same number said
 in bytes, so a list that would fail the criterion fails in seconds rather than
 eight minutes into an indexing run.

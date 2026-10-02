@@ -174,12 +174,16 @@ pub const INSTRUCTIONS_LIMIT: usize = 600;
 /// one it cannot, and routes by the question. Bounded, because a machine with
 /// forty registered roots should not cost every session a page of paths.
 pub fn instructions(roots: &[std::path::PathBuf]) -> String {
+    // Search first, because on the 727-question benchmark of 2026-10-01 it
+    // beat brief on every question where they differed (42 to 0); and the
+    // graph tools by the question they answer, because in 150 agent sessions
+    // no caller question ever reached them, while they found 91 % of callers
+    // against search's 76 %.
     const ROUTES: &str = " For a code question there, use semlith before grep, rg, find or cat: \
-         semlith_brief to understand how something works, semlith_search to locate (exact: true \
-         for every line matching a string or regex), \
-         semlith_impact for what breaks if a symbol changes, semlith_trace for how A reaches B, \
-         semlith_read for a span or a whole definition, semlith_files with tree: true for a \
-         directory. Paths in answers are relative to the root named above them.";
+         semlith_search to locate (exact: true for every line matching a regex; path to scope \
+         to one repository), semlith_read for a span or a whole definition, semlith_neighbors \
+         for who calls a symbol, semlith_impact for what breaks if it changes, semlith_brief \
+         for a span plus its callers in one call. Paths are relative to the root named above.";
     let lead = "semlith indexes ";
     let mut named = String::new();
     let mut left = roots.len();
@@ -467,6 +471,17 @@ pub fn tool_names() -> Vec<String> {
     tool_list().into_iter().map(|(name, _)| name).collect()
 }
 
+/// The tools `tools/list` sends, in its order. [`tool_names`] is every tool
+/// the server answers, listed or not.
+pub fn listed_names() -> Vec<String> {
+    tool_defs("")
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .collect()
+}
+
 /// Every tool, with the one-line purpose its definition advertises.
 ///
 /// The Agents page lists these. Reading the description out of the definition
@@ -475,7 +490,7 @@ pub fn tool_names() -> Vec<String> {
 /// annotation carries is the sentence a client shows a user, so it is the one
 /// the portal shows too.
 pub fn tool_list() -> Vec<(String, String)> {
-    tool_defs("")
+    all_tool_defs("")
         .as_array()
         .map(|defs| {
             defs.iter()
@@ -511,7 +526,45 @@ pub fn locate_bytes(hits: &[crate::Hit], query: &str) -> usize {
     locate(hits, query, DEFAULT_LOCATE_TOKENS, &crate::plain).len()
 }
 
+/// The tools `tools/list` advertises: [`LISTED`], or every tool when
+/// `SEMLITH_MCP_TOOLS=all`.
+///
+/// Every tool definition is paid for on every request an agent makes, used or
+/// not. On 2026-10-02 sixteen of them were 3 247 of the tokens an Opus request
+/// carried before it asked anything (first turn, 7 771 with semlith against
+/// 4 524 without), about 9.5k over a session; in 150 agent sessions the
+/// agents called four of them. The eight below are the read tools an agent
+/// reaches for; the rest -- writes, reports, pattern, path, trace, languages
+/// -- stay callable by name and stay on the CLI and the portal, and come back
+/// to the list with the variable.
 fn tool_defs(open: &str) -> Value {
+    let all = all_tool_defs(open);
+    if std::env::var("SEMLITH_MCP_TOOLS").is_ok_and(|v| v == "all") {
+        return all;
+    }
+    Value::Array(
+        all.as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| LISTED.contains(&t["name"].as_str().unwrap_or_default()))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// The tools listed by default, in the order an agent should consider them.
+pub const LISTED: &[&str] = &[
+    "semlith_search",
+    "semlith_brief",
+    "semlith_read",
+    "semlith_files",
+    "semlith_symbol",
+    "semlith_neighbors",
+    "semlith_impact",
+    "semlith_stats",
+];
+
+fn all_tool_defs(open: &str) -> Value {
     let store_arg = format!("Open: {open}.");
     let write_store_arg = format!("Open: {open}. Required when several are.");
 
@@ -534,18 +587,13 @@ fn tool_defs(open: &str) -> Value {
     json!([
         {
             "name": "semlith_search",
-            "description": "Where is X: ranked spans with file:line and definition. exact: true lists every matching line, as grep -E.",
+            "description": "Where is X / how does X work: ranked file:line spans. exact: true = every matching line (grep -E). Also ext, lang, prefer (code|docs), format: excerpt.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
-                    "k": { "type": "integer", "description": "Default 8.", "minimum": 1, "maximum": 50 },
-                    "format": { "type": "string", "enum": ["locate", "excerpt"], "description": "Default locate." },
-                    "max_tokens": { "type": "integer", "description": "Default 1500.", "minimum": 200 },
-                    "path": { "type": "array", "items": { "type": "string" }, "description": "Globs; ! excludes (also on ext, lang)." },
-                    "ext": { "type": "array", "items": { "type": "string" } },
-                    "lang": { "type": "array", "items": { "type": "string" }, "description": "See semlith_languages." },
-                    "prefer": { "type": "string", "enum": ["code", "docs", "any"], "description": "Default any." },
+                    "k": { "type": "integer", "description": "Default 8." },
+                    "path": { "type": "array", "items": { "type": "string" }, "description": "Globs; ! excludes." },
                     "exact": { "type": "boolean" },
                     "store": { "type": "array", "items": { "type": "string" }, "description": store_arg }
                 },
@@ -555,12 +603,12 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_brief",
-            "description": "How does X work: spans, the best code span's text and one-hop callers/callees.",
+            "description": "Spans, the top span's text and its callers/callees, in one call.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "question": { "type": "string" },
-                    "budget": { "type": "integer", "description": "Tokens. Default 4000; text is dropped first.", "minimum": 1 },
+                    "path": { "type": "array", "items": { "type": "string" } },
                     "store": { "type": "string" }
                 },
                 "required": ["question"]
@@ -569,11 +617,11 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_read",
-            "description": "Show me this: a path:start-end span, or a symbol name (Type::method) read whole.",
+            "description": "Read path:start-end, path:line, or a symbol (Type::method) whole.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "target": { "type": "string", "description": "path:start-end, path:line, or a symbol." },
+                    "target": { "type": "string" },
                     "store": { "type": "array", "items": { "type": "string" } }
                 },
                 "required": ["target"]
@@ -598,7 +646,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_stats",
-            "description": "What is indexed: files, chunks, languages and graph coverage per store.",
+            "description": "What is indexed, per store.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true }
         },
@@ -610,18 +658,13 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_files",
-            "description": "What is in this folder: files, or tree: true for a directory view with symbols.",
+            "description": "What is in this folder; tree: true for a directory view with symbols.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": { "type": "array", "items": { "type": "string" } },
-                    "ext": { "type": "array", "items": { "type": "string" } },
-                    "lang": { "type": "array", "items": { "type": "string" } },
-                    "store": { "type": "array", "items": { "type": "string" } },
-                    "limit": { "type": "integer" },
-                    "tree": { "type": "boolean", "description": "Directory view: counts, symbols, not indexed." },
-                    "depth": { "type": "integer", "description": "Tree depth. Default 2." },
-                    "sort": { "type": "string", "description": "name, size, symbols or recent." }
+                    "tree": { "type": "boolean" },
+                    "store": { "type": "array", "items": { "type": "string" } }
                 }
             },
             "annotations": { "readOnlyHint": true }
@@ -666,14 +709,13 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_symbol",
-            "description": "Where is X defined, and what touches it: definition, callers, callees.",
+            "description": "Where X is defined, with callers and callees. names: up to 20, a row each.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
-                    "names": { "type": "array", "items": { "type": "string" }, "items": { "type": "string" }, "description": "Up to 20; a row each." },
-                    "k": { "type": "integer", "description": "Default 20." },
-                    "history": { "type": "boolean", "description": "What it used to be." },
+                    "names": { "type": "array", "items": { "type": "string" } },
+                    "path": { "type": "array", "items": { "type": "string" } },
                     "store": { "type": "string" }
                 }
             },
@@ -681,13 +723,12 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_neighbors",
-            "description": "Who calls X and what does X call. Only resolved edges are certain.",
+            "description": "Who calls X, and what X calls. Use for caller questions.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
-                    "kind": { "type": "array", "items": { "type": "string" } },
-                    "all": { "type": "boolean", "description": "Expand collapsed rows and missing targets." },
+                    "path": { "type": "array", "items": { "type": "string" } },
                     "store": { "type": "string" }
                 },
                 "required": ["name"]
@@ -711,15 +752,12 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_impact",
-            "description": "What breaks if X changes: every caller and call site. Type::method narrows.",
+            "description": "What breaks if X changes: every call site, transitively. Type::method narrows.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
-                    "kind": { "type": "array", "items": { "type": "string" } },
-                    "depth": { "type": "integer", "description": "Default 3." },
-                    "all_edges": { "type": "boolean", "description": "Cross ambiguous names; a hypothesis." },
-                    "strict": { "type": "boolean" },
+                    "path": { "type": "array", "items": { "type": "string" } },
                     "store": { "type": "string" }
                 },
                 "required": ["name"]
@@ -866,13 +904,16 @@ fn call_tool(
             let Some(question) = args.get("question").and_then(Value::as_str) else {
                 return Err((-32602, "missing required argument: question".into(), None));
             };
-            // No filter and no preference. `semlith_search` carries both, and
-            // every property here is bytes every agent reads once per session
-            // before it asks anything -- a brief that can be scoped to a
-            // directory is not worth what four more schema properties cost on
-            // the list. A caller that needs to scope searches first.
+            // A filter but no preference. 0.23.0 left the filter off to keep
+            // the tool list short; on a store of seventy repositories an
+            // unscoped brief answered from the wrong one, and the benchmark of
+            // 2026-10-01 counted brief among the tools that could not be scoped
+            // at all.
             let only = strings(&args, "store");
-            let filter = crate::Filter::default();
+            let filter = match filter_of(&args) {
+                Ok(f) => f,
+                Err(e) => return Ok(tool_error(&e)),
+            };
             let budget = args
                 .get("budget")
                 .and_then(Value::as_i64)
@@ -1456,6 +1497,10 @@ fn call_tool(
             let name = name.as_str();
             let k = args.get("k").and_then(Value::as_u64).unwrap_or(20) as usize;
             let only = strings(&args, "store");
+            let filter = match filter_of(&args) {
+                Ok(f) => f,
+                Err(e) => return Ok(tool_error(&e)),
+            };
             if names.len() > 1 {
                 if names.len() > crate::graph::NAMES_LIMIT {
                     return Ok(tool_error(&format!(
@@ -1465,7 +1510,7 @@ fn call_tool(
                     )));
                 }
                 let paths = stores.shortener();
-                match stores.signatures_in(Some(&only), &names) {
+                match stores.signatures_in(Some(&only), &names, &filter) {
                     Ok(rows) if rows.is_empty() => empty_graph(stores, &names.join(", ")),
                     Ok(rows) => {
                         let text = crate::graph::render_signatures(&rows, &|p| paths.short(p));
@@ -1524,6 +1569,7 @@ fn call_tool(
                     &crate::graph::dependency_kinds(),
                     k.clamp(1, 200),
                     false,
+                    &filter,
                 ) {
                     Ok(found) if found.definitions.is_empty() => empty_graph(stores, name),
                     // The same renderer the CLI prints, so an agent and a person
@@ -1583,8 +1629,12 @@ fn call_tool(
                 )));
             }
             let only = strings(&args, "store");
+            let filter = match filter_of(&args) {
+                Ok(f) => f,
+                Err(e) => return Ok(tool_error(&e)),
+            };
             let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
-            match stores.neighbours_in(Some(&only), name, &kinds, all) {
+            match stores.neighbours_in(Some(&only), name, &kinds, all, &filter) {
                 // Only when there is genuinely nothing. A symbol whose every
                 // target lies outside the corpus has something to say, and
                 // saying "the graph does not have this" about it is the exact
@@ -1655,13 +1705,17 @@ fn call_tool(
             let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(3) as u32;
             let depth = depth.clamp(1, 10);
             let only = strings(&args, "store");
+            let filter = match filter_of(&args) {
+                Ok(f) => f,
+                Err(e) => return Ok(tool_error(&e)),
+            };
             let strict = args.get("strict").and_then(Value::as_bool).unwrap_or(false);
             let all_edges = args
                 .get("all_edges")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
                 && !strict;
-            match stores.impact_in(Some(&only), name, &kinds, depth, all_edges) {
+            match stores.impact_in(Some(&only), name, &kinds, depth, all_edges, &filter) {
                 Ok(impact) => {
                     let paths = stores.shortener();
                     paths.with_header(impact.render("", "", &|p| paths.short(p)))
@@ -2692,9 +2746,13 @@ mod tests {
         //
         // 0.33.0 moved it by the 338 bytes `"items": {"type": "string"}` costs
         // on thirteen array parameters, measured, and no more: 6 396 to 6 736.
+        //
+        // 0.36.0 cut it to the eight tools agents call (`LISTED`) with the
+        // arguments they need declared: 7 330 bytes to 2 633, and an Opus
+        // request's semlith overhead from 3 073 tokens to 1 323, measured.
         assert!(
-            size <= 6_736,
-            "tools/list is {size} bytes, over the 6 736 the 1 685-token gate allows: {}",
+            size <= 2_700,
+            "tools/list is {size} bytes, over the 2 700 the 675-token gate allows: {}",
             each.join(" ")
         );
     }

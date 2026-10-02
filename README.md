@@ -81,7 +81,7 @@ One command. No Rust toolchain, no package manager, nothing installed first.
 **macOS and Linux**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/semlith/semlith/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/semlith/semlith/main/install.sh | sh
 ```
 
 **Windows**
@@ -112,6 +112,46 @@ nothing but glibc and libstdc++ — no OpenBLAS, no OpenSSL. Its floor is
 build, which covers Debian 12, Ubuntu 22.04 LTS, RHEL 9 and Amazon Linux 2023.
 Intel macOS is not supported: ONNX Runtime no longer publishes `osx-x86_64`, so
 the embedding backend cannot link there.
+
+### Security
+
+**What the installer writes.** The binary to `~/.semlith/bin/semlith`
+(`~\.semlith\bin\semlith.exe` on Windows, `$SEMLITH_HOME/bin` if you set it),
+and on Linux `libonnxruntime.so` beside it. On macOS and Linux that directory
+is made private to you (mode 700). The download goes to a temporary directory that is removed on exit, and
+nothing is written before the archive has passed both checks below. Everything
+after that is `semlith setup`'s, as listed under [Commands](#commands).
+
+**What it checks.** The archive against the release's `SHA256SUMS`, then its
+provenance: every release file carries a GitHub artifact attestation signed by
+this repository's release workflow, and when `gh` is on your `PATH` the
+installer runs `gh attestation verify` and refuses to install if it does not
+confirm one. Without `gh`, or with a `gh` that is not logged in, it says the
+provenance was not verified and how to check it yourself. curl may use only
+https at TLS 1.2 or later, and the shell script is wrapped in a function called
+on its last line, so a download cut off part-way runs nothing. Releases before
+v0.36.0 carry no attestations.
+
+**Read it before you run it.** Each release has its own installer attached, so
+you can download that copy, read it and verify it first:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSLO https://github.com/semlith/semlith/releases/latest/download/install.sh
+less install.sh
+gh attestation verify install.sh --repo semlith/semlith
+sh install.sh
+```
+
+On Windows, `irm https://github.com/semlith/semlith/releases/latest/download/install.ps1 -OutFile install.ps1`,
+read it, then `powershell -ExecutionPolicy Bypass -File install.ps1`.
+
+**Verify an archive by hand.** Download the archive for your platform and
+`SHA256SUMS` from [the releases page](https://github.com/semlith/semlith/releases), then:
+
+```sh
+grep "  semlith-<tag>-<target>.tar.gz$" SHA256SUMS | shasum -a 256 -c
+gh attestation verify semlith-<tag>-<target>.tar.gz --repo semlith/semlith
+```
 
 ## Quick start
 
@@ -370,7 +410,10 @@ would have served both. The command reproduces it against any store you have.
 ## Using it from an agent
 
 `semlith mcp` speaks MCP over stdio, and `semlith start` answers the same sixteen
-tools over HTTP at `/mcp`:
+tools over HTTP at `/mcp`. `tools/list` sends eight of them — search, brief,
+read, files, symbol, neighbors, impact, stats — because every definition is paid
+for on every request; the rest answer by name, and `SEMLITH_MCP_TOOLS=all` lists
+them too:
 
 | Tool | What it does |
 | --- | --- |
@@ -484,7 +527,7 @@ of these drifts from its source:
 | daemon memory 60 s after a run, seven stores open | **465 MB** | `footprint -p <pid>` |
 | idle watcher CPU, over 60 s | **under 1.0 s** | the same |
 | one changed file | **1 shard rewritten** | `cargo test --release --test shards -- --ignored --nocapture` |
-| `tools/list` | **5 840 bytes**, ~1 460 tokens, sixteen tools | `cargo test --release --test retrieval -- --ignored` |
+| `tools/list` | **2 633 bytes**, eight listed tools; 1 323 tokens added to an Opus request, from 3 073 | `cargo test --release --test retrieval -- --ignored` |
 | retrieval, on 30 sealed questions of 107 | **hit@1 24/30, hit@3 27/30, hit@8 29/30**, median of three with zero spread, identifiers **11 of 11** in the top three, wrong-yes **0** | the same |
 | one search, rescoring off / on | **8.2 ms** / 132.2 ms on a 300-file store | the same |
 | one answered question, `brief` against search-then-read | **1.00 calls vs 2.54**, 1 112 tokens vs 725 | the same |
