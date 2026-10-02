@@ -5406,3 +5406,13 @@ td.c-why {
 .red-ink {
   color: var(--red);
 }
+/* The folder picker's one line of how-to, under its header. */
+.browse-hint {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line-soft);
+}
+.bitem .open {
+  user-select: none;
+}

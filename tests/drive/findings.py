@@ -506,7 +506,15 @@ def browse_into(d, scope, name):
         (() => {
           for (const row of document.querySelectorAll(%s + ' .bitem')) {
             const n = row.querySelector('.name');
-            if (n && n.textContent === %s) { row.querySelector('button.open').click(); return true; }
+            if (n && n.textContent === %s) {
+              // The wizard's picker selects on a click and opens a folder on a
+              // double-click (0.35.0); the adopt picker, which has nothing to
+              // select, opens on a click.
+              const open = row.querySelector('button.open');
+              if (row.querySelector('[role=checkbox]')) open.dispatchEvent(new MouseEvent('dblclick', {bubbles: true}));
+              else open.click();
+              return true;
+            }
           }
           return false;
         })()

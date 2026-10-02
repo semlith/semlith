@@ -2781,7 +2781,7 @@ function wizardScreen() {
             "div",
             { class: "src-row" },
             el("span", { class: "icon-tile s28" }, icon(s.type === "url" ? I.link : s.type === "file" ? I.file : I.folder, 14, { w: 1.6 })),
-            el("div", { class: "col" }, el("span", { class: "p", text: s.type === "url" ? s.path : tilde(s.path), "data-tip": s.path }), el("span", { class: "m", text: sourceMeta(s) })),
+            el("div", { class: "col" }, pathSpan(s.type === "url" ? s.path : tilde(s.path), "p", s.path), el("span", { class: "m", text: sourceMeta(s) })),
             el("div", { class: "row gap6" }, el("span", { class: "tag", text: s.type }), s.repos === 1 ? el("span", { class: "tag", text: "git" }) : null),
             btn({ class: "x-btn", "aria-label": `Remove ${s.path}`, "data-tip": "Remove", onclick: () => (w.sources.splice(i, 1), paint()) }, icon(I.x, 13, { w: 2 })),
           ),
@@ -2859,7 +2859,29 @@ function wizardScreen() {
       b.listing = null;
       paint();
     };
-    const selCount = b.sel.size;
+    // A selection is drawn in place, not by repainting: a repaint between the
+    // two clicks of a double-click replaces the item, and the browser then
+    // sees two single clicks on two elements and no double-click.
+    const count = meta("");
+    const addBtn = btn(
+      {
+        class: "btn sm dark",
+        disabled: !l ? true : null,
+        onclick: () => {
+          const list = b.sel.size ? [...b.sel] : [l.path];
+          b.sel.clear();
+          w.mode = null;
+          addSources(list.map((p) => ({ path: p.path || p, type: p.type || "folder" })));
+        },
+      },
+      "",
+    );
+    const syncHead = () => {
+      count.textContent = `${b.sel.size} selected`;
+      count.hidden = !b.sel.size;
+      addBtn.textContent = b.sel.size ? `Add ${plural(b.sel.size, "item")}` : "Use this folder";
+    };
+    syncHead();
     return el(
       "div",
       { class: "card" },
@@ -2868,21 +2890,10 @@ function wizardScreen() {
         { class: "browse-head" },
         btn({ class: "btn xs", disabled: !l || !l.parent ? true : null, onclick: () => l && l.parent && openDir(l.parent) }, icon(I.back, 13, { w: 1.8 }), "Up"),
         el("span", { class: "dir", text: l ? tilde(l.path, l.home) : "…" }),
-        selCount ? meta(`${selCount} selected`) : null,
-        btn(
-          {
-            class: "btn sm dark",
-            disabled: !l ? true : null,
-            onclick: () => {
-              const list = selCount ? [...b.sel] : [l.path];
-              b.sel.clear();
-              w.mode = null;
-              addSources(list.map((p) => ({ path: p.path || p, type: p.type || "folder" })));
-            },
-          },
-          selCount ? `Add ${plural(selCount, "item")}` : "Use this folder",
-        ),
+        count,
+        addBtn,
       ),
+      el("div", { class: "browse-hint", text: "Click to select · double-click a folder to open it" }),
       b.error ? errorBox(b.error) : null,
       l
         ? el(
@@ -2895,15 +2906,31 @@ function wizardScreen() {
                     const hit = [...b.sel].find((x) => x.path === e.path);
                     if (hit) b.sel.delete(hit);
                     else b.sel.add({ path: e.path, type: e.dir ? "folder" : "file" });
-                    paint();
+                    const now = !hit;
+                    item.classList.toggle("on", now);
+                    cb.setAttribute("aria-checked", String(now));
+                    syncHead();
                   };
-                  return el(
+                  const cb = checkbox(on, toggleSel, `Select ${e.name}`);
+                  const item = el(
                     "div",
                     { class: `bitem${on ? " on" : ""}${e.dir ? "" : " file"}` },
-                    checkbox(on, toggleSel, `Select ${e.name}`),
-                    btn({ class: "open", onclick: () => (e.dir ? openDir(e.path) : toggleSel()) }, icon(e.dir ? I.folder : I.file, 14, { w: 1.6 }), el("span", { class: "name", text: e.name })),
+                    cb,
+                    btn(
+                      {
+                        class: "open",
+                        "data-tip": e.dir ? `${e.name} — double-click to open` : e.name,
+                        onclick: toggleSel,
+                        // The two clicks before it toggled the item twice, so
+                        // the selection is as it was when the folder opens.
+                        ondblclick: () => e.dir && openDir(e.path),
+                      },
+                      icon(e.dir ? I.folder : I.file, 14, { w: 1.6 }),
+                      el("span", { class: "name", text: e.name }),
+                    ),
                     e.adoptable ? el("span", { class: "note", text: "store" }) : null,
                   );
+                  return item;
                 })
               : empty("Nothing here."),
           )
@@ -6312,7 +6339,7 @@ function briefView(out) {
         ? el(
             "div",
             { class: "card" },
-            el("div", { class: "card-h tight" }, el("span", { class: "mono t-b t-sm", text: hitPath(top) }), el("span", { class: "t-mono-sm", text: `${top.start_line}-${top.end_line}` }), el("span", { class: "t-mono-sm grow", text: top.store || "" }), listBadges(top.lists), el("span", { class: `dot ${top.fresh === false ? "amber" : "green"}` })),
+            el("div", { class: "card-h tight" }, pathSpan(hitPath(top), "mono t-b t-sm min0", top.path), el("span", { class: "t-mono-sm", text: `${top.start_line}-${top.end_line}` }), el("span", { class: "t-mono-sm grow", text: top.store || "" }), listBadges(top.lists), el("span", { class: `dot ${top.fresh === false ? "amber" : "green"}` })),
             top.text ? el("div", { class: "lines wrap" }, top.text.split("\n").map((t, i) => el("div", { class: "l" }, el("span", { class: "n", text: String(top.start_line + i) }), el("span", { text: t })))) : empty("The budget left no room for the text; the locator is still sent."),
           )
         : null,
@@ -6320,7 +6347,7 @@ function briefView(out) {
         ? el(
             "div",
             { class: "card" },
-            rest.map((s) => el("div", { class: "brief-row" }, el("span", { class: "mono t-sm ink2", text: `${hitPath(s)}:${s.start_line}-${s.end_line}` }), el("span", { class: "mono t-m t-sm grow", text: s.symbol || "" }), el("span", { class: "t-mono-sm muted i", text: s.text ? "with text" : "top span only" }), listBadges(s.lists))),
+            rest.map((s) => el("div", { class: "brief-row" }, pathSpan(`${hitPath(s)}:${s.start_line}-${s.end_line}`, "mono t-sm ink2 min0", `${s.path}:${s.start_line}-${s.end_line}`), el("span", { class: "mono t-m t-sm grow", text: s.symbol || "" }), el("span", { class: "t-mono-sm muted i", text: s.text ? "with text" : "top span only" }), listBadges(s.lists))),
           )
         : null,
       (b.symbols || []).length
@@ -7048,7 +7075,7 @@ function exploreTab(picker) {
                 { class: "g-defs" },
                 el("span", { class: "eyebrow sm", text: `${gr.defs.length} definitions` }),
                 gr.defs.map((d) =>
-                  btn({ class: `g-def${d.name === gr.sel ? " on" : ""}`, onclick: () => ((gr.sel = d.name), (gr.sym = null), paint(), loadSymbol()) }, el("span", { class: "t-mono t-m", text: d.name }), el("span", { class: "t-mono-sm muted", text: `${tilde(d.path)}:${d.start_line}` })),
+                  btn({ class: `g-def${d.name === gr.sel ? " on" : ""}`, onclick: () => ((gr.sel = d.name), (gr.sym = null), paint(), loadSymbol()) }, el("span", { class: "t-mono t-m", text: d.name }), pathSpan(`${tilde(d.path)}:${d.start_line}`, "t-mono-sm muted", `${d.path}:${d.start_line}`)),
                 ),
               )
             : null,
@@ -7230,7 +7257,7 @@ function blastResult(imp, headline) {
     columns: [
       { key: "name", label: "Reached", cls: "mm cap180", sort: (r) => r.name, render: (r) => r.name },
       // Where it reaches the symbol: the call site (at), not where it is defined.
-      { key: "where", label: "Where", cls: "ms cap180", sort: (r) => `${r.path}:${String(r.at ?? r.line).padStart(8, "0")}`, render: (r) => el("span", { "data-tip": `${r.path}:${r.at ?? r.line} · defined at line ${r.line}`, text: `${tilde(r.path)}:${r.at ?? r.line}` }) },
+      { key: "where", label: "Where", cls: "ms cap180", sort: (r) => `${r.path}:${String(r.at ?? r.line).padStart(8, "0")}`, render: (r) => pathSpan(`${tilde(r.path)}:${r.at ?? r.line}`, "", `${r.path}:${r.at ?? r.line} · defined at line ${r.line}`) },
       { key: "edge", label: "Edge", sort: (r) => r.confidence, render: (r) => el("span", { class: `badge ${r.confidence === "inferred" || r.confidence === "ambiguous" ? "amber" : "blue"}`, text: `${r.kind} · ${r.confidence}` }) },
       { key: "hop", label: "Hop", cls: "ms r", sort: (r) => r.hop, render: (r) => String(r.hop) },
     ],
@@ -7431,7 +7458,7 @@ function pathTab(picker) {
                   el(
                     "div",
                     { class: "col" },
-                    el("div", { class: "node" }, el("span", { class: `cd${nd.edge ? "" : " end"}` }), el("span", { class: "n", text: nd.name }), el("span", { class: "w", text: nd.where })),
+                    el("div", { class: "node" }, el("span", { class: `cd${nd.edge ? "" : " end"}` }), el("span", { class: "n", text: nd.name }), pathSpan(nd.where, "w")),
                     nd.edge
                       ? el(
                           "div",
@@ -8512,7 +8539,7 @@ VIEWS.privacy = {
                       "div",
                       { class: "col gap4" },
                       el("div", { class: "notice amber" }, el("span", { class: "sub", text: `${plural(pvUi.scan.findings.length, "file")} the rules would refuse today` })),
-                      pvUi.scan.findings.slice(0, 20).map((f) => el("div", { class: "row nowrap" }, el("span", { class: "mono t-xs grow ell", text: `${f.store} · ${tilde(f.path)}`, "data-tip": f.why }), lnk("Forget", () => forgetFound(f), "amber"))),
+                      pvUi.scan.findings.slice(0, 20).map((f) => el("div", { class: "row nowrap" }, el("span", { class: "row gap6 grow min0 mono t-xs", "data-tip": f.why }, el("span", { class: "nowrap", text: `${f.store} ·` }), pathSpan(tilde(f.path), "min0", f.path)), lnk("Forget", () => forgetFound(f), "amber"))),
                     )
                   : el("div", { class: "notice green" }, el("span", { class: "dot green" }), `${plural(liveStores().length, "store")} checked · 0 files the rules would refuse today`)
               : null,
