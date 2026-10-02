@@ -7,6 +7,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-10-02
+
+### Search on a store of many repositories
+
+**Search has no graph list.** On the 727-question accuracy benchmark of
+2026-10-01 over the 70-repository, 879k-chunk corpus, search scored the same
+without the graph walk as with it (398 against 397 of 507 development
+questions, 165 against 165 held out) while the walk took 112 of the 328 ms a
+search spent in the store at the median. Search now fuses the vector, keyword
+and image lists; `neighbors`, `impact`, `path`, `trace` and brief's callers and
+callees still read the graph. No hit is labelled `graph` and the `provenance`
+field is gone.
+
+**Every lookup tool can be scoped.** `semlith_brief`, `semlith_symbol`,
+`semlith_neighbors` and `semlith_impact` take `path`, `ext` and `lang` as
+search does, on MCP, the CLI and the portal's routes. A scope narrows the
+definitions in SQL and keeps every caller, callee and reached row outside it
+out — `impact` checks it at every hop — so a name defined in another repository
+of the same store no longer answers (#170).
+
+**The right repository first, unscoped.** On the 70-repository corpus an
+unscoped question answered 15 points worse than one scoped to its repository.
+Search now lifts the repository the head of the answer agrees on (a repository
+is the nearest directory holding `.git`, so a store of one project is
+unchanged), lifts further a repository the question names, adds the
+definitions of identifiers a sentence names as a list of their own, and ranks
+release notes last unless the question is about releases. On the frozen 727
+questions, answers within 4k tokens:
+
+| | development (507) | held out (220) |
+|---|---|---|
+| unscoped search | 319 → 340 (26 wins, 5 losses) | 134 → 145 (13 wins, 2 losses) |
+| scoped search | 397 → 408 (11 wins, 0 losses) | 165 → 170 (6 wins, 1 loss) |
+
+**Faster on a large store.** Through the daemon on the 879k-chunk corpus, three
+sessions each, against 0.34.0 on the same machine the same evening:
+
+| | 0.34.0 | 0.36.0 |
+|---|---|---|
+| concept search, p50 / p95 | 402-475 / 731-1 298 ms | 53-83 / 128-160 ms |
+| identifier search, p50 | 140-271 ms | 16-27 ms |
+| scoped search, p50 | 547-591 ms | 57-68 ms |
+
+A scoped search resolves its filter through the chunks' file index instead of
+testing every chunk's path, filters the keyword list in memory instead of
+joining every match to its file, and keeps the last resolved filter until the
+store changes. Asked the same query unscoped and scoped, a scope's first call
+is still about twice an unscoped one (62 against 32 ms) and a repeated scope
+close to it (38 against 34 ms); the rest is #183.
+
+**A faster keyword list.** English stopwords leave the keyword list's query;
+on the 879k-chunk corpus that took it from 884 to 226 ms at the median with the
+same score on the 507 development questions (408 and 340 against 407 and 340).
+
+### What semlith costs an agent
+
+**Eight tools listed, not sixteen.** Every tool definition is sent with every
+request an agent makes. `tools/list` now carries the eight read tools agents
+call — search, brief, read, files, symbol, neighbors, impact, stats — with the
+arguments they need declared: 7 330 bytes to 2 633, and what semlith adds to an
+Opus request from 3 073 tokens to 1 323, measured on its first turn. Clients
+offer an agent only listed tools, so the other eight — the three writes,
+reports, pattern, path, trace and languages — are the CLI's and the portal's;
+`SEMLITH_MCP_TOOLS=all` in the server's environment lists them again.
+
+On the agent benchmark's 50 held-out questions, an Opus session with semlith
+installed now costs $0.071 against $0.076 with grep alone (it cost 19 % more on
+2026-10-01), with the same hits, and a Haiku session $0.067 against $0.082 with
+45 hits against 42, calling semlith in 48 of 50 sessions.
+
+**Caller questions go to the graph tools.** The skill, the rule block and the
+server instructions send "who calls" to `semlith_neighbors` and "what breaks"
+to `semlith_impact`, which found 91 % of callers against search's 76 % and were
+never chosen in 150 agent sessions, and send "where is" to search rather than
+brief. The skill is shorter, and it and the research agent now say what grep
+cannot do: PDF, Word, PowerPoint, Excel, OpenDocument, EPUB and HTML are indexed
+as text, and answers about them come from semlith.
+
+**The hook sends document reads to semlith.** A `Read`, `cat` or `head` of a
+Word, PowerPoint, Excel, OpenDocument or EPUB file the store holds is refused in
+every hook mode, with the call that returns its text: the tool would only show
+the zip's bytes, and on 2026-10-01 agents without semlith made up half their
+quotes from these files. A PDF read, and `pdftotext`, `textutil`, `unzip -p` or
+`pandoc` on a document, are nudged instead. A session that has called semlith
+is no longer nudged at all, and the Read nudge names `semlith_read` only.
+
+**The portal says which tools agents are offered.** Agents › Tools lists the
+eight first and marks the rest "CLI and portal", and the tool-list cost is
+counted over the eight it is sent with.
+
+### Fixes
+
+- A folder added to a running store is watched from that moment; it used to be
+  indexed once and then not watched until the daemon restarted (#180).
+- A connection over the daemon's limit is answered 503 after its request is
+  read, instead of being dropped unread, which Windows and Linux turn into a
+  reset the portal showed as ERR_CONNECTION_RESET (#181).
+- The Graph route reads under a 15 s limit and answers 503 naming how to scope
+  it past that, so no request holds a worker for minutes on a very large store
+  (#173).
+- `Inside the index` keeps each store's measure until the store changes and
+  measures a store over 20 000 chunks on a thread of its own, so a cold measure
+  no longer competes with every other route (#175).
+- The accel countdown test takes its clock before the lane's, so a preempted
+  runner cannot overshoot its bound (#177).
+
+### Installing
+
+**Releases are attested and the installers check them.** Every release
+archive, `SHA256SUMS` and both installers carry a GitHub artifact attestation
+signed by the release workflow. `install.sh` and `install.ps1` run
+`gh attestation verify` on the archive when `gh` is installed and logged in,
+refuse an archive that fails, and say so when the check could not run. The
+installers are attached to each release, so a version can be read before it
+runs; `install.sh` runs from one `main` call, so a truncated download executes
+nothing; curl is held to https and TLS 1.2. The README has a Security section.
+
+
 ## [0.35.0] - 2026-10-02
 
 ### The portal, redrawn
@@ -4270,7 +4388,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.35.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.36.0...HEAD
+[0.36.0]: https://github.com/semlith/semlith/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/semlith/semlith/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/semlith/semlith/compare/v0.33.1...v0.34.0
 [0.33.1]: https://github.com/semlith/semlith/compare/v0.33.0...v0.33.1
