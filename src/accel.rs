@@ -2061,6 +2061,11 @@ mod tests {
             percent: 0,
             eta_ms: None,
         });
+        // And how far behind it the lane's clock started. A runner preempted
+        // between the two put the lane's clock 82 ms behind and its estimate
+        // under a lower bound that assumed none (#177, the second time): the
+        // lane's elapsed time is `taken` less this, give or take a read.
+        let lag = began.elapsed().as_millis() as u64;
         assert!(lane.coming() && !lane.ready());
         // Before it has moved, the time the last compile took counts down.
         *lane.expected.lock().unwrap() = Some(Duration::from_secs(40));
@@ -2081,8 +2086,8 @@ mod tests {
         let first = eta(&lane);
         let slack = began.elapsed().as_millis() as u64 - taken + 50;
         assert!(
-            (taken.saturating_sub(slack).max(1_000)..=taken + slack).contains(&first),
-            "{first} after {taken} ms"
+            (taken.saturating_sub(slack + lag).max(1_000)..=taken + slack).contains(&first),
+            "{first} after {taken} ms, the lane's clock {lag} ms behind"
         );
         std::thread::sleep(Duration::from_millis(300));
         // Floored at a second, and never above what it said before.
