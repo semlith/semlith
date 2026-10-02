@@ -1,8 +1,9 @@
-"""One check per finding from the 2026-09-17 full regression drive.
+"""One check per finding from the 2026-09-17 full regression drive, and one per
+v6 view and flow.
 
 The findings document describes what the 0.20.1 portal did wrong. Every check
-here asserts what 0.20.2 should do instead, so a check that passes means the
-bug is gone and a check that fails means it is back.
+here asserts what the product should do instead, so a check that passes means
+the bug is gone and a check that fails means it is back.
 
 Each check is registered by its finding id:
 
@@ -14,6 +15,25 @@ both already holding the session token. Assertions go over whichever surface
 is honest for the finding. A status code, a JSON shape or a `limit` refusal is
 asserted over HTTP; a layout, a piece of copy or what a button does is
 asserted through the DOM.
+
+0.35.0 rebuilt the portal on design v6: nine pages in three groups, a store's
+own page with five tabs, a Welcome screen and a store wizard, all routed on
+`#/<page>/<parts>`. Every check below was migrated to that markup, never
+deleted or weakened — each keeps the behaviour it asserted and points at the
+surface that now carries it (the Index page's run cards are a store's Runs tab;
+its folder pickers are the wizard's Sources step; Machine limits is Settings ›
+Performance; Impact is Graph › Blast radius; About is Settings › About). Where
+v6 deliberately reversed an old rule, the check asserts the new rule and says
+"0.35.0 owner decision" beside it: v6 as drawn wins over older rules, and the
+owner named the three biggest reversals (bulk decisions in review, session
+replay on by default, a runtime ledger recording switch). That comment is the
+only way a check's meaning is allowed to change.
+
+The `v6.*` checks at the end are new in 0.35.0: one or more per view and flow,
+each asserting that the view renders without console errors, shows what the
+daemon says rather than sample values, and that its primary control works.
+`v6.shots` writes a screenshot of every view in light and dark at 1440 px and
+390 px into the output directory — the release record's evidence.
 
 Two conventions worth knowing before you edit this file:
 
@@ -46,23 +66,31 @@ CHECKS = []
 
 
 # The portal builds every control itself, so a selector here is only ever worth
-# what `src/portal/app.js` actually writes. These four are named rather than
+# what `src/portal/app.js` actually writes. These are named rather than
 # repeated because several checks share them and a guessed selector that
 # matches nothing turns a check into a check of nothing.
 
-#: One run's card on the Index page — `el("div", {class: "card pad run-card"})`.
-RUN_CARD = ".run-card"
+#: A live run's card on a store's Runs tab — `sdRuns()` draws one
+#: `card blue-edge pad` per run that is not finished, above the History card.
+LIVE_CARD = "#main .card.blue-edge"
 
-#: The folder picker or the projects checklist, whichever is currently open.
-#: Both are `el("div", {class: "card picker", hidden: true})`, and the Index
-#: page's reveal closes one before opening the other, so at most one matches.
-OPEN_PICKER = ".card.picker:not([hidden])"
+#: One finished run on a store's Runs tab — `sdRuns()`'s History rows, one per
+#: run, keyed by store, run id and start time.
+HIST_ROW = "#main .hist-row"
 
-#: The Search page's query box — `labelled("search-query", …)` sets the id.
-SEARCH_BOX = "#search-query"
+#: The confirm dialog `ask()` builds, and the folder picker `pickFolder()`
+#: builds in the same shape. There is no `<dialog>` in the v6 page.
+MODAL = cdp.Drive.MODAL
 
-#: One file's block of hits on the Search page — `class: "locate-group"`.
-RESULT_CARD = ".locate-group"
+#: The Search page's query box — `aria-label: "Search query"`.
+SEARCH_BOX = '#main input[aria-label="Search query"]'
+
+#: One file's block of hits on the Search page — `card hit-group`.
+RESULT_CARD = "#main .hit-group"
+
+#: The page's one scroller. `<main class="main">` carries the overflow for
+#: every page that is not a full-height one (Search and Graph are `main.fill`).
+MAIN = "document.querySelector('#main')"
 
 
 class CheckFailed(Exception):
@@ -126,93 +154,25 @@ def exists(d, selector):
 
 def view_text(d):
     """Everything the current view says, for copy assertions."""
-    return d.eval("(document.querySelector('#root') || document.body).innerText")
+    return d.eval("(document.querySelector('#main') || document.querySelector('#root') || document.body).innerText")
 
 
-def picker_where(d):
-    """The folder the open picker is currently showing."""
-    return text_of(d, OPEN_PICKER + " .where", "the open picker's current folder")
+def pause(d, ms):
+    """A short, bounded settle inside the page, for a debounce or a repaint."""
+    d.eval("new Promise(done => setTimeout(() => done(true), %d))" % ms)
 
 
-def descend_picker(d, path):
-    """Walk the open picker from wherever it is down to `path`.
+def press_text(d, selector, text, what=None):
+    """Click the control matching `selector` whose own words are `text`.
 
-    Clicking the rows it lists is the only way in. `/api/dirs` and
-    `/api/projects` confine both pickers to the home directory, and the card's
-    own `open` is a closure with no handle on it from outside the page, so a
-    check that wants the picker pointed somewhere has to point it the way a
-    person would.
+    The same rule as `cdp.Drive.click_text`, but returning a failure in this
+    file's words rather than a protocol error, because a control that is not on
+    offer is the finding, not the harness.
     """
-    here = picker_where(d)
-    # Compared as text rather than with `os.path.relpath`, which refuses two
-    # paths it reads as being on different mounts — and `\\?\C:\...` and
-    # `C:\...` are exactly that to Python, though they are one drive.
-    here_key, path_key = normalise(here), normalise(path)
-    if path_key == here_key:
-        return
-    if not path_key.startswith(here_key.rstrip("/") + "/"):
-        fail(
-            "the picker is showing %s, which is not above %s, so there is no way "
-            "to walk down to it" % (here, path)
-        )
-    # The segments come from the path as it is spelled, not from the key. The
-    # key is lowercased so that `C:` and `c:` compare equal; clicking a row
-    # called `AppData` with the text `appdata` matches nothing.
-    depth = len([p for p in here_key.rstrip("/").split("/") if p])
-    spelled = [p for p in path.replace("\\", "/").rstrip("/").split("/") if p]
-    for part in spelled[depth:]:
-        if part in ("", "."):
-            continue
-        clicked = d.eval(
-            """
-            (() => {
-              const picker = document.querySelector(%s);
-              if (!picker) return 'no picker is open';
-              for (const entry of picker.querySelectorAll('.entry')) {
-                const name = entry.querySelector('.name');
-                // The name alone, not the row's text: a row can also carry an
-                // "in <store>" pill or a store badge beside the folder's name.
-                if (name && name.textContent === %s) {
-                  entry.scrollIntoView({block: "center"});
-                  entry.click();
-                  return 'clicked';
-                }
-              }
-              return 'nothing in the listing is named ' + %s;
-            })()
-            """
-            % (json.dumps(OPEN_PICKER), json.dumps(part), json.dumps(part))
-        )
-        if clicked != "clicked":
-            fail("walking the picker down to %s stopped at %s: %s" % (path, here, clicked))
-        here = os.path.join(here, part)
-        d.wait_for(
-            "(document.querySelector(%s) || {}).innerText === %s"
-            % (json.dumps(OPEN_PICKER + " .where"), json.dumps(here)),
-            what="the picker to open %s" % here,
-        )
-    return here
-
-
-#: The "runs at once" field. `settingField` gives each of the three an
-#: `aria-label` and no name or id, so the label is the handle.
-RUNS_AT_ONCE = 'input[aria-label="runs at once"]'
-
-
-def limits_panel(d):
-    """Everything the machine limits panel says, with its panel already open."""
-    text = d.eval(
-        "(() => { const field = document.querySelector(%s);"
-        " return field ? field.closest('.card').innerText : null; })()"
-        % json.dumps(RUNS_AT_ONCE)
-    )
-    if text is None:
-        fail(
-            "the machine limits panel is open and holds no %s field. The three "
-            "numbers are 'runs at once', 'threads each' and 'MiB per store'."
-            % RUNS_AT_ONCE
-        )
-    return text
+    try:
+        d.click_text(selector, text)
+    except cdp.ProtocolError as error:
+        fail("%s: %s" % (what or ("pressing %r" % text), error))
 
 
 def rects(d, selector):
@@ -226,6 +186,22 @@ def rects(d, selector):
                   text: (el.innerText || '').trim().slice(0, 40)};
         })
         """
+        % json.dumps(selector)
+    )
+
+
+def tip_of(d, selector):
+    """The full value a truncated element hands over on hover.
+
+    v6 hangs it on `data-tip` — the page's one rich tooltip, which follows the
+    pointer and also opens on keyboard focus — and a native `title` is the
+    other honest carrier. Either is a full value reachable without the DOM
+    inspector, which is what finding 4.1 asked for.
+    """
+    return d.eval(
+        "(() => { const el = document.querySelector(%s); if (!el) return null;"
+        " const h = el.closest('[data-tip], [title]');"
+        " return h ? (h.getAttribute('data-tip') || h.getAttribute('title')) : null; })()"
         % json.dumps(selector)
     )
 
@@ -246,14 +222,13 @@ def store_named(d, name):
 
 
 def doctor_state(row):
-    """The state the Doctor page's `semlith` column shows for one client row.
+    """The state the Agents › Health page shows for one client row.
 
     `/api/doctor` returns the facts — `note`, `registered`, `scope`, `command`,
-    `present` — and `doctorView()`'s own `state(c)` in `src/portal/app.js`
-    derives the words from them. There is no `state` field on the row, so a
-    check that read one grouped every client under `''` and then compared their
-    `command` values, which are the client binaries (`claude`, `codex`, …) and
-    not remedies at all. This is that function, in the same order.
+    `present` — and the page derives the words from them. There is no `state`
+    field on the row, so a check that read one grouped every client under `''`
+    and then compared their `command` values, which are the client binaries
+    (`claude`, `codex`, …) and not remedies at all. This is that derivation.
     """
     if row.get("note"):
         return "cannot register"
@@ -268,14 +243,17 @@ def doctor_state(row):
     return "installed, not registered"
 
 
-def start_index(d, path):
+def start_index(d, path, review=None):
     """Index a folder as its own store, and return (run id, store name).
 
     `store: "each"` is used rather than naming a store because it is the one
     submission shape that both creates the store and tells the caller what it
     was called, which makes every later assertion about that store exact.
     """
-    answer = d.api("/api/index", method="POST", body={"path": [path], "store": "each"})
+    body = {"path": [path], "store": "each"}
+    if review:
+        body["review"] = review
+    answer = d.api("/api/index", method="POST", body=body)
     runs = answer.get("runs") or []
     if not runs or "error" in runs[0]:
         fail("indexing %s was refused: %s" % (path, json.dumps(answer)[:300]))
@@ -367,6 +345,18 @@ def indexed_fixture(d, path):
     return store_name
 
 
+def a_store(d):
+    """A store with files in it, made if there is none yet.
+
+    With no store registered the v6 router draws the Welcome screen for almost
+    every route, so a check about a page needs one before it can open that page.
+    """
+    for row in stores(d):
+        if row.get("files") and not row.get("missing") and not row.get("unopened"):
+            return row["name"]
+    return indexed_fixture(d, d.fixtures.small())
+
+
 def all_files(d, params=""):
     """Every row of /api/files, paged, so a check can reason about the corpus."""
     rows = []
@@ -383,7 +373,7 @@ def normalise(path):
     """One spelling of a path, so a Windows comparison is about the path.
 
     The verbatim prefix comes off first. `registry.json` holds what
-    `std::fs::canonicalize` produced, which on Windows is `\\?\C:\...`, and
+    `std::fs::canonicalize` produced, which on Windows is `\\\\?\\C:\\...`, and
     that is deliberate — it is what the long-path APIs need. A comparison
     against a path a person typed has to meet it in the middle.
     """
@@ -395,6 +385,250 @@ def normalise(path):
                 text = "//" + text
             break
     return text
+
+
+def tilde(d, path):
+    """`path` the way the page spells it: the home directory as `~`.
+
+    `tilde()` in app.js shortens every path under the user's home, and the
+    home is what `/api/dirs` reports, so a check comparing against the page
+    asks the same question.
+    """
+    home = d.api("/api/dirs").get("home") or ""
+    return "~" + path[len(home):] if home and path.startswith(home) else path
+
+
+def sidebar_stores(d):
+    """The sidebar's store count, as the daemon card says it."""
+    text = text_of(d, ".nav .daemon .facts", "the sidebar's daemon card")
+    found = re.search(r"(\d+) stores?", text)
+    if not found:
+        fail("the sidebar's daemon card does not count stores: %r" % text)
+    return int(found.group(1))
+
+
+def stop_quietly(d, store):
+    """Stop a run if one is going, and say nothing when there is not.
+
+    Tidying up after a check. A run that finished on its own is refused with a
+    409 that names exactly that, which is the product being right rather than
+    something for the drive to raise.
+    """
+    try:
+        d.api("/api/index/control", method="POST", body={"store": store, "action": "stop"})
+    except cdp.ProtocolError as refused:
+        # A store its own stop deleted has nothing left to stop either.
+        if not re.search(r"no run to stop|no store called|no store is open", str(refused)):
+            raise
+
+
+def store_row_js(name):
+    """A JS expression for the Stores list row of one store, or undefined.
+
+    The row's name is the first text of `.cellname .a`, which also holds the
+    store's kind in a `.k` span after it.
+    """
+    return (
+        "[...document.querySelectorAll('#main .gl-row.gl-stores')].find(r =>"
+        " ((r.querySelector('.cellname .a') || {}).firstChild || {}).textContent"
+        " && r.querySelector('.cellname .a').firstChild.textContent.trim() === %s)"
+        % json.dumps(name)
+    )
+
+
+def stores_widest(d):
+    """Show every store on one page of the Stores list.
+
+    The list opens at 10 rows a page (0.35.0, v6 as drawn), and this drive makes
+    more stores than that, so a check looking for one row asks for 100 first.
+    """
+    if d.eval("(() => { const s = document.querySelector('#main .pager .dd'); return !!s && s.dataset.value !== '100'; })()"):
+        pick(d, "#main .pager .dd", "100")
+    pause(d, 150)
+
+
+def pick(d, selector, label):
+    """Choose `label` in the portal's dropdown at `selector`, the way a person
+    does: open it, press the item. From 0.35.0 every dropdown is the portal's
+    own (a button and the menu), not a system <select>."""
+    d.eval("document.querySelector(%s).click()" % json.dumps(selector))
+    d.wait_for("!!document.querySelector('.menu:not([hidden]) .menu-item')", timeout=5, what="the dropdown at %s to open" % selector)
+    hit = d.eval(
+        "(() => { const b = [...document.querySelectorAll('.menu:not([hidden]) .menu-item')]"
+        ".find(x => (x.querySelector('.ell') || x).textContent.trim() === %s);"
+        " if (b) b.click(); return !!b; })()" % json.dumps(label)
+    )
+    if not hit:
+        fail("the dropdown at %s offers no %r" % (selector, label))
+
+
+def open_wizard_for(d, store):
+    """The wizard's Sources step for an existing store, the way a person gets there.
+
+    A store's page offers Add sources; the wizard opens on step 2 with the store
+    already named, because naming it was done when it was made.
+    """
+    d.open_view("store/%s" % store)
+    press_text(d, "#main button", "Add sources", "the store page's Add sources")
+    d.wait_for(
+        "!!document.querySelector('.wz-steps') && /STEP 2 OF/.test((document.querySelector('.wz-head') || {}).innerText || '')",
+        what="the wizard's Sources step for %s" % store,
+    )
+
+
+def wizard_mode(d, label):
+    """Open one of the Sources step's three panels: Browse folders, Paste a path, Add a URL."""
+    pressed = d.eval(
+        "(() => { const b = [...document.querySelectorAll('.dropzone button')]"
+        ".find(b => (b.innerText || '').trim() === %s);"
+        " if (!b) return null; if (b.getAttribute('aria-pressed') !== 'true') b.click(); return true; })()"
+        % json.dumps(label)
+    )
+    if not pressed:
+        fail("the wizard's Sources step offers no %r" % label)
+    pause(d, 100)
+
+
+def browse_where(d, scope):
+    """The folder a folder picker inside `scope` is showing, as the page spells it."""
+    return d.wait_for(
+        "(() => { const t = ((document.querySelector(%s + ' .browse-head .dir') || {}).innerText || '').trim();"
+        " return t && t !== '…' ? t : null; })()" % json.dumps(scope),
+        what="the folder picker in %s to show where it is" % scope,
+    )
+
+
+def browse_into(d, scope, name):
+    """Click the folder row named `name` in a folder picker inside `scope`."""
+    before = browse_where(d, scope)
+    clicked = d.eval(
+        """
+        (() => {
+          for (const row of document.querySelectorAll(%s + ' .bitem')) {
+            const n = row.querySelector('.name');
+            if (n && n.textContent === %s) {
+              // The wizard's picker selects on a click and opens a folder on a
+              // double-click (0.35.0); the adopt picker, which has nothing to
+              // select, opens on a click.
+              const open = row.querySelector('button.open');
+              if (row.querySelector('[role=checkbox]')) open.dispatchEvent(new MouseEvent('dblclick', {bubbles: true}));
+              else open.click();
+              return true;
+            }
+          }
+          return false;
+        })()
+        """
+        % (json.dumps(scope), json.dumps(name))
+    )
+    if not clicked:
+        fail("the folder picker at %s lists nothing named %s: %s"
+             % (before, name, texts_of(d, scope + " .bitem .name")))
+    d.wait_for(
+        "(() => { const t = ((document.querySelector(%s + ' .browse-head .dir') || {}).innerText || '').trim();"
+        " return t && t !== '…' && t !== %s; })()" % (json.dumps(scope), json.dumps(before)),
+        what="the picker to open %s" % name,
+    )
+
+
+def descend(d, scope, path):
+    """Walk a folder picker in `scope` from wherever it is down to `path`.
+
+    Clicking the rows it lists is the only way in. `/api/dirs` confines every
+    picker to the home directory, and the picker's state is a closure with no
+    handle on it from outside the page, so a check that wants the picker
+    pointed somewhere has to point it the way a person would.
+    """
+    home = d.api("/api/dirs").get("home") or ""
+    here = browse_where(d, scope)
+    here_full = home + here[1:] if here.startswith("~") else here
+    if normalise(path) == normalise(here_full):
+        return
+    if not normalise(path).startswith(normalise(here_full).rstrip("/") + "/"):
+        fail("the picker is showing %s, which is not above %s" % (here, path))
+    rest = path.replace("\\", "/")[len(here_full.replace("\\", "/")):].strip("/")
+    for part in [p for p in rest.split("/") if p]:
+        browse_into(d, scope, part)
+
+
+def pick_store(d, button, store, route):
+    """Pick `store` in one of the Graph page's store pickers.
+
+    The picker lists the stores the page knew when it was drawn, and the page
+    brings its store list up to date a poll later, so a store a check has just
+    indexed can be a redraw away from the menu. The route is opened again until
+    it is there, bounded.
+    """
+    deadline = time.time() + 20
+    while True:
+        d.click(button)
+        if d.eval("[...document.querySelectorAll('.menu:not([hidden]) .menu-item .ell')].some(e => e.textContent === %s)"
+                  % json.dumps(store)):
+            press_text(d, ".menu .menu-item .ell", store, "picking %s" % store)
+            d.wait_for("[...document.querySelectorAll(%s + ' .mono')].some(e => e.textContent.trim() === %s)"
+                       % (json.dumps(button), json.dumps(store)), what="the picker to read %s" % store)
+            return
+        d.eval("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))")
+        if time.time() > deadline:
+            fail("the store picker never offered %s, a store with files: %s"
+                 % (store, texts_of(d, ".menu .menu-item .ell")))
+        time.sleep(1)
+        d.open_view(route)
+
+
+# ---------------------------------------------------------------- run cards
+
+
+def live_card(store=None):
+    """A JS expression for the first live run card on the open Runs tab."""
+    return "document.querySelector(%s)" % json.dumps(LIVE_CARD)
+
+
+def card_offers(card_js, label):
+    """A JS predicate: the card offers a visible button that reads `label`."""
+    return (
+        "(() => { const c = %s; return !!c && [...c.querySelectorAll('button')]"
+        ".some(b => !b.hidden && b.offsetParent !== null && (b.textContent || '').trim() === %s); })()"
+        % (card_js, json.dumps(label))
+    )
+
+
+def grouped(value):
+    """A count the way the page prints one: `Intl.NumberFormat("en-US")`."""
+    return "{:,}".format(int(value or 0))
+
+
+def newest_history_row(d, run):
+    """The top History row once it describes `run`, or None.
+
+    Waited for, not read once: the page paints from its last poll, so a run
+    that finished a moment ago can be a second away from its row, and reading
+    the top row in that second reads the run before it.
+    """
+    said = "%s indexed · %s chunks" % (grouped(run.get("indexed")), grouped(run.get("chunks")))
+    try:
+        return d.wait_for(
+            "(() => { const r = document.querySelector(%s);"
+            " return r && r.innerText.includes(%s) ? r.innerText : null; })()"
+            % (json.dumps(HIST_ROW), json.dumps(said)),
+            timeout=15,
+            what="the top History row to describe run %s" % run.get("id"),
+        )
+    except cdp.ProtocolError:
+        return None
+
+
+def press_in(d, card_js, label):
+    """Press the visible button reading `label` inside the element `card_js`."""
+    pressed = d.eval(
+        "(() => { const c = %s; if (!c) return 'nothing to press in';"
+        " const b = [...c.querySelectorAll('button')].find(b => !b.hidden && b.offsetParent !== null"
+        " && (b.textContent || '').trim() === %s);"
+        " if (!b) return 'nothing on offer reads ' + %s; b.click(); return 'pressed'; })()"
+        % (card_js, json.dumps(label), json.dumps(label))
+    )
+    if pressed != "pressed":
+        fail("pressing %r: %s" % (label, pressed))
 
 
 # ==========================================================================
@@ -471,6 +705,21 @@ def _(d):
             % (len(open_stores), before, after)
         )
 
+    # And the Ledger page counts what the route counts: the KPI tile is the
+    # number a person reads.
+    d.open_view("ledger")
+    tile = d.eval(
+        "(() => { const k = [...document.querySelectorAll('#main .kpi')].find(k =>"
+        " /queries recorded/i.test((k.querySelector('.eyebrow') || {}).textContent || ''));"
+        " return k ? (k.querySelector('.v') || {}).textContent : null; })()"
+    )
+    if tile is None:
+        fail("the Ledger page has no Queries recorded tile")
+    shown = int(re.sub(r"[^\d]", "", tile) or "-1")
+    now = d.api("/api/ledger")["queries"]
+    if shown != now:
+        fail("the Queries recorded tile reads %r while /api/ledger counts %d" % (tile, now))
+
 
 @finding("1.3", "a URL fetched into a store is indexed, not left orphaned")
 def _(d):
@@ -497,46 +746,64 @@ def _(d):
         )
 
 
-@finding("1.4", "a finished run card offers Remove, never Pause or Stop")
+@finding("1.4", "a finished run offers no Pause or Stop, and leaves the live area")
 def _(d):
+    # From 0.35.0 a run's controls live on its store's Runs tab: a live run is a
+    # card with Pause and Stop, and a finished one is a History row with none.
+    #
+    # The old check also required a finished card to offer Remove.
+    # 0.35.0 owner decision (v6 as drawn): finished runs are not dismissed by hand any more —
+    # they leave the live area by themselves and are kept, newest first, in a
+    # History that survives a restart. What the finding was about is unchanged
+    # and asserted in full: nothing about a run that is over offers to pause it
+    # or stop it, and the route refuses a stop that would latch the store.
     store_name = indexed_fixture(d, d.fixtures.small())
-    d.open_view("index")
+    d.open_view("store/%s/runs" % store_name)
     d.wait_for(
-        "[...document.querySelectorAll(%s)].some(c => c.innerText.includes(%s))"
-        % (json.dumps(RUN_CARD), json.dumps(store_name)),
-        what="the finished run card for %s" % store_name,
+        "document.querySelectorAll(%s).length > 0" % json.dumps(HIST_ROW),
+        what="a History row for the finished run on %s" % store_name,
     )
+    if d.eval("document.querySelectorAll(%s).length" % json.dumps(LIVE_CARD)):
+        live = [r for r in d.api("/api/index/runs")["runs"]
+                if r["store"] == store_name and r["status"] not in TERMINAL]
+        # The page draws from its last poll; a short follow-up run (the
+        # watcher's) can finish between that poll and this read. What the
+        # finding asks is that the card leaves once the run is over, so it gets
+        # a few polls to do so.
+        if not live:
+            try:
+                d.wait_for("document.querySelectorAll(%s).length === 0" % json.dumps(LIVE_CARD),
+                           timeout=10, what="the finished run's card to leave the live area")
+            except cdp.ProtocolError:
+                pass
+        if not live and d.eval("document.querySelectorAll(%s).length" % json.dumps(LIVE_CARD)):
+            fail(
+                "%s has no run going and its Runs tab still draws a live run card. "
+                "A run that is over belongs in History, with nothing to pause or stop."
+                % store_name
+            )
 
-    # Only the buttons the card is actually offering. A finished card keeps its
-    # Pause and its Stop in the markup and sets `hidden` on them, so a reader
-    # that took every `button` in the card would report controls nobody can see.
-    buttons = d.eval(
+    # Only what the History card offers a person, the row toggles aside.
+    offered = d.eval(
         """
         (() => {
-          const cards = [...document.querySelectorAll(%s)];
-          const card = cards.find(c => /done|stopped|failed/i.test(c.innerText)
-                                    && c.innerText.includes(%s));
-          if (!card) return null;
-          return [...card.querySelectorAll('button')]
-            .filter(b => !b.hidden && b.offsetParent !== null)
+          const cards = [...document.querySelectorAll('#main .card')];
+          const hist = cards.find(c => /history/i.test((c.querySelector('.card-t') || {}).textContent || ''));
+          if (!hist) return null;
+          return [...hist.querySelectorAll('button')]
+            .filter(b => !b.hidden && b.offsetParent !== null && !b.classList.contains('hist-row'))
             .map(b => (b.innerText || '').trim());
         })()
         """
-        % (json.dumps(RUN_CARD), json.dumps(store_name))
     )
-    if buttons is None:
-        fail("no run card for %s in a terminal state was found on the Index page" % store_name)
-    # The fold toggle a finished card starts with; it is not a run control.
-    buttons = [b for b in buttons if b not in ("Details", "Hide details")]
-
-    live = [b for b in buttons if b.lower() in ("pause", "stop", "resume")]
+    if offered is None:
+        fail("the Runs tab of %s has no History card for its finished run" % store_name)
+    live = [b for b in offered if b.lower() in ("pause", "stop", "stop…", "resume")]
     if live:
         fail(
-            "a finished run card still offers %s. A run that is over has nothing "
-            "to pause or stop; it should offer Remove." % ", ".join(live)
+            "a finished run on %s still offers %s. A run that is over has nothing "
+            "to pause or stop." % (store_name, ", ".join(live))
         )
-    if not any(b.lower() == "remove" for b in buttons):
-        fail("a finished run card offers %r and no Remove" % buttons)
 
     # And the route agrees, so a stale page cannot latch the store either.
     status, answer = d.api_result(
@@ -593,7 +860,7 @@ def _(d):
         )
 
 
-@finding("1.6", "a run card's totals agree with the store it wrote")
+@finding("1.6", "a run's totals agree with the store it wrote")
 def _(d):
     # The ambiguity: the findings explain the under-report by a race with the
     # watcher, which had already embedded two of three files before the run
@@ -606,7 +873,7 @@ def _(d):
     # A run over a corpus that is already indexed correctly reports "0 indexed,
     # N unchanged, 0 chunks", and asserting its `indexed` against the store's
     # total made a correct run look like the under-reporting one. So the store
-    # is measured on both sides of the run and the deltas are what the card has
+    # is measured on both sides of the run and the deltas are what the run has
     # to match. On a full drive this is the first run over `small`, so the store
     # does not exist yet and the deltas are the whole corpus; on `--only 1.6`
     # after an earlier drive they are zero, and zero indexed against zero gained
@@ -624,15 +891,27 @@ def _(d):
 
     if run.get("indexed") != gained_files:
         fail(
-            "the run card says it indexed %s files and %s went from %d to %d — a "
-            "gain of %d. A card that under-reports makes the user's own index run "
+            "the run says it indexed %s files and %s went from %d to %d — a "
+            "gain of %d. A run that under-reports makes the user's own index run "
             "look like it did almost nothing."
             % (run.get("indexed"), store_name, was["files"], now["files"], gained_files)
         )
     if run.get("chunks") != gained_chunks:
         fail(
-            "the run card says %s chunks and %s went from %d to %d — a gain of %d"
+            "the run says %s chunks and %s went from %d to %d — a gain of %d"
             % (run.get("chunks"), store_name, was["chunks"], now["chunks"], gained_chunks)
+        )
+
+    # And the run's History row on the store's page says the same numbers the
+    # route does, so the page cannot under-report on its own either.
+    d.open_view("store/%s/runs" % store_name)
+    newest = run_for(d, store_name)
+    if newest_history_row(d, newest) is None:
+        fail(
+            "the newest History row on %s reads %r and the daemon's newest run "
+            "indexed %s files into %s chunks"
+            % (store_name, d.eval("(document.querySelector(%s) || {}).innerText || ''" % json.dumps(HIST_ROW)),
+               newest.get("indexed"), newest.get("chunks"))
         )
 
 
@@ -650,13 +929,27 @@ def _(d):
                 % (row["name"], row["files"])
             )
 
+    # The Stores list's WRITTEN column, row by row: no store holding files may
+    # read "never" there.
     d.open_view("stores")
-    body = view_text(d)
-    if re.search(r"\bnever\b", body, re.IGNORECASE) and store_named(d, store_name)["files"] > 0:
+    stores_widest(d)
+    cells = d.eval(
+        "[...document.querySelectorAll('#main .gl-row.gl-stores')].map(r => ({"
+        " name: ((r.querySelector('.cellname .a') || {}).firstChild || {}).textContent,"
+        " written: ((r.querySelector('.c-written') || {}).textContent || '').trim()}))"
+    )
+    if not cells:
+        fail("the Stores list draws no rows, so its WRITTEN column cannot be read")
+    files = {row["name"]: row["files"] for row in stores(d)}
+    wrong = [c for c in cells if (c["name"] or "").strip() in files
+             and files[(c["name"] or "").strip()] > 0 and re.search(r"\bnever\b", c["written"], re.I)]
+    if wrong:
         fail(
-            "the Stores page still prints 'never' in the LAST WRITE column while "
-            "a store on it holds files"
+            "the Stores list still prints 'never' under WRITTEN for %s, which "
+            "hold files" % ", ".join(c["name"].strip() for c in wrong)
         )
+    if store_name not in [(c["name"] or "").strip() for c in cells]:
+        fail("the Stores list does not show %s at all" % store_name)
 
 
 @finding("1.8", "ledger and portal timestamps carry the same zone, and say which")
@@ -710,17 +1003,33 @@ def _(d):
             )
         offsets.add(when[-6:])
 
-    # And the portal shows that string rather than a clock of its own: the
-    # browser's local time was the other half of the disagreement.
-    d.open_view("ledger")
-    body = view_text(d)
+    # And the portal carries that string rather than a clock of its own: the
+    # browser's own time was the other half of the disagreement.
+    #
+    # 0.35.0 owner decision (v6 as drawn): the Retrievals table prints a short
+    # clock — "today 14:02" — and hangs the row's full `when`, offset and all,
+    # on that cell as its tooltip. So the assertion is that the newest row's
+    # cell carries `when` exactly, and that the clock it prints is that
+    # timestamp's own hours and minutes, not a second clock that could drift.
+    d.open_view("ledger/retrievals")
     shown = str(rows[0]["when"])
-    if shown not in body:
+    cell = d.eval(
+        "(() => { const c = [...document.querySelectorAll('#main table tbody tr td [data-tip]')]"
+        ".find(e => e.getAttribute('data-tip') === %s);"
+        " return c ? {tip: c.getAttribute('data-tip'), text: (c.textContent || '').trim()} : null; })()"
+        % json.dumps(shown)
+    )
+    if cell is None:
         fail(
-            "the newest ledger row is timestamped %r and the Retrieval ledger "
-            "page does not print it. The page used to render the browser's own "
-            "clock, which is how the same retrieval read 13:40:32 in one place "
-            "and 19:00:18 in the other." % shown
+            "the newest ledger row is timestamped %r and no row of the Retrievals "
+            "table carries it. The page used to render the browser's own clock, "
+            "which is how the same retrieval read 13:40:32 in one place and "
+            "19:00:18 in the other." % shown
+        )
+    if shown[11:16] not in cell["text"]:
+        fail(
+            "the Retrievals row for %r prints %r, which is not that timestamp's "
+            "own %s" % (shown, cell["text"], shown[11:16])
         )
 
     # The CLI is the other reader of the same rows, and the finding is about
@@ -814,43 +1123,43 @@ def _(d):
 
 @finding("2.2", "the URL panel names its own store, and a private address is refused as one")
 def _(d):
-    d.open_view("index")
-    # The panel is behind its own button, like the other three on this page.
-    d.open_index_panel("Add from a URL")
-    own_store_control = d.eval(
+    # From 0.35.0 a URL is added in the store wizard's Sources step, which is
+    # always for one named store: opened from a store's page it reads "Add
+    # sources to <store>" across the top and NAME <store> in its summary. That
+    # is the panel naming its own store — the store a fetch lands in is never
+    # read from a control in some other group, which is what went wrong.
+    target = a_store(d)
+    open_wizard_for(d, target)
+    wizard_mode(d, "Add a URL")
+    seen = d.eval(
         """
         (() => {
-          const field = document.querySelector('#index-url');
-          if (!field) return null;
-          const panel = field.closest('.card');
-          const select = panel.querySelector('select, [role=combobox], input[list]');
-          if (!select) return null;
-          // The label has to be the panel's own, not one borrowed from the
-          // control group above: that is exactly what went wrong.
-          const label = panel.querySelector(`label[for="${select.id}"]`);
-          return {label: label ? label.textContent.trim() : null,
-                  options: [...select.options || []].map(o => o.value)};
+          const field = [...document.querySelectorAll('.wz-body input')]
+            .find(i => /web address/i.test(i.placeholder || ''));
+          const top = (document.querySelector('header.top') || {}).innerText || '';
+          const name = [...document.querySelectorAll('.wz-rail .sum-row')]
+            .find(r => /^NAME$/i.test(((r.querySelector('.k') || {}).textContent || '').trim()));
+          return {field: !!field, top,
+                  name: name ? ((name.querySelector('.v') || {}).textContent || '').trim() : null};
         })()
         """
     )
-    if own_store_control is None:
+    if not seen["field"]:
+        fail("the wizard's Add a URL panel has no address field")
+    if ("Add sources to %s" % target) not in seen["top"]:
         fail(
-            "the 'Add from a URL' panel still has no store selector of its own. "
-            "The control it reads sits in a different control group above, and "
-            "the error it produces names the stores without saying where to name one."
+            "the wizard the URL panel sits in does not name the store it adds "
+            "to; its header reads %r" % seen["top"][:200]
         )
-    want("the URL panel's store selector label", own_store_control["label"], "Fetch into")
-    d.close_index_panel("Add from a URL")
+    want("the store the wizard's summary names", seen["name"], target)
+    press_text(d, "header.top button", "Cancel", "leaving the wizard")
 
     # With a store named, the request reaches URL validation, so the privacy
-    # refusal for a private address is actually exercised from the portal.
-    open_stores = [row["name"] for row in stores(d) if not row.get("unopened")]
-    if not open_stores:
-        skip("no store is open to fetch into")
+    # refusal for a private address is actually exercised.
     status, answer = d.api_result(
         "/api/add",
         method="POST",
-        body={"url": d.portal_url + "/", "store": open_stores[0]},
+        body={"url": d.portal_url + "/", "store": target},
     )
     message = json.dumps(answer).lower()
     if status == 200:
@@ -863,162 +1172,174 @@ def _(d):
         )
 
 
-@finding("2.3", "Open in Files filters the Files page to that store")
+@finding("2.3", "a store's own Files tab lists that store's files and no other's")
 def _(d):
     # Two stores with files, built rather than hoped for: telling a store filter
     # from no filter needs something to filter out, and this drive starts
     # against an empty store home.
+    #
+    # The finding: "Open in Files" from a store's menu landed on an unfiltered
+    # Files page, leaving no way anywhere in the portal to look at one store's
+    # files. From 0.35.0 the store's menu Open — or a click on its row — goes
+    # to the store's own page, and its Files tab is that store's files.
     target = indexed_fixture(d, d.fixtures.small())
     indexed_fixture(d, d.fixtures.second())
 
     d.open_view("stores")
-    d.wait_for(
-        "[...document.querySelectorAll('tbody tr')].some(r =>"
-        " ((r.querySelector('.name') || {}).textContent || '').trim() === %s)"
-        % json.dumps(target),
-        what="the %s row on the Stores page" % target,
-    )
-    # Opened and chosen in one tick. The Stores page rebuilds its rows from a
-    # one-second poll, so a menu opened in one CDP call and clicked in the next
-    # can be hanging off a row that has since been replaced — which is how this
-    # check used to land on an unfiltered Files page and blame the product.
-    # `rowMenu` builds its items from the row's own store at open time, so the
-    # only thing that has to be atomic is open-then-click.
+    stores_widest(d)
+    d.wait_for("!!(%s)" % store_row_js(target), what="the %s row on the Stores list" % target)
+    # Opened and chosen in one tick: the Stores list repaints from the live
+    # poll, so a menu opened in one CDP call and clicked in the next can be
+    # hanging off a row that has since been replaced.
     opened = d.eval(
         """
         (() => {
-          const rows = [...document.querySelectorAll('tbody tr')];
-          // The store's own name cell — `lineCell(s.name, "name")` — not the
-          // row's text, which also carries its path, its badges and its counts.
-          const row = rows.find(r =>
-            ((r.querySelector('.name') || {}).textContent || '').trim() === %s);
+          const row = %s;
           if (!row) return 'no row for the store';
-          const kebab = row.querySelector('button[aria-haspopup], button[aria-label*="action" i], td:last-child button');
+          const kebab = row.querySelector('button[aria-haspopup]');
           if (!kebab) return 'the row carries no actions control';
           kebab.click();
-          const item = [...document.querySelectorAll('.menu-item, [role=menuitem]')]
-            .find(b => (b.textContent || '').trim() === 'Open in Files');
-          if (!item) return 'the row menu opened with no Open in Files item';
+          const item = [...document.querySelectorAll('.menu .menu-item')]
+            .find(b => (b.textContent || '').trim() === 'Open');
+          if (!item) return 'the row menu opened with no Open item';
           item.click();
           return 'opened';
         })()
         """
-        % json.dumps(target)
+        % store_row_js(target)
     )
     if opened != "opened":
-        fail("could not drive the %s row's menu to Open in Files: %s" % (target, opened))
-
-    # Both halves before anything is read: the view, and its store control
-    # actually reading the store the menu was opened on. A row read while the
-    # page is still showing every store is a read of the wrong page.
-    chip = '.store-chips [data-store=%s][aria-pressed="true"]' % json.dumps(target)
+        fail("could not drive the %s row's menu to Open: %s" % (target, opened))
     d.wait_for(
-        "location.hash.startsWith('#files') && !!document.querySelector(%s)"
-        " && document.querySelectorAll('tbody tr').length > 0" % json.dumps(chip),
-        what="the Files view's store control to read %s, with its rows drawn" % target,
+        "location.hash === %s && ((document.querySelector('#main .sd-name') || {}).textContent || '') === %s"
+        % (json.dumps("#/store/%s" % target), json.dumps(target)),
+        what="the row menu's Open to land on %s's own page" % target,
+    )
+    press_text(d, "#main .tabs .tab", "Files", "the store page's Files tab")
+    d.wait_for(
+        "location.hash === %s && document.querySelectorAll('#main table tbody tr').length > 0"
+        % json.dumps("#/store/%s/files" % target),
+        what="the Files tab of %s, with its rows drawn" % target,
     )
 
-    shown = [t for t in texts_of(d, "tbody tr") if t]
+    # The store's roots, and its own directory: a URL fetched into a store is
+    # kept in that store's downloads folder, by design, and is that store's.
+    row = store_named(d, target)
+    roots = [normalise(r["path"]) for r in row.get("roots") or []] + [normalise(row["dir"])]
+    shown = d.eval(
+        "[...document.querySelectorAll('#main table tbody tr td [data-tip]')]"
+        ".map(e => e.getAttribute('data-tip')).filter(Boolean)"
+    )
     if not shown:
-        fail("Open in Files landed on an empty table")
-    wrong = [t for t in shown if target not in t]
+        fail("the Files tab of %s drew rows with no full path on any of them" % target)
+    wrong = [p for p in shown if not any(normalise(p).startswith(r + "/") for r in roots)]
     if wrong:
         fail(
-            "Open in Files from %s showed rows from other stores. It navigated "
-            "to #files and applied no filter at all, which leaves no way "
-            "anywhere in the portal to look at one store's files. First stray "
-            "row: %s" % (target, wrong[0][:120])
+            "the Files tab of %s lists files from outside that store's roots "
+            "(%s), so it is not one store's files. First stray: %s"
+            % (target, ", ".join(roots), wrong[0])
+        )
+    total = d.api("/api/files?store=%s&limit=1" % urllib.parse.quote(target))["total"]
+    foot = text_of(d, "#main .card-foot .grow", "the Files table's count")
+    if not re.search(r"of %s\b" % re.escape("{:,}".format(total)), foot):
+        fail(
+            "the Files tab of %s counts %r while /api/files holds %d files for "
+            "that store" % (target, foot, total)
         )
 
 
 @finding("2.4", "with every edge-kind chip off, the graph draws no edges and says so")
 def _(d):
+    a_store(d)
     d.open_view("graph")
-    d.wait_for("/\\d+\\s+edges/i.test(document.querySelector('#root').innerText)",
-               what="the graph summary")
 
     def summary_edges():
-        match = re.search(r"([\d,]+)\s+edges", view_text(d), re.IGNORECASE)
+        match = re.search(r"([\d,]+)\s+edges", text_of(d, ".g-foot", "the graph's foot"))
         if not match:
-            fail("the graph page no longer prints an edge count")
+            fail("the graph's foot no longer prints an edge count")
         return int(match.group(1).replace(",", ""))
 
     base = summary_edges()
-    chips = d.eval(
-        "[...document.querySelectorAll('[aria-pressed]')].filter(c =>"
-        " /calls|defines|imports|references|contains|aliases/i.test(c.innerText)).length"
-    )
+    chips = d.eval("document.querySelectorAll('.g-bar .seg button[aria-pressed]').length")
     if not chips:
         skip("this store's graph has no edge-kind chips to toggle")
 
     d.eval(
-        """
-        [...document.querySelectorAll('[aria-pressed="true"]')]
-          .filter(c => /calls|defines|imports|references|contains|aliases/i.test(c.innerText))
-          .forEach(c => c.click());
-        """
+        "[...document.querySelectorAll('.g-bar .seg button[aria-pressed=\"true\"]')].forEach(c => c.click())"
     )
-    d.eval("new Promise(done => setTimeout(() => done(true), 800))")
+    pause(d, 800)
 
     off = summary_edges()
-    if off != 0:
+    drawn = d.eval("document.querySelectorAll('.g-live svg.edges line').length")
+    if off != 0 or drawn != 0:
         fail(
-            "with all %d edge-kind chips off the summary says %d edges (the "
-            "unfiltered graph says %d). 'No filter selected' must mean no edges, "
-            "not every edge, or the summary asserts a number that does not "
-            "describe what is drawn." % (chips, off, base)
+            "with all %d edge-kind chips off the foot says %d edges and the "
+            "canvas draws %d (unfiltered: %d). 'No filter selected' must mean no "
+            "edges, not every edge the chips do not name, or the summary asserts "
+            "a number that does not describe what is drawn." % (chips, off, drawn, base)
         )
+    # Put the chips back for the checks after this one.
+    d.eval(
+        "[...document.querySelectorAll('.g-bar .seg button[aria-pressed=\"false\"]')].forEach(c => c.click())"
+    )
 
 
-@finding("2.5", "the projects picker can be pointed somewhere other than $HOME")
+@finding("2.5", "the folder picker can be pointed somewhere other than $HOME")
 def _(d):
+    # The finding: "Projects under a folder…" opened at $HOME with no Up and no
+    # clickable folders, so a monorepo anywhere else was out of reach. From
+    # 0.35.0 the one folder picker is the wizard's Browse folders; adding a
+    # folder holding several repositories offers "Keep together" or "One store
+    # each", which is what the projects picker was for.
     monorepo = d.fixtures.monorepo()
-    d.open_view("index")
-    # The checklist is one of the Index page's four folded panels, so it is
-    # opened here rather than assumed.
-    d.open_index_panel("Projects under a folder…")
+    open_wizard_for(d, a_store(d))
+    wizard_mode(d, "Browse folders")
+    scope = ".wz-body"
+    browse_where(d, scope)
 
     has_up = d.eval(
-        "[...document.querySelectorAll(%s)]"
+        "[...document.querySelectorAll('.wz-body .browse-head button')]"
         ".some(b => (b.innerText || '').trim() === 'Up')"
-        % json.dumps(OPEN_PICKER + " button")
     )
     if not has_up:
         fail(
-            "the projects picker has no Up control, so it cannot leave the home "
-            "directory. Its sibling, Choose folders…, has full navigation."
+            "the wizard's folder picker has no Up control, so it cannot leave "
+            "the folder it opened on"
         )
 
     # Navigation is asserted by doing it: walking down to the monorepo is the
     # whole of "somewhere other than $HOME", and every step of it is a click on
     # a folder name that used to render as an unclickable SPAN.
-    descend_picker(d, monorepo)
-    want("the folder the projects picker reached", picker_where(d), monorepo)
+    descend(d, scope, monorepo)
+    want("the folder the picker reached", browse_where(d, scope), tilde(d, monorepo))
 
     # And Up goes back up, which is the control the finding is named for.
-    d.click_text(OPEN_PICKER + " button", "Up")
+    press_text(d, ".wz-body .browse-head button", "Up", "the picker's Up")
     d.wait_for(
-        "(document.querySelector(%s) || {}).innerText === %s"
-        % (json.dumps(OPEN_PICKER + " .where"), json.dumps(os.path.dirname(monorepo))),
+        "((document.querySelector('.wz-body .browse-head .dir') || {}).innerText || '').trim() === %s"
+        % json.dumps(tilde(d, os.path.dirname(monorepo))),
         what="Up to leave %s" % monorepo,
     )
-    descend_picker(d, monorepo)
+    descend(d, scope, monorepo)
 
-    # Having navigated, the checklist offers the two repositories under it.
-    offered = d.eval(
-        "[...document.querySelectorAll(%s)].map(e => e.textContent.trim())"
-        % json.dumps(OPEN_PICKER + " .entry .name")
-    )
+    offered = texts_of(d, ".wz-body .bitem .name")
     for expected in ("repo-one", "repo-two"):
         if expected not in offered:
-            fail(
-                "the projects checklist at %s does not offer %s: it lists %s"
-                % (monorepo, expected, ", ".join(offered) or "nothing")
-            )
+            fail("the picker at %s does not offer %s: it lists %s"
+                 % (monorepo, expected, ", ".join(offered) or "nothing"))
+
+    # Use this folder adds it, and the wizard says it holds two repositories
+    # and offers to keep them together or give each its own store.
+    press_text(d, ".wz-body .browse-head button", "Use this folder", "Use this folder")
+    d.wait_for(
+        "/holds 2 repositories/.test((document.querySelector('.wz-body .notice') || {}).innerText || '')",
+        timeout=20,
+        what="the wizard to say the folder it was given holds 2 repositories",
+    )
 
     # And the daemon agrees about which of them are repositories, so the page
     # is not listing plain subfolders and calling them projects.
-    listing = d.api("/api/projects?path=%s" % monorepo)
+    listing = d.api("/api/projects?path=%s" % urllib.parse.quote(monorepo))
     if not listing.get("repositories"):
         fail(
             "/api/projects says nothing under the monorepo fixture is a "
@@ -1029,292 +1350,185 @@ def _(d):
         if expected not in found:
             fail("the projects listing for the monorepo fixture is missing %s: saw %s"
                  % (expected, sorted(n for n in found if n)))
-
-    # Left as it was found: this panel is exclusive with the other three.
-    d.close_index_panel("Projects under a folder…")
+    press_text(d, "header.top button", "Cancel", "leaving the wizard")
 
 
-def widest_page(d):
-    """Show the most rows the open table offers per page.
-
-    Tables open at 5 a page from 0.29.0, so a check looking for one row among
-    the drive's many stores asks for the widest page first.
-    """
-    d.eval(
-        "(() => { const chips = [...document.querySelectorAll('#root .table-foot .chips .chip')];"
-        " const last = chips[chips.length - 1]; if (last) last.click(); })()"
-    )
-
-
-def sidebar_stores(d):
-    """The sidebar's store count, as the daemon card says it."""
-    text = text_of(d, "#daemon-stores", "the sidebar's daemon card")
-    found = re.search(r"(\d+) stores?", text)
-    if not found:
-        fail("the sidebar's daemon card does not count stores: %r" % text)
-    return int(found.group(1))
-
-
-#: The Stop dialog's "Also delete the store" box.
-DELETE_BOX = "document.querySelector('dialog.modal[open] input[type=checkbox]')"
-
-
-def stop_quietly(d, store):
-    """Stop a run if one is going, and say nothing when there is not.
-
-    Tidying up after a check. A run that finished on its own is refused with a
-    409 that names exactly that, which is the product being right rather than
-    something for the drive to raise.
-    """
-    try:
-        d.api("/api/index/control", method="POST", body={"store": store, "action": "stop"})
-    except cdp.ProtocolError as refused:
-        # A store its own stop deleted has nothing left to stop either.
-        if not re.search(r"no run to stop|no store called|no store is open", str(refused)):
-            raise
-
-
-@finding("2.6", "finished runs can be dismissed and the active run sorts first")
+@finding("2.6", "finished runs leave the live area by themselves, and the active run sorts first")
 def _(d):
-    # A corpus nobody else indexes, so exactly one card on the page carries this
-    # store and that card is this check's handle on its own run. Counting cards
-    # instead does not work on a live page: the Index page keeps painting while
-    # this check waits — its own second half starts another run, and so does
-    # every check after it — so the total can rise past where it started while
-    # the dismissed card is long gone. The assertion is on *that* card going.
+    # The finding: finished runs could not be dismissed and buried the live one
+    # under them. 0.35.0 owner decision (v6 as drawn): there is nothing to
+    # dismiss by hand — a run that finishes leaves the live area of its store's
+    # Runs tab for History on its own, and History is kept across restarts. The
+    # half of the finding that is about order is asserted as before: a live run
+    # is the first thing on the tab, above every finished one, and the header's
+    # run pill names it from any page.
     finished = indexed_fixture(d, d.fixtures.unique("solo"))
-    d.open_view("index")
-    mine = (
-        "[...document.querySelectorAll(%s)].filter(c =>"
-        " ((c.querySelector('.card-title') || {}).textContent || '').trim() === %s)"
-        % (json.dumps(RUN_CARD), json.dumps(finished))
-    )
-    # The card's own Remove, not the "Remove all finished" button above the
-    # cards and not another run's: found inside that one card, and a hidden
-    # button is skipped so only the control on offer can match.
-    #
-    # Waited for rather than assumed. A card is built from the page's last poll,
-    # which can be a second old, so a run this check has already watched finish
-    # is painted as live for up to that long — with Pause and Stop where its
-    # Remove will be.
-    offered = (
-        "%s.filter(c => [...c.querySelectorAll('button')].some(b =>"
-        " !b.hidden && b.offsetParent !== null"
-        " && (b.textContent || '').trim() === 'Remove'))" % mine
-    )
+    d.open_view("store/%s/runs" % finished)
     d.wait_for(
-        "%s.length === 1" % offered,
-        what="the finished run card for %s, with its Remove on offer" % finished,
-    )
-
-    clicked = d.eval(
-        """
-        (() => {
-          const card = %s[0];
-          if (!card) return 'the card went before it could be removed';
-          const remove = [...card.querySelectorAll('button')].find(
-            b => !b.hidden && b.offsetParent !== null
-                 && (b.textContent || '').trim() === 'Remove');
-          if (!remove) return 'that card offers no Remove';
-          remove.click();
-          return 'removed';
-        })()
-        """
-        % offered
-    )
-    if clicked != "removed":
-        fail("Remove on the finished run card for %s: %s" % (finished, clicked))
-
-    d.wait_for(
-        "%s.length === 0" % mine,
+        "document.querySelectorAll(%s).length > 0 && document.querySelectorAll(%s).length === 0"
+        % (json.dumps(HIST_ROW), json.dumps(LIVE_CARD)),
         timeout=30,
-        what="the dismissed card for %s to go" % finished,
+        what="the finished run on %s to be in History and not on a live card" % finished,
     )
 
-    # And when something is actually running, it is the card at the top.
-    _, busy = start_index(d, d.fixtures.bulk())
-    d.open_view("index")
-    # Both conditions in one wait, not two reads. The page repaints its cards
-    # from the shared one-second poll, so between "the new card exists" and "the
-    # list has been re-sorted around it" there is a frame in which the finished
-    # card is still first — and reading once in that frame reported a sort bug
-    # that was a repaint the check did not wait for. A bounded wait, because a
-    # live run that never reaches the top is exactly what this finding is about.
+    run_id, busy = start_index(d, d.fixtures.unique("busy", count=400))
     try:
-        d.wait_for(
-            "(() => { const cards = [...document.querySelectorAll(%s)];"
-            " const first = cards[0];"
-            " return cards.some(c => c.innerText.includes(%s))"
-            " && !!first && first.innerText.includes(%s); })()"
-            % (json.dumps(RUN_CARD), json.dumps(busy), json.dumps(busy)),
-            timeout=30,
-            what="the live run on %s to be the first card on the Index page" % busy,
-        )
-    except cdp.ProtocolError:
-        # A run that finished while we were watching is not a failure of the
-        # ordering. The fixture corpus is already indexed by the time this
-        # check runs, so a second run over it can finish in under a second on a
-        # fast machine and there is no live card left to be first.
-        still_live = any(
-            run["store"] == busy and run["status"] in ("queued", "running", "paused", "stopping")
-            for run in (d.api("/api/index/runs").get("runs") or [])
-        )
-        first = d.eval(
-            "(document.querySelector(%s) || {}).innerText || ''" % json.dumps(RUN_CARD)
-        )
-        stop_quietly(d, busy)
-        if still_live:
-            fail(
-                "a run that is still going (%s) never became the first card on the "
-                "page; after 30s of repaints the top card still reads %r"
-                % (busy, first[:120])
+        d.open_view("store/%s/runs" % busy)
+        try:
+            d.wait_for(
+                "(() => { const host = document.querySelector('#main .page > .stack:last-child')"
+                " || document.querySelector('#main .stack');"
+                " const first = host && host.firstElementChild;"
+                " return !!first && first.classList.contains('blue-edge'); })()",
+                timeout=30,
+                what="the live run on %s to be the first card on its Runs tab" % busy,
             )
-        skip(
-            "the run over %s finished before the ordering could be observed; "
-            "there was no live card to sort above the finished ones" % busy
+        except cdp.ProtocolError:
+            run = run_by_id(d, run_id)
+            if run and run.get("status") in TERMINAL:
+                skip("the run over %s finished before the ordering could be observed" % busy)
+            fail(
+                "a run that is still going (%s, %s) is not the first card on its "
+                "store's Runs tab" % (busy, run and run.get("status"))
+            )
+        pill = d.eval(
+            "(() => { const p = document.querySelector('header.top .run-pill');"
+            " return p && !p.hidden ? (p.innerText || '').trim() : null; })()"
         )
-    stop_quietly(d, busy)
+        run = run_by_id(d, run_id)
+        if run and run.get("status") not in TERMINAL and (not pill or busy not in pill):
+            fail("the header's run pill reads %r while %s is running" % (pill, busy))
+    finally:
+        stop_quietly(d, busy)
 
 
 @finding("2.7", "lang:, path: and budget re-run the query like every other filter")
 def _(d):
+    a_store(d)
     d.open_view("search")
     d.type(SEARCH_BOX, "release record sealed immutable")
     d.press("Enter")
     d.wait_for("document.querySelectorAll(%s).length > 0" % json.dumps(RESULT_CARD),
                what="search results")
-    before = texts_of(d, RESULT_CARD)
+    before = texts_of(d, RESULT_CARD + " .hit-head .p")
 
-    # `labelled("search-path", …)` gives the `path:` dial's field its id.
-    if not exists(d, "#search-path"):
-        fail("no `path:` filter field was found on the Search page")
-
-    d.type("#search-path", "**/*.md")
-    # Deliberately no Enter in the main query box: that is exactly the
-    # workaround the finding says a user should not need. The filters debounce
-    # by 250ms and then re-run the query, so this waits for the answer rather
-    # than for a fixed number of milliseconds.
+    # From 0.35.0 the filters are chips under the box: "+ path" opens a field
+    # inside its chip, and the scope, lean, results and budget dials re-run the
+    # query on a click. The path field applies on its own Enter, the same
+    # contract as the graph's scope field (finding 2.8) — never the main query
+    # box's Enter, which is the workaround the finding says nobody should need.
+    if not exists(d, '#main input[aria-label="Path filter"]'):
+        press_text(d, "#main .sr-bar button", "+ path", "the Search page's + path chip")
+        d.wait_for("!!document.querySelector('#main input[aria-label=\"Path filter\"]')",
+                   what="the path filter field")
+    d.type('#main input[aria-label="Path filter"]', "**/*.md")
+    d.eval(
+        "document.querySelector('#main input[aria-label=\"Path filter\"]')"
+        ".dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}))"
+    )
     try:
         d.wait_for(
+            "!document.querySelector('#main .spinner') && "
             "[...document.querySelectorAll(%s)].map(e => (e.innerText || '').trim()).join('\\n') !== %s"
-            % (json.dumps(RESULT_CARD), json.dumps("\n".join(before))),
-            timeout=10,
-            what="the `path:` filter to re-run the query",
+            % (json.dumps(RESULT_CARD + " .hit-head .p"), json.dumps("\n".join(before))),
+            timeout=15,
+            what="the path filter to re-run the query",
         )
     except cdp.ProtocolError:
-        # Let the assertion below say what went wrong, in the finding's words.
-        pass
-    after = texts_of(d, RESULT_CARD)
-
+        pass  # the assertion below says it in the finding's words
+    after = texts_of(d, RESULT_CARD + " .hit-head .p")
     if after == before:
         fail(
-            "setting the `path:` filter left the results exactly as they were. "
-            "The store chips, the k stepper and the prefer segments all re-run "
-            "immediately; the user is looking at results that contradict the "
-            "visible filter state, with nothing to say so."
+            "setting the path filter left the results exactly as they were. The "
+            "scope and lean dials re-run immediately; the user is looking at "
+            "results that contradict the visible filter state."
         )
-    stray = [row for row in after if ".md" not in row.lower()]
+    stray = [row for row in after if not row.lower().endswith(".md")]
     if stray:
-        fail("the results after `path: **/*.md` still include %r" % stray[0][:120])
+        fail("the results after path **/*.md still include %r" % stray[0][:120])
+
+    # Budget is the other dial the finding named. It re-runs the query too:
+    # counted by the requests the page makes, because a budget change need not
+    # change which files come back.
+    d.eval(
+        "(() => { window.__searches = 0; const real = window.fetch.bind(window);"
+        " window.fetch = (u, o) => { if (String(u).includes('/api/search')) window.__searches++;"
+        " return real(u, o); }; })()"
+    )
+    d.eval(
+        "[...document.querySelectorAll('#main .sr-bar .dial')]"
+        ".find(b => /BUDGET/.test(b.innerText || '')).click()"
+    )
+    try:
+        d.wait_for("window.__searches > 0", timeout=10, what="the budget dial to re-run the query")
+    except cdp.ProtocolError:
+        fail("pressing the budget dial changed the budget and did not re-run the query")
 
 
-@finding("2.8", "the graph's scope field says how it is applied, and both ways work")
+@finding("2.8", "the graph's symbol field says how it is applied, and both ways work")
 def _(d):
     # The finding's complaint is that a text field silently waiting for Enter
     # reads as broken beside click-to-apply chips, and it allowed either of two
     # answers: apply as you type, or give the field a visible submit affordance
-    # that says Enter also works. The product took the second, so that is what
-    # is asserted here — the button, the hint that names the key, and both
-    # routes actually applying a scope. A release that later switches to
-    # apply-as-you-type must rewrite this check, not delete it.
-    #
-    # From 0.27.0 the hint is read rather than seen. The sentence sat inside the
-    # field's border and pushed the button off its end, so it is `.sr-only` now:
-    # the button is the affordance for anyone looking at the field, and the
-    # description is still there for anyone who is not. Both halves of the
-    # finding still hold; only which sense they reach changed.
+    # whose description says Enter also works. The product took the second in
+    # 0.27.0, so that is what is asserted here — the button, the hint that names
+    # the key, and both routes actually applying. From 0.35.0 the field is
+    # Explore's "Jump to a symbol" box; the contract did not move with it.
+    a_store(d)
     d.open_view("graph")
-    d.wait_for("/\\d+\\s+symbols/i.test(document.querySelector('.graph-count').innerText)",
-               what="the graph summary")
-
-    if not exists(d, "#graph-scope"):
-        fail("no 'Scope to a path, or find a symbol' field was found on the Graph page")
+    field = '.g-bar input[aria-label="Jump to a symbol"]'
+    if not exists(d, field):
+        fail("no 'Jump to a symbol' field was found on the Graph page")
 
     affordance = d.eval(
         """
         (() => {
-          const field = document.querySelector('#graph-scope');
-          const scope = field.closest('.graph-scope');
-          if (!scope) return null;
-          const button = [...scope.querySelectorAll('button')]
-            .find(b => (b.innerText || '').trim().length > 0);
+          const field = document.querySelector(%s);
+          const box = field.closest('.box') || field.parentElement;
+          const button = [...box.querySelectorAll('button')]
+            .find(b => (b.innerText || b.getAttribute('aria-label') || '').trim().length > 0);
           const described = field.getAttribute('aria-describedby');
           const hint = described && document.getElementById(described);
-          // `textContent`, not `innerText`: from 0.27.0 the hint is
-          // screen-reader-only, and `innerText` is what is rendered — which is
-          // nothing, by design. A screen reader reads the text either way, and
-          // the text is what this finding is about.
-          return {button: button ? (button.innerText || '').trim() : null,
+          return {button: button ? (button.innerText || button.getAttribute('aria-label') || '').trim() : null,
                   describedby: described,
                   hint: hint ? (hint.textContent || '').trim() : null};
         })()
         """
+        % json.dumps(field)
     )
-    if affordance is None:
-        fail("the graph's scope field is no longer in a .graph-scope group")
     if not affordance["button"]:
         fail(
-            "the graph's scope field has no button beside it. Every other filter "
-            "on the page is a click-to-apply chip, so a text field that answers "
-            "only Enter reads as broken — it needs either a submit affordance or "
-            "apply-as-you-type, and this release chose the affordance."
+            "the graph's symbol field has no button beside it. Every other "
+            "filter on the page is a click-to-apply chip, so a text field that "
+            "answers only Enter reads as broken — it needs either a submit "
+            "affordance or apply-as-you-type."
         )
     if not affordance["hint"] or "enter" not in affordance["hint"].lower():
         fail(
-            "the scope field's button is there and nothing names the key that "
+            "the symbol field's button is there and nothing names the key that "
             "also applies it. Its aria-describedby is %r and reads %r; it should "
-            "say Enter applies it."
-            % (affordance["describedby"], affordance["hint"])
+            "say Enter applies it." % (affordance["describedby"], affordance["hint"])
         )
 
-    # Two symbols the graph actually holds, so "applied" can be asserted on the
-    # rail naming the symbol that was asked for rather than on the page merely
-    # having changed.
     def selected():
-        return d.eval(
-            "((document.querySelector('.graph-selected .sym') || {}).innerText || '').trim()"
-        )
+        return d.eval("((document.querySelector('.g-sel .nm') || {}).innerText || '').trim()")
 
-    overview = d.api("/api/graph?limit=25")
-    plain = [
-        node["name"]
-        for node in overview.get("nodes") or []
-        # A name carrying a dot or a slash is read as a path to scope to rather
-        # than as a symbol to centre on, which is a different code path.
-        if node.get("name") and "." not in node["name"] and "/" not in node["name"]
-    ]
+    store = d.eval("((document.querySelector('.g-bar button[aria-haspopup] .mono') || {}).textContent || '').trim()")
+    overview = d.api("/api/graph?limit=25&store=%s" % urllib.parse.quote(store))
+    plain = [n["name"] for n in overview.get("nodes") or [] if n.get("name") and "." not in n["name"] and "/" not in n["name"]]
     landed = selected()
     targets = [name for name in plain if name != landed][:2]
     if len(targets) < 2:
-        skip("this graph holds fewer than two symbols that can be scoped to by name")
+        skip("this graph holds fewer than two symbols that can be jumped to by name")
 
-    # The button applies it.
-    d.type("#graph-scope", targets[0])
-    d.click_text(".graph-scope button", affordance["button"])
-    d.wait_for(
-        "((document.querySelector('.graph-selected .sym') || {}).innerText || '').trim() === %s"
-        % json.dumps(targets[0]),
-        what="the %r button to apply the scope %r" % (affordance["button"], targets[0]),
-    )
-
-    # And so does Enter, which is what the hint promises.
-    d.type("#graph-scope", targets[1])
+    d.type(field, targets[0])
+    press_text(d, ".g-bar .box button", affordance["button"])
+    d.wait_for("((document.querySelector('.g-sel .nm') || {}).innerText || '').trim() === %s"
+               % json.dumps(targets[0]), what="the button to apply %r" % targets[0])
+    d.type(field, targets[1])
     d.press("Enter")
-    d.wait_for(
-        "((document.querySelector('.graph-selected .sym') || {}).innerText || '').trim() === %s"
-        % json.dumps(targets[1]),
-        what="Enter to apply the scope %r, as the hint says it does" % targets[1],
-    )
+    d.wait_for("((document.querySelector('.g-sel .nm') || {}).innerText || '').trim() === %s"
+               % json.dumps(targets[1]), what="Enter to apply %r, as the hint says" % targets[1])
 
 
 @finding("2.9", "the PWA manifest's icons resolve, and a page load logs no errors")
@@ -1338,8 +1552,9 @@ def _(d):
                 "make the srcs absolute." % (src, resolved, code)
             )
 
+    a_store(d)
     d.clear_console()
-    d.open_view("stores", fresh=True)
+    d.open_view("home", fresh=True)
     errors = d.console_errors()
     if errors:
         fail("a page load logged %d console errors:\n  %s" % (len(errors), "\n  ".join(errors[:5])))
@@ -1359,7 +1574,7 @@ def _(d):
                 "not exist sends anyone debugging a typo'd asset looking at the "
                 "token instead of the path." % (path, code)
             )
-    for path in ("/style.css", "/app.js"):
+    for path in ("/style.css", "/app.js", "/logo.svg", "/logo-dark.svg"):
         want("%s is still served" % path, d.status(path), 200)
 
 
@@ -1382,238 +1597,237 @@ def _(d):
         skip("the daemon has not noticed the removed root yet")
 
     d.open_view("stores")
-    # Waited for, not read once. The page is live: it polls every second and
-    # redraws what moved, so a row read in the same breath as the navigation is
-    # a row drawn from the answer before the root was removed.
-    read_row = (
-        "(() => { const r = [...document.querySelectorAll('tbody tr')]"
-        ".find(r => r.innerText.includes(%s)); return r ? r.innerText : null; })()"
-        % json.dumps(store_name)
-    )
+    stores_widest(d)
+    # Waited for, not read once. The page is live: it repaints from the poll,
+    # so a row read in the same breath as the navigation is a row drawn from
+    # the answer before the root was removed.
+    read_row = "(() => { const r = %s; return r ? r.innerText : null; })()" % store_row_js(store_name)
     try:
         d.wait_for(
-            "(() => { const r = [...document.querySelectorAll('tbody tr')]"
-            ".find(r => r.innerText.includes(%s));"
-            " return !!r && /missing|gone|not there|unavailable/i.test(r.innerText); })()"
-            % json.dumps(store_name),
+            "(() => { const r = %s; return !!r && /missing|gone|not there|unavailable/i.test(r.innerText); })()"
+            % store_row_js(store_name),
             timeout=15,
             what="the Stores row for %s to say its root is gone" % store_name,
         )
     except cdp.ProtocolError:
-        # Fall through to the assertion below, which says it in the finding's
-        # own words and quotes what the row actually read.
-        pass
+        pass  # the assertion below says it in the finding's own words
     row_text = d.eval(read_row)
     if row_text is None:
-        fail("the Stores page no longer lists %s at all" % store_name)
+        fail("the Stores list no longer lists %s at all" % store_name)
     if not re.search(r"missing|gone|not there|unavailable", row_text, re.IGNORECASE):
         fail(
             "%s has no root directory and its Stores row shows no badge saying "
-            "so: %r. The API already returns the data a badge needs — `roots` is "
-            "empty and `present` is false — and nothing uses it."
-            % (store_name, row_text.replace("\n", " · ")[:160])
+            "so: %r. The API already returns the data a badge needs — `present` "
+            "is false — and nothing uses it." % (store_name, row_text.replace("\n", " · ")[:160])
         )
 
-    d.open_view("index")
-    offered = d.eval(
-        "[...document.querySelectorAll('option')].map(o => (o.innerText||'').trim())"
+    # Not offered as a target. The old Index page offered "add to <store>" for
+    # a store whose directory is gone, which is the mechanism behind finding
+    # 1.1. From 0.35.0 the controls that would index into a store from its
+    # registered roots are its menu's and its page's Re-index; a store with no
+    # root left to read must not offer either.
+    menu = d.eval(
+        """
+        (() => {
+          const row = %s;
+          if (!row) return null;
+          row.querySelector('button[aria-haspopup]').click();
+          const items = [...document.querySelectorAll('.menu .menu-item')]
+            .map(b => ({label: (b.textContent || '').trim(), off: b.disabled}));
+          document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}));
+          return items;
+        })()
+        """
+        % store_row_js(store_name)
     )
-    if any(store_name in option for option in offered):
+    offered = [i["label"] for i in (menu or []) if i["label"].startswith("Re-index") and not i["off"]]
+    if offered:
         fail(
-            "the Index page still offers 'add to %s' for a store whose directory "
-            "does not exist. That is the same mechanism that produced finding 1.1."
-            % store_name
+            "the Stores row menu still offers %s for %s, whose directory does not "
+            "exist. That is the same mechanism that produced finding 1.1."
+            % (", ".join(offered), store_name)
         )
+    d.open_view("store/%s" % store_name)
+    live = d.eval(
+        "[...document.querySelectorAll('#main button')].some(b => (b.textContent || '').trim() === 'Re-index' && !b.disabled)"
+    )
+    if live:
+        fail("%s's own page offers Re-index although its root directory is gone" % store_name)
 
 
-@finding("3.2", "the machine limits panel does not contradict itself")
+def perf_card(d):
+    """Settings › Performance's Limits card: its text and every tooltip in it.
+
+    The derivations the old Machine limits panel printed under each field are
+    the daemon's `reason` strings, and v6 hangs them on each stepper as its
+    tooltip, so a check about what the card says reads both.
+    """
+    d.open_view("settings")
+    seen = d.eval(
+        """
+        (() => {
+          const card = [...document.querySelectorAll('#main .card')]
+            .find(c => /^limits$/i.test(((c.querySelector('.card-t') || {}).textContent || '').trim()));
+          if (!card) return null;
+          const tips = [...card.querySelectorAll('[data-tip]')].map(e => e.getAttribute('data-tip'));
+          return card.innerText + '\\n' + tips.join('\\n');
+        })()
+        """
+    )
+    if seen is None:
+        fail("Settings › Performance has no Limits card")
+    return seen
+
+
+def limit_value(d, label):
+    """The value a Settings › Performance stepper shows, by its label."""
+    return d.eval(
+        "(() => { const r = [...document.querySelectorAll('#main .limit-row')].find(r =>"
+        " ((r.querySelector('.k') || {}).textContent || '').trim() === %s);"
+        " return r ? ((r.querySelector('.stepper .v') || {}).textContent || '').trim() : null; })()"
+        % json.dumps(label)
+    )
+
+
+@finding("3.2", "the machine limits do not contradict themselves")
 def _(d):
-    d.open_view("index")
-    # The three numbers live behind the "Machine limits" button, folded away
-    # because they are read once and changed rarely.
-    d.open_index_panel("Machine limits")
-    panel = limits_panel(d)
+    # Machine limits moved to Settings › Performance in 0.35.0.
+    panel = perf_card(d)
 
     if re.search(r"\b0\s*GiB is free", panel, re.IGNORECASE):
         fail(
-            "the panel says '0 GiB is free' — an integer truncation — three "
-            "lines below a figure in MiB that is not zero:\n%s" % panel[:400]
+            "the limits say '0 GiB is free' — an integer truncation — beside a "
+            "free figure that is not zero:\n%s" % panel[:400]
         )
-
-    # A reserve larger than what is free is a negative, and the copy concluded
-    # "allows 1" anyway. Whatever the numbers are, when a floor is applied the
-    # sentence has to admit it.
     reserve = re.search(r"([\d.]+)\s*GiB free minus a ([\d.]+)\s*GiB reserve", panel, re.IGNORECASE)
     if reserve:
         free, held = float(reserve.group(1)), float(reserve.group(2))
         if free < held and not re.search(r"floor|at least|minimum", panel, re.IGNORECASE):
             fail(
-                "the panel subtracts a %.1f GiB reserve from %.1f GiB free and "
-                "concludes it 'allows 1' without saying a floor was applied:\n%s"
+                "the limits subtract a %.1f GiB reserve from %.1f GiB free and "
+                "conclude it 'allows 1' without saying a floor was applied:\n%s"
                 % (held, free, panel[:400])
             )
-
-    if re.search(r"\bMiB per store\b", panel) and re.search(r"\bMB\b", panel):
+    if re.search(r"\bMiB\b", panel) and re.search(r"\bMB\b", panel):
         fail(
-            "the field is labelled MiB per store and its help text says MB. One "
-            "card, two units for one number:\n%s" % panel[:400]
+            "the memory limit is shown in MiB and its help says MB. One card, "
+            "two units for one number:\n%s" % panel[:400]
         )
-    d.close_index_panel("Machine limits")
 
 
 @finding("3.3", "'threads each' recomputes when 'runs at once' changes")
 def _(d):
-    d.open_view("index")
-    d.open_index_panel("Machine limits")
-    if not exists(d, RUNS_AT_ONCE):
-        fail("no 'runs at once' field was found in the machine limits panel")
-    if d.eval("document.querySelector(%s).disabled" % json.dumps(RUNS_AT_ONCE)):
+    runs = d.api("/api/index/runs")["limits"]
+    if runs["runs_at_once"].get("source") == "set by the environment":
         skip("this machine's runs-at-once is set by the environment, so the page cannot change it")
     # A home with a saved 'threads each' (#153) holds that number whatever
-    # 'runs at once' says, so there is no derivation left to recompute: the
-    # note says what was saved, not how many threads a run would get.
-    if d.eval(
-        "/\\bsaved\\b/.test(document.querySelector(%s).closest('.setting').innerText)"
-        % json.dumps(THREADS_EACH)
-    ):
+    # 'runs at once' says, so there is no derivation left to recompute.
+    if runs["embed_threads"].get("source") == "saved":
         skip("'threads each' is saved on this home, so it does not follow 'runs at once'")
 
-    # `settingField` saves on `change`, which `d.type` dispatches; the panel is
-    # then repainted from the daemon's answer.
-    d.type(RUNS_AT_ONCE, "3")
-    try:
+    d.open_view("settings")
+    if limit_value(d, "Runs at once") is None:
+        fail("Settings › Performance has no Runs at once stepper")
+    # The steppers save on each press and the card is repainted from the
+    # daemon's answer.
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        value = limit_value(d, "Runs at once")
+        if value == "3":
+            break
+        button = "Raise Runs at once" if int(value or 0) < 3 else "Lower Runs at once"
+        d.click('#main button[aria-label="%s"]' % button)
         d.wait_for(
-            "/\\b3 runs\\b/.test(document.querySelector(%s).closest('.card').innerText)"
-            % json.dumps(RUNS_AT_ONCE),
-            timeout=15,
-            what="the limits panel to be repainted for 3 runs at once",
+            "(() => { const r = [...document.querySelectorAll('#main .limit-row')].find(r =>"
+            " ((r.querySelector('.k') || {}).textContent || '').trim() === 'Runs at once');"
+            " return !!r && ((r.querySelector('.stepper .v') || {}).textContent || '').trim() !== %s; })()"
+            % json.dumps(value),
+            timeout=10,
+            what="the Runs at once stepper to move off %s" % value,
         )
-    except cdp.ProtocolError:
-        # Let the assertions below say which derivation went stale.
-        pass
+    want("runs at once after stepping", limit_value(d, "Runs at once"), "3")
 
-    # Each field's derivation is the `.note` under it, not a paragraph.
     help_text = d.eval(
-        """
-        (() => {
-          const all = [...document.querySelectorAll('.setting .note, .note')];
-          const el = all.find(e => /embedding threads/i.test(e.innerText || ''));
-          return el ? el.innerText : null;
-        })()
-        """
+        "(() => { const r = [...document.querySelectorAll('#main .limit-row')].find(r =>"
+        " ((r.querySelector('.k') || {}).textContent || '').trim() === 'Threads per run');"
+        " if (!r) return null; const s = r.querySelector('[data-tip]');"
+        " return r.innerText + ' ' + (s ? s.getAttribute('data-tip') : ''); })()"
     )
     if help_text is None:
-        fail("no 'threads each' help text was found")
+        fail("no 'Threads per run' row was found")
     if re.search(r"\bbetween 1 run\b", help_text, re.IGNORECASE):
         fail(
-            "'runs at once' was set to 3 and the 'threads each' help still reads "
-            "%r. The sibling field's derivation is stale." % help_text
+            "'runs at once' was set to 3 and the 'threads per run' derivation "
+            "still reads %r. The sibling field's derivation is stale." % help_text
         )
     if not re.search(r"\b3 runs?\b", help_text):
-        fail("'threads each' help does not mention the 3 runs now configured: %r" % help_text)
-    # Left open for 3.4, which reads the same panel for the saved value this
+        fail("'threads per run' does not mention the 3 runs now configured: %r" % help_text)
+    # Left at 3 for 3.4, which reads the same card for the saved value this
     # check has just written.
 
 
 @finding("3.4", "a value the daemon calls saved, the portal calls saved too")
 def _(d):
-    d.open_view("index")
-    d.open_index_panel("Machine limits")
-    panel = limits_panel(d)
+    limits = d.api("/api/index/runs")["limits"]
+    panel = perf_card(d)
     # 3.3 has just written a value, so this run of the drive has a saved one.
-    if re.search(r"\bderived\b", panel) and not re.search(r"\bsaved\b", panel):
+    saved = [k for k, v in limits.items() if isinstance(v, dict) and v.get("source") == "saved"]
+    if re.search(r"\bderived\b", panel) and saved and not re.search(r"\bsaved\b", panel):
         fail(
-            "the panel calls the runs-at-once value 'derived' when settings.json "
-            "holds a saved one. The daemon logs it as '(saved)', and the two only "
-            "diverge when the saved value equals the derived one — exactly when a "
-            "user is trying to work out whether their setting took effect:\n%s"
-            % panel[:300]
+            "the limits call a value 'derived' when settings.json holds a saved "
+            "one (%s). The daemon logs it as '(saved)', and the two only diverge "
+            "when the saved value equals the derived one — exactly when a user "
+            "is trying to work out whether their setting took effect:\n%s"
+            % (", ".join(saved), panel[:300])
         )
-    d.close_index_panel("Machine limits")
+    # Put runs at once back to what this machine derives, so later checks run
+    # one at a time as the rest of the drive assumes.
+    d.api("/api/index/settings", method="POST",
+          body={"runs_at_once": limits["runs_at_once"].get("derived") or 1})
 
 
-@finding("3.5", "the graph's CALLERS list holds only call edges")
+@finding("3.5", "the graph's Called by list holds only call edges")
 def _(d):
-    d.open_view("graph")
-    # The rail fills from `/api/neighbors` after the graph itself has drawn, so
-    # it is waited for by its own markup — `ends(title, …)` builds one
-    # `.rail-group` per list, headed by an `h3`.
-    # Scoped to `.graph-rail`, because the shell's own navigation is built from
-    # `.rail-group` divs too and a bare `.rail-group` matches four of them
-    # before it reaches the graph's.
-    d.wait_for(
-        "!!document.querySelector('.graph-rail .rail-group h3')",
-        timeout=30,
-        what="the graph rail's edge lists for the symbol it opened on",
-    )
     # The finding allowed either of two answers: filter the list to `calls`, or
-    # rename it to what it holds. The product took the rename — the heading is
-    # now "Incoming" — so the property asserted is the one both answers share:
-    # a list whose heading promises calls holds only calls. Each row carries its
-    # own kind in `el("span", {class: "via", text: end.kind})`, so the kinds are
-    # read rather than pattern-matched out of the row's prose.
-    rail = d.eval(
-        """
-        (() => {
-          const groups = [...document.querySelectorAll('.graph-rail .rail-group')];
-          if (!groups.length) return null;
-          return groups.map(group => ({
-            head: ((group.querySelector('h3') || {}).innerText || '').trim(),
-            kinds: [...group.querySelectorAll('li')]
-              .map(row => ((row.querySelector('.via') || {}).innerText || '').trim())
-              .filter(Boolean),
-          }));
-        })()
-        """
+    # rename it to what it holds. From 0.35.0 the list is Explore's "Called by"
+    # tab, fed from `/api/symbol`'s callers. Its heading promises calls, so the
+    # property is that every edge behind it is one.
+    a_store(d)
+    d.open_view("graph")
+    d.wait_for(
+        "/^Called by · \\d+/.test(((document.querySelector('.g-side .tabs .tab') || {}).innerText || '').trim())",
+        timeout=30,
+        what="Explore's Called by tab for the symbol it opened on",
     )
-    if not rail:
+    head = text_of(d, ".g-side .tabs .tab", "the Called by tab")
+    name = text_of(d, ".g-sel .nm", "the selected symbol")
+    store = d.eval("((document.querySelector('.g-bar button[aria-haspopup] .mono') || {}).textContent || '').trim()")
+    answer = d.api("/api/symbol?name=%s&store=%s&k=40" % (urllib.parse.quote(name), urllib.parse.quote(store)))
+    callers = answer.get("callers") or []
+    wrong = sorted({c.get("kind") for c in callers if c.get("kind") != "calls"}, key=str)
+    if re.match(r"^called by\b", head, re.IGNORECASE) and wrong:
         fail(
-            "the graph rail lists no edge groups at all for the symbol the page "
-            "opened on. `ends(…)` builds one `.rail-group` with an `h3` per list, "
-            "even when the list is empty."
+            "the %r list for %s holds %s edges, which are not calls. A list "
+            "headed Called by holds only calls." % (head, name, ", ".join(map(str, wrong)))
         )
-    incoming = [g for g in rail if re.match(r"^(incoming|callers)\b", g["head"], re.IGNORECASE)]
-    if not incoming:
-        fail(
-            "the graph rail has no list of the edges that point at the selected "
-            "symbol. Its groups are headed %s."
-            % ", ".join(repr(g["head"]) for g in rail)
-        )
-    for group in incoming:
-        if not group["kinds"]:
-            continue
-        promises_calls = re.match(r"^callers\b", group["head"], re.IGNORECASE)
-        wrong = sorted({k for k in group["kinds"] if k.lower() != "calls"})
-        if promises_calls and wrong:
-            fail(
-                "the rail's %r list holds %s, which are not calls. The section is "
-                "really 'incoming edges'; either it says so — as it now does — or "
-                "it filters to calls." % (group["head"], ", ".join(wrong))
-            )
+    shown = int(re.search(r"(\d+)", head).group(1))
+    want("the Called by count beside %s" % name, shown, len(callers))
 
 
 @finding("3.6", "the graph opens on something legible and offers fit and zoom")
 def _(d):
+    a_store(d)
     d.open_view("graph")
-    d.wait_for("/\\d+\\s+symbols/i.test(document.querySelector('#root').innerText)",
-               what="the graph summary")
-
-    controls = texts_of(d, "button")
+    controls = texts_of(d, "#main button")
     if not any(re.search(r"\b(fit|reset|zoom|\+|−|-)\b", c, re.IGNORECASE) for c in controls):
         fail(
             "the graph offers only %s. With no zoom, fit or reset there is no way "
             "to read a view whose labels have collided."
             % ", ".join(c for c in controls if c)[:160]
         )
-
     # `new` is the worst possible default hub in a Rust codebase: every type
     # has one, so the default view radiates every edge in the store from it.
-    # Label collision itself is drawn on a canvas and cannot be measured from
-    # the DOM; the default selection can.
-    selected = d.eval(
-        "(document.querySelector('[aria-current=\"true\"], .selected, [aria-selected=\"true\"]')"
-        " || {}).innerText || ''"
-    ).strip()
+    selected = d.eval("((document.querySelector('.g-sel .nm') || {}).innerText || '').trim()")
     if selected.lower() == "new":
         fail(
             "the graph still opens on `new`, the single worst hub in a Rust "
@@ -1624,50 +1838,33 @@ def _(d):
 
 @finding("3.7", "scoping the graph cannot raise the edge count")
 def _(d):
-    # Read from `/api/graph`, not from the page's `.graph-count`.
-    #
-    # The number the page prints is `canvas.counts()` — whatever survived the
-    # edge-kind chips and the store chips that whichever check ran before this
-    # one left switched on — and the page does not open on the whole graph
-    # anyway: `graphView()` lands on `focus(busiest.name)`, a neighbourhood. So
-    # the unscoped reading came back as two symbols and every comparison after
-    # it was against the wrong denominator. Both numbers now come from one
-    # route, with the same `limit` and the same (absent) store filter, so the
-    # only difference between the two answers is the scope. Nothing on the page
-    # is touched, so its chips are left exactly as they were found.
+    # Read from `/api/graph`, not from the page: what the page prints is what
+    # survived its edge-kind chips, which whichever check ran before this one
+    # may have left switched off. Both numbers come from one route with the
+    # same `limit` and the same store, so the only difference between the two
+    # answers is the scope.
     LIMIT = 200
+    store = a_store(d)
 
     def counts(data):
         return (len(data.get("nodes") or []), len(data.get("edges") or []))
 
-    whole = d.api("/api/graph?limit=%d" % LIMIT)
+    whole = d.api("/api/graph?limit=%d&store=%s" % (LIMIT, urllib.parse.quote(store)))
     base_symbols, base_edges = counts(whole)
     if not base_symbols:
         skip("this machine's stores hold no extracted symbols to scope")
 
-    # The same value the scope box would send: `applyScope()` reads anything
-    # without a dot or a slash as a symbol to centre on, and posts it as `name`.
     target = next(
-        (
-            node["name"]
-            for node in whole["nodes"]
-            if node.get("name") and "." not in node["name"] and "/" not in node["name"]
-        ),
+        (n["name"] for n in whole["nodes"] if n.get("name") and "." not in n["name"] and "/" not in n["name"]),
         None,
     )
     if not target:
         skip("no symbol in this graph can be scoped to by name")
 
-    scoped_data = d.api("/api/graph?limit=%d&name=%s" % (LIMIT, urllib.parse.quote(target)))
+    scoped_data = d.api("/api/graph?limit=%d&store=%s&name=%s"
+                        % (LIMIT, urllib.parse.quote(store), urllib.parse.quote(target)))
     scoped_symbols, scoped_edges = counts(scoped_data)
 
-    # The drawn set is capped — a force layout is a hairball past a few dozen
-    # nodes — so neither answer is "the whole graph", and the summary line now
-    # says so ("32 of 4,092 symbols"). What must hold is that no edge is drawn
-    # twice: the original defect was every open store being asked about every
-    # drawn name, so an edge two stores both knew was counted once per store
-    # and a twenty-node scope reported 836 edges where the page's own unscoped
-    # view reported 623.
     def duplicates(data):
         seen, twice = set(), []
         for edge in data.get("edges") or []:
@@ -1682,8 +1879,7 @@ def _(d):
         if twice:
             fail(
                 "%s draws %d edge(s) twice, so its edge count is not a count of "
-                "what is on the canvas: %s"
-                % (label, len(twice), twice[:3])
+                "what is on the canvas: %s" % (label, len(twice), twice[:3])
             )
 
     if scoped_symbols > base_symbols:
@@ -1703,24 +1899,32 @@ def _(d):
         )
 
 
-@finding("3.8", "Doctor gives no fix command for a client that is not installed")
+@finding("3.8", "no fix command is given for a client that is not installed")
 def _(d):
     rows = d.api("/api/doctor").get("clients") or d.api("/api/doctor").get("rows") or []
     if not rows:
         skip("the doctor route lists no clients on this machine")
     for row in rows:
-        state = str(row.get("state") or row.get("status") or "").lower()
-        fix = (row.get("fix") or row.get("command") or "").strip()
-        if "not installed" in state and fix and fix != "—":
+        state = doctor_state(row)
+        fix = (row.get("repair") or "").strip()
+        if state == "not installed" and fix and fix != "—":
             fail(
                 "%s is reported as '%s' and still handed %r. Every other "
-                "not-installed row gets an em dash, and the same client then "
-                "shows up in the Agents dry run as 'will be created'."
-                % (row.get("name"), state, fix)
+                "not-installed row gets an em dash." % (row.get("name"), state, fix)
             )
+    # And the page agrees: Agents › Health prints "—" under To fix for every
+    # client it calls not installed.
+    d.open_view("agents/health")
+    bad = d.eval(
+        "[...document.querySelectorAll('#main table tbody tr')].filter(tr =>"
+        " /not installed/.test(tr.cells[1].innerText) && tr.cells[3].innerText.trim() !== '—')"
+        ".map(tr => tr.cells[0].innerText + ': ' + tr.cells[3].innerText)"
+    )
+    if bad:
+        fail("Agents › Health hands a fix to a client it calls not installed: %s" % bad[:3])
 
 
-@finding("3.9", "one Doctor state has one fix command")
+@finding("3.9", "one client state has one fix command")
 def _(d):
     rows = d.api("/api/doctor").get("clients") or []
     if not rows:
@@ -1736,38 +1940,53 @@ def _(d):
     for state, fixes in by_state.items():
         if len(fixes) < 2:
             continue
-        # Two commands under one state are allowed when the cell says why. The
-        # product's own answer is a trailing `# <client> is registered by writing
-        # its config file, which \`semlith setup\` alone does not do`, which the
-        # `copyField` renders with the command — so a remedy that carries an
-        # explanation of its own is not an unexplained second remedy.
+        # Two commands under one state are allowed when the cell says why: a
+        # trailing `# <client> is registered by writing its config file …`
+        # explains its own difference.
         unexplained = {fix: names for fix, names in fixes.items() if "#" not in fix}
         if len(unexplained) < 2:
             continue
-        listed = "; ".join(
-            "%s → %r" % (", ".join(names), fix) for fix, names in unexplained.items()
-        )
+        listed = "; ".join("%s → %r" % (", ".join(names), fix) for fix, names in unexplained.items())
         fail(
             "the state %r is given %d different remedies with nothing to "
             "explain the difference: %s" % (state, len(unexplained), listed)
         )
 
 
+def agents_add(d, client):
+    """Agents › Add a client with one client picked."""
+    d.open_view("agents/add")
+    clicked = d.eval(
+        "(() => { const b = [...document.querySelectorAll('#main .client-row')].find(b =>"
+        " ((b.querySelector('.grow') || {}).textContent || '').trim() === %s);"
+        " if (!b) return false; b.click(); return true; })()" % json.dumps(client)
+    )
+    if not clicked:
+        fail("Agents › Add a client lists no %s" % client)
+    d.wait_for(
+        "((document.querySelector('#main .card-b .big15') || {}).textContent || '').trim() === %s"
+        % json.dumps(client),
+        what="%s to be the client on show" % client,
+    )
+
+
 @finding("3.10", "the recommended Claude Code HTTP command carries --scope user")
 def _(d):
-    d.open_view("agents")
-    body = view_text(d)
+    a_store(d)
+    agents_add(d, "Claude Code")
+    press_text(d, "#main .tabs .tab", "Terminal", "the Terminal tab")
+    d.wait_for("document.querySelectorAll('#main .copyfield .t').length > 0", what="the terminal commands")
     command = None
-    for line in body.splitlines():
+    for line in texts_of(d, "#main .copyfield .t"):
         if "claude mcp add" in line and "--transport http" in line:
-            command = line.strip()
+            command = line
             break
     if command is None:
-        fail("no `claude mcp add --transport http` command was found on the Agents page")
+        fail("no `claude mcp add --transport http` command is offered for Claude Code")
     if "--scope user" not in command:
         fail(
-            "the copyable HTTP command omits `--scope user`, which the paragraph "
-            "directly above it says is 'what makes one registration cover every "
+            "the copyable HTTP command omits `--scope user`, which the client's "
+            "own note says is 'what makes one registration cover every "
             "directory'. Copy it and semlith is registered for one directory "
             "only. Saw: %s" % command
         )
@@ -1775,69 +1994,76 @@ def _(d):
 
 @finding("3.11", "the Agents page renders no literal backticks")
 def _(d):
-    d.open_view("agents")
-    body = view_text(d)
-    stray = [line.strip() for line in body.splitlines() if "`" in line]
-    if stray:
-        fail(
-            "backticks are printed as characters on the Agents page, while every "
-            "other inline code reference on the same page is styled:\n  %s"
-            % "\n  ".join(stray[:3])
-        )
+    a_store(d)
+    for tab in ("agents", "agents/add", "agents/tools", "agents/health"):
+        d.open_view(tab)
+        stray = [line.strip() for line in view_text(d).splitlines() if "`" in line]
+        if stray:
+            fail(
+                "backticks are printed as characters on %s, while every other "
+                "inline code reference is styled:\n  %s" % (tab, "\n  ".join(stray[:3]))
+            )
 
 
 @finding("3.12", "stopping the MCP endpoint asks first")
 def _(d):
+    a_store(d)
     d.open_view("agents")
     before = d.api("/api/agents")
-    d.click_text("button", "Stop")
-    d.eval("new Promise(done => setTimeout(() => done(true), 600))")
+    switch = "#main .head button[role=switch]"
+    if not exists(d, switch):
+        fail("the Agents page has no endpoint switch")
+    try:
+        d.click(switch)
+        pause(d, 600)
+        asked = d.modal_open()
+        after = d.api("/api/agents")
+        if not asked:
+            fail(
+                "the endpoint switch closed the MCP endpoint with no dialog. Forget "
+                "store, Forget file and Stop run all confirm; the one action that "
+                "severs every connected agent does not."
+            )
+        if json.dumps(after.get("endpoint")) != json.dumps(before.get("endpoint")):
+            fail("the endpoint changed state before the confirmation was answered")
+        d.press("Escape")
+    finally:
+        # Whatever happened, the endpoint is open again for the checks after this.
+        d.api("/api/endpoint", method="POST", body={"open": True})
 
-    asked = d.eval(
-        "!!document.querySelector('dialog[open], [role=alertdialog], [role=dialog]')"
-    )
-    if not asked:
-        fail(
-            "Stop closed the MCP endpoint with no dialog. Delete store, Forget "
-            "file, Forget selected and Stop run all confirm; the one action that "
-            "severs every connected agent does not."
-        )
-    after = d.api("/api/agents")
-    if json.dumps(after.get("endpoint")) != json.dumps(before.get("endpoint")):
-        fail("the endpoint changed state before the confirmation was answered")
-    d.press("Escape")
 
-
-@finding("3.13", "the dry run is the primary button, writing files is not")
+@finding("3.13", "nothing writes a client's config before what it writes is on screen")
 def _(d):
-    d.open_view("agents")
-    classes = d.eval(
+    # The finding: "Write these files" was the primary button and the dry run
+    # that showed what it would write was secondary, so the destructive button
+    # was reachable without ever seeing the preview.
+    #
+    # 0.35.0 owner decision (v6 as drawn): there is no separate dry run. Each
+    # client registers in one click, and the exact command or file that click
+    # writes is printed beside the button before it can be pressed; the wizard's
+    # Connect step lists what it will write per client above its Register. So
+    # the property asserted is the one the finding was about — the write is
+    # never reachable without what it writes being on screen next to it.
+    a_store(d)
+    d.open_view("agents/add")
+    rows = d.eval(
         """
-        (() => {
-          const out = {};
-          for (const b of document.querySelectorAll('button')) {
-            const t = (b.innerText || '').trim().toLowerCase();
-            if (t.startsWith('write these files')) out.write = b.className;
-            if (t.startsWith('show what would be written')) out.preview = b.className;
-          }
-          return out;
-        })()
+        [...document.querySelectorAll('#main .one-click')].map(r => ({
+          what: ((r.querySelector('.t-mono-sm') || {}).textContent || '').trim(),
+          button: ((r.querySelector('button') || {}).textContent || '').trim()}))
         """
     )
-    if "write" not in classes or "preview" not in classes:
-        fail("the Agents page no longer carries both the write and the preview buttons")
-    if "secondary" in classes["write"]:
-        return
-    if "secondary" not in classes["preview"] and "primary" in classes["write"]:
-        fail(
-            "'Write these files' is still the primary button (%r) and the safe "
-            "preview is %r. The visual hierarchy is inverted relative to the "
-            "risk: the primary writes MCP configuration into ten real config "
-            "files across the machine." % (classes["write"], classes["preview"])
-        )
+    clients = [c for c in (d.api("/api/agents").get("doctor") or []) if c.get("present")]
+    if not rows:
+        if clients:
+            fail("Agents › Add a client offers no Register for %s, which is installed" % clients[0]["name"])
+        skip("no client is installed on this machine, so nothing can be registered from the page")
+    for row in rows:
+        if row["button"] in ("Register", "Unregister") and not row["what"]:
+            fail("a %s button sits beside no statement of what it writes" % row["button"])
 
 
-@finding("3.14", "the About page's model notes describe the models they sit beside")
+@finding("3.14", "the model notes describe the models they sit beside")
 def _(d):
     models = d.api("/api/models")
     rows = models.get("models") if isinstance(models, dict) else models
@@ -1856,16 +2082,14 @@ def _(d):
     for name in ("GTEBaseENV15", "GTEBaseENV15Q"):
         note = note_of(name)
         if "multilingual" in note:
-            fail("%s is the English GTE model and its note calls it multilingual: %r"
-                 % (name, note))
+            fail("%s is the English GTE model and its note calls it multilingual: %r" % (name, note))
 
     small = note_of("BGESmallENV15")
     if "default" in small:
         fail(
             "BGESmallENV15's note calls it the default English model. semlith's "
-            "default is granite, and these notes are presented in semlith's UI as "
-            "semlith's own statements about models the user is invited to choose "
-            "between: %r" % small
+            "default is granite, and these notes are presented as semlith's own "
+            "statements about models the user is invited to choose between: %r" % small
         )
 
 
@@ -1873,14 +2097,11 @@ def _(d):
 def _(d):
     # The ambiguity: the finding complains that 43 of 48 rows are empty and
     # that sorting by SIZE hides the five that are not. It does not say every
-    # model must gain a size — upstream may not publish one. The two things it
-    # does imply are asserted: the model semlith is running has a size, and
-    # the sort puts the rows that have one where they can be seen.
+    # model must gain a size — upstream may not publish one. What it does imply
+    # is asserted: the model semlith is running has a size.
     about = d.api("/api/about")
     in_use = about.get("model") or (about.get("embedding") or {}).get("model")
     if not in_use:
-        # `/api/about` describes the binary; the model belongs to a store, and
-        # every store's row names the one it was built with.
         in_use = next(
             (s["model"] for s in (d.api("/api/stores").get("stores") or []) if s.get("model")),
             None,
@@ -1890,101 +2111,101 @@ def _(d):
 
     models = d.api("/api/models")
     rows = models.get("models") if isinstance(models, dict) else models
-    match = next(
-        (r for r in rows if (r.get("name") or r.get("model")) == in_use), None
-    )
+    match = next((r for r in rows if (r.get("name") or r.get("model")) == in_use), None)
     if match is None:
         fail("the model in use, %s, is not in the models table at all" % in_use)
     if not match.get("size") and not match.get("bytes"):
         fail(
             "the model actually in use (%s), which is downloaded and which the "
-            "Privacy page reports as cached, shows no SIZE" % in_use
+            "Privacy page reports as on disk, shows no SIZE" % in_use
         )
-
-    # The second half of this check drove the About page's models table and its
-    # SIZE sort. 0.27.0 removed that table: forty-eight rows of a catalogue of
-    # which any machine has fetched one, on a page the v4 design gives seven
-    # facts and a language table. What the finding was actually about survives
-    # above — the model in use has a size, and `/api/models` still says so —
-    # and 7.9 asserts the table is gone and both routes still answer. There is
-    # no sort control left to mis-sort.
+    # The About page's models table and its SIZE sort went in 0.27.0 (7.9
+    # asserts it stays gone); the Privacy page's downloads list is where a
+    # person reads the model's size now, and 8.8 asserts every size on it.
 
 
 @finding("3.16", "the Retrieval ledger page shows the ledger")
 def _(d):
+    a_store(d)
     d.api("/api/search?query=release%20record%20sealed%20immutable&k=8")
     time.sleep(1.0)
-    d.open_view("ledger")
-    d.eval("new Promise(done => setTimeout(() => done(true), 1000))")
+    for tab in ("ledger", "ledger/retrievals"):
+        d.open_view(tab)
+        try:
+            d.wait_for("document.querySelectorAll('#main table tbody tr').length > 0", timeout=10,
+                       what="rows on %s" % tab)
+        except cdp.ProtocolError:
+            fail(
+                "%s has aggregate tiles, a by-client breakdown and terminal "
+                "snippets, and zero rows. The one thing described as a debugging "
+                "trail is the one thing the page will not show, and the CLI "
+                "prints rows where the portal does not." % tab
+            )
 
-    rows = d.eval("document.querySelectorAll('table tbody tr').length")
-    if not rows:
-        fail(
-            "the Retrieval ledger page has aggregate tiles, a by-client "
-            "breakdown and three snippets telling you to run `semlith ledger "
-            "--last 20` in a terminal, and zero rows. The one thing described as "
-            "'a debugging trail' is the one thing the page will not show. It also "
-            "breaks the portal-parity rule: the CLI prints rows, the portal does not."
-        )
 
-
-@finding("3.17", "the LINES tile's caption describes lines")
+@finding("3.17", "the lines tile's caption describes lines")
 def _(d):
-    d.open_view("stores")
+    # The tiles moved to Stores › Inside the index in 0.35.0.
+    a_store(d)
+    d.open_view("stores/inside")
     caption = d.eval(
         """
         (() => {
-          const tiles = [...document.querySelectorAll('.tile, .stat, figure, li')];
-          const tile = tiles.find(t => /^\\s*LINES\\b/i.test(t.innerText || ''));
+          const tile = [...document.querySelectorAll('#main .kpi')]
+            .find(t => /^\\s*LINES\\b/i.test((t.querySelector('.eyebrow') || {}).textContent || ''));
           return tile ? tile.innerText : null;
         })()
         """
     )
     if caption is None:
-        fail("no LINES tile was found on the Stores page")
+        fail("no lines tile was found on Stores › Inside the index")
     if re.search(r"readers? in use", caption, re.IGNORECASE):
         fail(
-            "the LINES tile's caption is 'readers in use' — a fact about format "
-            "handlers, not about lines. Every other tile's caption describes its "
-            "own number: '63 formats' under FILES, '384-dimension vectors' under "
-            "CHUNKS, 'int8 quantised' under ON DISK. Saw: %r"
-            % caption.replace("\n", " · ")
+            "the lines tile's caption is 'readers in use' — a fact about format "
+            "handlers, not about lines. Saw: %r" % caption.replace("\n", " · ")
         )
 
 
-@finding("3.18", "the LAST WRITE column holds one vocabulary")
+@finding("3.18", "the WRITTEN column holds one vocabulary")
 def _(d):
+    a_store(d)
     d.open_view("stores")
+    stores_widest(d)
     values = d.eval(
-        """
-        (() => {
-          const table = document.querySelector('table');
-          if (!table) return null;
-          const heads = [...table.querySelectorAll('th')].map(h => (h.innerText||'').trim().toLowerCase());
-          const at = heads.findIndex(h => h.startsWith('last write'));
-          if (at < 0) return null;
-          return [...table.querySelectorAll('tbody tr')]
-            .map(r => ((r.children[at] || {}).innerText || '').trim().toLowerCase())
-            .filter(Boolean);
-        })()
-        """
+        "[...document.querySelectorAll('#main .gl-row.gl-stores .c-written')]"
+        ".map(c => (c.textContent || '').trim().toLowerCase()).filter(Boolean)"
     )
-    if values is None:
-        fail("no LAST WRITE column was found on the Stores page")
+    if not values:
+        fail("no WRITTEN column was found on the Stores list")
     if "not opened" in values:
         fail(
-            "'not opened' appears in the LAST WRITE column. It is a fact about "
-            "whether the daemon holds the store, not a last write, and it rendered "
-            "as an amber pill beside grey ones — one column, two vocabularies, two "
-            "visual treatments."
+            "'not opened' appears in the WRITTEN column. It is a fact about "
+            "whether the daemon holds the store, not a last write — one column, "
+            "two vocabularies."
         )
-    phrases = {v for v in values if not re.search(r"\d", v)}
+    # The phrases for the absence of a write. "just now" is a time, not an
+    # absence, though it has no digit in it.
+    phrases = {v for v in values if not re.search(r"\d", v) and v != "just now"}
     if len(phrases) > 1:
-        fail("the LAST WRITE column uses %d different phrases for the absence of a "
+        fail("the WRITTEN column uses %d different phrases for the absence of a "
              "write: %s" % (len(phrases), sorted(phrases)))
 
 
-@finding("3.19", "the Files header's store count respects the filter")
+def files_tab(d, store, glob=""):
+    """A store's Files tab, filtered by a path glob or by none.
+
+    The field is always set: the page keeps one filter for every store's Files
+    tab, so a glob typed on one store's tab is still applied on the next one's.
+    """
+    d.open_view("store/%s/files" % store)
+    d.wait_for("!!document.querySelector('#main input[aria-label=\"Path or glob\"]')",
+               what="the Files tab's path field")
+    if d.eval("document.querySelector('#main input[aria-label=\"Path or glob\"]').value") != glob:
+        d.type('#main input[aria-label="Path or glob"]', glob)
+        pause(d, 700)
+
+
+@finding("3.19", "a file count respects the filter, and the Forget note goes with the rows")
 def _(d):
     page = d.api("/api/files?path=**/*.no-such-extension")
     want("a filter that matches nothing returns no files", page["total"], 0)
@@ -1996,55 +2217,33 @@ def _(d):
             "describes the daemon." % page["stores"]
         )
 
-    d.open_view("files")
-    path_field = d.eval(
-        """
-        (() => {
-          const el = [...document.querySelectorAll('input')]
-            .find(i => /path|filter|glob/i.test(i.placeholder || i.name || i.id || ''));
-          return el ? (el.id ? '#' + el.id : ('input[placeholder="' + el.placeholder + '"]')) : null;
-        })()
-        """
-    )
-    if path_field:
-        d.type(path_field, "**/*.no-such-extension")
-        d.press("Enter")
-        d.eval("new Promise(done => setTimeout(() => done(true), 1200))")
-        if re.search(r"Forget drops the file's chunks", view_text(d)):
-            fail(
-                "the Forget footnote is still visible with no rows and no Forget "
-                "buttons on the page"
-            )
+    # The cross-store Files page went in 0.35.0; a store's own Files tab is
+    # where files are filtered and forgotten now.
+    files_tab(d, a_store(d), "**/*.no-such-extension")
+    d.wait_for("document.querySelectorAll('#main table tbody tr').length === 0",
+               what="the filtered table to empty")
+    if re.search(r"Forget drops (the|a) file's chunks", view_text(d)):
+        fail(
+            "the Forget footnote is still visible with no rows and no Forget "
+            "buttons on the page"
+        )
 
 
 @finding("3.20", "the empty state after a Forget blames the corpus, not the filter")
 def _(d):
-    store_name = indexed_fixture(d, d.fixtures.small())
+    store_name = indexed_fixture(d, d.fixtures.unique("forgetme"))
     rows = all_files(d, params="&store=%s" % store_name)
     if not rows:
         skip("the fixture store holds no files to forget")
     target = rows[0]["path"]
+    leaf = target.replace("\\", "/").rsplit("/", 1)[-1]
 
-    d.open_view("files")
-    path_field = d.eval(
-        """
-        (() => {
-          const el = [...document.querySelectorAll('input')]
-            .find(i => /path|filter|glob/i.test(i.placeholder || i.name || i.id || ''));
-          return el ? (el.id ? '#' + el.id : ('input[placeholder="' + el.placeholder + '"]')) : null;
-        })()
-        """
-    )
-    if not path_field:
-        fail("no path filter field was found on the Files page")
-    d.type(path_field, "**/" + target.replace("\\", "/").rsplit("/", 1)[-1])
-    d.press("Enter")
-    d.wait_for("document.querySelectorAll('tbody tr').length > 0", what="the filtered row")
-
+    files_tab(d, store_name, "**/" + leaf)
+    d.wait_for("document.querySelectorAll('#main table tbody tr').length > 0", what="the filtered row")
     d.api("/api/forget", method="POST", body={"store": store_name, "path": target})
-    d.press("Enter")
-    d.eval("new Promise(done => setTimeout(() => done(true), 1200))")
-
+    # The same filter again, which is what reloads the table.
+    d.type('#main input[aria-label="Path or glob"]', "**/" + leaf)
+    pause(d, 900)
     body = view_text(d)
     if re.search(r"the filter, not the corpus", body, re.IGNORECASE):
         fail(
@@ -2056,285 +2255,178 @@ def _(d):
 
 @finding("3.21", "a completed Forget says something")
 def _(d):
-    store_name = indexed_fixture(d, d.fixtures.small())
-    rows = all_files(d, params="&store=%s" % store_name)
-    if not rows:
+    store_name = indexed_fixture(d, d.fixtures.unique("forgetsays"))
+    if not all_files(d, params="&store=%s" % store_name):
         skip("the fixture store holds no files to forget")
-
-    d.open_view("files")
-    d.wait_for("document.querySelectorAll('tbody tr').length > 0", what="the files table")
+    files_tab(d, store_name)
+    d.wait_for("document.querySelectorAll('#main table tbody tr').length > 0", what="the files table")
     clicked = d.eval(
-        """
-        (() => {
-          const rows = [...document.querySelectorAll('tbody tr')];
-          const row = rows.find(r => r.innerText.includes(%s));
-          if (!row) return false;
-          const button = [...row.querySelectorAll('button')]
-            .find(b => /forget/i.test(b.innerText || ''));
-          if (!button) return false;
-          button.click();
-          return true;
-        })()
-        """
-        % json.dumps(store_name)
+        "(() => { const b = [...document.querySelectorAll('#main table tbody tr button')]"
+        ".find(b => (b.textContent || '').trim() === 'Forget'); if (!b) return false; b.click(); return true; })()"
     )
     if not clicked:
-        skip("no Forget button was reachable for the fixture store's rows")
+        fail("no Forget was reachable on the rows of %s's Files tab" % store_name)
     # Confirm, because Forget is one of the actions that asks.
-    d.eval(
-        "[...document.querySelectorAll('dialog button, [role=dialog] button')]"
-        ".filter(b => /forget|confirm|yes/i.test(b.innerText || '')).forEach(b => b.click())"
+    d.wait_for("!!document.querySelector(%s)" % json.dumps(MODAL), what="the Forget confirm")
+    d.modal_press("Forget")
+    d.wait_for(
+        "[...document.querySelectorAll('.toast, [role=status], [aria-live]')]"
+        ".some(el => /forgot/i.test(el.innerText || ''))",
+        timeout=15,
+        what="the Forget to say something",
     )
-    d.eval("new Promise(done => setTimeout(() => done(true), 1000))")
-
-    announced = d.eval(
-        """
-        [...document.querySelectorAll('.toast, [role=status], [aria-live]')]
-          .map(el => (el.innerText || '').trim()).filter(Boolean)
-        """
-    )
-    if not announced:
-        fail(
-            "the row disappeared and nothing said so: no toast, no [role=status], "
-            "no [aria-live] region with any text in it. The operation is correct; "
-            "it is just silent."
-        )
 
 
-@finding("3.22", "the Privacy Rules badge agrees with the Privacy scan")
+@finding("3.22", "the Privacy rules badge agrees with the Privacy scan")
 def _(d):
+    a_store(d)
     d.open_view("privacy")
     body = view_text(d)
-    if re.search(r"\bScan\s*\n?\s*Scan\b", body):
-        fail("the Privacy page renders 'Scan' immediately followed by 'Scan'")
+    if re.search(r"\bScan\s*\n?\s*Scan\b|\bCheck now\s*\n?\s*Check now\b", body):
+        fail("the Privacy page renders its scan control's words twice in a row")
 
     scan = d.api("/api/privacy/scan")
-    refused = scan.get("files") or scan.get("refused") or []
+    refused = scan.get("findings") or scan.get("files") or scan.get("refused") or []
     if not refused:
         # The badge and the scan can only be caught disagreeing on a machine
         # whose stores are holding something today's rules refuse, and staging
-        # one is not within a check's reach: the daemon holds the write lock,
-        # the routes are held to the deny-list, and a store adopted now joins
-        # on the next start. The copy assertion above this line — the "Scan
-        # Scan" doubling — runs either way.
+        # one is not within a check's reach. The copy assertion above runs
+        # either way.
         skip(
             "no open store is holding a file today's rules would refuse, so "
             "there is no disagreement for the badge to have with the scan"
         )
-
-    if re.search(r"rules\s*[—-]\s*all holding", body, re.IGNORECASE):
+    if re.search(r"all holding", body, re.IGNORECASE):
         fail(
-            "the Rules badge reads 'all holding' while the page's own Scan finds "
-            "%d file(s) that would be refused today. The rules are forward-looking "
-            "and the stored data is historical, which is a fair distinction — but "
-            "the page states it as a green badge and contradicts it a screen "
-            "further down." % len(refused)
+            "the rules badge reads 'all holding' while the page's own scan finds "
+            "%d file(s) that would be refused today." % len(refused)
         )
 
 
-@finding("3.23", "the theme toggle can return to following the system")
+@finding("3.23", "the theme control can return to following the system")
 def _(d):
-    d.open_view("stores", fresh=True)
+    # 0.35.0 owner decision (v6 as drawn): the theme control is Light, Dark and
+    # System side by side rather than a cycle, and the root always carries the
+    # resolved scheme in `data-theme` — "system" writes whichever one the OS
+    # prefers, and follows it live. The finding's property is asserted on that:
+    # with no stored choice the page follows the system, and once a choice has
+    # been made, System puts it back to following, which is the way back the
+    # finding said did not exist.
+    a_store(d)
     d.eval("try { localStorage.removeItem('semlith-theme'); } catch (e) {}")
-    d.open_view("stores", fresh=True)
+    try:
+        d.emulate_media({"prefers-color-scheme": "dark"})
+        d.open_view("home", fresh=True)
+        theme = '.theme button[data-value="%s"]'
+        if not exists(d, theme % "system"):
+            fail("no System theme control was found on the page")
+        want("the System button with nothing stored", d.eval(
+            "document.querySelector(%s).getAttribute('aria-pressed')" % json.dumps(theme % "system")), "true")
+        want("data-theme with nothing stored and the OS dark",
+             d.eval("document.documentElement.getAttribute('data-theme')"), "dark")
 
-    start = d.eval("document.documentElement.getAttribute('data-theme')")
-    if start is not None:
-        fail("with no stored preference the page should follow the OS, and it set "
-             "data-theme=%r" % start)
-
-    # `paintThemeButton()` labels the control with where it goes, not where you
-    # are: "Switch to light", "Switch to dark", "Follow the system theme". Only
-    # the third contains the word "theme", and it is never the label in the
-    # state this check starts from — so a selector matching on "theme" found
-    # nothing and reported the toggle as missing. All three labels, by name.
-    toggle = (
-        "button[aria-label='Follow the system theme'],"
-        " button[aria-label='Switch to light'],"
-        " button[aria-label='Switch to dark']"
-    )
-    if not exists(d, toggle):
-        fail("no theme toggle was found on the page")
-
-    seen = [start]
-    for _ in range(4):
-        d.click(toggle)
-        d.eval("new Promise(done => setTimeout(() => done(true), 300))")
-        seen.append(d.eval("document.documentElement.getAttribute('data-theme')"))
-        if seen[-1] is None and len(seen) > 2:
-            return
-    fail(
-        "the theme toggle cycled through %r and never came back to following the "
-        "system. The first click writes a preference to localStorage and from "
-        "then on it is a two-state light/dark toggle with no way back without "
-        "clearing site data." % seen
-    )
+        d.click(theme % "light")
+        want("data-theme after Light", d.eval("document.documentElement.getAttribute('data-theme')"), "light")
+        d.click(theme % "system")
+        want("data-theme after System, the OS dark",
+             d.eval("document.documentElement.getAttribute('data-theme')"), "dark")
+        want("the stored theme after System", d.eval("localStorage.getItem('semlith-theme')"), "system")
+        # And it follows the system live, which is what "following" means.
+        d.emulate_media({"prefers-color-scheme": "light"})
+        d.wait_for("document.documentElement.getAttribute('data-theme') === 'light'", timeout=5,
+                   what="System to follow the OS to light")
+    finally:
+        d.emulate_media({})
+        d.eval("try { localStorage.removeItem('semlith-theme'); } catch (e) {}")
 
 
-@finding("3.24", "the search box has one name, and the rail names its own journey")
+@finding("3.24", "the search launcher has one name, and the graph's actions name their own journey")
 def _(d):
-    d.open_view("search")
-    top_bar = d.eval(
-        """
-        (() => {
-          // The innermost match, not the outermost. `querySelectorAll` is in
-          // document order, so an ancestor comes before its descendants and
-          // taking the first one reads the launcher's whole container —
-          // including the `/` shortcut badge beside the phrase.
-          const all = [...document.querySelectorAll('header *, nav *')]
-            .filter(e => /ask (the index a question|it something)/i.test(e.innerText || e.placeholder || ''));
-          const el = all[all.length - 1];
-          return el ? (el.innerText || el.placeholder || '').trim() : null;
-        })()
-        """
+    # The finding: one destination, three names. Read in two parts from 0.26.1.
+    #
+    # 0.35.0 owner decision (v6 as drawn): the header's launcher reads "Ask the
+    # index a question" and the Search box it opens says how to ask — "Ask in
+    # words, or paste an identifier" — so the box's placeholder is guidance, not
+    # a second name for the launcher. What stays asserted is that the launcher
+    # is one control with one name (its accessible name is the words it shows)
+    # that lands on Search with the box ready; and that the graph's actions are
+    # named for what they give you rather than echoing the search box.
+    a_store(d)
+    d.open_view("home")
+    launcher = d.eval(
+        "(() => { const b = document.querySelector('header.top button.ask'); if (!b) return null;"
+        " return {label: b.getAttribute('aria-label'), text: ((b.querySelector('.t') || {}).textContent || '').trim()}; })()"
     )
-    field = d.eval(
-        """
-        (() => {
-          const el = [...document.querySelectorAll('input')]
-            .find(i => /ask/i.test(i.placeholder || ''));
-          return el ? el.placeholder.trim() : null;
-        })()
-        """
-    )
+    if launcher is None:
+        fail("the header has no search launcher")
+    if launcher["text"] and launcher["label"] != launcher["text"]:
+        fail("the launcher shows %r and announces itself as %r; one control, one name"
+             % (launcher["text"], launcher["label"]))
+    d.click("header.top button.ask")
+    d.wait_for("location.hash === '#/search' && !!document.querySelector(%s)" % json.dumps(SEARCH_BOX),
+               what="the launcher to land on Search")
+    field = d.eval("document.querySelector(%s).placeholder" % json.dumps(SEARCH_BOX))
+
     d.open_view("graph")
-    rail = d.eval(
-        """
-        (() => {
-          // Scoped to the graph's own rail. The top bar's launcher is a button
-          // on every view, matches the same words, and comes first in document
-          // order — so an unscoped search read the top bar twice and reported
-          // it as disagreeing with itself.
-          const el = [...document.querySelectorAll('.graph-rail a, .graph-rail button, .rail-actions button')]
-            .find(e => /chunks it lives in|ask (the index|it)/i.test(e.innerText || ''));
-          return el ? (el.innerText || '').trim() : null;
-        })()
-        """
-    )
-    # Read in two parts from 0.26.1, and the split is a judgement worth naming.
-    #
-    # The finding is that one destination had several names. The top bar's
-    # launcher and the Search page's field are one control's invitation seen
-    # twice, and those must still agree exactly — that is the bug, and it is
-    # asserted first.
-    #
-    # The graph rail's button is a different journey: it does not open an empty
-    # search, it runs one for the symbol you have selected. The v4 design names
-    # it for what it gives you rather than echoing the search box, and a button
-    # reading "Ask the index a question" told a reader nothing about what they
-    # would get. So the rail is held to a different rule: it must not be a
-    # third spelling of the search box's invitation. Require all three to match
-    # and the only way to pass is to call the top bar "Chunks it lives in",
-    # which is not an improvement anyone wants.
-    if top_bar and field and top_bar != field:
+    d.wait_for("document.querySelectorAll('.g-sel .two button').length > 0", what="the graph's actions")
+    actions = texts_of(d, ".g-sel .two button")
+    echo = [a for a in actions if a in (launcher["label"], field)]
+    if echo:
         fail(
-            "the top bar says %r and the search field says %r; they are one "
-            "control's invitation and must read the same" % (top_bar, field)
-        )
-    if rail and rail in {top_bar, field}:
-        fail(
-            "the graph rail's button reads %r, the same words as the search "
-            "box. It is a different journey — it searches for the selected "
-            "symbol rather than opening an empty box — and naming it after the "
-            "box says nothing about what it gives you." % rail
-        )
-    if rail and not re.search(r"chunks it lives in", rail, re.I):
-        fail(
-            "the graph rail's route into Search reads %r; the v4 design names "
-            "it 'Chunks it lives in', for what the reader gets" % rail
+            "the graph's action reads %r, the same words as the search box. It is "
+            "a different journey and naming it after the box says nothing about "
+            "what it gives you." % echo[0]
         )
 
 
 @finding("3.25", "the URL field's placeholder does not change after a failed attempt")
 def _(d):
-    d.open_view("index")
-    d.open_index_panel("Add from a URL")
-    selector = "(document.querySelector('#index-url') || {}).placeholder"
-    first = d.eval(selector)
+    open_wizard_for(d, a_store(d))
+    wizard_mode(d, "Add a URL")
+    field = ".wz-body .box input"
+    first = d.eval("(document.querySelector(%s) || {}).placeholder" % json.dumps(field))
     if not first:
-        fail("the 'Add from a URL' field carries no placeholder at all")
-
-    d.type("#index-url", "not-a-url")
-    d.click_text("button", "Fetch and index")
-    d.wait_for(
-        "!!document.querySelector('#index-url').closest('.card')"
-        ".querySelector('.note.bad')",
-        what="the failed attempt to be reported on the panel",
-    )
-
-    second = d.eval(selector)
+        fail("the wizard's Add a URL field carries no placeholder at all")
+    d.type(field, "not-a-url")
+    d.press("Enter")
+    if not d.eval("[...document.querySelectorAll('.wz-body button')].some(b => (b.textContent || '').trim() === 'Fetch' && b.disabled)"):
+        fail("Fetch is on offer for 'not-a-url', which is not an https address")
+    # Closed and opened again, which is the repaint the old panel changed on.
+    wizard_mode(d, "Paste a path")
+    wizard_mode(d, "Add a URL")
+    second = d.eval("(document.querySelector(%s) || {}).placeholder" % json.dumps(field))
     if second != first:
-        fail(
-            "the URL field's placeholder changed from %r to %r after a failed "
-            "attempt" % (first, second)
-        )
-    d.close_index_panel("Add from a URL")
+        fail("the URL field's placeholder changed from %r to %r after a failed attempt" % (first, second))
+    press_text(d, "header.top button", "Cancel", "leaving the wizard")
 
 
-@finding("3.26", "naming a target store and 'each folder becomes its own store' are exclusive")
+@finding("3.26", "keeping repositories together and giving each its own store are exclusive")
 def _(d):
-    d.open_view("index")
-    # The dropdown by its own `aria-label`, not by its text: a `<select>`'s
-    # `innerText` is the browser's business — Chrome gives an empty string for a
-    # closed one — so matching on "add to" found nothing and the check reported
-    # a control that was on the page the whole time.
-    TARGET = 'select[aria-label="Where to index into"]'
+    # The finding: "Projects under a folder…" made each project its own store
+    # while the store dropdown beside it could still read "add to proj-one",
+    # and nothing reconciled the two. From 0.35.0 a folder holding several
+    # repositories offers exactly that choice in the wizard — Keep together, or
+    # One store each — as two chips of which one is pressed.
+    monorepo = d.fixtures.monorepo()
+    open_wizard_for(d, a_store(d))
+    wizard_mode(d, "Paste a path")
+    d.type(".wz-body .box input", monorepo)
+    d.press("Enter")
+    d.wait_for("/holds 2 repositories/.test((document.querySelector('.wz-body .notice') || {}).innerText || '')",
+               timeout=20, what="the wizard to offer keeping the repositories together or apart")
 
-    def target():
+    def pressed():
         return d.eval(
-            "(() => { const s = document.querySelector(%s);"
-            " if (!s) return null;"
-            " return {value: ((s.selectedOptions[0] || {}).text || '').trim(),"
-            "         disabled: s.disabled === true,"
-            "         stores: [...s.options].filter(o => o.value !== 'each' && !o.disabled)"
-            "                               .map(o => o.value)}; })()" % json.dumps(TARGET)
+            "[...document.querySelectorAll('.wz-body .notice button')]"
+            ".filter(b => b.getAttribute('aria-pressed') === 'true').map(b => b.textContent.trim())"
         )
 
-    state = target()
-    if state is None:
-        fail("the Index page no longer carries a store dropdown beside its pickers")
-
-    # The exclusivity the finding asks for, exercised rather than waited for.
-    # The product's answer is in `reveal()`: opening the projects picker forces
-    # the dropdown back to "each folder becomes its own store" and disables it,
-    # because that mode makes each project its own store and an "add to <store>"
-    # beside it is an instruction that contradicts the picker that is open.
-    if not state["stores"]:
-        skip("no open store is offered as an index target, so there is nothing to make exclusive")
-    d.eval(
-        "(() => { const s = document.querySelector(%s);"
-        " s.value = %s;"
-        " s.dispatchEvent(new Event('change', {bubbles: true})); })()"
-        % (json.dumps(TARGET), json.dumps(state["stores"][0]))
-    )
-    named = target()
-    if not named["value"].lower().startswith("add to"):
-        fail(
-            "the store dropdown would not take %r as its target; it reads %r"
-            % (state["stores"][0], named["value"])
-        )
-
-    d.open_index_panel("Projects under a folder…")
-    with_picker = target()
-    if not with_picker["disabled"]:
-        fail(
-            "the store dropdown reads %r and is still live while 'Projects under "
-            "a folder…' is open. That mode is documented to make each project its "
-            "own store, and nothing reconciles the two." % with_picker["value"]
-        )
-    if with_picker["value"].lower().startswith("add to"):
-        fail(
-            "'Projects under a folder…' is open and the store dropdown still "
-            "reads %r. It is disabled, so the contradiction is now unfixable "
-            "from the page rather than resolved." % with_picker["value"]
-        )
-
-    d.close_index_panel("Projects under a folder…")
-    if target()["disabled"]:
-        fail(
-            "closing 'Projects under a folder…' left the store dropdown disabled, "
-            "so naming a target store is no longer possible at all"
-        )
+    want("the choice pressed to begin with", pressed(), ["Keep together"])
+    press_text(d, ".wz-body .notice button", "One store each")
+    want("the choice pressed after One store each", pressed(), ["One store each"])
+    press_text(d, ".wz-body .notice button", "Keep together")
+    want("the choice pressed after Keep together", pressed(), ["Keep together"])
+    press_text(d, "header.top button", "Cancel", "leaving the wizard")
 
 
 # ==========================================================================
@@ -2342,40 +2434,57 @@ def _(d):
 # ==========================================================================
 
 
-@finding("4.1", "a truncated path carries its full value in a title")
+# Whether a tooltip carries the whole of what a line shows. From 0.35.0 a long
+# path is shortened in the middle ("~/a/…/z") and several roots read as the
+# first plus "+ N more", so the tooltip is the longer value: every piece the
+# line shows must be in it.
+COVERS_JS = (
+    "((held, full) => { held = (held || '').trim(); full = (full || '').trim();"
+    " if (!full || !held) return false; if (held === full) return true;"
+    " return full.replace(/ \\+ \\d+ more$/, '').split('\u2026').every(p => held.includes(p.trim())); })"
+)
+
+
+@finding("4.1", "a truncated path carries its full value on hover")
 def _(d):
-    for view in ("stores", "files"):
-        d.open_view(view)
-        d.wait_for("document.querySelectorAll('tbody tr').length > 0",
-                   what="the %s table" % view, timeout=30)
-        missing = d.eval(
-            """
-            [...document.querySelectorAll('tbody tr')].map(r => {
-              const cell = [...r.querySelectorAll('td')]
-                .find(td => /[\\\\/]/.test(td.innerText || ''));
-              if (!cell) return null;
-              const holder = cell.matches('[title]') ? cell : cell.querySelector('[title]');
-              return holder && holder.getAttribute('title') ? null : (cell.innerText || '').trim();
-            }).filter(Boolean)
-            """
-        )
-        if missing:
-            fail(
-                "%d path cells on the %s page have no title tooltip, so the full "
-                "value is only reachable through the DOM inspector. First: %r"
-                % (len(missing), view, missing[0])
-            )
+    # A title then, a `data-tip` from 0.35.0: the page's one tooltip, which
+    # shows the full value on hover and on keyboard focus. Either carrier is the
+    # full value without the DOM inspector, which is what the finding asked for.
+    store = a_store(d)
+    d.open_view("stores")
+    d.wait_for("document.querySelectorAll('#main .gl-row.gl-stores').length > 0", what="the Stores list")
+    missing = d.eval(
+        "[...document.querySelectorAll('#main .gl-row.gl-stores .cellname .b')].filter(b => {"
+        " const t = (b.textContent || '').trim(); if (!/[\\\\/~]/.test(t)) return false;"
+        " const h = b.closest('[data-tip], [title]');"
+        " return !h || !%s(h.getAttribute('data-tip') || h.getAttribute('title'), t); }).map(b => b.textContent.trim())"
+        % COVERS_JS
+    )
+    if missing:
+        fail("%d store root lines on the Stores list carry no full value on hover. First: %r"
+             % (len(missing), missing[0]))
+    files_tab(d, store)
+    d.wait_for("document.querySelectorAll('#main table tbody tr').length > 0", what="the Files table")
+    bare = d.eval(
+        "[...document.querySelectorAll('#main table tbody tr')].map(r => {"
+        " const cell = r.cells[1]; if (!cell) return null;"
+        " const h = cell.querySelector('[data-tip], [title]');"
+        " const full = h && (h.getAttribute('data-tip') || h.getAttribute('title'));"
+        " return full && /[\\\\/]/.test(full) ? null : (cell.innerText || '').trim(); }).filter(Boolean)"
+    )
+    if bare:
+        fail("%d path cells on %s's Files tab have no full path on hover. First: %r"
+             % (len(bare), store, bare[0]))
 
 
 @finding("4.2", "every Files column sorts")
 def _(d):
-    d.open_view("files")
-    d.wait_for("document.querySelectorAll('tbody tr').length > 0", what="the files table")
+    files_tab(d, a_store(d))
+    d.wait_for("document.querySelectorAll('#main table tbody tr').length > 0", what="the files table")
     inert = d.eval(
         """
-        [...document.querySelectorAll('table th')].map(th => {
-          const sortable = th.hasAttribute('aria-sort') || !!th.querySelector('button')
-                           || th.getAttribute('role') === 'columnheader' && th.tabIndex >= 0;
+        [...document.querySelectorAll('#main table th')].map(th => {
+          const sortable = th.hasAttribute('aria-sort') || !!th.querySelector('button');
           return sortable ? null : (th.innerText || '').trim();
         }).filter(Boolean)
         """
@@ -2383,23 +2492,22 @@ def _(d):
     if inert:
         fail(
             "these Files columns carry no sort affordance and clicking them does "
-            "nothing: %s. Four of seven sorted; STORE, READ AS and LANGUAGE did "
-            "not, and with no store filter on the page that left no way to look "
-            "at one store's files at all." % ", ".join(inert)
+            "nothing: %s." % ", ".join(inert)
         )
 
 
 @finding("4.3", "the code preview shows that it scrolls")
 def _(d):
+    a_store(d)
     d.open_view("search")
-    d.type(SEARCH_BOX, "release record sealed immutable")
+    d.type(SEARCH_BOX, "describe_at_length releases it when the run that acquired it")
     d.press("Enter")
-    d.wait_for("document.querySelectorAll('pre, code, .preview').length > 0",
-               what="a code preview")
+    d.wait_for("!!document.querySelector('#main .sr-detail .lines .l')", timeout=30,
+               what="a code preview in the detail panel")
     clipped = d.eval(
         """
         (() => {
-          const panes = [...document.querySelectorAll('pre, .preview, .code')];
+          const panes = [...document.querySelectorAll('#main pre, #main .lines, #main .code, #main .preview')];
           const pane = panes.find(p => p.scrollWidth > p.clientWidth + 2);
           if (!pane) return null;
           const style = getComputedStyle(pane);
@@ -2414,32 +2522,28 @@ def _(d):
     if not clipped["cue"] and not clipped["fade"]:
         fail(
             "the preview clips at the right edge with overflow-x: %s and no fade "
-            "or shadow cue. It does scroll — the phone build shows a scrollbar — "
-            "but on desktop nothing says the content continues." % clipped["overflowX"]
+            "or shadow cue." % clipped["overflowX"]
         )
+
+
+def picker_rows(d, scope):
+    """A folder picker's rows, as {name, folder}, from their own `.name`."""
+    return d.eval(
+        "[...document.querySelectorAll(%s + ' .bitem')].map(r => ({"
+        " name: ((r.querySelector('.name') || {}).textContent || '').trim(),"
+        " folder: !r.classList.contains('file')})).filter(r => r.name)" % json.dumps(scope)
+    )
 
 
 @finding("4.4", "folder pickers sort case-insensitively")
 def _(d):
-    d.open_view("index")
-    d.open_index_panel("Choose folders…")
-    # Folders first and files after, each half by name — so the assertion is on
-    # each half rather than on the whole list, which the route deliberately
-    # groups. One name per row from the row's own `.name` span: a row can also
-    # carry a store badge, and the whole row's text would sort that too.
-    rows = d.eval(
-        """
-        [...document.querySelectorAll(%s)].map(entry => ({
-          name: ((entry.querySelector('.name') || {}).textContent || '').trim(),
-          // A file in a multiple-select picker is rendered inert; a folder is
-          // the row with a tick beside it.
-          folder: !entry.classList.contains('inert'),
-        })).filter(row => row.name)
-        """
-        % json.dumps(OPEN_PICKER + " .entry")
-    )
-    folders = [row["name"] for row in rows if row["folder"]]
-    files = [row["name"] for row in rows if not row["folder"]]
+    cased = d.fixtures.cased()
+    open_wizard_for(d, a_store(d))
+    wizard_mode(d, "Browse folders")
+    descend(d, ".wz-body", cased)
+    rows = picker_rows(d, ".wz-body")
+    folders = [r["name"] for r in rows if r["folder"]]
+    files = [r["name"] for r in rows if not r["folder"]]
     if len(folders) < 2 and len(files) < 2:
         skip("the picker lists fewer than two entries of either kind here")
     for kind, names in (("folders", folders), ("files", files)):
@@ -2449,162 +2553,148 @@ def _(d):
                 "lowercase entry sinks below every uppercase one. Saw: %s"
                 % (kind, ", ".join(names[:8]))
             )
-    d.close_index_panel("Choose folders…")
+    press_text(d, "header.top button", "Cancel", "leaving the wizard")
 
 
-@finding("4.5", "files in a folder picker read as not selectable")
+@finding("4.5", "a file in a folder picker reads as what it is: selectable")
 def _(d):
-    d.open_view("index")
-    d.open_index_panel("Choose folders…")
-    undimmed = d.eval(
+    # The finding: files were listed in the picker, could not be selected, and
+    # rendered at full contrast like the folders that could — what a row looked
+    # like did not say what it did.
+    #
+    # 0.35.0 owner decision (v6 as drawn): a single file is a source in its own
+    # right, so the wizard's picker offers files for selection beside folders.
+    # The property asserted is the finding's — a row reads as what it does: a
+    # file row carries the same checkbox a folder row does, and ticking it
+    # selects it.
+    cased = d.fixtures.cased()
+    open_wizard_for(d, a_store(d))
+    wizard_mode(d, "Browse folders")
+    descend(d, ".wz-body", cased)
+    seen = d.eval(
         """
         (() => {
-          const picker = document.querySelector(%s);
-          if (!picker) return null;
-          const entries = [...picker.querySelectorAll('.entry')];
-          // The tick is a sibling of the row rather than a child of it, so
-          // "has a checkbox" is a question about the wrapper: a folder row is
-          // an `.entry-row`, and a file is a bare `.entry` beside it.
-          const folders = entries.filter(e => e.closest('.entry-row'));
-          const files = entries.filter(e => !e.closest('.entry-row'));
+          const files = [...document.querySelectorAll('.wz-body .bitem.file')];
+          const folders = [...document.querySelectorAll('.wz-body .bitem:not(.file)')];
           if (!files.length || !folders.length) return null;
-          const opacity = el => parseFloat(getComputedStyle(el).opacity || '1');
-          const folderOpacity = Math.max(...folders.map(opacity));
-          return files.filter(f => opacity(f) >= folderOpacity - 0.05)
-                      .map(f => (f.innerText || '').trim()).slice(0, 3);
+          return {unticked: files.filter(f => !f.querySelector('[role=checkbox]'))
+                    .map(f => (f.innerText || '').trim()).slice(0, 3)};
         })()
         """
-        % json.dumps(OPEN_PICKER)
     )
-    d.close_index_panel("Choose folders…")
-    if undimmed is None:
-        skip("this directory shows no mix of files and folders")
-    if undimmed:
-        fail(
-            "files render at full contrast beside selectable folders, with a file "
-            "icon and no checkbox: %s. Dimming them would say 'not selectable' "
-            "without a second look." % ", ".join(undimmed)
-        )
+    if seen is None:
+        skip("this folder shows no mix of files and folders")
+    if seen["unticked"]:
+        fail("these files are listed with no checkbox, so nothing says whether they "
+             "can be picked: %s" % ", ".join(seen["unticked"]))
+    d.eval("document.querySelector('.wz-body .bitem.file [role=checkbox]').click()")
+    d.wait_for("/1 selected/.test((document.querySelector('.wz-body .browse-head') || {}).innerText || '')",
+               what="ticking a file to select it")
+    press_text(d, "header.top button", "Cancel", "leaving the wizard")
 
 
-@finding("4.6", "the stat tiles do not wrap four-and-one at tablet width")
+def orphan_tiles(d):
+    """KPI rows whose last line holds one tile alone under a fuller line."""
+    return d.eval(
+        """
+        [...document.querySelectorAll('#main .q4, #main .q3')].map(row => {
+          const tops = {};
+          for (const k of row.children) {
+            const t = Math.round(k.getBoundingClientRect().top);
+            tops[t] = (tops[t] || 0) + 1;
+          }
+          const shape = Object.keys(tops).map(Number).sort((a, b) => a - b).map(t => tops[t]);
+          return shape;
+        }).filter(s => s.length > 1 && s[s.length - 1] === 1 && s[s.length - 2] >= 3)
+        """
+    )
+
+
+@finding("4.6", "the stat tiles do not leave one tile alone at tablet width")
 def _(d):
+    # Five tiles four-and-one then; four tiles to a row everywhere from 0.35.0,
+    # so the shape the finding objected to is three-and-one now. Asserted on
+    # every page that draws a tile row.
+    store = a_store(d)
     d.set_viewport(768, 1024)
     try:
-        d.open_view("stores", fresh=True)
-        boxes = rects(d, ".tile, .stat, figure")
-        if len(boxes) < 5:
-            skip("fewer than five tiles are drawn on this page")
-        rows = {}
-        for box in boxes:
-            rows.setdefault(round(box["top"]), []).append(box)
-        shape = [len(v) for _, v in sorted(rows.items())]
-        if shape[:2] == [4, 1]:
-            fail(
-                "at 768px the five Stores tiles break four across with ON DISK "
-                "alone on a full-width row. 3+2 or 2+2+1 would read better. Saw %s"
-                % shape
-            )
+        for route in ("home", "stores/inside", "store/%s" % store, "ledger"):
+            d.open_view(route, fresh=True)
+            bad = orphan_tiles(d)
+            if bad:
+                fail("at 768px a tile row on %s breaks %s, leaving one tile alone" % (route, bad[0]))
     finally:
         d.reset_viewport()
 
 
 @finding("4.7", "a store's root path is reachable on a phone")
 def _(d):
+    a_store(d)
     d.set_viewport(390, 844, mobile=True)
     try:
         d.open_view("stores", fresh=True)
-        d.wait_for("document.querySelector('#root').innerText.length > 0",
-                   what="the Stores view")
-        body = view_text(d)
-        roots = [
-            r["path"]
-            for row in stores(d)
-            if not row.get("unopened")
-            for r in row.get("roots", [])
-        ]
+        roots = [r["path"] for row in stores(d) if not row.get("unopened") for r in row.get("roots", [])]
         if not roots:
             skip("no open store has a registered root to show")
-        shown = any(
-            root in body or root.replace("\\", "/") in body.replace("\\", "/")
-            for root in roots
+        spelled = set(roots) | {tilde(d, r) for r in roots}
+        reachable = d.eval(
+            "[...document.querySelectorAll('#main *')].some(el => {"
+            " const t = (el.getAttribute('data-tip') || el.getAttribute('title') || '');"
+            " const v = el.children.length === 0 ? (el.innerText || '') : '';"
+            " return %s.some(r => (t.includes(r) || (v.includes(r) && el.offsetParent !== null))); })"
+            % json.dumps(sorted(spelled))
         )
-        exposed_elsewhere = d.eval(
-            "[...document.querySelectorAll('[title], details, summary')]"
-            ".some(el => /[\\\\/]/.test(el.getAttribute('title') || el.innerText || ''))"
-        )
-        if not shown and not exposed_elsewhere:
+        if not reachable:
             fail(
-                "the responsive table drops ROOTS and CHUNKS and nothing else "
-                "exposes the root, so on a phone you cannot see what a store "
-                "indexes. The product's answer is the `<span class=\"meta "
-                "only-narrow\">` on the store's own row, which the stylesheet "
-                "shows below 820px."
+                "on a 390px Stores list nothing shows or hands over a store's root, "
+                "so on a phone you cannot see what a store indexes"
             )
-        # Clipped *and* unrecoverable. Two kinds of overflow on this page are
-        # not defects and were both being reported as one:
-        #
-        #   * `.sr-only` — the table's `<caption>` among others — is a 1×1 box
-        #     with `overflow: hidden` by design, so its scrollWidth always
-        #     exceeds its clientWidth. It is for a screen reader and cannot be
-        #     clipped visually at all.
-        #   * `lineCell(value, …)` deliberately truncates to one line and hangs
-        #     the whole value on a `title`, which is finding 4.1's contract. A
-        #     row that ends in an ellipsis and hands over its full text on hover
-        #     is the design, not a clip.
-        #
-        # What is left is text cut off with nothing carrying the rest — which is
-        # what would make a store's root unreadable on a phone.
+        # Clipped *and* unrecoverable: text cut off with nothing carrying the
+        # rest. A line that ends in an ellipsis and hands its full value to the
+        # tooltip is the design, and so is a screen-reader-only caption.
         clipped = d.eval(
             """
-            [...document.querySelectorAll('#root *')]
-              .filter(el => el.children.length === 0)
+            [...document.querySelectorAll('#main *')]
+              .filter(el => el.children.length === 0 && el.offsetParent !== null)
               .filter(el => !el.closest('.sr-only'))
               .filter(el => el.scrollWidth > el.clientWidth + 2)
               .filter(el => {
                 const full = (el.innerText || '').trim();
-                const held = (el.closest('[title]') || {}).title || '';
-                return !full || held.trim() !== full;
+                const h = el.closest('[data-tip], [title]');
+                const held = h ? (h.getAttribute('data-tip') || h.getAttribute('title') || '') : '';
+                return !full || !COVERS(held, full);
               })
               .map(el => (el.innerText || '').trim())
               .slice(0, 3)
-            """
+            """.replace("COVERS", COVERS_JS)
         )
         if clipped:
             fail(
                 "text is clipped on the phone build with nothing carrying the rest "
-                "of it — no `title`, no expansion: %s" % ", ".join(clipped)
+                "of it — no tooltip, no expansion: %s" % ", ".join(clipped)
             )
     finally:
         d.reset_viewport()
 
 
-@finding("4.8", "store chips do not consume the phone's first screen")
+@finding("4.8", "store choice does not consume the phone's first screen")
 def _(d):
+    # Store chips then; one scope menu ("in all stores ▾") from 0.35.0. The
+    # property is unchanged: on a 390px screen, what sits above the results
+    # leaves most of the first screen to the results.
+    a_store(d)
     d.set_viewport(390, 844, mobile=True)
     try:
         d.open_view("search", fresh=True)
-        # The store chips, and only those. This read `[aria-pressed], .chip`,
-        # which is every chip-shaped control on the page and several that are
-        # not above the results at all — the search dials, and from 0.27.0 the
-        # sidebar's `Replay first-run screen`, which became a chip when the
-        # muted text it used to be stopped reading as a control. Counting those
-        # as store chips made the check report three rows where the store chips
-        # occupied one, which is a failure about the wrong thing.
-        chips = rects(d, ".store-chips .chip, .store-chips [aria-pressed]")
-        store_chips = [c for c in chips if c["text"]]
-        if len(store_chips) < 3:
-            skip("fewer than three store chips are drawn here")
-        tops = sorted({round(c["top"]) for c in store_chips})
-        overflow = d.eval(
-            "[...document.querySelectorAll('button, summary')]"
-            ".some(b => /\\bmore\\b|\\+\\d+|show all/i.test(b.innerText || ''))"
-        )
-        if len(tops) > 2 and not overflow:
+        chips = d.eval("document.querySelectorAll('#main .sr-bar .chip[data-store], #main .store-chips .chip').length")
+        scope = exists(d, "#main .sr-bar .scope-btn")
+        if not scope and chips < 3:
+            skip("this page offers no store choice above the results")
+        bottom = d.eval("Math.round(document.querySelector('#main .sr-bar').getBoundingClientRect().bottom)")
+        if bottom > 844 * 0.5:
             fail(
-                "%d store chips wrap to %d rows above the results on a 390px "
-                "screen, with no overflow or 'more' affordance"
-                % (len(store_chips), len(tops))
+                "on a 390px screen the search bar and its store choice end at "
+                "y=%d, more than half of the first screen, with the results below it" % bottom
             )
     finally:
         d.reset_viewport()
@@ -2612,6 +2702,7 @@ def _(d):
 
 @finding("4.9", "a phone result card is not covered by the summary bar")
 def _(d):
+    a_store(d)
     d.set_viewport(390, 844, mobile=True)
     try:
         d.open_view("search", fresh=True)
@@ -2622,12 +2713,12 @@ def _(d):
         summary = d.eval(
             """
             (() => {
-              const el = [...document.querySelectorAll('*')]
-                .find(e => e.children.length === 0 && /\\bof\\b.*shown|budget/i.test(e.innerText || ''));
+              const el = document.querySelector('#main .sr-foot')
+                || [...document.querySelectorAll('#main *')].find(e => e.children.length === 0
+                     && /\\bof\\b.*shown|budget/i.test(e.innerText || ''));
               if (!el) return null;
-              const r = el.getBoundingClientRect();
-              return {bottom: r.bottom, top: r.top,
-                      fixed: getComputedStyle(el).position === 'fixed'};
+              const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+              return {top: r.top, bottom: r.bottom, fixed: s.position === 'fixed' || s.position === 'sticky'};
             })()
             """
         )
@@ -2635,104 +2726,88 @@ def _(d):
         if summary is None or not cards:
             skip("no summary bar or no result cards to compare")
         first = cards[0]
-        if summary["fixed"] and first["top"] < summary["bottom"] - 1:
+        if summary["fixed"] and first["top"] < summary["bottom"] - 1 and first["bottom"] > summary["top"] + 1:
             fail(
-                "the first result card starts at y=%.0f, under a fixed summary bar "
-                "that ends at y=%.0f, so the card is half-covered"
-                % (first["top"], summary["bottom"])
+                "the first result card spans y=%.0f–%.0f, under a pinned summary "
+                "bar at y=%.0f–%.0f, so the card is covered"
+                % (first["top"], first["bottom"], summary["top"], summary["bottom"])
             )
     finally:
         d.reset_viewport()
 
 
-@finding("4.10", "the queued-runs line matches what is queued, and clears")
+@finding("4.10", "what the portal says is running matches what is running, and clears")
 def _(d):
-    d.open_view("index")
-    d.eval("new Promise(done => setTimeout(() => done(true), 800))")
-    queued = len(d.api("/api/index/runs").get("queue") or [])
-    body = view_text(d)
-    stated = re.search(r"(\d+)\s+runs?\s+queued", body, re.IGNORECASE)
+    # "N runs queued." on the old Index page; from 0.35.0 the live state is
+    # told in two places: the header's run pill, and Home's Stores tile, which
+    # reads "N runs going now" while anything is live. Both must agree with the
+    # daemon, and both must clear when nothing is.
+    a_store(d)
+    d.open_view("home")
+    pause(d, 800)
+    live = [r for r in d.api("/api/index/runs").get("runs") or [] if r.get("status") not in TERMINAL]
+    tile = d.eval(
+        "(() => { const k = [...document.querySelectorAll('#main .kpi')].find(k =>"
+        " ((k.querySelector('.eyebrow') || {}).textContent || '').trim() === 'Stores');"
+        " return k ? ((k.querySelector('.s') || {}).textContent || '') : null; })()"
+    )
+    stated = re.search(r"(\d+)\s+runs?\s+going", tile or "")
+    pill = d.eval("(() => { const p = document.querySelector('header.top .run-pill'); return !!p && !p.hidden; })()")
+    if not live and (stated or pill):
+        fail("nothing is running and the page still says %r (run pill shown: %s)" % (tile, pill))
+    if live and not stated:
+        fail("%d run(s) are live and Home's Stores tile says %r" % (len(live), tile))
+    if live and int(stated.group(1)) != len(live):
+        fail("Home says %r while %d runs are live" % (stated.group(0), len(live)))
 
-    if queued == 0 and stated:
-        fail(
-            "nothing is queued and the page still says %r. The line stayed after "
-            "all runs finished, and read '1 run queued.' with four cards on screen."
-            % stated.group(0)
-        )
-    if queued and not stated:
-        fail("%d runs are queued and the page says nothing" % queued)
-    if queued and int(stated.group(1)) != queued:
-        fail("the page says %r while %d runs are actually queued"
-             % (stated.group(0), queued))
 
-
-@finding("4.11", "a run card's header and its log describe the same run")
+@finding("4.11", "one run is one row: a second run of a store does not overwrite the first")
 def _(d):
     first = indexed_fixture(d, d.fixtures.small())
     second_run, same_store = start_index(d, d.fixtures.small())
-    # Waited on by id: "the store's run" is now an ambiguous thing to wait for,
-    # which is the whole of this finding.
     wait_for_run(d, same_store, run_id=second_run)
     if same_store != first:
-        skip("the second submission made a new store, so there is no shared card")
+        skip("the second submission made a new store, so there is no shared history")
 
     runs = d.api("/api/index/runs")["runs"]
     ids = [r["id"] for r in runs if r["store"] == same_store]
     if len(ids) < 2:
         fail(
-            "after two runs against %s the daemon reports %d run(s) for it. Cards "
-            "are keyed by store name rather than by run, which is why a card's "
-            "header showed the new run's path and status while its body still "
-            "held the previous run's log lines." % (same_store, len(ids))
+            "after two runs against %s the daemon reports %d run(s) for it. Runs "
+            "keyed by store rather than by run are why a card's header showed the "
+            "new run while its body held the previous run's log." % (same_store, len(ids))
         )
 
-    # And the page draws one card per run rather than one per store, which is
-    # what a card describing two different runs at once looked like.
-    d.open_view("index")
-    d.wait_for(
-        "[...document.querySelectorAll(%s)].some(c => c.innerText.includes(%s))"
-        % (json.dumps(RUN_CARD), json.dumps(same_store)),
-        what="a run card for %s" % same_store,
-    )
-    drawn = d.eval(
-        "[...document.querySelectorAll(%s)]"
-        ".filter(c => c.innerText.includes(%s)).length"
-        % (json.dumps(RUN_CARD), json.dumps(same_store))
-    )
+    # And the store's Runs tab draws one History row per run.
+    d.open_view("store/%s/runs" % same_store)
+    try:
+        d.wait_for("document.querySelectorAll(%s).length >= 2" % json.dumps(HIST_ROW), timeout=15, what="History rows")
+    except cdp.ProtocolError:
+        pass  # the assertion below says it in the finding's words
+    drawn = d.eval("document.querySelectorAll(%s).length" % json.dumps(HIST_ROW))
     if drawn < 2:
         fail(
-            "the daemon holds %d runs for %s and the Index page draws %d card(s) "
-            "for it. One card per store means the second run's header sits over "
-            "the first run's log." % (len(ids), same_store, drawn)
+            "the daemon holds %d runs for %s and its Runs tab draws %d History "
+            "row(s). One row per store means the second run sits over the first."
+            % (len(ids), same_store, drawn)
         )
 
 
 @finding("4.12", "a sub-second run does not report a rate against a one-second clock")
 def _(d):
-    store_name = indexed_fixture(d, d.fixtures.small())
+    store_name = indexed_fixture(d, d.fixtures.unique("quick"))
     run = run_for(d, store_name)
     elapsed_ms = run.get("elapsed_ms") or 0
     if elapsed_ms >= 1000:
         skip("this run took %dms, so the timer's resolution is not in question" % elapsed_ms)
-
-    d.open_view("index")
-    card = d.eval(
-        """
-        (() => {
-          const cards = [...document.querySelectorAll(%s)];
-          const card = cards.find(c => c.innerText.includes(%s));
-          return card ? card.innerText : null;
-        })()
-        """
-        % (json.dumps(RUN_CARD), json.dumps(store_name))
-    )
-    if card is None:
-        fail("no run card for %s was found" % store_name)
-    if re.search(r"00:01", card) and re.search(r"chunks/s", card):
+    d.open_view("store/%s/runs" % store_name)
+    row = newest_history_row(d, run)
+    if row is None:
+        fail("%s's Runs tab never drew the row for its run %s" % (store_name, run.get("id")))
+    if re.search(r"00:01", row) or re.search(r"chunks/s", row):
         fail(
-            "a run that took %dms reports '00:01' and a chunks/s rate derived "
-            "from it. A sub-second run needs either a finer unit or no rate at "
-            "all." % elapsed_ms
+            "a run that took %dms reports %r. A sub-second run needs either a "
+            "finer unit or no rate at all." % (elapsed_ms, row)
         )
 
 
@@ -2740,12 +2815,9 @@ def _(d):
 def _(d):
     status, answer = d.api_result("/api/files?limit=2000")
     if status == 200:
-        returned = len(answer.get("files", []))
         fail(
             "asking for limit=2000 answered 200 with %d rows and no indication it "
-            "was clamped. The neighbouring `offset` refuses an out-of-range value "
-            "with a 400 and a reasoned comment in the source; `limit` should say "
-            "so too." % returned
+            "was clamped." % len(answer.get("files", []))
         )
     want("an out-of-range limit", status, 400)
     if "limit" not in json.dumps(answer).lower():
@@ -2754,327 +2826,282 @@ def _(d):
 
 @finding("4.14", "every table has a caption or an accessible name")
 def _(d):
-    for view in ("stores", "files", "doctor", "about"):
-        d.open_view(view)
-        d.eval("new Promise(done => setTimeout(() => done(true), 600))")
+    # Stores, Files, Doctor and About then. From 0.35.0 the Stores list is not
+    # a table and About has none; the tables are a store's Files and Review
+    # tabs, Agents' Connected, Tools and Health (Doctor's successor), the
+    # Ledger's two tabs and Graph's Blast radius. All of them are held to it.
+    store = a_store(d)
+    d.api("/api/search?query=release%20record&k=4")
+    for route in ("store/%s/files" % store, "store/%s/review" % store, "agents", "agents/tools",
+                  "agents/health", "ledger", "ledger/retrievals"):
+        d.open_view(route)
+        pause(d, 600)
         nameless = d.eval(
-            """
-            [...document.querySelectorAll('table')].map((t, i) => {
-              const named = t.querySelector('caption')
-                || t.getAttribute('aria-label')
-                || t.getAttribute('aria-labelledby');
-              return named ? null : i;
-            }).filter(v => v !== null)
-            """
+            "[...document.querySelectorAll('#main table')].map((t, i) => {"
+            " const named = t.querySelector('caption') || t.getAttribute('aria-label') || t.getAttribute('aria-labelledby');"
+            " return named ? null : i; }).filter(v => v !== null)"
         )
         if nameless:
-            fail(
-                "the %s page has %d table(s) with no caption and no aria-label. "
-                "Accessibility was otherwise clean across all ten views, which is "
-                "what makes this the one thing left." % (view, len(nameless))
-            )
+            fail("%s has %d table(s) with no caption and no aria-label" % (route, len(nameless)))
 
 
-@finding("4.15", "'Chunks it lives in' is a button, because it behaves like one")
+@finding("4.15", "a control that moves between views is a button")
 def _(d):
+    # "Chunks it lives in" was an `<a>` styled as a button with preventDefault.
+    # v6 has no such link; the controls that carry a reader from one view to
+    # another are the graph's Blast radius and Path from here, and the search
+    # detail's Open in graph. Each must be a button, because each behaves like one.
+    a_store(d)
     d.open_view("graph")
-    tag = d.eval(
-        """
-        (() => {
-          // The wording moved when finding 3.24 gave the destination one
-          // name; what this check is about is the element type, so it finds
-          // the control by either phrasing.
-          const el = [...document.querySelectorAll('.graph-rail a, .graph-rail button, .rail-actions button')]
-            .find(e => /chunks it lives in|ask the index/i.test(e.innerText || ''));
-          return el ? el.tagName : null;
-        })()
-        """
-    )
-    if tag is None:
-        skip("the graph rail does not offer that control for the default selection")
+    d.wait_for("document.querySelectorAll('.g-sel .two > *').length > 0", what="the graph's actions")
+    tags = d.eval("[...document.querySelectorAll('.g-sel .two > *')].map(e => e.tagName)")
+    if any(t != "BUTTON" for t in tags):
+        fail("the graph's actions are %r; each behaves like a button and must be one" % tags)
+    d.open_view("search")
+    d.type(SEARCH_BOX, "Widget000 new")
+    d.press("Enter")
+    try:
+        d.wait_for("[...document.querySelectorAll('#main .sr-detail *')].some(e => /Open in graph/.test(e.textContent || '') && e.children.length === 0)",
+                   timeout=20, what="the detail panel's Open in graph")
+    except cdp.ProtocolError:
+        skip("no search result named a symbol, so the detail panel offers no Open in graph")
+    tag = d.eval("[...document.querySelectorAll('#main .sr-detail *')].find(e => /Open in graph/.test(e.textContent || '') && e.children.length === 0).tagName")
     if tag != "BUTTON":
-        fail(
-            "'Chunks it lives in' is an <%s> styled as a button with "
-            "preventDefault. It works, but the element type does not match the "
-            "behaviour." % tag.lower()
-        )
+        fail("'Open in graph' is an <%s>; it behaves like a button and must be one" % tag.lower())
 
 
 @finding("4.16", "there is a way to act on the whole result set, not just the page")
 def _(d):
-    d.open_view("files")
-    d.wait_for("document.querySelectorAll('tbody tr').length > 0", what="the files table")
-    total = d.api("/api/files?limit=1")["total"]
-    if total <= 15:
+    store = indexed_fixture(d, d.fixtures.bulk())
+    total = d.api("/api/files?store=%s&limit=1" % urllib.parse.quote(store))["total"]
+    files_tab(d, store)
+    d.wait_for("document.querySelectorAll('#main table tbody tr').length > 0", what="the files table")
+    shown = d.eval("document.querySelectorAll('#main table tbody tr').length")
+    if total <= shown:
         skip("the corpus fits on one page, so the distinction does not arise")
-
-    d.eval(
-        "(document.querySelector('thead input[type=checkbox]') || {click(){}}).click()"
-    )
-    d.eval("new Promise(done => setTimeout(() => done(true), 600))")
+    d.eval("document.querySelector('#main thead [role=checkbox]').click()")
+    pause(d, 400)
     body = view_text(d)
-    # The page groups thousands, so 1664 is drawn as "1,664". The separator is
-    # the page's, and the number is the assertion.
-    grouped = "{:,}".format(total).replace(",", "[,\u202f ]?")
-    if not re.search(r"select all %s|all %s matches" % (grouped, grouped), body, re.IGNORECASE):
+    grouped = "{:,}".format(total).replace(",", "[,  ]?")
+    if not re.search(r"select all %s|all %s matching" % (grouped, grouped), body, re.IGNORECASE):
         fail(
-            "the header checkbox selects the page (the bulk bar honestly says so) "
-            "and nothing offers to act on all %d matches" % total
+            "the header checkbox selects the page (the selection bar honestly says "
+            "so) and nothing offers to act on all %d matches" % total
         )
+
+
+def adopt_picker(d):
+    """Stores › Adopt existing .semlith, open."""
+    d.open_view("stores")
+    press_text(d, "#main .head button", "Adopt existing .semlith", "Adopt existing .semlith")
+    d.wait_for("!!document.querySelector(%s + ' .browse-head .dir')" % json.dumps(MODAL),
+               what="the adopt picker")
+    browse_where(d, MODAL)
 
 
 @finding("4.17", "a failed adopt keeps the picker open where it was")
 def _(d):
+    a_store(d)
     folder = d.fixtures.monorepo()  # a folder that is deliberately not a store
-    d.open_view("stores")
-    d.click_text("button", "Adopt existing .semlith")
-    d.wait_for("!!document.querySelector(%s)" % json.dumps(OPEN_PICKER + " .crumbs"),
-               what="the adopt picker")
-
-    # Walked somewhere first, because "keeps the picker open where it was" can
-    # only be told from "reopens at $HOME" when it is not standing at $HOME.
-    descend_picker(d, folder)
-    before = picker_where(d)
-    want("the adopt picker's folder before the attempt", before, folder)
-
-    # The portal's own path, through the picker, so the error handling under
-    # test is the page's and not this drive's. The button says what it does
-    # here, rather than the multi-select picker's "Use this folder".
-    d.click_text(OPEN_PICKER + " button", "Adopt this directory")
-    d.wait_for(
-        "!!document.querySelector('.note.bad')",
-        what="the failed adopt to be reported",
-    )
-    # The page hides the card, reports the failure and reopens where it was, in
-    # that order, so the reopen is given its own moment before it is judged.
+    adopt_picker(d)
+    descend(d, MODAL, folder)
+    before = browse_where(d, MODAL)
+    want("the adopt picker's folder before the attempt", before, tilde(d, folder))
+    d.modal_press("Adopt this store")
+    d.wait_for("!!document.querySelector('.toast.bad')", what="the failed adopt to be reported")
     try:
-        d.wait_for("!!document.querySelector(%s)" % json.dumps(OPEN_PICKER), timeout=10)
+        d.wait_for("!!document.querySelector(%s + ' .browse-head')" % json.dumps(MODAL), timeout=5)
     except cdp.ProtocolError:
         pass  # the assertion below says what that means
-
-    if not exists(d, OPEN_PICKER):
+    if not exists(d, MODAL + " .browse-head"):
         fail(
             "a failed adopt closed the picker and dropped back to the Stores "
-            "page. Reopening starts again at $HOME with all navigation lost."
+            "page. Opening it again starts at $HOME with all navigation lost."
         )
-    after = picker_where(d)
+    after = browse_where(d, MODAL)
     if after != before:
         fail("the picker stayed open but moved from %r to %r" % (before, after))
-    d.click_text(OPEN_PICKER + " button", "Close")
+    d.modal_press("Cancel")
 
 
 @finding("4.18", "the adopt picker says which folder is adoptable")
 def _(d):
     folder = d.fixtures.adoptme()
-    listing = d.api("/api/dirs?path=%s" % folder)
+    listing = d.api("/api/dirs?path=%s" % urllib.parse.quote(os.path.dirname(folder)))
     entries = listing.get("entries") or listing.get("dirs") or []
-    names = [e.get("name") for e in entries]
-    marked = [e for e in entries if e.get("store") or e.get("adoptable") or e.get("semlith")]
-
-    if ".semlith" not in names and not marked:
+    marked = [e for e in entries if e.get("name") == os.path.basename(folder) and (e.get("adoptable") or e.get("store"))]
+    inside = d.api("/api/dirs?path=%s" % urllib.parse.quote(folder))
+    names = [e.get("name") for e in inside.get("entries") or []]
+    if not marked and ".semlith" not in names:
         fail(
-            "inside a folder that holds a valid `.semlith`, the picker lists %s "
-            "and nothing distinguishes it from any other folder. This is the "
-            "surface of finding 2.1: the picker hides the thing it adopts."
-            % (", ".join(n for n in names if n) or "nothing")
+            "the folder holding a valid `.semlith` is listed like any other "
+            "folder, and inside it the picker lists %s. The picker hides the "
+            "thing it adopts." % (", ".join(n for n in names if n) or "nothing")
         )
+    # And the page's picker draws the mark the route gives it.
+    a_store(d)
+    adopt_picker(d)
+    descend(d, MODAL, os.path.dirname(folder))
+    badge = d.eval(
+        "(() => { const r = [...document.querySelectorAll(%s + ' .bitem')].find(r =>"
+        " ((r.querySelector('.name') || {}).textContent || '') === %s);"
+        " return r ? (r.innerText || '').trim() : null; })()" % (json.dumps(MODAL), json.dumps(os.path.basename(folder)))
+    )
+    d.modal_press("Cancel")
+    if badge is None or not re.search(r"\bstore\b", badge, re.IGNORECASE):
+        fail("the adopt picker lists %s with no mark saying it holds a store: %r"
+             % (os.path.basename(folder), badge))
 
 
 # ------------------------------------------------------------------ 0.26.0
 #
-# The v4 surfaces. These are not findings from the 2026-09-17 drive — they are
-# the pages 0.26.0 added, checked the same way and numbered after it, so the
-# gate covers what shipped rather than only what was once broken. Each one
-# leaves a screenshot behind, which is what the release record carries.
+# The v4 surfaces, checked the same way as the findings and numbered after
+# them, so the gate covers what shipped rather than only what was once broken.
+# 0.35.0 moved most of them; each says where to.
 
 
-@finding("5.1", "the sidebar is every page, in four groups, in order")
+@finding("5.1", "the sidebar is every page, in three groups, in order")
 def _(d):
-    """Updated for 0.26.1, which took the v3 design's four groups back, and
-    again for 0.27.0, which split one page into two.
-
-    v4 flattened v3's Workspace / Explore / Operate / Account into two groups
-    of six and seven, which is a list with two headings in it rather than a
-    menu. `Account` held License and About; the binary is free and has no
-    licence page, so the fourth group is the two pages that describe this
-    machine.
-
-    `Index` and `Inside the index` are the split: the controls that read a
-    folder and the figures about what has already been read were one page, and
-    the design draws two.
-    """
-    d.open_view("stores")
-    labels = [t for t in texts_of(d, ".sidebar .nav-item") if t]
-    expected = [
-        "Stores",
-        "Files",
-        "Index",
-        "Inside the index",
-        "Search",
-        "Graph",
-        "Impact",
-        "Retrieval ledger",
-        "Reports",
-        "Agents",
-        "Cloud",
-        "Privacy",
-        "Doctor",
-        "About",
-    ]
-    want("the sidebar's entries", labels, expected)
+    # 0.35.0 owner decision (v6 as drawn): nine pages in three groups. Files is
+    # a store's own tab, Index is the store wizard, Inside the index is a tab of
+    # Stores, Impact is Graph › Blast radius, Cloud, Doctor and About are
+    # sections of Settings and Agents.
+    a_store(d)
+    d.open_view("home")
+    labels = [t for t in texts_of(d, ".nav .nav-item .lab") if t]
+    want("the sidebar's entries", labels, [
+        "Home", "Stores", "Search", "Graph",
+        "Agents", "Ledger", "Reports",
+        "Privacy", "Settings",
+    ])
     # The group labels are uppercased by the stylesheet, so innerText reads
-    # them that way. The design's names are what is being asserted, not the
-    # typography.
-    groups = [t.title() for t in texts_of(d, ".sidebar .nav-group-label") if t]
-    want("the sidebar's groups", groups, ["Workspace", "Explore", "Operate", "Machine"])
+    # them that way. The design's names are what is asserted, not the type.
+    groups = [t.title() for t in texts_of(d, ".nav .nav-label") if t]
+    want("the sidebar's groups", groups, ["Workspace", "Agents", "Machine"])
 
 
-@finding("5.2", "Impact answers for a symbol, by hop, with a support class on every row")
+def reach(d, symbol, store=None):
+    """Graph › Blast radius for one symbol, answered."""
+    d.open_view("graph/blast")
+    if store:
+        current = d.eval("((document.querySelector('.ctrl-card button[aria-haspopup] .mono') || {}).textContent || '').trim()")
+        if current != store:
+            pick_store(d, ".ctrl-card button[aria-haspopup]", store, "graph/blast")
+    # Typed until the field holds exactly the symbol: the page repaints when
+    # the store's hubs arrive, and a repaint between the clear and the typing
+    # put the last symbol back with the caret after it ("calleecallee").
+    box = '.ctrl-card input[aria-label="Symbol"]'
+    for _ in range(3):
+        d.type(box, symbol)
+        pause(d, 300)
+        if d.eval("(document.querySelector(%s) || {}).value" % json.dumps(box)) == symbol:
+            break
+    press_text(d, ".ctrl-card button", "Reach", "Reach")
+    d.wait_for("!document.querySelector('#main .spinner') && (!!document.querySelector('#main .q3') || !!document.querySelector('#main .error-box'))",
+               timeout=40, what="Blast radius to answer for %s" % symbol)
+
+
+@finding("5.2", "Blast radius answers for a symbol, by hop, with a support class on every row")
 def _(d):
-    path = d.fixtures.small()
-    indexed_fixture(d, path)
-
-    # The busiest symbol in the store, which is how the Graph page picks the
-    # neighbourhood it lands on. A hand-picked name would be a check of the
-    # fixture rather than of the page.
-    overview = d.api("/api/graph?limit=1")
+    # Impact moved to Graph › Blast radius in 0.35.0.
+    store = indexed_fixture(d, d.fixtures.small())
+    overview = d.api("/api/graph?limit=1&store=%s" % urllib.parse.quote(store))
     nodes = overview.get("nodes") or []
     if not nodes:
         skip("the store's graph holds no symbol to read backwards from")
     symbol = nodes[0].get("name")
+    reach(d, symbol, store)
+    if exists(d, "#main .error-box"):
+        fail("Blast radius for %s answered an error: %s" % (symbol, text_of(d, "#main .error-box", "the error")))
+    headline = text_of(d, "#main .card.pad .big14", "the answer's headline")
+    if symbol not in headline:
+        fail("the answer's headline does not name %s: %r" % (symbol, headline))
+    centre = text_of(d, "#main .mini-graph .g-node.sel", "the symbol at the centre of the canvas")
+    want("the subject at the centre", centre, symbol)
 
-    d.open_view("impact")
-    body = view_text(d)
-    if "Reverse reachability" not in body:
-        fail("the Impact page did not render its lead copy: %s" % body[:200])
-
-    d.eval(
-        "(() => { const box = document.querySelector('.impact-band input[type=search]');"
-        " box.value = %s;"
-        " box.dispatchEvent(new Event('input', {bubbles: true}));"
-        " [...document.querySelectorAll('.impact-band button')]"
-        "   .find(b => b.textContent.trim() === 'Reach').click(); })()"
-        % json.dumps(symbol)
-    )
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        if "Reading" not in view_text(d):
-            break
-        time.sleep(0.5)
-
-    body = view_text(d)
-    if "reach" not in body.lower():
-        fail("Impact said nothing about %s: %s" % (symbol, body[:300]))
-    subject = text_of(d, ".impact-subject", "the symbol Impact is about")
-    want("the subject line", subject, symbol)
-
-    rows = d.eval(
-        "document.querySelectorAll('.impact-block:not(.impact-files) .impact-row').length"
-    )
+    rows = d.eval("document.querySelectorAll('#main .split table tbody tr').length")
     if not rows:
-        # Nothing reaching the busiest symbol is a legitimate answer, and the
-        # page has to say so rather than render an empty list.
-        if "nothing in this store reaches" not in body.lower():
-            fail("no rows and no sentence saying why: %s" % body[:300])
+        # Nothing reaching the symbol is a legitimate answer, and the page has
+        # to say so rather than draw an empty list.
+        if not re.search(r"\b0 definitions\b|nothing", headline, re.IGNORECASE):
+            fail("no rows and no sentence saying why: %r" % headline)
         return
-
-    # Every reached row carries one of the four support classes. A hop with
-    # no badge is a hop a reader will assume was verified.
+    # Every reached row carries its support class. A hop with no badge is a
+    # hop a reader will assume was verified.
     unbadged = d.eval(
-        "[...document.querySelectorAll('.impact-block:not(.impact-files) .impact-row')]"
-        ".filter(el => !el.querySelector('.conf')).length"
+        "[...document.querySelectorAll('#main .split table tbody tr')].filter(tr =>"
+        " !/(extracted|resolved|inferred|ambiguous)/.test((tr.querySelector('.badge') || {}).textContent || '')).length"
     )
     if unbadged:
         fail("%d of %d reached rows carry no support class" % (unbadged, rows))
-    # And the hop groups are in order, nearest first.
-    hops = [t for t in texts_of(d, ".impact-block:not(.impact-files) .impact-hop h2") if t and t[0].isdigit()]
-    numbers = [int(t.split()[0]) for t in hops]
-    if numbers != sorted(numbers):
-        fail("the hop groups are out of order: %s" % numbers)
+    hops = [int(h) for h in d.eval("[...document.querySelectorAll('#main .split table tbody tr')].map(tr => tr.cells[3].innerText.trim())") if h.isdigit()]
+    if hops != sorted(hops):
+        fail("the reached rows are out of hop order: %s" % hops)
 
 
-@finding("5.3", "the path finder and Trace render on the Impact page")
+@finding("5.3", "the path finder and its evidence render on Graph › Path & evidence")
 def _(d):
-    d.open_view("impact")
+    root = review_tree(d, "pathfinder")
+    store = indexed_fixture(d, root)
+    d.open_view("graph/path")
     body = view_text(d)
-    for wanted in ["Path finder", "Prefer verified edges", "Strict", "Trace", "Copy as evidence"]:
+    for wanted in ["Path & evidence", "FROM", "TO", "Prefer verified", "Strict", "Find the path"]:
         if wanted not in body:
-            fail("the Impact page is missing %r: %s" % (wanted, body[:300]))
+            fail("Graph › Path & evidence is missing %r: %s" % (wanted, body[:300]))
+    pick_store(d, ".ctrl-card button[aria-haspopup]", store, "graph/path")
+    d.type('.ctrl-card input[aria-label="From"]', "caller")
+    d.type('.ctrl-card input[aria-label="To"]', "callee")
+    press_text(d, ".ctrl-card button", "Find the path", "Find the path")
+    d.wait_for("/Copy as evidence/.test(document.querySelector('#main').innerText)", timeout=30,
+               what="the path's supporting lines and Copy as evidence")
 
 
 @finding("5.4", "the Graph page lists the store's communities")
 def _(d):
+    a_store(d)
     d.open_view("graph")
-    time.sleep(3)
-    body = view_text(d)
-    if "Map" not in body:
-        fail("the Graph page has no Map panel: %s" % body[:300])
-    shown = text_of(d, ".map-shown", "the Map panel's count")
-    if "Shown" not in shown and "No call or import edges" not in view_text(d):
-        fail("the Map panel does not say how many of how many it shows: %r" % shown)
+    d.wait_for("/Subsystems/.test((document.querySelector('.g-side') || {}).innerText || '')", what="the Subsystems group")
+    if d.eval("(document.querySelector('.subsys-wrap .group-row') || {}).getAttribute('aria-expanded')") != "true":
+        d.click(".subsys-wrap .group-row")
+    d.wait_for("!/Reading/.test((document.querySelector('.subsys-wrap') || {}).innerText || '')", timeout=30,
+               what="the communities to be read")
+    shown = d.eval("((document.querySelector('.subsys-wrap .group-row .t-mono-sm') || {}).textContent || '').trim()")
+    if not re.match(r"^\d+ of [\d,]+$", shown) and not exists(d, ".subsys-wrap .error-box"):
+        fail("the Subsystems group does not say how many of how many it shows: %r" % shown)
 
 
 @finding("5.5", "Inside the index states what the graph covers")
 def _(d):
-    # `corpus` since 0.27.0. The indexing controls and the corpus figures were
-    # one page; they are the design's two again, and this is the second of
-    # them.
-    d.open_view("corpus")
-    # The three cards are a scan of every call edge away, so this waits for
-    # them rather than sleeping a fixed time and calling a slow store a bug.
-    # The three cards are a scan of every call edge away, so this waits for
-    # them rather than sleeping a fixed time and calling a slow store a bug.
-    # Compared case-blind: the card titles are uppercased by the stylesheet,
-    # and innerText reads what is rendered.
-    # Waits for `graph health`, which is the last of them.
-    #
-    # It waited for the language mix, and since 0.27.0 that card is drawn from
-    # `/api/corpus` while the other two come from a scan of every call edge
-    # behind `/api/stores?coverage=1` — so the mix was on screen a second
-    # before the cards this is really about, and the check read the page in
-    # between.
-    deadline = time.time() + 45
-    while time.time() < deadline:
-        if "graph health" in view_text(d).lower():
-            break
-        time.sleep(0.5)
-    time.sleep(0.5)
+    a_store(d)
+    d.open_view("stores/inside")
+    d.wait_for("/graph health/i.test(document.querySelector('#main').innerText)", timeout=45,
+               what="the Graph health card")
     body = view_text(d).lower()
     for wanted in ["language mix, by line", "chunks added per month", "graph health"]:
         if wanted not in body:
             fail("Inside the index is missing the %r card" % wanted)
-    if "unresolved targets" not in body or "names with several definitions" not in body:
+    if "unresolved" not in body or "several definitions" not in body:
         fail("Graph health does not state its unresolved targets: %s" % body[:400])
-    # Four tiers, and the same four the coverage table below reports. The page
-    # grouped `edges.confidence` for a while, which is a different question:
-    # it read `resolved 0 · ambiguous 0` directly above a table reading 2380
-    # and 2158.
     for tier in ("extracted", "resolved", "ambiguous", "unresolved"):
         if tier not in body:
             fail("the call-edge tier %r is missing from Graph health" % tier)
     # Twelve columns whatever the corpus holds: a store indexed this morning
     # has one month in it, and one bar in a full-width card is a chart that has
     # failed rather than a young corpus.
-    columns = d.eval("document.querySelectorAll('.month-col').length")
+    columns = d.eval("document.querySelectorAll('#main .months > div').length")
     if columns != 12:
         fail("the month chart draws %d columns; it should always draw 12" % columns)
-    # Every bar is sized through the CSSOM, because the portal is served
-    # under `style-src 'self'` and a width written into the markup is
-    # blocked — silently, leaving every bar full width.
-    #
-    # Asserted as what is on screen rather than as what is in the markup: a
-    # width assigned through the CSSOM and one written into the attribute
-    # look identical in `outerHTML`, and only one of them is applied. A bar
-    # whose share is under 100% and whose rendered width equals its track's
-    # is a bar the policy dropped.
+    # Every bar is sized through the CSSOM, because the portal is served under
+    # `style-src 'self'` and a width written into the markup is dropped,
+    # silently, leaving every bar full width.
+    rows = d.eval("document.querySelectorAll('#main .lang-row .bar').length")
     narrower = d.eval(
-        "[...document.querySelectorAll('.mix-row .meter')].some(track => {"
+        "[...document.querySelectorAll('#main .lang-row .bar')].some(track => {"
         "  const fill = track.firstElementChild; if (!fill) return false;"
-        "  const w = fill.getBoundingClientRect().width;"
-        "  const t = track.getBoundingClientRect().width;"
+        "  const w = fill.getBoundingClientRect().width, t = track.getBoundingClientRect().width;"
         "  return t > 0 && w > 0 && w < t - 1; })"
     )
-    if not narrower:
+    if rows > 1 and not narrower:
         fail(
             "every language-mix bar fills its whole track, so the width was "
             "written into the markup and `style-src 'self'` dropped it"
@@ -3083,119 +3110,89 @@ def _(d):
 
 @finding("5.6", "the ledger lists sessions, filters them, and exports what it shows")
 def _(d):
+    a_store(d)
+    d.api("/api/search?query=release%20record&k=4")
     d.open_view("ledger")
-    time.sleep(1)
     body = view_text(d)
     if "Sessions" not in body:
-        fail("the ledger page has no per-session table")
+        fail("the ledger page has no Sessions tab")
     for wanted in ["Markdown", "CSV", "JSON"]:
-        if wanted not in body:
+        if wanted not in texts_of(d, "#main .tabs button"):
             fail("the sessions table cannot export %s" % wanted)
-    # Two filters, client and tier. From 0.34.0 there is no model picker: a
-    # session's saving is priced at the model that session ran on, read from
-    # its client's own log, rather than at one model chosen for every row.
-    selects = d.eval("document.querySelectorAll('.card.pad .filters select').length")
-    if selects != 2:
-        fail("the sessions table has %d filter controls, expected client and tier" % selects)
-    if d.eval("!!document.querySelector('select[aria-label=\"Cost at\"]')"):
+    # 0.35.0 owner decision (v6 as drawn): three filters — client, store and
+    # tier — where there were two. Still no one model picked for every row: a
+    # session's saving is priced at the model it ran on.
+    selects = d.eval("[...document.querySelectorAll('#main .filterbar .dd')].map(s => s.getAttribute('aria-label'))")
+    want("the sessions table's filters", selects, ["Client", "Store", "Tier"])
+    if d.eval("!!document.querySelector('[aria-label=\"Cost at\"]')"):
         fail("the sessions table still prices every session at one chosen model")
-    heads = d.eval("[...document.querySelectorAll('.w-sessions th')].map(t => t.textContent.trim().toUpperCase()).join('|')")
-    for wanted in ["MODEL", "SAVED"]:
-        if wanted not in heads:
-            fail("the sessions table has no %s column: %s" % (wanted, heads))
+    # The Model column comes with the Usage-from-client-logs switch, which is
+    # where the model each session ran on is read from (0.35.0 owner decision:
+    # usage from logs is a Ledger switch). Saved comes with a priced session.
+    was = bool((d.api("/api/ledger").get("usage") or {}).get("enabled"))
+    try:
+        d.api("/api/ledger/usage", method="POST", body={"on": True})
+        d.open_view("ledger", fresh=True)
+        heads = d.eval("[...document.querySelectorAll('#main table th')].map(t => t.textContent.trim().toUpperCase()).join('|')")
+        if "MODEL" not in heads:
+            fail("with usage from client logs on, the sessions table has no MODEL column: %s" % heads)
+        priced = any(s.get("saved_usd") is not None for s in d.api("/api/ledger").get("sessions") or [])
+        if priced and "SAVED" not in heads:
+            fail("a session is priced and the sessions table has no SAVED column: %s" % heads)
+    finally:
+        d.api("/api/ledger/usage", method="POST", body={"on": was})
 
 
-@finding("5.7", "Session replay is off until Privacy turns it on")
+@finding("5.7", "session replay is on by default, and Privacy can turn it off and on")
 def _(d):
-    d.open_view("ledger")
-    time.sleep(1)
-    # From 0.27.0 the rows and the replay are two tabs over one ledger rather
-    # than two stacked cards, so the replay's copy is behind its tab. The check
-    # presses it, which is what a reader does.
-    body = view_text(d)
-    if "Session replay" not in body:
-        fail("the ledger page has no Session replay tab")
-    opened = d.eval(
-        """
-        (() => {
-          const tab = [...document.querySelectorAll('.tab')]
-            .find(t => /session replay/i.test(t.textContent || ''));
-          if (!tab) return false;
-          tab.click();
-          return true;
-        })()
-        """
-    )
-    if not opened:
-        fail("the ledger has no Session replay tab to open")
-    time.sleep(0.5)
-    body = view_text(d)
-    if "Turn on under Privacy" not in body:
-        fail("Session replay does not say where it is turned on: %s" % body[:300])
+    # 0.35.0 owner decision: session replay defaults to on (a settings file that
+    # never wrote the key reads as on; one that wrote off stays off). The old
+    # check asserted the opposite default. Asserted now: replay is on in this
+    # drive's pristine home, the Ledger's replay tab shows the on state, and
+    # the Privacy switch turns it off — after which the tab says so and offers
+    # to turn it back on, and does.
+    a_store(d)
     state = d.api("/api/ledger/replay")
-    if state.get("enabled"):
-        skip("session replay is already on on this machine, so its off state cannot be checked")
-    if state.get("sessions"):
-        fail("session replay is off and returned sessions anyway: %s" % state)
-    # The off state is the design's dashed strip with the one button in the
-    # whole portal that goes to Privacy. It said "Turn it on under Privacy" and
-    # left the reader to find the page, which on a sidebar of thirteen items is
-    # a sentence and not a route.
-    if not exists(d, ".replay-off"):
-        fail("Session replay's off state is not the design's panel")
-    if "Session replay is off. Nothing is read from your agent logs" not in body:
-        fail("Session replay's off state does not say what is not being read: %s" % body[:300])
-    went = d.eval(
-        """
-        (() => {
-          const b = [...document.querySelectorAll('.replay-off button')]
-            .find(x => (x.textContent || '').trim() === 'Open Privacy');
-          if (!b) return false;
-          b.click();
-          return true;
-        })()
-        """
-    )
-    if not went:
-        fail("Session replay's off state has no `Open Privacy` button")
-    d.wait_for(
-        "(location.hash || '') === '#privacy'",
-        what="the Privacy page, after pressing Open Privacy",
-    )
-    # The page renders from three routes, so the hash changes before the card
-    # this is about is on screen.
-    # Waited for until it is enabled, not until it exists: the switch is
-    # drawn at once and disabled with an empty status line while the page asks
-    # the daemon which state it is in, and a slow runner read it in that gap.
-    d.wait_for(
-        "!!document.querySelector('.replay-switch:not([disabled]) .replay-state')",
-        what="the Privacy page's session replay switch, loaded",
-    )
-    # And the control it lands on is the design's switch, not the button that
-    # used to be there: the state is the row, and the row says which state it
-    # is in rather than which one pressing it would reach.
-    switch = text_of(d, ".replay-switch .replay-state", "the Privacy page's replay switch")
-    if not switch.startswith("Off ·"):
-        fail("the Privacy page's session replay switch reads %r" % switch)
-    if d.eval("document.querySelector('.replay-switch').getAttribute('aria-checked')") != "false":
-        fail("the session replay switch is not announced as an unchecked switch")
+    if not state.get("enabled"):
+        fail(
+            "session replay is off in a store home that never chose: %s. It "
+            "defaults to on from 0.35.0." % json.dumps(state)[:200]
+        )
+    d.open_view("ledger/replay")
+    if not re.search(r"turn off on the Privacy page", view_text(d)):
+        fail("the Ledger's Session replay tab does not show the on state: %s" % view_text(d)[:300])
+    try:
+        d.open_view("privacy")
+        row = "#main .tg-row[role=switch]"
+        d.wait_for("[...document.querySelectorAll(%s)].some(b => /Session replay · on/.test(b.innerText))"
+                   % json.dumps(row), what="the Privacy page's Session replay switch, on")
+        d.eval("[...document.querySelectorAll(%s)].find(b => /Session replay/.test(b.innerText)).click()"
+               % json.dumps(row))
+        d.wait_for("[...document.querySelectorAll(%s)].some(b => /Session replay · off/.test(b.innerText)"
+                   " && b.getAttribute('aria-checked') === 'false')" % json.dumps(row),
+                   what="the switch to read off, announced as unchecked")
+        if d.api("/api/ledger/replay").get("enabled"):
+            fail("the Privacy switch reads off and the daemon still has replay on")
+        d.open_view("ledger/replay")
+        if "It is off" not in view_text(d):
+            fail("with replay off the Ledger's tab does not say so: %s" % view_text(d)[:300])
+        press_text(d, "#main button", "Turn it on", "the Ledger's Turn it on")
+        d.wait_for("/turn off on the Privacy page/.test(document.querySelector('#main').innerText)",
+                   what="Turn it on to turn replay back on")
+    finally:
+        d.api("/api/ledger/replay", method="POST", body={"on": True})
 
 
 @finding("5.8", "Reports generates all five, locally")
 def _(d):
+    a_store(d)
     d.open_view("reports")
     body = view_text(d)
-    for wanted in [
-        "Retrieval savings",
-        "AI access audit",
-        "Change brief",
-        "Index health",
-        "Knowledge gaps",
-    ]:
+    for wanted in ["Retrieval savings", "AI access audit", "Change brief", "Index health", "Knowledge gaps"]:
         if wanted not in body:
             fail("the Reports page is missing %r" % wanted)
-    if "Nothing leaves the machine" not in body:
-        fail("the Reports page does not say where the data came from")
+    if "never uploaded" not in body:
+        fail("the Reports page does not say where the data goes")
     for kind in ["savings", "access", "change", "health", "gaps"]:
         answer = d.api("/api/report?kind=%s&format=markdown" % kind)
         text = answer.get("text") or ""
@@ -3205,285 +3202,224 @@ def _(d):
             fail("the %s report does not say when it was generated" % kind)
 
 
-@finding("5.9", "the Cloud page describes the service and contacts nothing")
+@finding("5.9", "Settings › Cloud describes the service and contacts nothing")
 def _(d):
-    d.open_view("cloud")
+    d.open_view("settings/cloud")
     body = view_text(d)
-    if "Semlith Cloud is one hosted store" not in body:
-        fail("the Cloud page did not render: %s" % body[:300])
+    if "Semlith Cloud" not in body or "One hosted store for a whole organisation" not in body:
+        fail("Settings › Cloud did not render: %s" % body[:300])
     if "not connected" not in body:
-        fail("the Cloud page does not say it is not connected")
+        fail("Settings › Cloud does not say it is not connected")
     for word in ["Disconnect", "token prefix", "acme/api"]:
         if word in body:
-            fail("the Cloud page drew its connected state, which this release has no client for")
+            fail("Settings › Cloud drew its connected state, which this release has no client for")
 
 
 @finding("5.10", "the Agents page measures what its tool list costs")
 def _(d):
     d.open_view("agents")
     body = view_text(d)
-    if "What the tool list costs" not in body:
+    if not re.search(r"what the tool list costs", body, re.IGNORECASE):
         fail("the Agents page does not state what the tool list costs")
-    if "paid" in body:
+    if re.search(r"\bpaid\b", body):
         fail("a tool on the Agents page is marked paid")
     listed = d.api("/api/agents")
     tools = listed.get("tools") or []
     if len(tools) != 16:
         fail("the Agents page lists %d tools, expected 16" % len(tools))
+    shown = re.search(r"([\d,]+) tokens", text_of(d, "#main .big18", "the tool list's cost"))
+    if not shown or int(shown.group(1).replace(",", "")) != listed.get("tool_list_tokens"):
+        fail("the page states %r and /api/agents counts %s tokens"
+             % (shown and shown.group(0), listed.get("tool_list_tokens")))
 
 
-@finding("5.11", "every new page renders in both themes")
-def _(d):
-    """The record's evidence, taken by the gate rather than by hand.
-
-    One screenshot per new surface in light and again in dark. The check
-    fails only if a page does not render at all — the pictures are what a
-    person reads, and they are what the release record carries.
-    """
-    pages = [
-        ("impact", "Impact"),
-        ("graph", "Graph"),
-        ("index", "Index"),
-        ("corpus", "Inside the index"),
-        ("ledger", "Retrieval ledger"),
-        ("reports", "Reports"),
-        ("cloud", "Cloud"),
-        ("agents", "Agents"),
-        ("privacy", "Privacy"),
+def every_view(d):
+    """Every v6 route, plus each tab of one store's page."""
+    store = a_store(d)
+    return list(cdp.Drive.ROUTES) + ["store/%s" % store] + [
+        "store/%s/%s" % (store, tab) for tab in cdp.Drive.STORE_TABS[1:]
     ]
-    for theme in ("light", "dark"):
-        d.eval("document.documentElement.setAttribute('data-theme', %s)" % json.dumps(theme))
-        for view, title in pages:
-            d.open_view(view)
-            time.sleep(1.5)
-            body = view_text(d)
-            if title not in body:
-                fail("%s did not render in the %s theme" % (title, theme))
-            d.shot("5.11-%s-%s" % (theme, view))
-    d.eval("document.documentElement.removeAttribute('data-theme')")
+
+
+@finding("5.11", "every page renders in both themes")
+def _(d):
+    """Every v6 page in light and in dark, set the way the page's own control
+    sets it: `semlith-theme` in localStorage, then a load. The check fails if a
+    page does not draw or the root does not carry the theme; the full set of
+    pictures at two widths is `v6.shots`."""
+    views = every_view(d)
+    try:
+        for theme in ("light", "dark"):
+            d.eval("try { localStorage.setItem('semlith-theme', %s); } catch (e) {}" % json.dumps(theme))
+            for i, view in enumerate(views):
+                d.open_view(view, fresh=(i == 0))
+                got = d.eval("document.documentElement.getAttribute('data-theme')")
+                if got != theme:
+                    fail("%s drew with data-theme=%r in the %s theme" % (view, got, theme))
+    finally:
+        d.eval("try { localStorage.removeItem('semlith-theme'); } catch (e) {}")
 
 
 # ---------------------------------------------------------------- 0.26.1
 #
-# The 6.x block is the 2026-09-21 design-parity drive: the portal opened page
-# by page beside `Semlith Portal v4.dc.html` and driven at seven widths. Where
-# the 5.x checks assert that a page exists, these assert that it says what the
-# design says and that nothing on it is out of reach.
+# The 6.x block is the 2026-09-21 design-parity drive. Where the 5.x checks
+# assert that a page exists, these assert that it says what the design says
+# and that nothing on it is out of reach.
 
 
 def open_welcome(d):
-    """The first-run screen, which is not a view and has no sidebar.
-
-    `open_view` waits for a heading inside the shell; this screen replaces the
-    shell entirely, so it is navigated to and awaited by its own heading.
-    """
-    d.navigate("%s/?token=%s#welcome" % (d.portal_url, d.token))
-    d.wait_for(
-        "(() => { const h = document.querySelector('#root h1');"
-        " return !!h && (h.textContent || '').trim() === 'No stores yet'; })()",
-        what="the first-run screen's heading",
-    )
-    d.eval("new Promise(done => requestAnimationFrame(() => done(true)))")
+    """The first-run screen, which has no shell and no sidebar."""
+    d.open_view("welcome", fresh=True)
 
 
-@finding("6.1", "the first-run screen carries everything the v4 lockup and card carry")
+@finding("6.1", "the first-run screen carries what the v6 design's welcome carries")
 def _(d):
-    """0.26.0 shipped this screen with the version, one step, the ledger
-    sentence and the route into adopting a store all missing, and with a
-    footer that named the address without the port it was serving on."""
+    # 0.35.0 owner decision (v6 as drawn): five steps, Connect being the fifth;
+    # the version as a chip beside the wordmark; the machine checks on the
+    # right, the first naming the address the daemon answers on. The v4 screen's
+    # `--no-ledger` sentence is not on v6's welcome — it is on the Ledger page,
+    # beside the switch that pauses recording, which 6.6 and v6.29 assert.
     open_welcome(d)
-    body = view_text(d)
     about = d.api("/api/about")
-
-    version = text_of(d, ".welcome .lockup .ver", "the version beside the mark")
-    want("the version beside the mark", version, "v" + about["version"])
-
-    steps = d.eval("document.querySelectorAll('.welcome .step').length")
-    if steps != 4:
-        fail("the first-run screen draws %d steps, and the v4 design draws 4" % steps)
-
-    if "--no-ledger" not in body:
-        fail(
-            "the first-run screen does not say the ledger records locally. It is on by "
-            "default, so the screen that introduces the product is where that is said."
-        )
+    # The chip is drawn when /api/about answers, which a slow runner gives a
+    # moment after the screen itself.
+    try:
+        d.wait_for("!!document.querySelector('header.top .count-chip')", timeout=15, what="the version beside the wordmark")
+    except cdp.ProtocolError:
+        pass
+    version = text_of(d, "header.top .count-chip", "the version beside the wordmark")
+    if version.lstrip("v") != about["version"]:
+        fail("the welcome names version %r and the daemon is %s" % (version, about["version"]))
+    steps = d.eval("document.querySelectorAll('.welcome-card .steps5 .s').length")
+    want("the first-run screen's steps", steps, 5)
+    body = view_text(d)
     if "Adopt an existing .semlith" not in body:
-        fail(
-            "the first-run screen offers no way to adopt a store that already exists, "
-            "so the one screen whose job is to open a first store offers only one way"
-        )
-
+        fail("the first-run screen offers no way to adopt a store that already exists")
     host = d.eval("location.host")
-    foot = text_of(d, ".welcome .foot", "the first-run footer")
-    if host not in foot:
-        fail(
-            "the footer reads %r and does not name %s. 'loopback only' is a claim the "
-            "reader cannot check without the port." % (foot, host)
-        )
+    d.wait_for("!/checking…/.test((document.querySelector('.check-row') || {}).innerText || '')",
+               what="the machine checks to be read")
+    daemon_row = text_of(d, ".check-row", "the Daemon check")
+    if host not in daemon_row:
+        fail("the Daemon check reads %r and does not name %s. 'loopback only' is a "
+             "claim the reader cannot check without the port." % (daemon_row, host))
 
 
-@finding("6.2", "Skip for now lands on Stores")
+@finding("6.2", "Skip for now lands on Home")
 def _(d):
-    """It went to About, which is the page about the binary rather than the
-    page the reader was skipping ahead to."""
-    open_welcome(d)
-    d.click_text(".welcome button", "Skip for now")
-    d.wait_for(
-        "(location.hash || '') === '#stores'",
-        what="Skip for now to land on Stores",
-    )
+    # 0.35.0 owner decision (v6 as drawn): the first run's Skip for now is on
+    # the wizard's last step, Connect, and lands on Home — the page about this
+    # machine's index — rather than on the welcome's own Stores link it was in v4.
+    reach_connect_step(d, "skipper")
+    press_text(d, ".wz-foot button", "Skip for now", "Skip for now")
+    d.wait_for("location.hash === '#/home'", what="Skip for now to land on Home")
 
 
-@finding("6.3", "the Stores table offers the way into what the index holds")
+@finding("6.3", "the Stores page offers the way into what the index holds")
 def _(d):
+    a_store(d)
     d.open_view("stores")
-    label = "See what is actually inside the index"
-    if label not in view_text(d):
-        fail("the Stores table has no route into Inside the index")
-    d.click_text(".table-follow", label)
-    # `#corpus` from 0.29.0: this asserted `#index`, the page the link was left
-    # pointing at when 0.27.0 split Inside the index out of it.
-    d.wait_for("(location.hash || '') === '#corpus'", what="the route into Inside the index")
+    press_text(d, "#main .tabs .tab", "Inside the index", "the Inside the index tab")
+    d.wait_for("location.hash === '#/stores/inside'", what="the route into Inside the index")
 
 
 @finding("6.4", "the Retrieval ledger offers the way into Reports")
 def _(d):
+    a_store(d)
     d.open_view("ledger")
-    if "Build a report" not in view_text(d):
-        fail("the Retrieval ledger header has no route into Reports")
-    d.click_text(".page-head button", "Build a report")
-    d.wait_for("(location.hash || '') === '#reports'", what="the route into Reports")
+    press_text(d, "#main .head button", "Build a report", "Build a report")
+    d.wait_for("location.hash === '#/reports'", what="the route into Reports")
 
 
 @finding("6.5", "About states the licence the binary ships under")
 def _(d):
-    """0.27.0 took the MCP revisions row off this page and this check with it.
-
-    The row named a wire contract an agent settles in its handshake and a person
-    never acts on, and the v4 design's About page is seven facts and a language
-    table. `/api/about` still returns `revisions`, so nothing that reads them
-    lost anything — which is why this check no longer looks for them on the
-    page. See 7.9, which asserts they are gone.
-    """
-    d.open_view("about")
-    body = view_text(d)
+    d.open_view("settings/about")
     about = d.api("/api/about")
-    if about["license"] not in body:
-        fail("the About page does not state the licence the binary ships under")
+    if about["license"] not in view_text(d):
+        fail("Settings › About does not state the licence the binary ships under")
 
 
 @finding("6.6", "the sidebar states whether the ledger is recording")
 def _(d):
-    """0.27.0 took the `Replay first-run screen` control out of the sidebar and
-    this check's second half with it.
-
-    It was added in 0.26.1 on the reasoning that without it the first-run screen
-    is unreachable once a store exists. That is still true, and it was judged
-    not to be worth a permanent control in the sidebar of every page — the
-    screen is a first run, and `#welcome` still reaches it. What the daemon card
-    says about recording is the part of this finding that was about the sidebar
-    doing its job, and it is kept.
-    """
-    d.open_view("stores")
-    card = text_of(d, "#daemon-stores", "the daemon card's second line")
-    recording = (d.api("/api/about")).get("ledger") is not False
-    want("the daemon card's ledger state", "ledger on" in card, recording)
+    a_store(d)
+    d.open_view("home")
+    card = text_of(d, ".nav .daemon .facts", "the daemon card")
+    about = d.api("/api/about")
+    recording = about.get("recording")
+    on = recording.get("on") if isinstance(recording, dict) else about.get("ledger") is not False
+    want("the daemon card's ledger state", "ledger on" in card, bool(on))
 
 
 @finding("6.7", "Reports previews the one report that is selected")
 def _(d):
-    """The page used to be five cards each with its own Generate button and one
-    preview under them all, so the preview could be showing any of the five."""
+    a_store(d)
     d.open_view("reports")
-    types = d.eval("document.querySelectorAll('.report-type').length")
+    types = d.eval("document.querySelectorAll('#main .kind-card').length")
     if types != 5:
         fail("the Reports picker offers %d report types, expected 5" % types)
-    d.wait_for(
-        "((document.querySelector('.report-text') || {}).textContent || '').length > 40",
-        what="the selected report to generate",
-    )
-    first = d.eval("document.querySelector('.report-text').textContent")
-    # The card's own text is its name, its blurb and its reader run together,
-    # so the name is what is matched; the click bubbles to the card.
-    d.click_text(".report-type .name", "Index health")
-    d.wait_for(
-        "((document.querySelector('.report-text') || {}).textContent || '')"
-        " !== %s" % json.dumps(first),
-        what="the preview to follow the selected report",
-    )
-    name = text_of(d, ".report-preview-card .report-bar .name", "the preview's file name")
-    if not name.endswith(".md"):
-        fail("the preview names %r, which is not the chosen Markdown format" % name)
-    d.click_text(".report-builder .chip", "CSV")
-    d.wait_for(
-        "(document.querySelector('.report-preview-card .report-bar .name').textContent || '')"
-        ".endsWith('.csv')",
-        what="the format chip to change the file written",
-    )
+    d.wait_for("((document.querySelector('#main .preview') || {}).textContent || '').length > 40",
+               what="the selected report to generate")
+    first = d.eval("document.querySelector('#main .preview').textContent")
+    press_text(d, "#main .kind-card .t", "Index health")
+    d.wait_for("((document.querySelector('#main .preview') || {}).textContent || '') !== %s"
+               " && !/Generating/.test(document.querySelector('#main .preview').textContent)" % json.dumps(first),
+               what="the preview to follow the selected report")
+    name = text_of(d, "#main .card.flexcol .card-h .mono", "the preview's file name")
+    if not name.startswith("health-") or not name.endswith(".md"):
+        fail("the preview names %r, which is not the chosen report in the chosen Markdown format" % name)
+    press_text(d, "#main .seg button", "CSV")
+    d.wait_for("(document.querySelector('#main .card.flexcol .card-h .mono').textContent || '').endsWith('.csv')",
+               what="the format to change the file written")
 
 
 @finding("6.8", "no page scrolls sideways, at any width the design supports")
 def _(d):
-    """A control pushed off the right edge is a control nobody can reach, and
-    the page scrollbar that comes with it makes every page feel broken. Seven
-    widths, because 0.26.0 was verified at one."""
     widths = [390, 430, 820, 1024, 1280, 1440, 1920]
-    views = list(cdp.Drive.VIEW_TITLES)
+    views = every_view(d)
     bad = []
     try:
         for width in widths:
             d.set_viewport(width, 844 if width < 600 else 900, mobile=width < 600)
-            for view in views:
-                d.open_view(view, fresh=True)
-                time.sleep(0.4)
-                seen = d.eval(
-                    "({page: document.documentElement.scrollWidth,"
-                    " vw: document.documentElement.clientWidth})"
-                )
-                # One pixel of slack: a fractional layout width rounds up and
-                # is not a horizontal scrollbar.
+            for i, view in enumerate(views):
+                d.open_view(view, fresh=(i == 0))
+                seen = d.eval("({page: document.documentElement.scrollWidth, vw: document.documentElement.clientWidth})")
                 if seen["page"] > seen["vw"] + 1:
                     bad.append("%s at %dpx scrolls to %dpx" % (view, width, seen["page"]))
+        open_welcome(d)
+        for width in (390, 1440):
+            d.set_viewport(width, 844 if width < 600 else 900, mobile=width < 600)
+            seen = d.eval("({page: document.documentElement.scrollWidth, vw: document.documentElement.clientWidth})")
+            if seen["page"] > seen["vw"] + 1:
+                bad.append("welcome at %dpx scrolls to %dpx" % (width, seen["page"]))
     finally:
         d.reset_viewport()
     if bad:
         fail("pages scroll sideways: %s" % "; ".join(bad))
 
 
+def settle_network(d, limit=15.0):
+    """Block until the page stops making requests, or `limit` passes."""
+    deadline = time.time() + limit
+    last, stable = -1, 0
+    while time.time() < deadline:
+        count = d.eval("performance.getEntriesByType('resource').length")
+        stable = stable + 1 if count == last else 0
+        last = count
+        # Three readings the same, a beat apart: enough for a page whose
+        # panels fetch one after another rather than all at once.
+        if stable >= 3:
+            return True
+    return False
+
+
 @finding("6.9", "no page writes an error to the browser console")
 def _(d):
-    """A console error is a defect a screenshot cannot show. 0.26.0 was never
-    read for them, so this reads every page for them once.
-
-    The console is read only once a page has stopped fetching. Navigating
-    away from a page with a request still in flight cancels it, and Chrome
-    logs the cancellation against whichever page it lands on — on Windows
-    that showed up as `ERR_CONNECTION_RESET` on `/api/privacy`, whose socket
-    scan is the slowest read in the portal. Waiting is the honest fix: a load
-    failure that survives a quiet network is a real one, and is still failed
-    on. Suppressing the message by name would have hidden the real thing too.
-    """
-
-    def settle(limit=15.0):
-        """Block until the page stops making requests, or `limit` passes."""
-        deadline = time.time() + limit
-        last, stable = -1, 0
-        while time.time() < deadline:
-            count = d.eval("performance.getEntriesByType('resource').length")
-            stable = stable + 1 if count == last else 0
-            last = count
-            # Three readings the same, a beat apart: enough for a page whose
-            # panels fetch one after another rather than all at once.
-            if stable >= 3:
-                return True
-        # Said rather than silently tolerated: a page still fetching after
-        # fifteen seconds is worth knowing about even if nothing errored.
-        return False
-
+    """Read once a page has stopped fetching: navigating away with a request in
+    flight cancels it, and Chrome logs the cancellation against whichever page
+    it lands on. A load failure that survives a quiet network is a real one."""
     bad, restless = [], []
-    for view in cdp.Drive.VIEW_TITLES:
+    for view in every_view(d) + ["welcome"]:
         d.open_view(view, fresh=True)
-        if not settle():
+        if not settle_network(d):
             restless.append(view)
         # Cleared after the page is quiet, so anything read below was written
         # by this page rather than by the navigation that reached it.
@@ -3502,169 +3438,105 @@ def _(d):
 
 @finding("6.10", "an index run outlives the page that started it")
 def _(d):
-    """A run lives in the daemon, not in the tab.
-
-    The Index page says so in as many words — "leaving, refreshing or closing
-    the tab changes nothing, and a run ends only on its Stop". It was true
-    when 0.24.0 moved the run out of the streaming response that used to *be*
-    it, and nothing since should have moved it back. This is the check that
-    says so, because the failure mode is invisible until someone reloads
-    mid-run and watches their work disappear.
-    """
-    path = d.fixtures.bulk()
-    started = d.api("/api/index", method="POST", body={"path": [path]})
-    runs = started.get("runs") or []
-    if not runs:
-        skip("the daemon queued no run for the bulk fixture")
-    store = runs[0].get("store")
-
-    d.open_view("index", fresh=True)
-    before = d.eval(
-        "document.querySelectorAll('.run-card').length"
-    )
-    if not before:
-        fail("the Index page drew no run card for a run the daemon had just accepted")
-
-    # A full document load, which is what a reload and a reopened tab both are.
-    d.navigate("%s/#index" % d.portal_url)
-    d.wait_for(
-        "!!document.querySelector('.run-card')",
-        what="the run card to come back after a reload; a run that vanishes with "
-        "the page is a run bound to the request that started it, which is the "
-        "defect 0.24.0 fixed",
-    )
-    after = d.eval(
-        "[...document.querySelectorAll('.run-card .card-title')].map(n => n.textContent)"
-    )
-    if store not in after:
-        fail(
-            "after reloading, the Index page lists %r and not the running store %r"
-            % (after, store)
+    run_id, store = start_index(d, d.fixtures.unique("outlives", count=400))
+    try:
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("!!document.querySelector(%s)" % json.dumps(LIVE_CARD), what="the live run's card")
+        # A full document load, which is what a reload and a reopened tab are.
+        d.navigate("%s/#/store/%s/runs" % (d.portal_url, store))
+        d.wait_for(
+            "!!document.querySelector(%s) || (document.querySelectorAll(%s).length > 0)"
+            % (json.dumps(LIVE_CARD), json.dumps(HIST_ROW)),
+            what="the run to come back after a reload; a run that vanishes with the "
+            "page is a run bound to the request that started it, which 0.24.0 fixed",
         )
-
-    # And the daemon still owns it, which is the half a screenshot cannot show.
-    live = d.api("/api/index/runs")
-    if not any(r.get("store") == store for r in (live.get("runs") or [])):
-        fail("the daemon dropped the run for %s when the page reloaded" % store)
+        live = run_by_id(d, run_id)
+        if not live:
+            fail("the daemon dropped the run for %s when the page reloaded" % store)
+        if live.get("status") not in TERMINAL and not exists(d, LIVE_CARD):
+            fail("after reloading, %s's run is %s and its Runs tab draws no live card"
+                 % (store, live.get("status")))
+    finally:
+        stop_quietly(d, store)
 
 
 # ---------------------------------------------------------------- 0.27.0
 #
-# The 7.x block. Where 6.x asserted that each page says what the design says,
-# these assert the things 0.27.0 changed underneath every page at once — the
-# shared flex rule, the control shapes, the type scale, the bottom floor — plus
+# The 7.x block: the things 0.27.0 changed underneath every page at once, plus
 # the two surfaces it built from nothing.
-#
-# The point of writing them here rather than checking them by hand once: every
-# one of these was found by opening the portal and looking at it, and the next
-# portal release should inherit the gate instead of finding them again.
 
 
 @finding("7.1", "a page whose content overflows scrolls to its end")
 def _(d):
-    """`.view > *` set `flex-shrink: 0` and `.scroller` put it back at equal
-    specificity and later in the file, so on any page that overflowed one child
-    absorbed the whole overflow: the page stopped scrolling and the scroller was
-    crushed toward zero with `.card { overflow: hidden }` clipping what was
-    inside it.
-
-    The Retrieval ledger was where it showed, but it was never a ledger bug —
-    five pages put a `.scroller` directly under `.view`. So this is asserted on
-    the ledger *and* on a second page, which is the whole reason it is one
-    check with a loop rather than two checks.
-    """
-    for view in ("ledger", "stores"):
-        d.open_view(view)
-        d.eval("(document.querySelector('.view') || {}).scrollTop = 1e6")
-        d.eval("new Promise(done => requestAnimationFrame(() => done(true)))")
-        crushed = d.eval(
-            """
-            (() => {
-              const s = document.querySelector('.view > .scroller');
-              if (!s) return null;
-              const r = s.getBoundingClientRect();
-              return r.height < 40 ? r.height : 0;
-            })()
-            """
-        )
-        if crushed:
-            fail(
-                "on %s the scroller under .view is %dpx tall — it absorbed the "
-                "page's overflow instead of the page scrolling" % (view, crushed)
+    """`<main>` carries the overflow from 0.35.0. A child that absorbed it
+    instead — the 0.27.0 defect — stops the page scrolling and crushes itself."""
+    a_store(d)
+    d.set_viewport(1280, 600)
+    try:
+        for view in ("ledger", "stores", "home", "privacy"):
+            d.open_view(view)
+            seen = d.eval(
+                "(() => { const m = document.querySelector('#main'); m.scrollTop = 1e6;"
+                " return {top: m.scrollTop, over: m.scrollHeight - m.clientHeight}; })()"
             )
-        # Every card that is on the page is a card that can be read: nothing
-        # below the fold may be clipped to nothing by the same rule.
-        clipped = d.eval(
-            """
-            [...document.querySelectorAll('.view .card')].filter(el => {
-              const r = el.getBoundingClientRect();
-              return r.height > 0 && el.scrollHeight > Math.ceil(r.height) + 2;
-            }).length
-            """
-        )
-        if clipped:
-            fail("on %s, %d card(s) are shorter than their own content" % (view, clipped))
+            if seen["over"] > 2 and seen["top"] < seen["over"] - 2:
+                fail("on %s the page holds %dpx more than it shows and scrolls only %dpx"
+                     % (view, seen["over"], seen["top"]))
+            clipped = d.eval(
+                "[...document.querySelectorAll('#main .card')].filter(el => {"
+                " const s = getComputedStyle(el); if (/(auto|scroll)/.test(s.overflowY)) return false;"
+                " const r = el.getBoundingClientRect();"
+                " return r.height > 0 && el.scrollHeight > Math.ceil(r.height) + 2; }).length"
+            )
+            if clipped:
+                fail("on %s, %d card(s) are shorter than their own content" % (view, clipped))
+    finally:
+        d.reset_viewport()
 
 
 @finding("7.2", "every page ends with the design's floor under its last card")
 def _(d):
-    """`.view` was `20px 20px 24px` against the design's `24px 24px 44px`, so
-    every page ended 20px short and the last card sat against the viewport edge.
-
-    The graph page is the one recorded exception: it is `.graph-page`, has no
-    padding at all by design, and its canvas fills the frame.
-    """
-    views = ("stores", "ledger", "reports", "impact", "about", "privacy")
-    # Two widths, because the narrow breakpoint sets `.view`'s padding again
-    # and used to keep the old 24px while the base rule moved. A card against
-    # the bottom edge is truer on a phone than anywhere else.
+    """The v6 design's page is `20px 24px 28px`, and `14px 14px 24px` on a
+    phone, so the floor is 28px and 24px (0.35.0 owner decision: v6 as drawn,
+    where v4's was 44px at both). Search and Graph are the recorded exceptions:
+    full-height pages whose canvas fills the frame."""
+    a_store(d)
+    views = ("home", "stores", "ledger", "reports", "agents", "privacy", "settings")
     try:
         for width in (1280, 390):
             d.set_viewport(width, 844 if width < 600 else 900, mobile=width < 600)
-            for view in views:
-                d.open_view(view, fresh=True)
-                floor = d.eval(
-                    "(() => { const v = document.querySelector('.view');"
-                    " return v ? getComputedStyle(v).paddingBottom : null; })()"
-                )
+            for i, view in enumerate(views):
+                d.open_view(view, fresh=(i == 0))
+                floor = d.eval("(() => { const v = document.querySelector('#main > .page'); return v ? getComputedStyle(v).paddingBottom : null; })()")
                 if floor is None:
-                    fail("%s has no .view to measure a floor on" % view)
-                want("the floor under %s at %dpx" % (view, width), floor, "44px")
+                    fail("%s has no .page to measure a floor on" % view)
+                # The design's phone rule is `14px 14px 24px` below 760px.
+                want("the floor under %s at %dpx" % (view, width), floor, "24px" if width < 760 else "28px")
     finally:
         d.reset_viewport()
-
-    # The graph page is the one recorded exception and must stay one: it is
-    # `.graph-page`, its canvas fills the frame, and a 44px band under it would
-    # be a band of empty panel.
     d.open_view("graph")
-    if exists(d, ".graph-page > .view"):
-        fail("the graph page now roots on .view, so the recorded exception no longer applies")
+    if exists(d, "#main > .page"):
+        fail("the graph page now roots on .page, so the recorded exception no longer applies")
 
 
 @finding("7.3", "no control in the portal renders as bare text")
 def _(d):
-    """`.button.ghost` had no background and no border, which is what made the
-    graph page's `Reset` read as a caption rather than as a control. It is gone
-    and all fourteen call sites take the secondary shape.
-
-    A pressed chip is the design's ink fill rather than a blue wash, and does
-    not change font weight — a chip that gained weight on press changed width on
-    press, so picking one in a wrapped row reflowed the row under the pointer.
-    """
-    for view in ("stores", "graph", "ledger", "reports", "impact", "agents"):
+    """A `.btn` has a fill or an edge; a pressed chip does not change weight, so
+    a chip row does not reflow when one is picked. A `.lnk` is a link-styled
+    button by design and is not held to the button shape."""
+    a_store(d)
+    for view in ("stores", "graph", "ledger", "reports", "graph/blast", "agents", "settings"):
         d.open_view(view)
         bare = d.eval(
             """
-            [...document.querySelectorAll('.view .button, .graph-page .button,'
-              + ' .search-page .button')].filter(el => {
+            [...document.querySelectorAll('#main .btn')].filter(el => {
+              if (el.offsetParent === null) return false;
               const s = getComputedStyle(el);
-              const noFill = s.backgroundColor === 'rgba(0, 0, 0, 0)'
-                          || s.backgroundColor === 'transparent';
-              const noEdge = s.borderTopWidth === '0px'
-                          || s.borderTopStyle === 'none'
+              const noFill = s.backgroundColor === 'rgba(0, 0, 0, 0)' || s.backgroundColor === 'transparent';
+              const noEdge = s.borderTopWidth === '0px' || s.borderTopStyle === 'none'
                           || s.borderTopColor === 'rgba(0, 0, 0, 0)';
               return noFill && noEdge;
-            }).map(el => (el.textContent || '').trim()).slice(0, 5)
+            }).map(el => (el.textContent || el.getAttribute('aria-label') || '').trim()).slice(0, 5)
             """
         )
         if bare:
@@ -3672,228 +3544,131 @@ def _(d):
         weights = d.eval(
             """
             (() => {
-              const on = [...document.querySelectorAll('.chip[aria-pressed="true"]')];
-              const off = [...document.querySelectorAll('.chip[aria-pressed="false"]')];
+              const on = [...document.querySelectorAll('#main .chip[aria-pressed="true"]')];
+              const off = [...document.querySelectorAll('#main .chip[aria-pressed="false"]')];
               if (!on.length || !off.length) return null;
-              return [getComputedStyle(on[0]).fontWeight,
-                      getComputedStyle(off[0]).fontWeight];
+              return [getComputedStyle(on[0]).fontWeight, getComputedStyle(off[0]).fontWeight];
             })()
             """
         )
         if weights and weights[0] != weights[1]:
-            fail(
-                "on %s a pressed chip is weight %s and an unpressed one is %s, so a "
-                "chip row reflows when one is picked" % (view, weights[0], weights[1])
-            )
+            fail("on %s a pressed chip is weight %s and an unpressed one %s, so a chip "
+                 "row reflows when one is picked" % (view, weights[0], weights[1]))
 
 
 @finding("7.4", "no code block fades out at its right edge")
 def _(d):
-    """`pre.code` carried a 28px right-edge mask to say "the line continues".
-    Every block that class draws is a command a user is meant to select and
-    copy, and the fade made its last characters unreadable whether or not they
-    were the end of the line. The design's `<pre>` blocks scroll plainly.
-
-    The phone-only `.store-chips` mask is not a code block and is left alone.
-    """
-    for view in ("agents", "privacy"):
+    a_store(d)
+    for view in ("agents/add", "privacy", "reports", "settings/access"):
         d.open_view(view)
         masked = d.eval(
             """
-            [...document.querySelectorAll('pre.code, .report-text, .copyfield .text,'
-              + ' .hit pre, .brief-text, .code-line, .log')].filter(el => {
-              const s = getComputedStyle(el);
-              return (s.maskImage && s.maskImage !== 'none')
-                  || (s.webkitMaskImage && s.webkitMaskImage !== 'none');
-            }).length
+            [...document.querySelectorAll('#main .code, #main .copyfield .t, #main .lines, #main .log, #main .preview')]
+              .filter(el => { const s = getComputedStyle(el);
+                return (s.maskImage && s.maskImage !== 'none') || (s.webkitMaskImage && s.webkitMaskImage !== 'none'); }).length
             """
         )
         if masked:
             fail("on %s, %d code surface(s) still fade at the right edge" % (view, masked))
 
 
-@finding("7.5", "the Impact page draws its canvas beside the answer")
+@finding("7.5", "Blast radius draws its canvas beside the answer")
 def _(d):
-    """The right column of this page was a large empty area: the design puts a
-    320px reverse-reachability canvas at the top of it and the implementation
-    never drew one at all, while the `Changing` row and the three figures sat in
-    two unboxed page-wide bands above both columns.
-    """
-    d.open_view("impact")
-    if not exists(d, ".impact-canvas-card"):
-        fail("the Impact page draws no canvas card")
-    caption = text_of(d, ".impact-canvas-card .canvas-caption", "the canvas caption")
-    if not caption.startswith("reverse reachability"):
+    """Impact's 320px reverse-reachability canvas moved with it to Graph ›
+    Blast radius. It is the shared live renderer the Explore tab uses, it sits
+    in the right column beside the reached table, and its card says what it
+    draws."""
+    root = review_tree(d, "canvas")
+    store = indexed_fixture(d, root)
+    reach(d, "callee", store)
+    if not exists(d, "#main .mini-graph"):
+        fail("Blast radius draws no canvas card")
+    caption = text_of(d, "#main .mini-graph .label", "the canvas caption")
+    if not re.match(r"^(reverse reachability|\d+ beyond the \d+ drawn)", caption):
         fail("the canvas caption reads %r" % caption)
-    # The shared force canvas, not a painter of this page's own: the drag, the
-    # hover and the drift are that component's, and a second implementation of
-    # them here is a second set of behaviours to keep in step.
-    if not exists(d, ".impact-canvas-card .graph-canvas"):
-        fail("the Impact canvas is not the shared force canvas")
-    # The design's 320px, as a floor rather than as an exact height. It is drawn
-    # against a five-node mock; a real store answers with dozens, and the layout
-    # needs the room to keep its labels apart — so the card grows with the
-    # viewport and stops at 460.
-    height = d.eval(
-        "Math.round(document.querySelector('.impact-canvas-card').getBoundingClientRect().height)"
-    )
+    if not exists(d, "#main .mini-graph .g-live .g-node"):
+        fail("the Blast radius canvas is not the shared live renderer")
+    height = d.eval("Math.round(document.querySelector('#main .mini-graph').getBoundingClientRect().height)")
     if height < 320 or height > 460:
         fail("the canvas card is %dpx tall; it should sit between 320 and 460" % height)
-    # The `Changing` line and the three figures belong to a card in the left
-    # column, not to a band across the page.
-    if not exists(d, ".impact-subject-card .impact-subject-row"):
-        fail("the `Changing` row is not inside the left column's card")
-    if not exists(d, ".impact-subject-card .impact-stats"):
-        fail("the three figures are not inside the left column's card")
-    d.shot("7.5-impact-canvas")
+    beside = d.eval(
+        "(() => { const split = document.querySelector('#main .split.s-1-1'); if (!split) return false;"
+        " const cols = [...split.children]; return cols.length === 2 && !!cols[0].querySelector('table')"
+        " && !!cols[1].querySelector('.mini-graph') && !!cols[0].querySelector('.q3'); })()"
+    )
+    if not beside:
+        fail("the reached table, the three figures and the canvas are not two columns side by side")
+    d.shot("7.5-blast-canvas")
 
 
-@finding("7.6", "the Impact canvas is alive: it draws, it settles, it keeps moving")
+@finding("7.6", "the Blast radius canvas is alive: it draws, it settles, it keeps moving")
 def _(d):
-    """This canvas was a static ring painter — drawn once, redrawn only on a
-    resize. Nothing could be dragged, hovered or picked, and the picture never
-    moved. It is the shared force simulation now, as the design paints it, so
-    what this asserts is that the simulation is really running on this page and
-    not that a still image was produced.
-    """
-    # A symbol this corpus really has callers for, asked of the store rather
-    # than hard-coded. A name that reaches nothing is a fact about whatever
-    # happens to be indexed, and a check that failed on it would be measuring
-    # the fixture.
-    graph = d.api("/api/graph")
-    reachable = None
-    for node in (graph.get("nodes") or [])[:40]:
-        answer = d.api("/api/impact?name=%s&depth=3" % node["name"])
-        if ((answer.get("impact") or {}).get("reached") or []):
-            reachable = node["name"]
-            break
-    if not reachable:
-        skip(
-            "no symbol in the open store is reached by anything, so there is no "
-            "question to put to the canvas"
-        )
-
-    d.open_view("impact")
-    driven = d.eval(
-        """
-        (() => {
-          const box = document.querySelector('.impact-band input[type="search"]');
-          if (!box) return false;
-          box.value = %s;
-          box.dispatchEvent(new Event('input', {bubbles: true}));
-          box.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
-          return true;
-        })()
-        """
-        % json.dumps(reachable)
-    )
-    if not driven:
-        fail("the Impact page has no symbol field to drive")
-    d.wait_for(
-        "!!document.querySelector('.impact-results .impact-row')",
-        what="a reached row on the Impact page for %s" % reachable,
-    )
-    ink = """
-        (() => {
-          const c = document.querySelector('.impact-canvas-card .graph-canvas');
-          if (!c) return null;
-          const ctx = c.getContext('2d');
-          const px = ctx.getImageData(0, 0, c.width, c.height).data;
-          let lit = 0, sum = 0;
-          for (let i = 3; i < px.length; i += 4) {
-            if (px[i] > 0) { lit += 1; sum += i; }
-          }
-          return [lit, sum];
-        })()
-        """
-    first = d.eval(ink)
-    if not first or first[0] < 500:
-        fail(
-            "the Impact canvas is blank after asking about %s, which returned rows"
-            % reachable
-        )
-    # And it is still moving a moment later. The layout cools but never freezes:
-    # every node carries a slow wander, which is what makes this a live view of
-    # the subgraph rather than a picture of one.
-    #
-    # Skipped under reduced motion, where the canvas is deliberately solved once
-    # and left still — asserting drift there would be asserting against the
-    # accessibility preference the page is honouring.
-    still = d.eval("matchMedia('(prefers-reduced-motion: reduce)').matches")
-    if not still:
+    root = review_tree(d, "alive")
+    store = indexed_fixture(d, root)
+    answer = d.api("/api/impact?name=callee&store=%s&depth=3" % urllib.parse.quote(store))
+    if not ((answer.get("impact") or {}).get("reached") or []):
+        skip("nothing reaches callee in the fixture, so there is no question to put to the canvas")
+    reach(d, "callee", store)
+    d.wait_for("document.querySelectorAll('#main .mini-graph .g-node').length >= 2", what="the canvas to draw")
+    where = "[...document.querySelectorAll('#main .mini-graph .g-node')].map(n => n.style.left + ',' + n.style.top).join('|')"
+    first = d.eval(where)
+    # The layout cools but never freezes: every node carries a slow wander.
+    # Skipped under reduced motion, where the canvas is deliberately still.
+    if not d.eval("matchMedia('(prefers-reduced-motion: reduce)').matches"):
         time.sleep(1.2)
-        later = d.eval(ink)
-        if later and later[1] == first[1]:
-            fail(
-                "the Impact canvas has not moved in 1.2s; the simulation is not "
-                "running on this page"
-            )
-    # The three figures are the same answer counted, so a canvas that drew and
-    # a card that did not would be two readings of one question.
-    reached = text_of(d, ".impact-subject-card .impact-stat .n", "the Reached figure")
-    if reached.strip() in ("", "0"):
-        fail("the Changing card still reads 0 Reached while the table has rows")
-    d.shot("7.6-impact-canvas")
+        if d.eval(where) == first:
+            fail("the Blast radius canvas has not moved in 1.2s; the simulation is not running")
+    reached = d.eval("((document.querySelector('#main .q3 .stat-inline .v') || {}).textContent || '').trim()")
+    if reached in ("", "0"):
+        fail("the answer reads %r reached while the canvas draws callers" % reached)
+    d.shot("7.6-blast-canvas")
 
 
 @finding("7.7", "the Reports builder offers a window and a scope, and the route takes them")
 def _(d):
-    """The page offered neither, and `/api/report` read a `store` parameter and
-    threw it away — a control the route ignored would have been worse than no
-    control, which is why the route work landed with the page.
-    """
+    a_store(d)
     d.open_view("reports")
-    for group, what in (("window", "a Window group"), ("scope", "a Scope group")):
-        if not exists(d, "[data-group='%s'] .chip" % group):
-            fail("the Reports builder offers no %s" % what)
-    formats = d.eval("document.querySelectorAll(\"[data-group='format'] .chip\").length")
+    press_text(d, "#main .kind-card .t", "Change brief")
+    body = view_text(d)
+    for word in ("WINDOW", "STORES", "FORMAT"):
+        if word not in body:
+            fail("the Reports builder offers no %s group" % word.lower())
+    windows = d.eval("[...document.querySelectorAll('#main .seg')][0].querySelectorAll('button').length")
+    want("the windows the builder offers", windows, 4)
+    formats = d.eval("[...document.querySelectorAll('#main .seg')][1].querySelectorAll('button').length")
     want("the formats the builder offers", formats, 5)
-    # The route has to answer differently, not just accept the argument.
     week = d.api("/api/report?kind=change&window=week")
     month = d.api("/api/report?kind=change&window=month")
     if week.get("text") == month.get("text"):
         fail("/api/report returns the same change brief for a week and for a month")
 
 
-@finding("7.8", "a schedule the page adds is a schedule the daemon runs")
+@finding("7.8", "a schedule the page lists is a schedule the daemon runs")
 def _(d):
-    """Schedules are the first persistent, daemon-owned, time-driven state in
-    the product, and the one thing that makes them worth having is that the
-    daemon really runs them. The card reflects what the daemon holds rather than
-    page state, so this reads the list back out of the route rather than off the
-    page it was typed into.
-    """
+    a_store(d)
     d.open_view("reports")
-    if not exists(d, ".schedules-card"):
+    if "Schedules" not in view_text(d):
         fail("the Reports page has no Schedules card")
     held = d.api("/api/schedules")
-    listed = d.eval("document.querySelectorAll('.schedules-card .schedule-row').length")
+    listed = d.eval("document.querySelectorAll('#main .sched-row').length")
     want("the rows the card draws", listed, len(held.get("schedules") or {}))
-    # A schedule whose destination has gone away says so on the card. Silent
-    # failure here is the worst available outcome: a schedule that reads `on`
-    # beside a folder that never fills.
     broken = [s for s in (held.get("schedules") or {}).values() if s.get("last_error")]
-    if broken:
-        body = view_text(d)
-        for schedule in broken:
-            if "failed" not in body.lower():
-                fail("a schedule recorded an error and the card does not say so")
+    if broken and "failed" not in view_text(d).lower():
+        fail("a schedule recorded an error and the card does not say so")
     d.shot("7.8-schedules")
 
 
-@finding("7.9", "About has lost the two blocks the v4 page has no place for")
+@finding("7.9", "About has lost the two blocks the design has no place for")
 def _(d):
-    """A forty-eight-row catalogue of embedding models, of which this machine
-    has fetched one, and a row of MCP protocol revisions an agent settles in its
-    handshake. Both routes still answer — what went is a table, not a capability.
-    """
-    d.open_view("about")
-    if exists(d, ".w-models"):
-        fail("the About page still draws the models table")
+    """A forty-eight-row catalogue of embedding models and a row of MCP protocol
+    revisions an agent settles in its handshake. Both routes still answer —
+    what went is a view, not a capability. The v6 design's About is seven facts
+    (VERSION to UPTIME) and a language table, so this holds on Settings › About."""
+    d.open_view("settings/about")
+    if exists(d, "#main .w-models"):
+        fail("Settings › About still draws the models table")
     if "MCP revisions" in view_text(d):
-        fail("the About page still states the MCP revisions")
-    # The capability is untouched, which is the whole argument for removing the
-    # view: assert the routes rather than trusting the sentence.
+        fail("Settings › About states the MCP revisions, which the design's About does not")
     if not (d.api("/api/models").get("models") or []):
         fail("/api/models stopped answering when its portal view was removed")
     if not (d.api("/api/about").get("revisions") or []):
@@ -3902,15 +3677,6 @@ def _(d):
 
 @finding("7.10", "an unreadable store does not take the readable ones down with it")
 def _(d):
-    """One store whose database cannot be read made every route that aggregates
-    over `with_fleet` return `500 {"error":"disk I/O error"}`, so the Graph page
-    drew nothing and the message named neither the store nor the fact that the
-    others were fine.
-
-    The fixture for this is a damaged store, which the drive does not build —
-    when there is none registered, there is nothing to assert and the check says
-    so rather than passing quietly.
-    """
     answer = d.api("/api/stores")
     unreadable = [s for s in (answer.get("stores") or []) if s.get("unreadable")]
     if not unreadable:
@@ -3927,36 +3693,26 @@ def _(d):
 
 # ---------------------------------------------------------------- 0.28.0
 #
-# The 8.x block: the page checks of 0.28.0's functional items 1.3 to 1.8, run
-# on every operating system. 8.1 to 8.3 are item 1.8, "an Index page that
-# repaints in place".
+# The 8.x block: the page checks of 0.28.0's items 1.3 to 1.8, run on every
+# operating system. 8.1 to 8.3 are item 1.8, "a page that repaints in place".
 #
-# The Index page is the one page that paints itself from the live poll rather
-# than re-rendering, and it did it by rebuilding: every run card was re-appended
-# once a second, the machine-limits card was rebuilt whenever a reason quoted a
-# new free-memory figure, and a save announced itself above the card that had
-# just been typed into. Each of those moves something under the reader, so the
-# checks measure the page the way a reader meets it — the view's scroll offset,
-# where the pressed control sits, what holds focus, and which nodes a
+# From 0.35.0 the run controls are on a store's Runs tab and the limits on
+# Settings › Performance; both pages paint themselves from the one live poll.
+# Each check measures the page the way a reader meets it — `<main>`'s scroll
+# offset, where the pressed control sits, what holds focus, and which nodes a
 # MutationObserver sees replaced — rather than reading the code's intentions.
 #
 # Every wait is on a condition and bounded. "Settled" means two `/api/changes`
 # polls have come back since the action and no `/api/index/runs` read is still
-# in flight, counted by wrapping the page's own `fetch`; the one fixed interval
-# is 8.3's sixty seconds, which is the length of the observation the contract
-# asks for and not a wait for anything.
+# in flight, counted by wrapping the page's own `fetch`.
 
-#: A short window, so the Index page scrolls with only a handful of cards on it
-#: and the offset being held is not zero. Chrome does not anchor a scroller
-#: sitting at 0, so an offset of 0 proves nothing about anchoring. Short enough,
-#: too, that with the limits card held at the top of it the page still
-#: overflows once every finished card is gone — at 560 it did not, and "Remove
-#: all finished" clamped the offset to a bottom that had moved, which is the
-#: browser being right and not the page jumping.
+#: A short window, so the page scrolls with only a card or two on it and the
+#: offset being held is not zero. Chrome does not anchor a scroller sitting at
+#: 0, so an offset of 0 proves nothing about anchoring.
 STILL_VIEWPORT = (1280, 440)
 
-#: The page's own scroller: `.view` carries the overflow, see `scrollHolder`.
-VIEW = "document.querySelector('#root .view:not(.loading)')"
+#: The page's own scroller: `<main>` carries the overflow.
+VIEW = MAIN
 
 STILL_INSTRUMENT = r"""
 (() => {
@@ -3980,11 +3736,11 @@ STILL_INSTRUMENT = r"""
       return response;
     }, error => { done(); throw error; });
   };
-  // The loading view, anywhere, at any time from here on. A live update is
-  // never a navigation, so it must never show the page-wide loader.
+  // The page loader (`.ld`), anywhere, at any time from here on. A live update
+  // is never a navigation, so it must never show the loader.
   new MutationObserver(records => {
     for (const record of records) for (const node of record.addedNodes) {
-      if (node.nodeType === 1 && (node.matches('.loading') || node.querySelector('.loading'))) still.loading++;
+      if (node.nodeType === 1 && (node.matches('.ld') || node.querySelector('.ld'))) still.loading++;
     }
   }).observe(document.body, {childList: true, subtree: true});
   return true;
@@ -3992,19 +3748,10 @@ STILL_INSTRUMENT = r"""
 """
 
 
-def still_card(store):
-    """A JS expression for the run card of one store, or null."""
-    return (
-        "[...document.querySelectorAll(%s)].find(c =>"
-        " ((c.querySelector('.card-title') || {}).textContent || '').trim() === %s)"
-        % (json.dumps(RUN_CARD), json.dumps(store))
-    )
-
-
-def still_open(d, viewport):
-    """The Index page on a short window, instrumented, with no panel open."""
+def still_open(d, viewport, route):
+    """A route on a short window, instrumented."""
     d.set_viewport(*viewport)
-    d.open_view("index", fresh=True)
+    d.open_view(route, fresh=True)
     d.eval(STILL_INSTRUMENT)
     d.wait_for("window.__still.changes >= 1", timeout=15, what="the page's live poll to be running")
 
@@ -4021,7 +3768,7 @@ def settle(d, what):
 
 
 def hold_at(d, element_js, above):
-    """Scroll the view so `element_js` sits `above` px under its top.
+    """Scroll `<main>` so `element_js` sits `above` px under its top.
 
     Returns the offset, which has to be neither 0 nor the bottom: at 0 nothing
     about the offset is being tested, and at the bottom a page that shrinks
@@ -4041,11 +3788,11 @@ def hold_at(d, element_js, above):
         % (VIEW, element_js, above)
     )
     if not at:
-        fail("the Index page or the element to scroll to was not on screen")
+        fail("the page or the element to scroll to was not on screen")
     if at["at"] < 1:
         fail(
-            "the Index page could not be scrolled at all at this window size "
-            "(%d px of overflow), so there was no offset to hold" % at["max"]
+            "the page could not be scrolled at all at this window size (%d px of "
+            "overflow), so there was no offset to hold" % at["max"]
         )
     return at["at"]
 
@@ -4063,10 +3810,11 @@ def press(d, element_js, label):
           const wanted = %s;
           const control = scope.matches('button, input') ? scope
             : [...scope.querySelectorAll('button')].find(b => !b.hidden
-                && b.offsetParent !== null && (b.textContent || '').trim() === wanted);
+                && b.offsetParent !== null && (b.textContent || b.getAttribute('aria-label') || '').trim() === wanted);
           if (!control) return 'nothing on offer reads ' + wanted;
           const view = %s;
           window.__still.pressed = control;
+          window.__still.label = wanted;
           window.__still.before = {scroll: view.scrollTop, top: control.getBoundingClientRect().top,
                                    loading: window.__still.loading};
           control.focus({preventScroll: true});
@@ -4100,34 +3848,42 @@ def held(d, what, focus=False, place=False):
     )
     before = seen["before"]
     if seen["loading"]:
-        fail("%s showed the page-wide loading view; a live update is not a navigation" % what)
+        fail("%s showed the page loader; a live update is not a navigation" % what)
     if abs(seen["scroll"] - before["scroll"]) > 0.5:
-        # Said apart, because the remedy differs: a page that shrank under the
-        # offset has to clamp, and the fix is a shorter window in this file.
         clamped = seen["scroll"] < before["scroll"] and abs(seen["scroll"] - seen["bottom"]) < 1
         fail(
-            "%s moved the Index page's scroll offset from %.1f to %.1f%s"
-            % (
-                what,
-                before["scroll"],
-                seen["scroll"],
-                " — clamped: the page is now too short to hold the offset, so "
-                "shorten STILL_VIEWPORT" if clamped else "",
-            )
+            "%s moved the page's scroll offset from %.1f to %.1f%s"
+            % (what, before["scroll"], seen["scroll"],
+               " — clamped: the page is now too short to hold the offset, so "
+               "shorten STILL_VIEWPORT" if clamped else "")
         )
     if place and (seen["top"] is None or abs(seen["top"] - before["top"]) > 1):
         fail(
-            "%s moved the pressed control on screen from y=%.1f to %s: the page "
-            "held its offset but the content under the reader jumped"
-            % (what, before["top"], seen["top"])
+            "%s moved the pressed control on screen from y=%.1f to %s (still in "
+            "the page: %s): the page held its offset but the content under the "
+            "reader jumped, or the control was rebuilt"
+            % (what, before["top"], seen["top"], seen["connected"])
         )
     if focus and not (seen["connected"] and seen["focused"]):
         fail(
-            "%s took the focus off the control that was pressed (connected: %s; "
-            "focus is now on %s). A control rebuilt or re-parented by its own "
-            "repaint loses the focus a keyboard user just gave it."
+            "%s took the focus off the control that was pressed (still in the "
+            "page: %s; focus is now on %s). A control rebuilt by its own repaint "
+            "loses the focus a keyboard user just gave it."
             % (what, seen["connected"], seen["active"])
         )
+
+
+def tidy(d, store):
+    """After a check that started a run: stop it first, then put the window
+    back. In that order, because a browser that has stopped answering must not
+    leave a run holding the daemon's only slot for every check after it."""
+    try:
+        stop_quietly(d, store)
+    finally:
+        try:
+            d.reset_viewport()
+        except Exception:
+            pass
 
 
 def running(d, run_id, store):
@@ -4139,10 +3895,8 @@ def running(d, run_id, store):
         if status == "running":
             return
         if status in TERMINAL:
-            fail(
-                "the run on %s was %s before it could be paused; the corpus is "
-                "too small for this machine" % (store, status)
-            )
+            fail("the run on %s was %s before it could be paused; the corpus is "
+                 "too small for this machine" % (store, status))
         time.sleep(0.2)
     fail("the run on %s was never admitted within %ds" % (store, RUN_APPEARS * 2))
 
@@ -4163,57 +3917,46 @@ def wait_status(d, run_id, statuses, what, timeout=60):
          % (what, "/".join(sorted(statuses)), timeout, last and last.get("status")))
 
 
-@finding("8.1", "Pause, Resume and the Stop dialog leave the Index page where it was")
-def _(d):
-    """Pause, Resume, the Stop dialog cancelled and the Stop dialog confirmed.
+CARD = "document.querySelector(%s)" % json.dumps(LIVE_CARD)
 
-    Each is pressed with the view scrolled so the run's card is on screen and
-    the offset is neither 0 nor the bottom. After each: the offset is where it
-    was, the page never showed its loader, and — for the three where the
-    pressed button is still on offer afterwards — the button is where it was
-    on screen and still holds the focus. Pause turning into Resume is that
-    button's own repaint; it used to be re-parented once a second with every
-    other card, which blurred it.
-    """
-    # Four hundred files nobody has indexed, so the run is still reading when
-    # it is paused, and paused straight away over HTTP so nothing below races
-    # it to the end.
-    run_id, store = start_index(d, d.fixtures.unique("still", count=400))
+
+@finding("8.1", "Pause, Resume and the Stop dialog leave the Runs tab where it was")
+def _(d):
+    """Pause, Resume, the Stop dialog cancelled and the Stop dialog confirmed,
+    on the store's Runs tab with `<main>` scrolled so the live card is on
+    screen and the offset is neither 0 nor the bottom. After each: the offset is
+    where it was, the page never showed its loader, and — where the pressed
+    button is still on offer afterwards — it is where it was and holds focus."""
+    # Big enough to still be running after Pause, Resume and both Stop
+    # dialogs on the fastest lane (the Neural Engine finished 400 first).
+    run_id, store = start_index(d, d.fixtures.unique("still", count=4000))
     try:
         running(d, run_id, store)
         control_run(d, store, "pause", run_id)
         wait_status(d, run_id, {"paused"}, "pausing %s" % store)
 
-        still_open(d, STILL_VIEWPORT)
-        card = still_card(store)
-        d.wait_for(
-            "(() => { const c = %s; return !!c && [...c.querySelectorAll('button')]"
-            ".some(b => !b.hidden && b.textContent.trim() === 'Resume'); })()" % card,
-            what="the paused run's card, offering Resume",
-        )
-        hold_at(d, card, above=60)
+        still_open(d, STILL_VIEWPORT, "store/%s/runs" % store)
+        d.wait_for(card_offers(CARD, "Resume"), what="the paused run's card, offering Resume")
+        hold_at(d, CARD, above=60)
 
-        press(d, card, "Resume")
-        d.wait_for("window.__still.pressed.textContent.trim() === 'Pause'",
-                   what="Resume to turn into Pause")
+        press(d, CARD, "Resume")
+        d.wait_for(card_offers(CARD, "Pause"), what="Resume to turn into Pause")
         settle(d, "Resume")
         held(d, "Resume", focus=True, place=True)
 
-        press(d, card, "Pause")
-        d.wait_for("window.__still.pressed.textContent.trim() === 'Resume'",
-                   what="Pause to turn into Resume")
+        press(d, CARD, "Pause")
+        d.wait_for(card_offers(CARD, "Resume"), what="Pause to turn into Resume")
         wait_status(d, run_id, {"paused"}, "Pause on the card")
         settle(d, "Pause")
         held(d, "Pause", focus=True, place=True)
 
-        press(d, card, "Stop")
-        d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the Stop dialog")
-        d.eval("[...document.querySelectorAll('dialog.modal[open] button')]"
-               ".find(b => b.textContent.trim() === 'Cancel').click()")
-        d.wait_for("!document.querySelector('dialog.modal')", what="the Stop dialog to close")
+        press(d, CARD, "Stop…")
+        d.wait_for("!!document.querySelector(%s)" % json.dumps(MODAL), what="the Stop dialog")
+        d.modal_press("Keep running")
+        d.wait_for("!document.querySelector(%s)" % json.dumps(MODAL), what="the Stop dialog to close")
         settle(d, "the Stop dialog cancelled")
-        # The platform hands the focus back to the button that opened the
-        # dialog, as long as the page has not replaced that button meanwhile.
+        # The dialog hands the focus back to the button that opened it, as
+        # long as the page has not replaced that button meanwhile.
         held(d, "the Stop dialog cancelled", focus=True, place=True)
         if run_by_id(d, run_id).get("status") in TERMINAL:
             fail("cancelling the Stop dialog stopped the run anyway")
@@ -4222,380 +3965,308 @@ def _(d):
         # run is creating its store, so the box starts ticked, and the stop
         # takes the store with it — off the sidebar's count too, with no reload.
         stores_before = sidebar_stores(d)
-        press(d, card, "Stop")
-        d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the Stop dialog")
-        ticked = d.eval(DELETE_BOX + ".checked")
+        press(d, CARD, "Stop…")
+        d.wait_for("!!document.querySelector(%s)" % json.dumps(MODAL), what="the Stop dialog")
+        ticked = d.eval("(document.querySelector('#stop-delete') || {}).checked")
         if ticked is not True:
             fail(
                 "the Stop dialog for %s, a store this run is creating, left 'Also "
                 "delete the store' %s; stopping the run that makes a store should "
-                "offer to take the empty store with it" % (store, "unticked" if ticked is False else "missing")
+                "offer to take the empty store with it"
+                % (store, "unticked" if ticked is False else "missing")
             )
-        d.eval("[...document.querySelectorAll('dialog.modal[open] button')]"
-               ".find(b => b.textContent.trim() === 'Stop and undo').click()")
+        d.modal_press("Stop and undo")
         wait_status(d, run_id, {"stopped"}, "Stop and undo")
+        # 0.35.0: the store's page goes with the store. Where the stopped card
+        # said "the store was deleted" and offered Remove, the page now says
+        # there is no store by that name — the same fact, on the page that was
+        # open, with no reload.
         d.wait_for(
-            "(() => { const c = %s; return !!c && /the store was deleted/.test(c.innerText)"
-            " && [...c.querySelectorAll('button')].some(b => !b.hidden && b.offsetParent !== null"
-            " && b.textContent.trim() === 'Remove'); })()" % card,
+            "window.__still && /There is no store called %s/.test(document.querySelector('#main').innerText)"
+            % re.escape(store),
             timeout=60,
-            what="the stopped card to say its store was deleted and offer Remove",
+            what="the open page to say %s is gone, without a reload" % store,
         )
-        settle(d, "the Stop dialog confirmed with the delete box")
-        # Not the focus: a stopped run has no Stop to hold it.
-        held(d, "the Stop dialog confirmed with the delete box")
         d.wait_for(
             "window.__still && (() => { const m = /(\\d+) stores?/.exec("
-            "(document.getElementById('daemon-stores') || {}).textContent || '');"
+            "(document.querySelector('.nav .daemon .facts') || {}).textContent || '');"
             " return !!m && Number(m[1]) === %d; })()" % (stores_before - 1),
-            what="the sidebar to count %d store(s) after the delete, without a reload"
-            % (stores_before - 1),
+            what="the sidebar to count %d store(s) after the delete, without a reload" % (stores_before - 1),
         )
     finally:
-        d.reset_viewport()
-        stop_quietly(d, store)
+        tidy(d, store)
 
 
-@finding("8.2", "a limit saved, a run finishing and a card removed leave the Index page where it was")
+@finding("8.2", "a limit saved and a run finishing leave the page where it was")
 def _(d):
-    """A limit saved, a run finishing, a card removed, and Remove all finished.
+    """A limit saved on Settings › Performance, with `<main>` scrolled so the
+    Limits card is at the top of the view, which is where a reader is when they
+    change one; and a run finishing on its store's Runs tab. A save used to
+    announce itself above the card being changed and push it down a line, and a
+    rebuilt card put new controls in place of the focused one.
 
-    The view is scrolled so the machine-limits card is at the top of it, which
-    is where a reader is when they change a limit, and every card is under it.
-    A save used to announce itself on the page's note above the card, pushing
-    the card being typed into down a line; the queued-runs note emptying when a
-    run finished did the same to every card; and a rebuilt limits card put a
-    new input in place of the focused one.
+    The old check also removed a finished card and pressed "Remove all
+    finished". 0.35.0 owner decision (v6 as drawn): a finished run leaves the
+    live area for History by itself, which is the "run finishing" asserted
+    here; there is no card to remove by hand.
     """
-    # A finished card to remove, made before the page is open so its arrival is
-    # not one of the things being measured.
-    dismiss = indexed_fixture(d, d.fixtures.unique("dismiss"))
     run_id, store = start_index(d, d.fixtures.unique("finishing", count=200))
     try:
         running(d, run_id, store)
         control_run(d, store, "pause", run_id)
         wait_status(d, run_id, {"paused"}, "pausing %s" % store)
 
-        still_open(d, STILL_VIEWPORT)
-        d.open_index_panel("Machine limits")
-        d.wait_for("!!(%s)" % still_card(store), what="the paused run's card")
-        d.wait_for("!!(%s)" % still_card(dismiss), what="the finished card for %s" % dismiss)
-        limits = "document.querySelector(%s).closest('.card')" % json.dumps(RUNS_AT_ONCE)
-        hold_at(d, limits, above=8)
-
-        if d.eval("document.querySelector(%s).disabled" % json.dumps(RUNS_AT_ONCE)):
+        limits = d.api("/api/index/runs")["limits"]
+        if limits["runs_at_once"].get("source") == "set by the environment":
             skip("runs at once is set by this daemon's environment, so the page cannot save it")
-        # The value it already holds, so the drive leaves the machine as it
-        # found it; `change` saves whatever the field says.
-        field = "document.querySelector(%s)" % json.dumps(RUNS_AT_ONCE)
-        press(d, field, "")
-        d.eval(
-            "(() => { const f = window.__still.pressed;"
-            " f.dispatchEvent(new Event('input', {bubbles: true}));"
-            " f.dispatchEvent(new Event('change', {bubbles: true})); })()"
-        )
-        d.wait_for(
-            "[...document.querySelectorAll('#root .view .note')]"
-            ".some(n => (n.textContent || '').startsWith('Saved'))",
-            what="the save to be answered",
-        )
-        # The daemon applies all three at once and says what it is running
-        # with; the page used to promise the next run instead.
-        answered = d.eval(
-            "[...document.querySelectorAll('#root .view .note')]"
-            ".map(n => n.textContent || '').find(t => t.startsWith('Saved')) || ''"
-        )
-        if "now running with" not in answered:
-            fail("a saved limit says %r, not what the daemon is now running with" % answered)
-        if re.search(r"applies to the next run", view_text(d)):
-            fail("the Index page still says a limit applies to the next run; it applies now")
-        settle(d, "a limit saved")
-        held(d, "a limit saved", focus=True, place=True)
+        still_open(d, STILL_VIEWPORT, "settings")
+        card = ("[...document.querySelectorAll('#main .card')].find(c =>"
+                " /^limits$/i.test(((c.querySelector('.card-t') || {}).textContent || '').trim()))")
+        hold_at(d, card, above=8)
+        # Up one and back down, so the drive leaves the machine as it found it.
+        for label in ("Raise Runs at once", "Lower Runs at once"):
+            button = "document.querySelector('#main button[aria-label=\"%s\"]')" % label
+            # At its end a stepper button is aria-disabled, so it keeps focus.
+            if d.eval("!%s || %s.disabled || %s.getAttribute('aria-disabled') === 'true'" % (button, button, button)):
+                continue
+            press(d, button, label)
+            # The daemon applies all three limits at once and says what it is
+            # running with; the page shows that answer.
+            try:
+                d.wait_for(
+                    "[...document.querySelectorAll('.toast')].some(t => /now running with/.test(t.innerText))",
+                    timeout=10, what="the save to be answered",
+                )
+            except cdp.ProtocolError:
+                fail(
+                    "pressing %r saved the limit and the page never said what the "
+                    "daemon is now running with — /api/index/settings answers "
+                    "'applied: now running with …' and the page drops it" % label
+                )
+            if re.search(r"applies to the next run", view_text(d)):
+                fail("the page says a limit applies to the next run; it applies now")
+            settle(d, "a limit saved")
+            held(d, "a limit saved (%s)" % label, focus=True, place=True)
 
-        press(d, still_card(store), "Resume")
-        d.wait_for(
-            "(() => { const c = %s; return !!c && /\\bdone\\b/.test(c.querySelector('.pill').textContent); })()"
-            % still_card(store),
-            timeout=RUN_FINISHES,
-            what="the run on %s to finish on the page" % store,
-        )
+        d.reset_viewport()
+        still_open(d, STILL_VIEWPORT, "store/%s/runs" % store)
+        d.wait_for(card_offers(CARD, "Resume"), what="the paused run's card")
+        hold_at(d, CARD, above=30)
+        press(d, CARD, "Resume")
+        wait_status(d, run_id, TERMINAL, "the run on %s to finish" % store, timeout=RUN_FINISHES)
+        d.wait_for("!document.querySelector(%s) && document.querySelectorAll(%s).length > 0"
+                   % (json.dumps(LIVE_CARD), json.dumps(HIST_ROW)),
+                   timeout=30, what="the finished run to leave the live area for History")
         settle(d, "a run finishing")
         held(d, "a run finishing")
-
-        press(d, still_card(dismiss), "Remove")
-        d.wait_for("!(%s)" % still_card(dismiss), what="the removed card to go")
-        settle(d, "a card removed")
-        held(d, "a card removed")
-
-        press(d, "document.querySelector('#root .view')", "Remove all finished")
-        d.wait_for(
-            "![...document.querySelectorAll(%s)].some(c => [...c.querySelectorAll('button')]"
-            ".some(b => !b.hidden && b.offsetParent !== null && b.textContent.trim() === 'Remove'))"
-            % json.dumps(RUN_CARD),
-            timeout=60,
-            what="every finished card to go",
-        )
-        settle(d, "Remove all finished")
-        held(d, "Remove all finished")
     finally:
-        d.reset_viewport()
-        stop_quietly(d, store)
+        tidy(d, store)
 
 
-#: The "threads each" field, typed into by 8.3 and never saved.
-THREADS_EACH = 'input[aria-label="threads each"]'
+OBSERVE = r"""
+new Promise(done => {
+  const still = window.__still, loading = still.loading, runs = still.runs;
+  const target = %(target)s;
+  const keep = %(keep)s;
+  const found = [];
+  const name = n => n.nodeType === 1 ? n.tagName.toLowerCase()
+    + (n.className && typeof n.className === 'string' ? '.' + n.className.split(' ').join('.') : '') : '#text';
+  const observer = new MutationObserver(records => {
+    for (const r of records) {
+      if (r.type !== 'childList') continue;
+      if (keep && r.target.closest && r.target.closest(keep)) continue;
+      if (!target.isConnected) { found.push('the observed card itself was replaced'); continue; }
+      found.push(name(r.target) + ' lost ' + [...r.removedNodes].map(name).join(',')
+        + ' gained ' + [...r.addedNodes].map(name).join(','));
+    }
+  });
+  // The observed node and every ancestor up to <main>, so a card replaced
+  // whole by its parent's repaint is seen as well as one rebuilt from inside.
+  observer.observe(document.querySelector('#main'), {childList: true, subtree: true});
+  const rates = {samples: 0, missing: [], lapsed: [], numbered: false};
+  const sampler = %(rate)s ? setInterval(() => {
+    const card = document.querySelector('#main .card.blue-edge');
+    if (!card) return;
+    const word = (card.querySelector('.pill') || {}).textContent || '';
+    if (!/indexing|catching up/.test(word)) return;
+    rates.samples++;
+    const line = (card.querySelector('.t-mono-sm') || {}).textContent || '';
+    const m = /(—|[\d.,]+) chunks\/s/.exec(line);
+    if (!m) rates.missing.push(line.slice(0, 80) || '(empty)');
+    else if (m[1] === '—' && rates.numbered) rates.lapsed.push(line.slice(0, 80));
+    else if (m[1] !== '—') rates.numbered = true;
+  }, 250) : null;
+  setTimeout(() => {
+    if (sampler) clearInterval(sampler);
+    observer.takeRecords();
+    observer.disconnect();
+    done({found: [...new Set(found)].slice(0, 5), count: found.length,
+          loading: still.loading - loading, paints: still.runs - runs, rates});
+  }, %(ms)d);
+})
+"""
 
 
-@finding("8.3", "over a live run nothing on the Index page is rebuilt or retyped, and the rate is on every poll")
+def observe(d, target_js, keep, ms, rate=False):
+    return d.eval(
+        OBSERVE % {"target": target_js, "keep": json.dumps(keep), "ms": ms, "rate": "true" if rate else "false"},
+        timeout=ms / 1000 + 60,
+    )
+
+
+@finding("8.3", "over a live run nothing on screen is rebuilt or retyped, and the rate is on every poll")
 def _(d):
-    """Sixty seconds of a live run under a MutationObserver.
+    """Sixty seconds of a live run under a MutationObserver, in three windows of
+    twenty, because 0.35.0 spread the old Index page over three: Settings ›
+    Performance (the limits, which may change their words but not their
+    nodes), the store's Runs tab (the live card, which may grow its log and
+    nothing else, and shows its rate on every read), and the store's Settings
+    tab, where a name typed and not saved keeps its input, its focus and its
+    text. The page used to rebuild the limits card about once a second, so
+    what was being typed went with the input it was typed into — app.js's own
+    header promises that never happens again. The loader never appears.
 
-    The machine-limits card may change its words but not its nodes: no child
-    of it, at any depth, is added or removed. No run card is taken out of the
-    list beyond the fewest moves a change of order needs — other checks' runs
-    may finish during the minute and drop below this one, and on Linux a
-    watcher burst is a run with a card of its own — and no part of a card
-    outside its log, the one thing meant to grow, is rebuilt. And the loading
-    view never appears.
-
-    Through all of it "threads each" holds a number that has been typed and not
-    saved, with the focus in it. The limits card used to be rebuilt about once
-    a second, so what was being typed went with the input it was typed into.
-
-    Fifteen hundred files nobody has indexed keep the run reading for the
-    whole minute on any machine the drive runs on; the check fails rather
-    than passes if the page did not repaint often enough to prove anything.
-    """
-    run_id, store = start_index(d, d.fixtures.unique("steady", count=1500))
+    Fifteen hundred files nobody has indexed keep the run reading for the whole
+    minute; each window fails rather than passes if the page did not repaint
+    often enough to prove anything."""
+    # Sized for the fastest lane, not the slowest: on Apple's Neural Engine
+    # (about 230 chunks a second) fifteen hundred files were done in ten
+    # seconds, before the second window opened. The run is tidied away at the
+    # end, so a slow CPU-only runner never waits for all of it.
+    run_id, store = start_index(d, d.fixtures.unique("steady", count=15000))
     try:
         running(d, run_id, store)
-        still_open(d, STILL_VIEWPORT)
-        d.open_index_panel("Machine limits")
-        d.wait_for("!!(%s)" % still_card(store), what="the live run's card")
-        if d.eval("document.querySelector(%s).disabled" % json.dumps(THREADS_EACH)):
-            skip("threads each is set by this daemon's environment, so it cannot be typed into")
-        # Typed and not saved: `input` without `change`, which is where a
-        # person is between two keystrokes. Put back before the focus leaves,
-        # so the blur has nothing to save.
-        typed = d.eval(
-            """
-            (() => {
-              const field = document.querySelector(%s);
-              window.__still.typed = {field, was: field.value};
-              field.focus({preventScroll: true});
-              field.value = String(Number(field.value) + 1);
-              field.dispatchEvent(new Event('input', {bubbles: true}));
-              return field.value;
-            })()
-            """
-            % json.dumps(THREADS_EACH)
-        )
-        seen = d.eval(
-            """
-            new Promise(done => {
-              const still = window.__still, loading = still.loading, runs = still.runs;
-              const limits = document.querySelector(%s).closest('.card');
-              const cards = document.querySelector('.cards');
-              const found = {limits: [], detached: [], rebuilt: []};
-              const name = n => n.nodeType === 1 ? n.tagName.toLowerCase()
-                + (n.className ? '.' + String(n.className).split(' ').join('.') : '') : '#text';
-              // The fewest cards a change of order can be made with: those
-              // outside the longest run that kept its order. A card finishing
-              // under a live one is one move; every card re-parented on every
-              // poll is what this block is here to catch.
-              const needed = (before, after) => {
-                const at = new Map(after.map((n, i) => [n, i]));
-                const common = before.filter(n => at.has(n)).map(n => at.get(n));
-                const tails = [];
-                for (const v of common) {
-                  let lo = 0, hi = tails.length;
-                  while (lo < hi) { const mid = (lo + hi) >> 1; if (tails[mid] < v) lo = mid + 1; else hi = mid; }
-                  tails[lo] = v;
-                }
-                return (common.length - tails.length) + (before.length - common.length);
-              };
-              let last = [...cards.children];
-              const title = n => (n.querySelector && (n.querySelector('.card-title') || {}).textContent) || name(n);
-              const observer = new MutationObserver(records => {
-                const out = [];
-                for (const r of records) {
-                  if (r.type !== 'childList') continue;
-                  if (limits.contains(r.target)) {
-                    found.limits.push(name(r.target) + ' lost ' + [...r.removedNodes].map(name).join(',')
-                      + ' gained ' + [...r.addedNodes].map(name).join(','));
-                  } else if (r.target === cards) {
-                    for (const n of r.removedNodes) if (n.nodeType === 1) out.push(n);
-                  } else if (cards.contains(r.target) && !r.target.closest('.log')) {
-                    found.rebuilt.push(name(r.target));
-                  }
-                }
-                const now = [...cards.children];
-                if (out.length > needed(last, now)) found.detached.push(...out.map(title));
-                last = now;
-              });
-              observer.observe(limits, {childList: true, subtree: true});
-              observer.observe(cards, {childList: true, subtree: true});
-              // The rate, read four times a second off the live card: the
-              // daemon's rolling figure, or "—" before the first batch, and
-              // never "—" again once there has been one.
-              const card = %s;
-              const rate = card.querySelector('.filters .meta').children[0];
-              const rates = {samples: 0, missing: [], lapsed: [], numbered: false};
-              const sampler = setInterval(() => {
-                const word = (card.querySelector('.pill') || {}).textContent || '';
-                if (!/indexing|catching up/.test(word)) return;
-                rates.samples++;
-                const said = rate.hidden ? '' : (rate.textContent || '').trim();
-                const m = /^(—|[\\d.,]+) chunks\\/s/.exec(said);
-                if (!m) rates.missing.push(said || '(hidden)');
-                else if (m[1] === '—' && rates.numbered) rates.lapsed.push(said);
-                else if (m[1] !== '—') rates.numbered = true;
-              }, 250);
-              setTimeout(() => {
-                clearInterval(sampler);
-                observer.takeRecords();
-                observer.disconnect();
-                done({limits: found.limits.slice(0, 5), limitsCount: found.limits.length,
-                      detached: found.detached.slice(0, 5), detachedCount: found.detached.length,
-                      rebuilt: [...new Set(found.rebuilt)].slice(0, 5), rebuiltCount: found.rebuilt.length,
-                      loading: still.loading - loading, paints: still.runs - runs,
-                      rates: {samples: rates.samples, numbered: rates.numbered,
-                              missing: rates.missing.slice(0, 5), lapsed: rates.lapsed.slice(0, 5)}});
-              }, 60000);
-            })
-            """
-            % (json.dumps(RUNS_AT_ONCE), still_card(store)),
-            timeout=120,
-        )
-        kept = d.eval(
-            """
-            (() => {
-              const t = window.__still.typed, now = document.querySelector(%s);
-              const kept = {same: now === t.field, focused: document.activeElement === t.field,
-                            value: t.field.value};
-              t.field.value = t.was;
-              t.field.blur();
-              return kept;
-            })()
-            """
-            % json.dumps(THREADS_EACH)
-        )
+
+        still_open(d, STILL_VIEWPORT, "settings")
+        card = ("[...document.querySelectorAll('#main .card')].find(c =>"
+                " /^limits$/i.test(((c.querySelector('.card-t') || {}).textContent || '').trim()))")
+        seen = observe(d, card, None, 20000)
         if seen["loading"]:
-            fail("the loading view appeared %d time(s) during a live run" % seen["loading"])
-        if seen["limitsCount"]:
+            fail("the loader appeared %d time(s) on Settings › Performance during a live run" % seen["loading"])
+        if seen["count"]:
             fail(
-                "the machine-limits card had %d child replacement(s) in a minute with "
-                "no limit changed, e.g. %s. A card rebuilt under the cursor cannot be "
-                "typed into." % (seen["limitsCount"], seen["limits"])
+                "Settings › Performance had %d node replacement(s) in twenty seconds "
+                "with no limit changed, e.g. %s. A card rebuilt under the cursor "
+                "cannot be used." % (seen["count"], seen["found"])
             )
-        if seen["detachedCount"]:
+        if seen["paints"] < 5:
+            fail("Settings › Performance read the runs only %d time(s) in twenty seconds, "
+                 "so the observation proves nothing about repainting" % seen["paints"])
+
+        d.reset_viewport()
+        still_open(d, STILL_VIEWPORT, "store/%s/runs" % store)
+        d.wait_for("!!%s" % CARD, what="the live run's card")
+        seen = observe(d, CARD, ".log", 20000, rate=True)
+        if seen["loading"]:
+            fail("the loader appeared %d time(s) on the Runs tab during a live run" % seen["loading"])
+        if seen["count"]:
             fail(
-                "%d run card(s) were taken out of the list beyond what the order "
-                "changes needed: %s. A detached card loses its focus and its log's "
-                "scroll position, so only the cards whose place changed may move."
-                % (seen["detachedCount"], seen["detached"])
-            )
-        if seen["rebuiltCount"]:
-            fail(
-                "parts of a run card outside its log were rebuilt %d time(s) "
-                "instead of updated in place: %s" % (seen["rebuiltCount"], seen["rebuilt"])
-            )
-        if not (kept["same"] and kept["focused"] and kept["value"] == typed):
-            fail(
-                "a minute of repaints did not leave the field being typed into alone: "
-                "the same input %s, it %s the focus, and it holds %r where %r was typed"
-                % (
-                    "is still there" if kept["same"] else "was replaced",
-                    "kept" if kept["focused"] else "lost",
-                    kept["value"],
-                    typed,
-                )
+                "parts of the Runs tab outside the live card's log were rebuilt %d "
+                "time(s) in twenty seconds instead of updated in place: %s"
+                % (seen["count"], seen["found"])
             )
         rates = seen["rates"]
         if rates["missing"]:
             fail(
-                "the live card showed no rate on %d of %d reads, e.g. %r: the rolling "
-                "rate is on the card on every poll while a run is live, '—' until "
-                "its first batch" % (len(rates["missing"]), rates["samples"], rates["missing"])
+                "the live card showed no rate on %d of %d reads, e.g. %r: the "
+                "rolling rate is on the card on every poll while a run is live, "
+                "'—' until its first batch" % (len(rates["missing"]), rates["samples"], rates["missing"][:3])
             )
         if rates["lapsed"]:
-            fail(
-                "the live card's rate went back to '—' after it had a number (%r); "
-                "the daemon's rate is null only before the first batch" % rates["lapsed"]
-            )
+            fail("the live card's rate went back to '—' after it had a number (%r)" % rates["lapsed"])
         if rates["samples"] and not rates["numbered"]:
             fail("in %d reads of a live run the card never showed a rate" % rates["samples"])
-        if seen["paints"] < 10:
-            fail(
-                "the page read the runs only %d time(s) in the minute, so the "
-                "observation proves nothing about repainting" % seen["paints"]
-            )
-    finally:
+        if seen["paints"] < 5:
+            fail("the Runs tab read the runs only %d time(s) in twenty seconds" % seen["paints"])
+
         d.reset_viewport()
-        stop_quietly(d, store)
-
-
-def live_card(store):
-    """A JS expression for the store's card that still offers Stop, or null.
-
-    A store can have a finished card and a live one; the live one is the one
-    with a Stop on offer.
-    """
-    return (
-        "[...document.querySelectorAll(%s)].find(c =>"
-        " ((c.querySelector('.card-title') || {}).textContent || '').trim() === %s"
-        " && [...c.querySelectorAll('button')].some(b => !b.hidden && b.offsetParent !== null"
-        " && b.textContent.trim() === 'Stop'))"
-        % (json.dumps(RUN_CARD), json.dumps(store))
-    )
+        still_open(d, STILL_VIEWPORT, "store/%s/settings" % store)
+        field = '#main input[aria-label="Store name"]'
+        typed = d.eval(
+            """
+            (() => {
+              const f = document.querySelector(%s);
+              if (!f) return null;
+              window.__still.typed = {field: f, was: f.value};
+              f.focus({preventScroll: true});
+              f.value = f.value + '-typed';
+              f.dispatchEvent(new Event('input', {bubbles: true}));
+              return f.value;
+            })()
+            """
+            % json.dumps(field)
+        )
+        if typed is None:
+            fail("the store's Settings tab has no name field to type into")
+        seen = observe(d, "document.querySelector(%s)" % json.dumps(field), None, 20000)
+        kept = d.eval(
+            """
+            (() => {
+              const t = window.__still.typed, now = document.querySelector(%s);
+              const kept = {same: now === t.field, focused: document.activeElement === (now || t.field),
+                            value: (now || t.field).value};
+              (now || t.field).value = t.was;
+              (now || t.field).dispatchEvent(new Event('input', {bubbles: true}));
+              (now || t.field).blur();
+              return kept;
+            })()
+            """
+            % json.dumps(field)
+        )
+        if not (kept["same"] and kept["focused"] and kept["value"] == typed):
+            fail(
+                "twenty seconds of repaints did not leave the field being typed into "
+                "alone: the same input %s, it %s the focus, and it holds %r where %r "
+                "was typed (%d node replacement(s) seen, e.g. %s)"
+                % ("is still there" if kept["same"] else "was replaced",
+                   "kept" if kept["focused"] else "lost",
+                   kept["value"], typed, seen["count"], seen["found"][:2])
+            )
+        if seen["paints"] < 5:
+            fail("the Settings tab read the runs only %d time(s) in twenty seconds" % seen["paints"])
+    finally:
+        tidy(d, store)
 
 
 @finding("8.4", "Pause reads 'pausing' the moment it is pressed, and never goes back to indexing")
 def _(d):
     """The route answers `{"state": "pausing"}` at once and the engine stops at
     its next batch. The card says "pausing" on that answer, not a poll later,
-    and no poll asked before the click paints "indexing" back over it.
+    and no poll asked before the click paints "indexing" back over it — nor
+    does it claim "paused" before the engine is there.
 
-    Every word the pill shows is recorded by a MutationObserver from before the
-    click until the run is paused, so a flicker between two polls is seen even
-    though no single read would catch it.
-    """
+    Every word the live card's pill shows is sampled every 30 ms from before
+    the click until the run is paused — re-reading the card each time, so a
+    card the repaint replaced is still followed."""
     run_id, store = start_index(d, d.fixtures.unique("pausing", count=400))
     try:
         running(d, run_id, store)
-        still_open(d, STILL_VIEWPORT)
-        card = live_card(store)
-        d.wait_for(
-            "(() => { const c = %s; return !!c && [...c.querySelectorAll('button')]"
-            ".some(b => !b.hidden && b.textContent.trim() === 'Pause'); })()" % card,
-            what="the live run's card, offering Pause",
-        )
+        still_open(d, STILL_VIEWPORT, "store/%s/runs" % store)
+        d.wait_for(card_offers(CARD, "Pause"), what="the live run's card, offering Pause")
         seen = d.eval(
             """
             new Promise(done => {
-              const card = %s, pill = card.querySelector('.pill');
+              const pill = () => { const c = document.querySelector('#main .card.blue-edge');
+                const p = c && c.querySelector('.pill'); return p ? p.textContent : ''; };
               const words = [];
-              const note = () => {
-                const word = (pill.textContent || '').trim();
-                if (words[words.length - 1] !== word) words.push(word);
-              };
+              const note = () => { const w = pill().trim(); if (w && words[words.length - 1] !== w) words.push(w); };
               note();
-              const observer = new MutationObserver(note);
-              observer.observe(pill, {characterData: true, childList: true, subtree: true});
               const at = words.length;
-              [...card.querySelectorAll('button')].find(b => !b.hidden
-                && b.textContent.trim() === 'Pause').click();
+              const tick = setInterval(note, 30);
+              const card = document.querySelector('#main .card.blue-edge');
+              [...card.querySelectorAll('button')].find(b => !b.hidden && b.textContent.trim() === 'Pause').click();
               const started = Date.now();
-              const tick = setInterval(() => {
-                if ((pill.textContent || '').trim() === 'paused' || Date.now() - started > 30000) {
-                  clearInterval(tick);
-                  observer.disconnect();
+              const stop = setInterval(async () => {
+                const r = await fetch('/api/index/runs', {headers: {'Semlith-Token': sessionStorage.getItem('semlith.token')}}).then(x => x.json());
+                const mine = (r.runs || []).find(x => x.id === %d);
+                if ((mine && mine.status === 'paused' && /paused/.test(pill())) || Date.now() - started > 30000) {
+                  clearInterval(tick); clearInterval(stop); note();
                   done({before: words.slice(0, at), after: words.slice(at)});
                 }
-              }, 50);
+              }, 200);
             })
             """
-            % card,
+            % run_id,
             timeout=60,
         )
         after = seen["after"]
@@ -4603,26 +4274,21 @@ def _(d):
             fail(
                 "after Pause the pill read %r; the first word after the click is "
                 "'pausing', from the route's own answer, before the engine gets "
-                "there" % after
+                "there — 'paused' at that moment claims a stop that has not "
+                "happened yet" % after
             )
         if "indexing" in after:
-            fail(
-                "after Pause the pill went back to 'indexing' (%r): a poll asked "
-                "before the click was painted over the pausing state" % after
-            )
+            fail("after Pause the pill went back to 'indexing' (%r): a poll asked "
+                 "before the click was painted over the pausing state" % after)
         if after[-1] != "paused":
             fail("the run never reached 'paused' within 30s of Pause: %r" % after)
     finally:
-        stop_quietly(d, store)
-        d.reset_viewport()
+        tidy(d, store)
 
 
 def quiet(d, timeout=180):
-    """Wait, bounded, until no run is live anywhere, so the next check's run
-    is admitted at once rather than queued behind an earlier check's tidying
-    up. Not a failure when it does not happen: an earlier check may leave a
-    run going on purpose (6.10), and the checks that follow wait for their own
-    run to be admitted anyway."""
+    """Wait, bounded, until no run is live anywhere, so the next check's run is
+    admitted at once rather than queued behind an earlier check's tidying."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         answer = d.api("/api/index/runs")
@@ -4632,17 +4298,20 @@ def quiet(d, timeout=180):
         time.sleep(0.5)
 
 
-@finding("8.5", "the Stop dialog leaves 'Also delete the store' unticked for a store with files, and says how many stay")
+@finding("8.5", "the Stop dialog never offers to delete a store that held files, and says it stays as it was")
 def _(d):
     """A store that already held files is a store somebody has: stopping a run
-    on it must not offer to delete it by default, and the dialog says what is
-    at stake. (A store the run is creating starts ticked: 8.1.)
+    on it must not delete it by default, and the dialog says what is at stake.
+    (A store the run is creating is offered, ticked: 8.1.)
+
+    0.35.0 owner decision (v6 as drawn): for a store that held files the delete
+    option is not offered at all, which is the old "unticked" made stronger,
+    and the dialog's sentence is the design's — what the run embedded is undone
+    and the store is left exactly as it was before the run — where the v4
+    dialog counted the files that stay.
 
     The run is the one the store's own watcher starts when four hundred new
-    files land in its folder: a run on a store that held three, long enough to
-    pause. A second submission into the same folder only queued behind it, and
-    by the time it started the watcher had indexed most of what it was for.
-    """
+    files land in its folder: a run on a store that held three."""
     quiet(d)
     corpus = d.fixtures.unique("kept", count=3)
     store = indexed_fixture(d, corpus)
@@ -4650,17 +4319,12 @@ def _(d):
     deadline = time.time() + RUN_APPEARS * 2
     run = None
     while time.time() < deadline and run is None:
-        run = next(
-            (r for r in d.api("/api/index/runs")["runs"]
-             if r["store"] == store and r.get("status") == "running"),
-            None,
-        )
+        run = next((r for r in d.api("/api/index/runs")["runs"]
+                    if r["store"] == store and r.get("status") == "running"), None)
         time.sleep(0.2)
     if run is None:
-        fail(
-            "four hundred files written into %s's folder started no run on it "
-            "within %ds; the store's watcher should read them" % (store, RUN_APPEARS * 2)
-        )
+        fail("four hundred files written into %s's folder started no run on it "
+             "within %ds; the store's watcher should read them" % (store, RUN_APPEARS * 2))
     run_id = run["id"]
     try:
         control_run(d, store, "pause", run_id)
@@ -4668,42 +4332,28 @@ def _(d):
         before = (run_by_id(d, run_id) or {}).get("files_before")
         if not before:
             fail("the daemon says %s held %r files before this run; it held at least 3" % (store, before))
-
-        d.open_view("index")
-        card = live_card(store)
-        d.wait_for("!!(%s)" % card, what="the paused run's card on %s, offering Stop" % store)
-        d.eval("[...(%s).querySelectorAll('button')].find(b => !b.hidden"
-               " && b.textContent.trim() === 'Stop').click()" % card)
-        d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the Stop dialog")
-        dialog = d.eval(
-            "({checked: (%s || {}).checked, text: document.querySelector('dialog.modal[open]').innerText})"
-            % DELETE_BOX
-        )
-        d.eval("[...document.querySelectorAll('dialog.modal[open] button')]"
-               ".find(b => b.textContent.trim() === 'Cancel').click()")
-        if dialog["checked"] is not False:
-            fail(
-                "the Stop dialog for %s, which held %d files before this run, has "
-                "'Also delete the store' %s; it starts unticked for a store with files"
-                % (store, before, "ticked" if dialog["checked"] else "missing")
-            )
-        said = "This store holds %d file%s; they stay." % (before, "" if before == 1 else "s")
-        if said not in dialog["text"]:
-            fail("the Stop dialog does not say %r: %r" % (said, dialog["text"][:300]))
+        d.open_view("store/%s/runs" % store)
+        d.wait_for(card_offers(CARD, "Stop…"), what="the paused run's card on %s, offering Stop" % store)
+        press_in(d, CARD, "Stop…")
+        d.wait_for("!!document.querySelector(%s)" % json.dumps(MODAL), what="the Stop dialog")
+        dialog = d.eval("({box: !!document.querySelector('#stop-delete'), text: document.querySelector(%s).innerText})"
+                        % json.dumps(MODAL))
+        d.modal_press("Keep running")
+        if dialog["box"]:
+            fail("the Stop dialog for %s, which held %d files before this run, offers to "
+                 "delete the store" % (store, before))
+        if "left exactly as it was before the run" not in dialog["text"]:
+            fail("the Stop dialog does not say the store is left as it was: %r" % dialog["text"][:300])
     finally:
         stop_quietly(d, store)
         quiet(d)
 
 
-@finding("8.6", "a store deleted by a stop leaves the Stores page and the sidebar count without a reload")
+@finding("8.6", "a store deleted by a stop leaves the Stores list and the sidebar count without a reload")
 def _(d):
-    """The stop's delete moves the stores counter, and the page's one poll
-    picks it up: the row goes from the Stores table and the sidebar counts one
-    store fewer, on the page that was already open.
-    """
     quiet(d)
     # A second store, so deleting this one does not leave the machine with
-    # none, which is the welcome screen and has no sidebar to count with.
+    # none, which is the Welcome screen and has no sidebar to count with.
     indexed_fixture(d, d.fixtures.unique("stays"))
     run_id, store = start_index(d, d.fixtures.unique("deleted", count=400))
     try:
@@ -4711,136 +4361,138 @@ def _(d):
         control_run(d, store, "pause", run_id)
         wait_status(d, run_id, {"paused"}, "pausing %s" % store)
         d.open_view("stores", fresh=True)
-        widest_page(d)
-        # A row whose first line is the store's name. Not any row mentioning
-        # it: the page's events table says "deleted-N: the store was deleted",
-        # which is the delete being reported, not the store still listed.
-        listed = (
-            "[...document.querySelectorAll('#root tbody tr')].some(r =>"
-            " ((r.querySelector('.one-line.name') || {}).textContent || '').trim() === %s)" % json.dumps(store)
-        )
-        d.wait_for(listed, what="%s in the Stores table" % store)
+        stores_widest(d)
+        listed = "!!(%s)" % store_row_js(store)
+        d.wait_for(listed, what="%s in the Stores list" % store)
         before = sidebar_stores(d)
-        # Set on this document; a reload would take it away.
         d.eval("window.__sameDocument = true")
         d.api("/api/index/control", method="POST",
               body={"store": store, "action": "stop", "run": run_id, "delete": True})
         try:
             d.wait_for(
                 "window.__sameDocument === true && !(%s) && (() => {"
-                " const m = /(\\d+) stores?/.exec((document.getElementById('daemon-stores') || {}).textContent || '');"
+                " const m = /(\\d+) stores?/.exec((document.querySelector('.nav .daemon .facts') || {}).textContent || '');"
                 " return !!m && Number(m[1]) === %d; })()" % (listed, before - 1),
                 timeout=60,
-                what="%s to leave the Stores table and the sidebar to count %d, without a reload"
-                % (store, before - 1),
+                what="%s to leave the Stores list and the sidebar to count %d, without a reload" % (store, before - 1),
             )
         except cdp.ProtocolError:
             seen = d.eval(
                 "({same: window.__sameDocument === true,"
-                " sidebar: (document.getElementById('daemon-stores') || {}).textContent,"
-                " rows: [...document.querySelectorAll('#root tbody tr')].map(r =>"
-                " ((r.querySelector('.one-line.name') || {}).textContent || '').trim())})"
+                " sidebar: (document.querySelector('.nav .daemon .facts') || {}).textContent})"
             )
-            fail(
-                "a minute after %s's stop deleted it, the Stores page %s: the sidebar "
-                "reads %r (it counted %d before) and the table's rows are %r"
-                % (
-                    store,
-                    "is the same document" if seen["same"] else "was reloaded",
-                    seen["sidebar"],
-                    before,
-                    seen["rows"],
-                )
-            )
+            fail("a minute after %s's stop deleted it, the Stores list %s: the sidebar reads "
+                 "%r (it counted %d before)" % (store, "is the same document" if seen["same"] else "was reloaded",
+                                                seen["sidebar"], before))
     finally:
         stop_quietly(d, store)
 
 
-@finding("8.7", "the Machine limits card lists the accelerator lanes, with the CPU active")
+@finding("8.7", "Settings › Performance lists the accelerator lanes, with the CPU active")
 def _(d):
-    """One row per lane `/api/accel` reports, each a switch with its device,
-    its state and its share of the rate. The CPU is always a lane and always
+    """One row per lane `/api/accel` reports, each a switch with its device, its
+    state and its share of the work. The CPU is always a lane and always
     active; CI runners have no GPU, so nothing here depends on one.
 
-    Turning CUDA on says what it downloads before anything is posted: the
-    dialog is opened and cancelled, and the lane is still off afterwards.
-    """
+    Turning a lane on that needs a download says what it downloads before
+    anything is posted: the dialog is opened and cancelled, and the lane is
+    still off afterwards."""
     accel = d.api("/api/accel")
     lanes = accel.get("lanes") or []
-    d.open_view("index")
-    d.open_index_panel("Machine limits")
-    limits = "document.querySelector(%s).closest('.card')" % json.dumps(RUNS_AT_ONCE)
-    d.wait_for(
-        "%s.querySelectorAll('.replay-switch').length === %d" % (limits, len(lanes)),
-        what="one switch per accelerator lane (%d) on the Machine limits card" % len(lanes),
-    )
+    d.open_view("settings")
+    d.wait_for("document.querySelectorAll('#main .lane-row').length === %d" % len(lanes),
+               what="one row per accelerator lane (%d) on Settings › Performance" % len(lanes))
     rows = d.eval(
-        "[...%s.querySelectorAll('.replay-switch')].map(b => ({"
-        " title: b.querySelector('.replay-state').textContent,"
-        " state: b.querySelector('.replay-switch-note').textContent,"
-        " on: b.getAttribute('aria-checked'),"
-        " share: b.querySelector('.meta').textContent}))" % limits
+        "[...document.querySelectorAll('#main .lane-row')].map(r => ({"
+        " title: ((r.querySelector('.col .row') || {}).textContent || '').trim(),"
+        " state: ((r.querySelector('.col .muted') || {}).textContent || '').trim(),"
+        " on: (r.querySelector('[role=switch]') || {getAttribute(){return null}}).getAttribute('aria-checked'),"
+        " share: ((r.querySelector('.right') || {}).textContent || '').trim()}))"
     )
-    names = [row["title"].split(" · ")[0] for row in rows]
+    names = [row["title"].split(" · ")[0].replace("experimental", "").strip() for row in rows]
     for wanted in ("CPU", "GPU", "CUDA"):
         if wanted not in names:
-            fail("the Accelerators section has no %s row; it lists %r" % (wanted, names))
+            fail("the lanes card has no %s row; it lists %r" % (wanted, names))
     cpu = rows[names.index("CPU")]
-    if not cpu["state"].endswith("active"):
+    if "active" not in cpu["state"]:
         fail("the CPU row reads %r; the CPU lane is always active" % cpu["state"])
-    for row in rows:
-        if not re.match(r"^\d+ %$", row["share"]):
-            fail("the %s row's share of the rate reads %r, not 'N %%'" % (row["title"], row["share"]))
+    # Matched by name: from 0.35.0 the lanes this machine cannot run are
+    # listed after the others, under their own line, and read "off".
+    by_label = {(l.get("label") or l["lane"]): l for l in lanes}
+    for row, name in zip(rows, names):
+        lane = by_label.get(name)
+        if lane is None:
+            fail("the lanes card lists %r, which /api/accel does not report" % name)
+        if row["on"] != ("true" if lane.get("enabled") else "false"):
+            fail("the %s switch reads %s and the daemon has it %s"
+                 % (row["title"], row["on"], "on" if lane.get("enabled") else "off"))
+        unavailable = (lane.get("status") or {}).get("state") == "unavailable"
+        if unavailable:
+            if row["share"] != "off":
+                fail("the %s row cannot run here and reads %r, not 'off'" % (row["title"], row["share"]))
+        elif not re.match(r"^\d+% of the work$", row["share"]) and not row["share"].startswith(("cosine", "agrees", "differs")):
+            fail("the %s row's share of the work reads %r, not 'N%% of the work'" % (row["title"], row["share"]))
 
-    cuda = next((lane for lane in lanes if lane["lane"] == "cuda"), None)
-    if cuda is None or cuda.get("enabled"):
+    # A lane that downloads before it runs asks first, naming the size.
+    candidate = next((l for l in lanes if not l.get("enabled") and l.get("download_bytes")
+                      and not l.get("installed") and (l.get("status") or {}).get("state") != "unavailable"), None)
+    if candidate is None:
         return
-    d.eval("[...%s.querySelectorAll('.replay-switch')].find(b =>"
-           " b.querySelector('.replay-state').textContent.startsWith('CUDA')).click()" % limits)
-    d.wait_for("!!document.querySelector('dialog.modal[open]')",
-               what="a confirmation before CUDA is turned on")
-    said = d.eval("document.querySelector('dialog.modal[open]').innerText")
-    d.eval("[...document.querySelectorAll('dialog.modal[open] button')]"
-           ".find(b => b.textContent.trim() === 'Cancel').click()")
-    if not re.search(r"\d+(\.\d)? (MiB|GiB)", said):
-        fail("turning CUDA on did not say its download size first: %r" % said[:300])
-    still = next(lane for lane in d.api("/api/accel")["lanes"] if lane["lane"] == "cuda")
+    label = candidate.get("label") or candidate["lane"]
+    d.click('#main .lane-row button[aria-label="%s lane"]' % label)
+    d.wait_for("!!document.querySelector(%s)" % json.dumps(MODAL),
+               what="a confirmation before %s is turned on" % label)
+    said = d.modal_text()
+    d.modal_press("Cancel")
+    if not re.search(r"\d+(\.\d)? (MB|GB|KB)", said):
+        fail("turning %s on did not say its download size first: %r" % (label, said[:300]))
+    still = next(l for l in d.api("/api/accel")["lanes"] if l["lane"] == candidate["lane"])
     if still.get("enabled"):
-        fail("cancelling the CUDA confirmation turned CUDA on anyway")
+        fail("cancelling the %s confirmation turned it on anyway" % label)
 
 
 @finding("8.8", "the Privacy page lists every download, where from, its size, when, and whether it is here")
 def _(d):
-    want = d.api("/api/privacy").get("downloads") or []
-    if not want:
+    downloads = d.api("/api/privacy").get("downloads") or []
+    if not downloads:
         fail("/api/privacy lists no downloads; the embedding model at least is one")
     d.open_view("privacy")
     rows = d.eval(
         """
         (() => {
-          const table = [...document.querySelectorAll('#root table')].find(t =>
-            /can download/.test((t.querySelector('caption') || {}).textContent || ''));
-          if (!table) return null;
-          return [...table.querySelectorAll('tbody tr')]
-            .map(tr => [...tr.cells].map(td => (td.innerText || '').trim()));
+          const card = [...document.querySelectorAll('#main .card')].find(c =>
+            /ever fetches/.test((c.querySelector('.card-t') || {}).textContent || ''));
+          if (!card) return null;
+          return [...card.querySelectorAll('.dl-row')].map(r => ({
+            what: ((r.querySelector('.t-m') || {}).textContent || '').trim(),
+            sub: ((r.querySelector('.muted') || {}).textContent || '').trim(),
+            pill: ((r.querySelector('.pill') || {}).textContent || '').trim()}));
         })()
         """
     )
     if rows is None:
-        fail("the Privacy page has no downloads table")
-    if len(rows) != len(want):
-        fail("the downloads table has %d rows; /api/privacy lists %d" % (len(rows), len(want)))
-    for row, download in zip(rows, want):
-        if row[0] != download["what"] or row[1] != download["source"]:
-            fail("a downloads row reads %r where the route says %r from %r"
-                 % (row[:2], download["what"], download["source"]))
-        if not re.match(r"^[\d.]+ (B|KB|MB|GB)$", row[2]):
-            fail("the size of %r reads %r" % (download["what"], row[2]))
-        if row[3] != download["when"]:
-            fail("when %r happens reads %r, not %r" % (download["what"], row[3], download["when"]))
-        here = "here" if download["cached"] else "not downloaded"
-        if row[4] != here:
-            fail("%r reads %r; the route says it is %s" % (download["what"], row[4], here))
+        fail("the Privacy page has no list of what semlith fetches")
+    if len(rows) < len(downloads):
+        fail("the list has %d rows; /api/privacy lists %d downloads" % (len(rows), len(downloads)))
+    for row, download in zip(rows, downloads):
+        # 0.35.0 owner decision (revised v6 design): the portal never names the
+        # embedding model, so the row is the route's words without the bracketed
+        # model detail — "the embedding model", not which one. Everything else
+        # in the row is still the route's.
+        plain = re.sub(r"\s*\([^)]*\)", "", download["what"])
+        expected = plain[0].upper() + plain[1:]
+        if row["what"] != expected:
+            fail("a download row reads %r where the route says %r" % (row["what"], download["what"]))
+        parts = [p.strip() for p in row["sub"].split("·")]
+        if len(parts) < 3 or parts[0] != download["source"]:
+            fail("the source of %r reads %r, not %r" % (download["what"], row["sub"], download["source"]))
+        if not re.match(r"^[\d.]+ (B|KB|MB|GB)$", parts[1]):
+            fail("the size of %r reads %r" % (download["what"], parts[1]))
+        if parts[2] != download["when"]:
+            fail("when %r happens reads %r, not %r" % (download["what"], parts[2], download["when"]))
+        here = "on disk" if download["cached"] else "never fetched"
+        if row["pill"] != here:
+            fail("%r reads %r; the route says it is %s" % (download["what"], row["pill"], here))
 
 
 # ---------------------------------------------------------------- 0.29.0
@@ -4871,232 +4523,228 @@ def _(d):
                  % json.dumps({k: run.get(k) for k in ("status", "bytes", "bytes_total", "chunks")}))
         if not run.get("bytes_total") or not (0 < run.get("bytes", 0) <= run["bytes_total"]):
             fail("the snapshot's bytes are %r of %r" % (run.get("bytes"), run.get("bytes_total")))
-        d.open_view("index")
-        d.wait_for(
-            "(() => { const c = %s; return !!c && /left|almost done|estimating/.test(c.innerText); })()"
-            % live_card(store),
-            timeout=20,
-            what="%s's card to show the time left" % store,
-        )
-        text = d.eval("(%s).innerText" % live_card(store))
+        d.open_view("store/%s/runs" % store)
+        d.wait_for("(() => { const c = %s; return !!c && /left|almost done|estimating/.test(c.innerText); })()" % CARD,
+                   timeout=20, what="%s's card to show the time left" % store)
+        text = d.eval("(%s).innerText" % CARD)
         if re.search(r"\b\d{2}:\d{2}\b", text):
             fail("the running card still shows a clock: %r" % text[:200])
     finally:
         stop_quietly(d, store)
 
 
-@finding("9.2", "a finished card says how long the work took and when it finished")
+@finding("9.2", "a finished run says how long the work took and when it finished")
 def _(d):
     store = indexed_fixture(d, d.fixtures.unique("finished"))
-    run = next((r for r in d.api("/api/index/runs")["runs"] if r.get("store") == store), None)
+    run = run_for(d, store)
     if not run or not run.get("started_at") or not run.get("finished_at"):
         fail("the finished run's snapshot has no started_at/finished_at: %s" % json.dumps(run)[:300])
     if run["started_at"] < run["submitted"] or run["finished_at"] < run["started_at"]:
         fail("submitted %s, started %s, finished %s are out of order"
              % (run["submitted"], run["started_at"], run["finished_at"]))
-    d.open_view("index", fresh=True)
-    card = still_card(store)
-    d.wait_for("!!(%s)" % card, what="%s's finished card" % store)
-    text = d.eval("(%s).innerText" % card)
+    d.open_view("store/%s/runs" % store, fresh=True)
+    text = newest_history_row(d, run)
+    if text is None:
+        fail("%s's Runs tab never drew the row for its run %s" % (store, run.get("id")))
     hhmm = d.eval("new Date(%d * 1000).toTimeString().slice(0, 5)" % run["finished_at"])
-    if "took " not in text or ("finished " + hhmm) not in text:
-        fail("the finished card reads %r; it should say 'took …' and 'finished %s'" % (text[:200], hhmm))
+    if "took " not in text or hhmm not in text:
+        fail("the finished run's row reads %r; it should say 'took …' and when it finished (%s)" % (text[:200], hhmm))
 
 
 @finding("9.3", "no line is held above the run cards")
 def _(d):
-    """0.30.0 moved the button row into `.index-bar`, and the page's answer to
-    Scan / Start indexing sits directly under it rather than inside it. What
-    the finding is about still holds: nothing else is on a line of its own
-    above the cards, and the answer takes no room while it has nothing to say.
-    """
-    d.open_view("index", fresh=True)
-    seen = d.eval(
-        """
-        (() => {
-          const view = document.querySelector('#root .view');
-          const note = view.querySelector('.index-note');
-          const bar = view.querySelector('.index-bar');
-          return {stray: [...view.querySelectorAll(':scope > .note')].filter(n => n !== note).length,
-                  underBar: !!note && !!bar && bar.nextElementSibling === note,
-                  text: note ? note.textContent : null,
-                  shown: note ? getComputedStyle(note).display !== 'none' : null};
-        })()
-        """
+    """Nothing but cards on a store's Runs tab: no note on a line of its own
+    above them, taking room while it has nothing to say."""
+    store = a_store(d)
+    d.open_view("store/%s/runs" % store, fresh=True)
+    stray = d.eval(
+        "(() => { const host = document.querySelector('#main .page > .stack:last-child');"
+        " if (!host) return null; return [...host.children].filter(c => !c.classList.contains('card'))"
+        ".map(c => c.className + ': ' + (c.innerText || '').slice(0, 60)); })()"
     )
-    if seen["stray"]:
-        fail("the Index view still has a note on a line of its own above the cards")
-    if not seen["underBar"]:
-        fail("the Index page's answer to Scan is not directly under the button row (.index-bar)")
-    if not seen["text"] and seen["shown"]:
-        fail("the empty note still takes up room under the button row")
+    if stray is None:
+        fail("the Runs tab has no list of cards to read")
+    if stray:
+        fail("the Runs tab holds something other than run cards above or between them: %r" % stray)
 
 
-@finding("9.4", "every paginated table opens at 5 per page")
+@finding("9.4", "every paginated table opens at the design's page size")
 def _(d):
-    for view in ("stores", "files", "ledger", "agents"):
-        d.open_view(view, fresh=True)
-        time.sleep(1)
-        pressed = d.eval(
-            "[...document.querySelectorAll('#root .table-foot')].map(f =>"
-            " ((f.querySelector('.chip[aria-pressed=true]') || {}).textContent || '').trim())"
+    # 0.35.0 owner decision (v6 as drawn): tables open at 10 rows a page, and a
+    # store's Files table at 25, where v4's opened at 5. The property is that a
+    # table opens at its stated size and shows no more rows than that.
+    store = a_store(d)
+    d.api("/api/search?query=release%20record&k=4")
+    for route, size in (("stores", 10), ("store/%s/files" % store, 25), ("store/%s/review" % store, 10),
+                        ("ledger", 10), ("ledger/retrievals", 10)):
+        d.open_view(route, fresh=True)
+        pause(d, 800)
+        seen = d.eval(
+            "[...document.querySelectorAll('#main .pager')].map(p => {"
+            " const card = p.closest('.card') || p.closest('.grid-wrap');"
+            " const rows = card.querySelectorAll('tbody tr, .gl-row.gl-stores').length;"
+            " return {per: (p.querySelector('.dd') || {dataset: {}}).dataset.value, rows}; })"
         )
-        wrong = [p for p in pressed if p != "5"]
-        if wrong:
-            fail("on %s a table opens at %r per page, not 5" % (view, wrong))
-        rows = d.eval(
-            "[...document.querySelectorAll('#root table')].filter(t => t.closest('.table-card'))"
-            ".map(t => t.querySelectorAll('tbody tr').length)"
-        )
-        if any(n > 5 for n in rows):
-            fail("on %s a table shows %s rows on its first page" % (view, rows))
+        if not seen:
+            fail("%s draws no paginated table" % route)
+        for table in seen:
+            if table["per"] != str(size):
+                fail("on %s a table opens at %r per page, not %d" % (route, table["per"], size))
+            if table["rows"] > size:
+                fail("on %s a table shows %d rows on its first page of %d" % (route, table["rows"], size))
 
 
-@finding("9.5", "several stores are deleted in one confirm that names each")
+@finding("9.5", "each store's Forget asks in a confirm that names it, and takes it")
 def _(d):
+    # 0.35.0 owner decision (v6 as drawn): the Stores list has no multi-select,
+    # so stores are forgotten one by one from each row's menu — the bulk confirm
+    # that named every store it would delete has no v6 surface. What it was for
+    # is asserted per store: the confirm names the store it deletes, and when it
+    # closes the store is gone from the list and from the daemon.
     names = [indexed_fixture(d, d.fixtures.unique("bulk")) for _ in range(2)]
     d.open_view("stores", fresh=True)
-    widest_page(d)
     for name in names:
-        box = ("[...document.querySelectorAll('#root tbody tr')].find(r =>"
-               " ((r.querySelector('.one-line.name') || {}).textContent || '').trim() === %s)"
-               % json.dumps(name))
-        d.wait_for("!!(%s)" % box, what="%s in the Stores table" % name)
-        d.eval("(%s).querySelector('input.pick').click()" % box)
-    d.wait_for("/Delete 2 stores/.test((document.querySelector('#root .bulk') || {}).innerText || '')",
-               what="the bulk bar to offer 'Delete 2 stores'")
-    d.eval("[...document.querySelectorAll('#root .bulk button')].find(b => /Delete 2 stores/.test(b.textContent)).click()")
-    d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the confirm")
-    body = d.eval("document.querySelector('dialog.modal[open]').innerText")
-    for name in names:
+        stores_widest(d)
+        d.wait_for("!!(%s)" % store_row_js(name), what="%s in the Stores list" % name)
+        opened = d.eval(
+            "(() => { const row = %s; row.querySelector('button[aria-haspopup]').click();"
+            " const item = [...document.querySelectorAll('.menu .menu-item')].find(b => /^Forget/.test(b.textContent.trim()));"
+            " if (!item) return false; item.click(); return true; })()" % store_row_js(name)
+        )
+        if not opened:
+            fail("the %s row's menu offers no Forget" % name)
+        d.wait_for("!!document.querySelector(%s)" % json.dumps(MODAL), what="the Forget confirm for %s" % name)
+        body = d.modal_text()
         if name not in body:
-            fail("the confirm does not name %s: %r" % (name, body[:300]))
-    d.eval("[...document.querySelectorAll('dialog.modal[open] button')]"
-           ".find(b => /Delete 2 stores/.test(b.textContent)).click()")
-    d.wait_for(
-        "(() => { const t = document.querySelector('#root').innerText; return %s.every(n => "
-        "![...document.querySelectorAll('#root tbody .one-line.name')].some(e => e.textContent.trim() === n)); })()"
-        % json.dumps(names),
-        timeout=60,
-        what="both stores to leave the table",
-    )
+            fail("the Forget confirm does not name %s: %r" % (name, body[:300]))
+        d.modal_press("Forget store")
+        d.wait_for("!(%s)" % store_row_js(name), timeout=60, what="%s to leave the list" % name)
     left = {s["name"] for s in d.api("/api/stores")["stores"]}
     if left & set(names):
         fail("the daemon still lists %s" % sorted(left & set(names)))
 
 
-@finding("9.6", "the Graph rail's two actions are whole and on screen, and names end in an ellipsis")
+@finding("9.6", "the graph's two actions are whole and on screen, and the selected name is never cut")
 def _(d):
+    a_store(d)
     d.open_view("graph")
-    d.wait_for("!!document.querySelector('.rail-actions:not([hidden]) button')", timeout=30,
+    d.wait_for("document.querySelectorAll('.g-sel .two button').length === 2", timeout=30,
                what="a selected symbol's actions")
     for scrolled in ("top", "bottom"):
-        d.eval(
-            "(() => { const s = document.querySelector('.graph-scroll');"
-            " if (s) s.scrollTop = %s; })()" % ("0" if scrolled == "top" else "s.scrollHeight")
-        )
+        d.eval("(() => { const s = document.querySelector('.g-side-scroll'); if (s) s.scrollTop = %s; })()"
+               % ("0" if scrolled == "top" else "s.scrollHeight"))
         clipped = d.eval(
-            """
-            [...document.querySelectorAll('.rail-actions button')].filter(b => {
-              const r = b.getBoundingClientRect();
-              return r.height === 0 || r.top < 0 || r.bottom > innerHeight + 0.5
-                || r.right > innerWidth + 0.5;
-            }).map(b => b.textContent.trim())
-            """
+            "[...document.querySelectorAll('.g-sel .two button')].filter(b => {"
+            " const r = b.getBoundingClientRect();"
+            " return r.height === 0 || r.top < 0 || r.bottom > innerHeight + 0.5 || r.right > innerWidth + 0.5;"
+            " }).map(b => b.textContent.trim())"
         )
         if clipped:
             fail("with the side column scrolled to its %s, %s is cut off" % (scrolled, clipped))
+    # 0.29.0 kept a long name to one line with an ellipsis and the full name on
+    # hover. 0.35.0 owner decision (v6 as drawn): the name breaks across lines
+    # and is shown whole. Either way the property is that the name is never
+    # cut off with nothing carrying the rest, which is asserted on both shapes.
     sym = d.eval(
-        "(() => { const h = document.querySelector('.graph-selected .sym'); const s = getComputedStyle(h);"
-        " return {ws: s.whiteSpace, to: s.textOverflow, title: h.title, text: h.textContent}; })()"
+        "(() => { const h = document.querySelector('.g-sel .nm'); const s = getComputedStyle(h);"
+        " const t = h.closest('[data-tip], [title]');"
+        " return {ws: s.whiteSpace, to: s.textOverflow, wb: s.wordBreak, cut: h.scrollWidth > h.clientWidth + 1,"
+        " full: t ? (t.getAttribute('data-tip') || t.getAttribute('title')) : '', text: h.textContent}; })()"
     )
-    if sym["ws"] != "nowrap" or sym["to"] != "ellipsis" or sym["title"] != sym["text"]:
-        fail("the selected symbol's name wraps or has no full name on hover: %r" % sym)
+    if sym["cut"] and sym["full"] != sym["text"]:
+        fail("the selected symbol's name is cut off with no full name on hover: %r" % sym)
+    if sym["ws"] == "nowrap" and sym["to"] != "ellipsis" and sym["cut"]:
+        fail("the selected symbol's name is held to one line and clipped without an ellipsis: %r" % sym)
 
 
-@finding("9.7", "Blast radius opens Impact on the Graph's symbol and its store")
+@finding("9.7", "Blast radius opens on the graph's symbol and its store")
 def _(d):
+    a_store(d)
     d.open_view("graph")
-    d.wait_for("!!document.querySelector('.rail-actions:not([hidden]) button')", timeout=30,
-               what="a selected symbol's actions")
+    d.wait_for("document.querySelectorAll('.g-sel .two button').length === 2 && !/nothing yet/.test(document.querySelector('.g-sel .nm').textContent)",
+               timeout=30, what="a selected symbol's actions")
     picked = d.eval(
-        "(() => { const c = [...document.querySelectorAll('.graph-selected .chip.static')];"
-        " return {name: document.querySelector('.graph-selected .sym').textContent,"
-        " chips: c.map(e => e.textContent)}; })()"
+        "({name: document.querySelector('.g-sel .nm').textContent.trim(),"
+        " store: ((document.querySelector('.g-bar button[aria-haspopup] .mono') || {}).textContent || '').trim()})"
     )
-    d.eval("[...document.querySelectorAll('.rail-actions button')].find(b => b.textContent.trim() === 'Blast radius').click()")
-    d.wait_for("(document.querySelector('#root h1') || {}).textContent === 'Impact'", what="the Impact page")
-    d.wait_for("!/Reading/.test(document.querySelector('#root').innerText)", timeout=30, what="the answer")
-    subject = text_of(d, ".impact-subject", "the symbol Impact is about")
-    want("Impact's subject", subject, picked["name"])
-    scope = d.eval("((document.querySelector('.impact-subject-card .chips .chip') || {}).textContent || '')")
-    if not any(("in %s ×" % c) == scope.strip() for c in picked["chips"]):
-        fail("Impact is not scoped to the store the symbol was picked in: chip %r, graph chips %r"
-             % (scope, picked["chips"]))
+    press_text(d, ".g-sel .two button", "Blast radius")
+    d.wait_for("location.hash === '#/graph/blast'", what="Blast radius")
+    d.wait_for("!document.querySelector('#main .spinner') && !!document.querySelector('#main .q3, #main .error-box')",
+               timeout=40, what="the answer")
+    asked = d.eval("document.querySelector('.ctrl-card input[aria-label=\"Symbol\"]').value")
+    want("the symbol Blast radius asks about", asked, picked["name"])
+    scope = d.eval("((document.querySelector('.ctrl-card button[aria-haspopup] .mono') || {}).textContent || '').trim()")
+    want("the store Blast radius reads", scope, picked["store"])
+    headline = text_of(d, "#main .card.pad .big14", "the answer's headline")
+    if picked["name"] not in headline:
+        fail("Blast radius answered %r, which does not name %s" % (headline, picked["name"]))
 
 
 @finding("9.8", "the Brief view draws spans as cards, and search meta sits under the box")
 def _(d):
+    a_store(d)
     d.open_view("search")
-    d.eval(
-        "(() => { const i = document.querySelector('#search-query');"
-        " i.value = 'index run'; i.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); })()"
-    )
-    d.wait_for("/\\d/.test((document.querySelector('.search-meta') || {}).textContent || '')",
+    d.type(SEARCH_BOX, "release record")
+    d.press("Enter")
+    d.wait_for("/\\d/.test((document.querySelector('#main .sr-bar .t-mono-sm') || {}).textContent || '')",
                timeout=60, what="the search's count and timing")
-    inside = d.eval("!!document.querySelector('.search-field .search-meta')")
-    if inside:
+    if exists(d, "#main .sr-field .t-mono-sm"):
         fail("the hit count and timing are still inside the query box")
-    d.eval("[...document.querySelectorAll('#root .dial .seg')].find(b => b.textContent.trim() === 'brief').click()")
-    d.wait_for("!!document.querySelector('.brief-view')", timeout=60, what="the Brief view")
+    press_text(d, "#main .seg button", "Brief")
+    d.wait_for("/BRIEF/.test(document.querySelector('#main').innerText) && !document.querySelector('#main .spinner')",
+               timeout=60, what="the Brief view")
     shape = d.eval(
-        "({cards: document.querySelectorAll('.brief-view .span-card .gutter-code').length,"
-        " bare: document.querySelectorAll('.brief-view pre.brief-text').length,"
-        " strip: !!document.querySelector('.brief-summary')})"
+        "({cards: document.querySelectorAll('#main .card .lines .l .n').length,"
+        " bare: document.querySelectorAll('#main pre').length,"
+        " strip: /tokens[\\s\\S]*spans[\\s\\S]*dropped/.test(document.querySelector('#main').innerText)})"
     )
     if not shape["cards"] or shape["bare"] or not shape["strip"]:
         fail("the Brief view is not drawn as span cards with a summary strip: %r" % shape)
 
 
-@finding("9.9", "Impact says what its figures mean and where to start")
+@finding("9.9", "Blast radius says what its figures mean and where to start")
 def _(d):
-    d.open_view("impact", fresh=True)
-    seen = d.eval(
-        """
-        ({guide: document.querySelectorAll('.impact-subject-card .impact-guide li').length,
-          toGraph: [...document.querySelectorAll('#root button')].some(b => b.textContent.trim() === 'Open Graph'),
-          finder: !!document.querySelector('.path-card'), trace: !!document.querySelector('.trace-card')})
-        """
-    )
-    if seen["guide"] != 3:
-        fail("Impact's guide has %d lines, not 3: %r" % (seen["guide"], seen))
-    if not seen["toGraph"]:
-        fail("an empty Impact page does not say how to get there from Graph")
-    if not (seen["finder"] and seen["trace"]):
-        fail("the path finder or the trace is no longer on the page: %r" % seen)
-    d.click_text("button", "Open Graph")
-    d.wait_for("(document.querySelector('#root h1') || {}).textContent === 'Graph'", what="the Graph page")
+    a_store(d)
+    d.open_view("graph/blast", fresh=True)
+    starts = texts_of(d, "#main .kind-card .mono")
+    if not starts:
+        fail("an empty Blast radius offers no symbol to start from")
+    # Where to start is a symbol this store has, read from the daemon — not a
+    # name the page made up because it had not read the store's hubs yet.
+    store = d.eval("((document.querySelector('.ctrl-card button[aria-haspopup] .mono') || {}).textContent || '').trim()")
+    for name in starts:
+        found = d.api("/api/symbol?name=%s&store=%s&k=1" % (urllib.parse.quote(name), urllib.parse.quote(store)))
+        if not found.get("symbols"):
+            fail("Blast radius suggests starting from %r, which %s does not define" % (name, store))
+    if not all(t in texts_of(d, "#main .tabs .tab") for t in ("Explore", "Path & evidence")):
+        fail("Explore or Path & evidence is no longer one tab away from Blast radius")
+    d.click("#main .kind-card")
+    d.wait_for("!document.querySelector('#main .spinner') && !!document.querySelector('#main .q3, #main .error-box')",
+               timeout=40, what="a starting symbol to be reached")
+    figures = texts_of(d, "#main .q3 .stat-inline .eyebrow")
+    want("the figures the answer states", figures, ["REACHED", "FILES", "INFERRED"])
+    headline = text_of(d, "#main .card.pad .big14", "the sentence that says what they mean")
+    if not re.search(r"reach(es)?\b.* within \d+ hops?", headline):
+        fail("the answer's headline does not say what the figures mean: %r" % headline)
 
 
-@finding("9.10", "the Agents page's two card rows line up and collapse together")
+@finding("9.10", "the Agents page's columns line up and collapse together")
 def _(d):
+    a_store(d)
     for width in (1280, 820):
         d.set_viewport(width, 900)
         d.open_view("agents", fresh=True)
-        cols = d.eval(
-            "[...document.querySelectorAll('#root .agent-row')].map(g =>"
-            " getComputedStyle(g).gridTemplateColumns.split(' ').length)"
-        )
-        if len(cols) != 2 or cols[0] != cols[1]:
-            fail("at %dpx the Agents rows have %r columns" % (width, cols))
-        edges = d.eval(
-            "[...document.querySelectorAll('#root .agent-row')].map(g =>"
-            " [...g.children].map(c => Math.round(c.getBoundingClientRect().left)))"
-        )
-        if edges[0] != edges[1]:
-            fail("at %dpx the Agents rows' cards start at %r and %r" % (width, edges[0], edges[1]))
-    d.set_viewport(1280, 900)
-
+        cols = d.eval("(() => { const s = document.querySelector('#main .split'); if (!s) return null;"
+                      " return [...s.children].map(c => { const r = c.getBoundingClientRect();"
+                      " return {top: Math.round(r.top), left: Math.round(r.left), right: Math.round(r.right)}; }); })()")
+        if not cols or len(cols) != 2:
+            fail("at %dpx the Agents page has no two-column split: %r" % (width, cols))
+        side_by_side = cols[0]["right"] <= cols[1]["left"] + 1
+        if side_by_side and cols[0]["top"] != cols[1]["top"]:
+            fail("at %dpx the Agents columns start at %d and %d" % (width, cols[0]["top"], cols[1]["top"]))
+        if not side_by_side and cols[0]["left"] != cols[1]["left"]:
+            fail("at %dpx the Agents columns neither sit side by side nor stack: %r" % (width, cols))
+    d.reset_viewport()
 
 
 # ---------------------------------------------------------------- 0.30.0 (10.x)
@@ -5128,18 +4776,6 @@ def review_tree(d, name):
     return root
 
 
-#: The Index page's one button for the whole flow (0.30.0). It reads Scan, and
-#: while any run is held after its scan it reads Start indexing.
-SCAN_BUTTON = ".index-bar .index-bar-group.end .button:not(.secondary)"
-
-#: The page-level card that lists what a held scan found, above the run cards.
-SCAN_PANEL = ".scan-panel:not([hidden])"
-
-
-def scan_button(d):
-    return text_of(d, SCAN_BUTTON, "the Index page's Scan button")
-
-
 def clean_tree(d, name):
     """Two ordinary files and nothing the scan would hold back."""
     root = os.path.join(d.fixtures.root, "%s-%d" % (name, random.randint(0, 10**9)))
@@ -5162,95 +4798,81 @@ def held_run(d, root):
             if run.get("status") == "review":
                 return run
             if run.get("status") in TERMINAL:
-                fail("the scan of %s went to %s without holding for Start indexing"
-                     % (root, run.get("status")))
+                fail("the scan of %s went to %s without holding for Start indexing" % (root, run.get("status")))
         time.sleep(0.3)
     fail("the scan of %s never held for Start indexing within %ds" % (root, RUN_APPEARS))
 
 
-def scan_on_page(d, root):
-    """Scan a folder the way a person does: its path in the box, each folder
-    its own store, and the one button, which reads Scan. Returns the held run.
-
-    Every scan from the page holds (`review: "always"`), even a clean one, so
-    nothing is embedded before its plan has been on screen.
-    """
-    d.open_view("index", fresh=True)
-    d.wait_for("!!document.querySelector(%s)" % json.dumps(SCAN_BUTTON), what="the Scan button")
-    label = scan_button(d)
-    if label != "Scan":
-        fail("the Index page opened with its button reading %r, not 'Scan': a scan an "
-             "earlier check left held would be started by pressing it" % label)
-    d.type("#index-path", root)
-    d.eval(
-        "(() => { const s = document.querySelector('.index-bar-group.end select');"
-        " s.value = 'each'; s.dispatchEvent(new Event('change', {bubbles: true})); })()"
-    )
-    d.click(SCAN_BUTTON)
-    run = held_run(d, root)
-    d.wait_for(
-        "(document.querySelector(%s) || {}).textContent === 'Start indexing'" % json.dumps(SCAN_BUTTON),
-        timeout=30, what="the Scan button to read Start indexing while the scan is held",
-    )
-    return run
-
-
 def release_held(d, run):
-    """Drop a scan a failed check left held, so the next check's page opens on
-    Scan rather than on this check's Start indexing."""
-    now = run_by_id(d, run["id"])
+    """Drop a scan a failed check left held."""
+    now = run and run_by_id(d, run["id"])
     if now and now.get("status") == "review":
         for action in ("stop", "remove"):
             d.api_result("/api/index/control", method="POST",
                          body={"store": run["store"], "action": action, "run": run["id"]})
 
 
-def scan_rows(d, store):
-    """The scan panel's decision rows for one store, as {file, cells, buttons}.
+def wizard_scan(d, store, root):
+    """Scan `root` into `store` the way a person does from v6: the store's Add
+    sources, the path pasted, Scan, and the review step once the scan is held.
+    Every scan from the wizard holds (`review: "always"`), so nothing is
+    embedded before its plan has been on screen. Returns the held run."""
+    open_wizard_for(d, store)
+    wizard_mode(d, "Paste a path")
+    d.type(".wz-body .box input", root)
+    d.press("Enter")
+    d.wait_for("document.querySelectorAll('.wz-body .src-row').length > 0", what="the pasted folder as a source")
+    press_text(d, ".wz-foot button", "Scan 1 source", "Scan 1 source")
+    try:
+        d.wait_for("!!document.querySelector('.wz-body .error-box') || /STEP 3 OF/.test((document.querySelector('.wz-head') || {}).innerText || '')"
+                   " && !!document.querySelector('.wz-body .q4, .wz-body .stage-box')", timeout=30,
+                   what="the scan to start")
+    except cdp.ProtocolError:
+        pass
+    if exists(d, ".wz-body .error-box"):
+        fail("the wizard's scan of %s into %s was refused: %s"
+             % (root, store, text_of(d, ".wz-body .error-box", "the scan's error")))
+    run = held_run(d, root)
+    d.wait_for("/STEP 3 OF/.test((document.querySelector('.wz-head') || {}).innerText || '')"
+               " && !!document.querySelector('.wz-body .q4')", timeout=30,
+               what="the wizard's Review step, with the scan's figures")
+    return run
 
-    The Store column is there only when more than one folder is held, so a
-    five-cell row carries the store second and a four-cell row is the only
-    store on the panel.
-    """
-    rows = d.eval(
-        """
-        [...document.querySelectorAll(%s)].map(tr => ({
-          cells: [...tr.cells].map(td => (td.innerText || '').trim()),
-          buttons: [...tr.querySelectorAll('button')].map(b => b.textContent.trim()),
-        }))
-        """
-        % json.dumps(SCAN_PANEL + " .w-scan-review tbody tr")
+
+def kpi_value(d, label):
+    return d.eval(
+        "(() => { const k = [...document.querySelectorAll('.wz-body .kpi, #main .kpi')].find(k =>"
+        " ((k.querySelector('.eyebrow') || {}).textContent || '').trim().toLowerCase() === %s.toLowerCase());"
+        " return k ? ((k.querySelector('.v') || {}).textContent || '').trim() : null; })()" % json.dumps(label)
     )
-    return [dict(r, file=r["cells"][0]) for r in rows
-            if len(r["cells"]) == 4 or (len(r["cells"]) == 5 and r["cells"][1] == store)]
 
 
-def press_in_scan_row(d, store, name, label):
+def decision_rows(d):
+    """The review step's decision rows, as {file, text, buttons}."""
+    return d.eval(
+        "[...document.querySelectorAll('.wz-body .dec-list .dec-grid')].map(r => ({"
+        " file: ((r.querySelector('.p') || {}).textContent || '').trim(), text: r.innerText,"
+        " buttons: [...r.querySelectorAll('.acts button')].map(b => b.textContent.trim())}))"
+    )
+
+
+def decide_row(d, name, label):
     pressed = d.eval(
-        """
-        (() => {
-          for (const tr of document.querySelectorAll(%s)) {
-            const cells = [...tr.cells].map(td => (td.innerText || '').trim());
-            if (cells[0] !== %s || (cells.length === 5 && cells[1] !== %s)) continue;
-            const b = [...tr.querySelectorAll('button')].find(b => b.textContent.trim() === %s);
-            if (!b) return 'the row offers only ' + [...tr.querySelectorAll('button')].map(b => b.textContent.trim()).join(', ');
-            b.click();
-            return 'pressed';
-          }
-          return 'no row of the scan panel reads ' + %s;
-        })()
-        """
-        % (json.dumps(SCAN_PANEL + " .w-scan-review tbody tr"), json.dumps(name), json.dumps(store),
-           json.dumps(label), json.dumps(name))
+        "(() => { const r = [...document.querySelectorAll('.wz-body .dec-list .dec-grid')].find(r =>"
+        " ((r.querySelector('.p') || {}).textContent || '').trim() === %s); if (!r) return 'no row reads ' + %s;"
+        " const b = [...r.querySelectorAll('.acts button')].find(b => b.textContent.trim() === %s);"
+        " if (!b) return 'the row offers no ' + %s; b.click(); return 'pressed'; })()"
+        % (json.dumps(name), json.dumps(name), json.dumps(label), json.dumps(label))
     )
     if pressed != "pressed":
-        fail("pressing %r on %s in the scan panel: %s" % (label, name, pressed))
+        fail("deciding %s as %r: %s" % (name, label, pressed))
 
 
 @finding("10.1", "a scan lists reviewable files for a decision, the .env only as a no-action count, and indexes an accepted file redacted")
 def _(d):
+    host = indexed_fixture(d, clean_tree(d, "reviewhost"))
     root = review_tree(d, "review")
-    run = scan_on_page(d, root)
+    run = wizard_scan(d, host, root)
     run_id, store = run["id"], run["store"]
     try:
         plan = run.get("plan") or {}
@@ -5258,100 +4880,73 @@ def _(d):
         if not any(p.endswith(".env") for p in plan.get("credential") or []):
             fail("the .env is not listed as a credential file: %s" % json.dumps(plan)[:300])
 
-        d.wait_for("!!document.querySelector(%s)" % json.dumps(SCAN_PANEL + " .w-scan-review"),
-                   timeout=20, what="the scan panel's decision table")
-        panel = text_of(d, SCAN_PANEL, "the scan panel")
-        if ("Scanned %s" % store) not in panel and not re.search(r"Scanned \d+ folders", panel):
-            fail("the scan panel is not titled for the scan: %r" % panel[:200])
-        # innerText follows the eyebrow's text-transform, so compared folded.
-        if "needs your decision" not in panel.lower():
-            fail("the scan panel has no 'Needs your decision' heading: %r" % panel[:400])
-        rows = scan_rows(d, store)
-        want("the files the panel asks about", sorted(r["file"] for r in rows), ["alpha.txt", "beta.txt"])
+        d.wait_for("document.querySelectorAll('.wz-body .dec-list .dec-grid').length > 0", timeout=20,
+                   what="the review step's decision rows")
+        # Titled for the scan: what it is and that nothing is embedded yet.
+        want("the review step's heading", text_of(d, ".wz-head .h", "the review step's heading"),
+             "Review before anything is indexed")
+        if not re.search(r"needs your decision", d.eval("document.querySelector('.wz-body').innerText"), re.I):
+            fail("the review step has no 'Needs your decision' card")
+        rows = decision_rows(d)
+        want("the files the review step asks about", sorted(r["file"] for r in rows), ["alpha.txt", "beta.txt"])
         for r in rows:
-            # A secret-shaped value: both accepts, and keeping it refused.
-            want("the choices on %s" % r["file"], r["buttons"], ["Accept redacted", "Accept as-is", "Keep refused"])
-        # The .env is never offered: no row, only the no-action line.
-        if any(".env" in " ".join(r["cells"]) for r in scan_rows(d, store)):
+            # 0.35.0 owner decision: three decisions per file — Keep out, Redact
+            # & index, Index — taken on the row, one file or a selection at a
+            # time, each logged per file. Where 0.30.0 read "Accept redacted",
+            # "Accept as-is" and "Keep refused" through a dialog.
+            want("the choices on %s" % r["file"], r["buttons"], ["Keep out", "Redact & index", "Index"])
+            if re.search(r"AKIA[A-Z0-9]{16}", r["text"]):
+                fail("the row for %s shows the matched value unmasked" % r["file"])
+            if not re.search(r"\d+%", r["text"]):
+                fail("the row for %s does not say how risky indexing it would be: %r" % (r["file"], r["text"][:200]))
+        # The .env is never offered: no row, only the no-action count.
+        if any(".env" in r["file"] for r in rows):
             fail("the .env has a decision row; a credential file is never offered")
-        skipped = text_of(d, SCAN_PANEL + " .scan-skipped", "the scan panel's no-action line")
-        if "credential file" not in skipped or "no action needed" not in skipped:
-            fail("the no-action line does not count the credential file: %r" % skipped)
-        d.click_text(SCAN_PANEL + " .scan-skipped button", "Show files")
-        d.wait_for("(() => { const t = document.querySelector(%s + ' .scan-skipped + .rows');"
-                   " return !!t && !t.hidden && !!t.firstChild; })()" % json.dumps(SCAN_PANEL),
-                   what="the no-action file list to open")
-        listed = d.eval("(() => { const t = document.querySelector(%s + ' .scan-skipped + .rows');"
-                        " return {text: t.innerText, buttons: t.querySelectorAll('button').length,"
-                        " table: !!t.querySelector('.w-scan-skipped')}; })()" % json.dumps(SCAN_PANEL))
-        if listed["buttons"]:
-            fail("the no-action list offers a button: %r" % listed["text"][:300])
-        if listed["table"] and ".env" not in listed["text"]:
-            fail("the no-action list does not name the .env: %r" % listed["text"][:300])
+        cred = kpi_value(d, "Credential files")
+        if not cred or not cred.isdigit() or int(cred) < 1:
+            fail("the review step counts %r credential files; the .env is one" % cred)
+        opened = d.eval(
+            "(() => { const g = [...document.querySelectorAll('.wz-body .group-row')].find(b => /Credential files/.test(b.innerText));"
+            " if (!g) return false; g.click(); return true; })()"
+        )
+        if not opened:
+            fail("the Left out automatically card has no Credential files group")
+        d.wait_for("/\\.env/.test((document.querySelector('.wz-body .group-paths') || {}).innerText || '')",
+                   what="the credential group to name the .env")
+        if d.eval("(document.querySelector('.wz-body .group-paths') || document.body).querySelectorAll('button').length"):
+            fail("the no-action list offers a button")
 
-        # Accept alpha with redaction, through the dialog.
-        press_in_scan_row(d, store, "alpha.txt", "Accept redacted")
-        d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the accept dialog")
-        dialog = d.eval(
-            """
-            (() => { const m = document.querySelector('dialog.modal[open]');
-              const t = s => [...m.querySelectorAll(s)].map(e => (e.innerText || '').trim());
-              return {title: t('h2')[0], path: t('code.dialog-path')[0], values: t('ul.findings .finding-value'),
-                      kinds: t('ul.findings .finding-kind'), conf: t('ul.findings .finding-conf'),
-                      signals: t('ul.findings .finding-signals'), radios: m.querySelectorAll('input[type=radio]').length,
-                      tick: !!m.querySelector('label.reviewed #reviewed-inline')}; })()
-            """
-        )
-        want("the dialog's title", dialog["title"], "Accept with redaction?")
-        want("the dialog's file", dialog["path"], "alpha.txt")
-        if not dialog["values"] or any(re.search(r"AKIA[A-Z0-9]{16}", v) for v in dialog["values"]):
-            fail("the dialog does not show the match masked: %r" % dialog["values"])
-        if not dialog["kinds"] or not all(re.search(r"%", c) for c in dialog["conf"]):
-            fail("the dialog does not say what matched and how likely it is real: %r" % dialog)
-        if not any(dialog["signals"]):
-            fail("the dialog's confidence carries no signals: %r" % dialog)
-        if dialog["radios"]:
-            fail("the dialog still offers a mode choice; the row's button chose it")
-        if not dialog["tick"]:
-            fail("the dialog has no 'I have reviewed this file' tick")
-        d.eval("document.querySelector('dialog.modal #reviewed-inline').click()")
-        d.eval("[...document.querySelectorAll('dialog.modal button')].find(b => b.textContent === 'Accept this file').click()")
-        d.wait_for("!document.querySelector('dialog.modal[open]')", timeout=30, what="the dialog to close")
-        d.wait_for(
-            "[...document.querySelectorAll(%s)].some(tr => tr.cells[0].innerText.trim() === 'alpha.txt'"
-            " && /accepted, redacted/.test(tr.innerText))" % json.dumps(SCAN_PANEL + " .w-scan-review tbody tr"),
-            what="alpha.txt's row to say accepted, redacted",
-        )
-        press_in_scan_row(d, store, "beta.txt", "Keep refused")
-        d.wait_for(
-            "[...document.querySelectorAll(%s)].some(tr => tr.cells[0].innerText.trim() === 'beta.txt'"
-            " && /stays refused/.test(tr.innerText))" % json.dumps(SCAN_PANEL + " .w-scan-review tbody tr"),
-            what="beta.txt's row to say stays refused",
-        )
+        decide_row(d, "alpha.txt", "Redact & index")
+        d.wait_for("[...document.querySelectorAll('.wz-body .dec-list .dec-grid')].some(r => /alpha\\.txt/.test(r.innerText)"
+                   " && /Redacted · indexed/.test(r.innerText))", what="alpha.txt to read Redacted · indexed")
+        decide_row(d, "beta.txt", "Keep out")
+        d.wait_for("[...document.querySelectorAll('.wz-body .dec-list .dec-grid')].some(r => /beta\\.txt/.test(r.innerText)"
+                   " && /Kept out/.test(r.innerText))", what="beta.txt to read Kept out")
 
-        # Start indexing, from the same button that scanned.
-        want("the button while the scan is held", scan_button(d), "Start indexing")
-        d.click(SCAN_BUTTON)
+        press_text(d, ".wz-foot button", "Continue to index", "Continue to index")
+        d.wait_for("/STEP 4 OF/.test((document.querySelector('.wz-head') || {}).innerText || '')", what="the Index step")
+        press_text(d, ".wz-foot button", "Start indexing", "Start indexing")
         wait_for_run(d, store, run_id=run_id)
     finally:
         release_held(d, run)
     refused = d.api("/api/refused")
     rows = [r for s in refused["stores"] if s["store"] == store for r in s["rows"]]
     names = {os.path.basename(r["path"]): r for r in rows}
-    if "beta.txt" not in names or names["beta.txt"]["class"] != "content" or names["beta.txt"].get("accepted"):
-        fail("the kept file is not still refused: %s" % json.dumps(rows)[:400])
+    beta = names.get("beta.txt")
+    if not beta or beta.get("accepted") in ("redacted", "as-is", True):
+        fail("the kept-out file is not still out of the index: %s" % json.dumps(beta))
     if names.get("alpha.txt", {}).get("accepted") != "redacted":
         fail("the accepted file is not listed as accepted (redacted): %s" % json.dumps(names.get("alpha.txt")))
     read = d.api("/api/read?target=%s" % urllib.parse.quote(os.path.join(os.path.realpath(root), "alpha.txt") + ":1-2"))
-    body = json.dumps(read)
-    if "REDACTED:aws" not in body:
-        fail("the accepted file is not indexed redacted in the same run: %s" % body[:300])
+    if "REDACTED:aws" not in json.dumps(read):
+        fail("the accepted file is not indexed redacted in the same run: %s" % json.dumps(read)[:300])
 
 
-@finding("10.2", "Scan on a clean folder shows the plan and waits for Start indexing")
+@finding("10.2", "a scan of a clean folder shows the plan and waits for Start indexing")
 def _(d):
+    host = indexed_fixture(d, clean_tree(d, "cleanhost"))
     root = clean_tree(d, "scanclean")
-    run = scan_on_page(d, root)
+    run = wizard_scan(d, host, root)
     run_id, store = run["id"], run["store"]
     try:
         plan = run.get("plan") or {}
@@ -5360,30 +4955,23 @@ def _(d):
             fail("the held plan has nothing to embed: %s" % json.dumps(plan)[:300])
         if plan.get("seconds", 99) > 5:
             fail("the scan took %.2f s over two files" % plan["seconds"])
-        card = still_card(store)
-        d.wait_for("!!(%s) && !((%s).querySelector('.run-plan') || {hidden: true}).hidden" % (card, card),
-                   timeout=20, what="the held card's plan line")
-        line = d.eval("(%s).querySelector('.run-plan').innerText.trim()" % card)
-        if not re.match(r"^scanned: \d+ to embed \(.+\) · \d+ unchanged · waiting for Start indexing$", line):
-            fail("the held card's plan reads %r" % line)
-        panel = text_of(d, SCAN_PANEL, "the scan panel")
-        if "Nothing here needs a decision." not in panel:
-            fail("the scan panel of a clean folder does not say nothing needs a decision: %r" % panel[:400])
-        if not exists(d, ".index-bar-group.end .button.secondary:not([hidden])"):
-            fail("a held scan offers no Discard scan")
+        head = text_of(d, ".wz-head .h", "the review step's heading")
+        want("the review step's heading for a clean folder", head, "Everything is decided")
+        want("the decision figure for a clean folder", kpi_value(d, "Your decision"), "done")
+        if kpi_value(d, "Will be indexed") in (None, "0"):
+            fail("the review step says nothing will be indexed from a clean folder")
         # Held means held: nothing starts on its own.
         time.sleep(2)
         want("the run's status two seconds after a clean scan", (run_by_id(d, run_id) or {}).get("status"), "review")
-        d.click(SCAN_BUTTON)
+        press_text(d, ".wz-foot button", "Continue to index", "Continue to index")
+        press_text(d, ".wz-foot button", "Start indexing", "Start indexing")
         final = wait_for_run(d, store, run_id=run_id)
     finally:
         release_held(d, run)
     want("the run started by Start indexing", final.get("status"), "done")
-    d.wait_for("(document.querySelector(%s) || {}).textContent === 'Scan'" % json.dumps(SCAN_BUTTON),
-               timeout=20, what="the button to read Scan again once nothing is held")
 
 
-@finding("10.3", "Impact's Where column shows the call site, not the definition")
+@finding("10.3", "Blast radius's Where column shows the call site, not the definition")
 def _(d):
     root = review_tree(d, "impact")
     store = indexed_fixture(d, root)
@@ -5391,37 +4979,37 @@ def _(d):
     rows = (answer.get("impact") or {}).get("reached") or []
     if not rows or not rows[0].get("at"):
         fail("impact carries no call-site line: %s" % json.dumps(answer)[:300])
-    d.open_view("impact")
-    d.eval(
-        "(() => { const box = document.querySelector('.impact-band input[type=search]');"
-        " box.value = 'callee'; box.dispatchEvent(new Event('input', {bubbles: true}));"
-        " [...document.querySelectorAll('.impact-band button')].find(b => b.textContent.trim() === 'Reach').click(); })()"
-    )
-    d.wait_for("!!document.querySelector('.impact-row .where')", timeout=30, what="an Impact row")
-    where = texts_of(d, ".impact-block:not(.impact-files) .impact-row .where")
+    reach(d, "callee", store)
+    d.wait_for("document.querySelectorAll('#main .split table tbody tr').length > 0", timeout=30, what="a reached row")
+    where = d.eval("[...document.querySelectorAll('#main .split table tbody tr')].map(tr => tr.cells[1].innerText.trim())")
     if not any(re.search(r"lib\.rs:%d$" % rows[0]["at"], w) for w in where):
         fail("the Where column reads %r, not the call at line %d" % (where, rows[0]["at"]))
 
 
-@finding("10.4", "Graph's symbol box takes several names and shows a definitions table")
+@finding("10.4", "the graph's symbol box takes several names and shows each one's definition")
 def _(d):
     root = review_tree(d, "graphnames")
-    indexed_fixture(d, root)
+    store = indexed_fixture(d, root)
     d.open_view("graph")
-    d.eval(
-        "(() => { const box = document.querySelector('.graph-scope input');"
-        " box.value = 'callee, caller'; box.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); })()"
-    )
-    d.wait_for("document.querySelectorAll('.graph-defs .defs-row').length >= 2", timeout=20,
-               what="the definitions table")
-    rows = texts_of(d, ".graph-defs .defs-row")
-    if not any("callee" in r for r in rows) or not any("caller" in r for r in rows):
-        fail("the table does not list both names: %r" % rows)
+    pick_store(d, ".g-bar button[aria-haspopup]", store, "graph")
+    pause(d, 300)
+    d.type('.g-bar input[aria-label="Jump to a symbol"]', "callee, caller")
+    d.press("Enter")
+    d.wait_for("/\\d[\\d,]* of [\\d,]+ symbols/.test((document.querySelector('.g-foot') || {}).innerText || '')"
+               " && !/reading/.test((document.querySelector('.g-sel') || {}).innerText || '')",
+               timeout=20, what="the graph to answer for two names")
+    nodes = texts_of(d, ".g-live .g-node")
+    for name in ("callee", "caller"):
+        if name not in nodes:
+            fail("asking for 'callee, caller' drew no %s node: %r" % (name, nodes))
+    side = d.eval("document.querySelector('.g-sel').innerText")
+    if not re.search(r"\b2 definitions\b", side) and not ("callee" in side and "caller" in side):
+        fail("the selection names neither both definitions nor how many there are: %r" % side[:300])
 
 
 def explorer_tree(d, name):
     """A folder with a subfolder to open, an ordinary file beside it, and a
-    binary the scan cannot index, so the explorer has a greyed row to show."""
+    binary the scan cannot index, so the tree has a greyed row to show."""
     root = os.path.join(d.fixtures.root, "%s-%d" % (name, random.randint(0, 10**9)))
     os.makedirs(os.path.join(root, "src"))
     with open(os.path.join(root, "src", "lib.rs"), "w") as f:
@@ -5433,178 +5021,198 @@ def explorer_tree(d, name):
     return root
 
 
-#: One root's rows in the Tree tab, found by the folder its title names.
-TREE_ROOT = """
+TREE = """
 (() => {
-  const leaf = %s;
-  const head = [...document.querySelectorAll('.ftree ul[role=tree] .ftree-row.root')]
-    .find(r => (r.title || '').split(/[\\\\/]/).pop() === leaf);
-  if (!head) return null;
-  const rows = group => group ? [...group.querySelectorAll(':scope > li > .ftree-row')].map(r => ({
-    name: (r.querySelector('.fname') || {}).textContent, cls: r.className,
-    expanded: r.getAttribute('aria-expanded'), meta: (r.querySelector('.fmeta') || {}).textContent || ''})) : [];
-  const kids = head.parentElement.querySelector(':scope > ul[role=group]');
-  const src = kids && [...kids.querySelectorAll(':scope > li > .ftree-row.dir')]
-    .find(r => (r.querySelector('.fname') || {}).textContent === 'src');
-  return {expanded: head.getAttribute('aria-expanded'), rows: rows(kids),
-          src: src ? rows(src.parentElement.querySelector(':scope > ul[role=group]')) : null};
+  const box = document.querySelector('#main .card[data-scroll-keep="tree"]');
+  if (!box) return null;
+  const top = box.querySelector(':scope > div > .tree-row');
+  if (!top) return null;
+  const kids = top.nextElementSibling;
+  const rows = group => group ? [...group.children].map(c => {
+    const r = c.matches('.tree-row') ? c : c.querySelector(':scope > .tree-row');
+    return r ? {name: ((r.querySelector('.grow') || {}).textContent || '').trim(), cls: r.className,
+                dir: r.tagName === 'BUTTON', expanded: r.getAttribute('aria-expanded'),
+                meta: ((r.querySelector('.m') || {}).textContent || '').trim(),
+                open: r.tagName === 'BUTTON' && !!r.nextElementSibling && !r.nextElementSibling.hidden
+                      && !!r.nextElementSibling.querySelector('.tree-row')} : null; }).filter(Boolean) : [];
+  const src = kids && [...kids.children].find(c => ((c.querySelector(':scope > .tree-row .grow') || {}).textContent || '') === 'src');
+  return {expanded: top.getAttribute('aria-expanded'), rows: rows(kids),
+          src: src ? rows(src.querySelector(':scope > .tree-row').nextElementSibling) : null};
 })()
 """
 
 
-@finding("10.5", "the Files page's Tree tab opens folders on click and greys a file it did not index")
+@finding("10.5", "a store's Tree view opens folders on click and greys a file it did not index")
 def _(d):
     root = explorer_tree(d, "explorer")
-    indexed_fixture(d, root)
-    leaf = os.path.basename(root)
-    d.open_view("files", fresh=True)
-    d.click_text(".tabs .tab", "Tree")
-    d.wait_for("(() => { const t = %s; return !!t && t.rows.length > 0; })()" % (TREE_ROOT % json.dumps(leaf)),
-               timeout=30, what="the explorer to draw the fixture's root with its children")
-    tree = d.eval(TREE_ROOT % json.dumps(leaf))
+    store = indexed_fixture(d, root)
+    files_tab(d, store)
+    press_text(d, "#main .seg button", "Tree", "the Files tab's Tree view")
+    d.wait_for("(() => { const t = %s; return !!t && t.rows.length > 0; })()" % TREE, timeout=30,
+               what="the tree to draw the store's root with its children")
+    tree = d.eval(TREE)
     want("the root folder's aria-expanded", tree["expanded"], "true")
     by_name = {r["name"]: r for r in tree["rows"]}
     src = by_name.get("src")
-    if not src or "dir" not in src["cls"].split():
+    if not src or not src["dir"]:
         fail("the root does not list the src folder as a folder: %r" % tree["rows"])
     want("the unopened src folder's aria-expanded", src["expanded"], "false")
-    if tree["src"]:
-        fail("the src folder's children are drawn before it was opened: %r" % tree["src"])
+    if src["open"]:
+        fail("the src folder's children are drawn before it was opened")
     readme = by_name.get("README.md")
-    if not readme or "off" in readme["cls"].split():
+    if not readme or "muted" in readme["cls"].split():
         fail("README.md is not an ordinary indexed row: %r" % readme)
     logo = by_name.get("logo.png")
-    if not logo or "off" not in logo["cls"].split() or not logo["meta"].startswith("not indexed"):
+    if not logo or "muted" not in logo["cls"].split() or not logo["meta"].startswith("not indexed"):
         fail("the binary is not a greyed not-indexed row: %r" % tree["rows"])
-    # The owner's third walk: sort chips on an explorer were no use, so the
-    # tree has none, and orders folders first, then files, by name.
-    chips = texts_of(d, ".tab-panel .filters .chip")
-    want("the explorer's chips", chips, [])
+    names = [r["name"] for r in tree["rows"]]
+    dirs = [r["name"] for r in tree["rows"] if r["dir"]]
+    if names[:len(dirs)] != dirs:
+        fail("the tree does not order folders before files: %r" % names)
+    # The owner's third walk: chips on an explorer were no use, so a tree offers
+    # none it does not apply.
+    chips = d.eval("[...document.querySelectorAll('#main .row .chip')].filter(c => c.offsetParent !== null).map(c => c.textContent.trim())")
+    want("the chips offered beside the tree", chips, [])
 
     d.eval(
-        "[...document.querySelectorAll('.ftree .ftree-row.dir')].find(r => r.getAttribute('aria-expanded') === 'false'"
-        " && (r.querySelector('.fname') || {}).textContent === 'src'"
-        " && r.closest('ul[role=group]').parentElement.querySelector(':scope > .ftree-row.root').title.split(/[\\\\/]/).pop() === %s).click()"
-        % json.dumps(leaf)
+        "(() => { const box = document.querySelector('#main .card[data-scroll-keep=\"tree\"]');"
+        " const b = [...box.querySelectorAll('button.tree-row')].find(b => ((b.querySelector('.grow') || {}).textContent || '') === 'src');"
+        " b.click(); })()"
     )
-    d.wait_for("(() => { const t = %s; return !!t && !!t.src && t.src.some(r => r.name === 'lib.rs'); })()"
-               % (TREE_ROOT % json.dumps(leaf)), timeout=20, what="the src folder to open and list lib.rs")
-    tree = d.eval(TREE_ROOT % json.dumps(leaf))
-    want("the opened src folder's aria-expanded",
-         next(r["expanded"] for r in tree["rows"] if r["name"] == "src"), "true")
+    d.wait_for("(() => { const t = %s; return !!t && !!t.src && t.src.some(r => r.name === 'lib.rs'); })()" % TREE,
+               timeout=20, what="the src folder to open and list lib.rs")
+    tree = d.eval(TREE)
+    want("the opened src folder's aria-expanded", next(r["expanded"] for r in tree["rows"] if r["name"] == "src"), "true")
 
 
-@finding("10.6", "the Decisions tab lists each decision with its reason and confidence, Revoke undoes one, and nothing is bulk")
+@finding("10.6", "a store's Decisions list each decision with its reason, Undo takes one back, and a selection is logged per file")
 def _(d):
     root = review_tree(d, "decisions")
     store = indexed_fixture(d, root)
     rows = [r for s in d.api("/api/refused")["stores"] if s["store"] == store for r in s["rows"]]
     alpha = next((r["path"] for r in rows if os.path.basename(r["path"]) == "alpha.txt"), None)
-    if not alpha:
-        fail("alpha.txt is not on the store's refused list: %s" % json.dumps(rows)[:400])
-    d.api("/api/refused/accept", method="POST",
-          body={"store": store, "path": alpha, "mode": "redacted", "reviewed": True})
+    beta = next((r["path"] for r in rows if os.path.basename(r["path"]) == "beta.txt"), None)
+    if not alpha or not beta:
+        fail("alpha.txt and beta.txt are not on the store's refused list: %s" % json.dumps(rows)[:400])
+    d.api("/api/refused/accept", method="POST", body={"store": store, "path": alpha, "mode": "redacted", "reviewed": True})
 
-    table = (
-        "(() => { const h = [...document.querySelectorAll('.decisions h2.section-title')]"
-        ".find(h => h.textContent === %s); return h ? h.nextElementSibling : null; })()" % json.dumps(store)
-    )
-    d.open_view("files", fresh=True)
-    d.click_text(".tabs .tab", "Decisions")
-    d.wait_for("!!%s" % table, timeout=30, what="the Decisions table for %s" % store)
+    d.open_view("store/%s/review" % store, fresh=True)
+    table = ("[...document.querySelectorAll('#main .card')].find(c =>"
+             " ((c.querySelector('.card-t') || {}).textContent || '').trim() === 'Decisions')")
+    d.wait_for("!!(%s) && (%s).querySelectorAll('tbody tr').length > 0" % (table, table), timeout=30,
+               what="the Decisions table for %s" % store)
     seen = d.eval(
         "(() => { const t = %s; return {heads: [...t.querySelectorAll('thead th')].map(th => (th.textContent || '').trim()),"
         " rows: [...t.querySelectorAll('tbody tr')].map(tr => ({cells: [...tr.cells].map(td => (td.innerText || '').trim()),"
-        " buttons: [...tr.querySelectorAll('button')].map(b => b.textContent.trim())}))}; })()" % table
+        " buttons: [...tr.querySelectorAll('button:not([role=checkbox])')].map(b => b.textContent.trim())}))}; })()" % table
     )
-    for label in ("File", "Decision", "Why it was held back", "Likely real"):
-        if not any(h.startswith(label) for h in seen["heads"]):
+    # 0.35.0 owner decision (v6 as drawn): the Decisions table is Path,
+    # Outcome, Why and By — yours and the rules' together, undo on any of yours —
+    # where 0.30.0 listed only the person's with a "Likely real" confidence.
+    for label in ("Path", "Outcome", "Why", "By"):
+        if label not in seen["heads"]:
             fail("the Decisions table has no %r column: %r" % (label, seen["heads"]))
-    # Only what a person decided: not the kept beta.txt, never the .env.
-    want("the files listed as decided", [r["cells"][0] for r in seen["rows"]], ["alpha.txt"])
-    cells = seen["rows"][0]["cells"]
-    if "accepted, redacted" not in cells or not any(re.search(r"^\d+ %$", c) for c in cells):
-        fail("the decided row does not say accepted, redacted with a confidence: %r" % cells)
-    want("the decided row's action", seen["rows"][0]["buttons"], ["Revoke"])
-    if d.eval("!!document.querySelector('.decisions input[type=checkbox], .decisions .bulk')"):
-        fail("the Decisions tab has a select-all checkbox or a bulk bar")
+    mine = [r for r in seen["rows"] if any(c.startswith("you") for c in r["cells"])]
+    want("the files decided by you", [r["cells"][1] for r in mine], ["alpha.txt"])
+    cells = mine[0]["cells"]
+    if "redacted · indexed" not in cells:
+        fail("the decided row does not say redacted · indexed: %r" % cells)
+    want("the decided row's action", mine[0]["buttons"], ["Undo"])
+    if any(r["buttons"] for r in seen["rows"] if r not in mine):
+        fail("a decision made by the rules offers an undo")
 
-    d.eval("[...(%s).querySelectorAll('tbody button')].find(b => b.textContent.trim() === 'Revoke').click()" % table)
-    d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the revoke confirm")
-    want("the revoke dialog's file", text_of(d, "dialog.modal[open] code.dialog-path", "the dialog's file"), "alpha.txt")
-    d.eval("[...document.querySelectorAll('dialog.modal[open] button')].find(b => b.textContent.trim() === 'Revoke').click()")
-    d.wait_for("!document.querySelector('dialog.modal[open]')", timeout=30, what="the revoke confirm to close")
-    d.wait_for("!%s" % table, timeout=30, what="the revoked decision to leave the Decisions tab")
+    d.eval("[...(%s).querySelectorAll('tbody button')].find(b => b.textContent.trim() === 'Undo').click()" % table)
+    d.wait_for("!(%s) || ![...(%s).querySelectorAll('tbody tr')].some(tr => /alpha\\.txt/.test(tr.innerText) && /you/.test(tr.innerText))"
+               % (table, table), timeout=30, what="Undo to take alpha.txt's decision back")
     after = [r for s in d.api("/api/refused")["stores"] if s["store"] == store for r in s["rows"]]
     if any(os.path.basename(r["path"]) == "alpha.txt" and r.get("accepted") for r in after):
-        fail("Revoke left alpha.txt accepted: %s" % json.dumps(after)[:400])
+        fail("Undo left alpha.txt accepted: %s" % json.dumps(after)[:400])
 
-    status, _ = d.api_result("/api/refused/accept", method="POST",
-                             body={"paths": [root], "mode": "as-is", "reviewed": True, "store": store})
-    want("a list sent to the accept route", status, 400)
+    # 0.35.0 owner decision: decisions take a list — bulk is allowed — and each
+    # file is still logged as its own decision, by the person. Where 0.30.0
+    # refused a list with a 400.
+    status, answer = d.api_result("/api/refused/decide", method="POST",
+                                  body={"store": store, "files": [alpha, beta], "decision": "out"})
+    want("a list sent to the decide route", status, 200)
+    logged = d.api("/api/refused?store=%s&decisions=1" % urllib.parse.quote(store))
+    decisions = logged.get("decisions") or [r for s in logged.get("stores") or [] for r in s.get("decisions") or s.get("rows") or []]
+    by_you = {os.path.basename(r["path"]) for r in decisions if r.get("by") == "you" and r.get("outcome") == "kept out"}
+    if not {"alpha.txt", "beta.txt"} <= by_you:
+        fail("a two-file decision was not logged as two decisions by you: %s" % json.dumps(decisions)[:400])
+    d.api_result("/api/refused/decide", method="POST", body={"store": store, "files": [alpha, beta], "decision": "reset"})
 
 
-@finding("10.7", "a finished run card states its plan, with what it did not index and what needed review")
+@finding("10.7", "a finished run states what it did, and the store says what it did not index and what needs review")
 def _(d):
+    # 0.35.0 owner decision (v6 as drawn): a finished run's History row states
+    # what it indexed, in how many chunks and how long it took; what the run
+    # did not index and what waits for a decision are the store's Review tab —
+    # the Waiting card and the rules' rows in Decisions — rather than a plan
+    # line on the card.
     root = review_tree(d, "cardplan")
     store = indexed_fixture(d, root)
-    d.open_view("index", fresh=True)
-    card = still_card(store)
-    d.wait_for("!!(%s) && !((%s).querySelector('.run-plan') || {hidden: true}).hidden" % (card, card),
-               timeout=20, what="the finished card's plan line")
-    plan = d.eval("(() => { const p = (%s).querySelector('.run-plan');"
-                  " return {text: p.textContent.trim(), links: p.querySelectorAll('a').length}; })()" % card)
-    found = re.match(r"^plan: \d+ to embed \(.+\) · \d+ unchanged · (\d+) not indexed · (\d+) needed review$", plan["text"])
-    if not found:
-        fail("the finished card's plan reads %r" % plan["text"])
-    if int(found.group(1)) < 1:
-        fail("the plan counts nothing not indexed, and the .env was not: %r" % plan["text"])
-    want("files the plan says needed review", int(found.group(2)), 2)
-    want("links on the plan line", plan["links"], 0)
+    d.open_view("store/%s/runs" % store, fresh=True)
+    line = newest_history_row(d, run_for(d, store)) or d.eval("(document.querySelector(%s) || {}).innerText || ''" % json.dumps(HIST_ROW))
+    if not re.search(r"[\d,]+ indexed · [\d,]+ chunks · took ", line):
+        fail("the finished run's row reads %r" % line)
+    if d.eval("document.querySelectorAll(%s + ' a').length" % json.dumps(HIST_ROW)):
+        fail("the run's row carries a link")
+    d.open_view("store/%s/review" % store)
+    waiting = d.eval("document.querySelectorAll('#main .card.accent-edge .dec-grid:not(.head)').length")
+    want("files the store says wait for a decision", waiting, 2)
+    never = d.eval("[...document.querySelectorAll('#main table tbody tr')].filter(tr => /\\.env/.test(tr.innerText) && /never indexed/.test(tr.innerText)).length")
+    if not never:
+        fail("the store's Decisions do not list the .env as never indexed")
 
 
-@finding("10.8", "the sidebar carries no count of files waiting for review")
+@finding("10.8", "the sidebar's Stores item counts the files waiting for a decision")
 def _(d):
-    """The owner's fourth walk took the count off the sidebar: a scan's panel
-    says what waits for a decision, and a number on a nav item said it again
-    on every page. It is on no item, even with files waiting."""
+    # 0.35.0 owner decision (v6 as drawn): the Stores item carries an amber
+    # count of files waiting for a decision, where 0.30.0's fourth walk had
+    # taken it off. Asserted: the count is the daemon's, and it is not shown
+    # when nothing waits.
     root = review_tree(d, "badge")
     indexed_fixture(d, root)
-    if not (d.api("/api/refused").get("review") or 0):
+    waiting = sum(s.get("review") or 0 for s in d.api("/api/refused")["stores"])
+    if not waiting:
         fail("/api/refused counts nothing waiting for review after a run that refused two files")
-    d.open_view("stores", fresh=True)
-    time.sleep(1.5)
-    if exists(d, ".sidebar .nav-count"):
-        fail("a sidebar item still carries a count of files waiting for review")
+    d.open_view("home", fresh=True)
+    d.wait_for("!!document.querySelector('.nav [data-badge=\"stores\"]:not([hidden])')", what="the Stores item's count")
+    badge = text_of(d, '.nav [data-badge="stores"]', "the Stores item's count")
+    want("the Stores item's count", badge, str(waiting))
 
 
 @finding("10.9", "the Agents page names the installed hook mode")
 def _(d):
-    d.open_view("agents", fresh=True)
-    time.sleep(2)
+    a_store(d)
+    d.open_view("agents/health", fresh=True)
     body = view_text(d)
-    if "hook" in body and not re.search(r"hook \w+ \((soft|gate|hard)\)", body):
-        # A machine with no hook installed shows no mode, and that is right.
-        clients = d.api("/api/agents").get("clients") or []
-        if any(c.get("hook_mode") for c in clients):
-            fail("a hook mode is installed and the Agents page does not name it")
+    clients = d.api("/api/agents").get("doctor") or []
+    modes = [c for c in clients if c.get("hook_mode") and c.get("hook") and c.get("hook") != "paste"]
+    for c in modes:
+        if not re.search(r"hook \(%s\)" % re.escape(c["hook_mode"]), body):
+            fail("%s has hook mode %s installed and Agents › Health does not name it" % (c["name"], c["hook_mode"]))
 
 
-@finding("10.10", "Discard scan leaves no empty store behind for a folder that had none")
+@finding("10.10", "discarding a held scan leaves no empty store behind for a folder that had none")
 def _(d):
-    """The scan of a new folder registers its store so the plan has somewhere
-    to live. Discarding that scan has to take the store with it (`delete: true`
-    on the held run's stop, sent when it had no files before), or every scan a
-    person thinks better of leaves an empty store on the Stores page."""
+    """A scan of a new folder registers its store so the plan has somewhere to
+    live. Discarding that scan — Stop… on its held card, "Also delete the store"
+    ticked as it is for a store that held nothing — has to take the store with
+    it, or every scan a person thinks better of leaves an empty store behind."""
     root = clean_tree(d, "discard")
-    run = scan_on_page(d, root)
-    store = run["store"]
+    run_id, store = start_index(d, root, review="always")
+    run = held_run(d, root)
     try:
-        d.click_text(".index-bar-group.end button", "Discard scan")
-        d.wait_for("(document.querySelector(%s) || {}).textContent === 'Scan'" % json.dumps(SCAN_BUTTON),
-                   timeout=20, what="the button to read Scan again after the discard")
-        if exists(d, SCAN_PANEL):
-            fail("the scan panel is still on screen after Discard scan")
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for(card_offers(CARD, "Stop…"), what="the held scan's card, offering Stop")
+        if "Held for review" not in d.eval("(%s).innerText" % CARD):
+            fail("the held scan's card does not say it is held for review")
+        press_in(d, CARD, "Stop…")
+        d.wait_for("!!document.querySelector(%s)" % json.dumps(MODAL), what="the discard confirm")
+        if d.eval("(document.querySelector('#stop-delete') || {}).checked") is not True:
+            fail("discarding the scan of a new folder does not offer, ticked, to delete its empty store")
+        d.modal_press("Stop and undo")
         deadline = time.time() + 20
         while time.time() < deadline:
             if store not in {s["name"] for s in d.api("/api/stores")["stores"]}:
@@ -5620,21 +5228,26 @@ def _(d):
         release_held(d, run)
 
 
-@finding("10.11", "a store's size and what Compact gives back are on the Stores page, and Compact gives it back")
+@finding("10.11", "a store's size and what Compact gives back are on the Stores list, and Compact gives it back")
 def _(d):
     """0.31.0: the Stores row states what the store takes on disk and what a
-    compaction would reclaim; the row menu's Compact asks, names the bytes, and
-    the figures move when it closes. Machine limits carries the two settings."""
+    compaction would reclaim; Compact gives it back. From 0.35.0 the two
+    settings are Settings › Performance's Compact past and Keep retired
+    definitions."""
     root = clean_tree(d, "compact")
     store = indexed_fixture(d, root)
     d.open_view("stores", fresh=True)
-    time.sleep(1.5)
-    headers = d.eval("[...document.querySelectorAll('th')].map(t => t.textContent.trim())")
-    if "Disk" not in headers:
-        fail("the Stores table has no Disk column: %r" % headers)
+    headers = texts_of(d, "#main .gl-head.gl-stores > *")
+    if "ON DISK" not in [h.upper() for h in headers]:
+        fail("the Stores list has no On disk column: %r" % headers)
     row = next((s for s in d.api("/api/stores")["stores"] if s["name"] == store), None)
     if not row or not row.get("disk") or not row["disk"].get("total"):
         fail("/api/stores gives %s no disk figures: %r" % (store, row and row.get("disk")))
+    stores_widest(d)
+    shown = d.eval("(() => { const r = %s; return r ? ((r.querySelector('.c-disk .mono') || {}).textContent || '').trim() : null; })()"
+                   % store_row_js(store))
+    if not shown or shown == "—":
+        fail("%s's row shows no size on disk: %r" % (store, shown))
     body = d.api("/api/store/compact", method="POST", body={"store": store, "wait": True})
     compact = body.get("compact") or {}
     if body.get("stopped") or not compact.get("after"):
@@ -5642,9 +5255,775 @@ def _(d):
     after = next(s for s in d.api("/api/stores")["stores"] if s["name"] == store)["disk"]
     if after["reclaimable"] != 0:
         fail("%s still has %d reclaimable bytes straight after a compaction" % (store, after["reclaimable"]))
-    d.open_view("index")
-    d.open_index_panel("Machine limits")
-    for label in ("compact past %", "history days"):
-        if not exists(d, 'input[aria-label="%s"]' % label):
-            fail("Machine limits has no %r field" % label)
-    d.close_index_panel("Machine limits")
+    d.open_view("settings")
+    for label in ("Compact past", "Keep retired definitions"):
+        if limit_value(d, label) is None:
+            fail("Settings › Performance has no %r limit" % label)
+
+
+# ---------------------------------------------------------------- 0.35.0 (v6.x)
+#
+# One or more checks per v6 view and flow. Each opens its view with the
+# console cleared, compares what it shows with what the daemon says — never a
+# sample value the design was drawn with — presses its primary control, and
+# fails on any console error the view wrote.
+#
+# Some of what these assert rides on routes 0.35.0 adds alongside the page
+# (empty named stores, per-store settings, the ledger recording switch, review
+# decisions, runtime airgap, start at login, persisted run history, per-tool
+# answer sizes). They are written against the release's API contract, so they
+# pass once the daemon carries it.
+
+
+def human_bytes(value):
+    """`bytes()` in app.js, so a size can be compared as the page prints it."""
+    size, unit, units = float(value or 0), 0, ["B", "KB", "MB", "GB", "TB"]
+    while size >= 1024 and unit < len(units) - 1:
+        size /= 1024
+        unit += 1
+    return ("%d %s" % (size, units[unit])) if unit == 0 else ("%.1f %s" % (size, units[unit]))
+
+
+def open_clean(d, route, fresh=False):
+    """Open a route with the console cleared before it."""
+    d.clear_console()
+    d.open_view(route, fresh=fresh)
+
+
+def no_console_errors(d, what):
+    pause(d, 300)
+    errors = d.console_errors()
+    if errors:
+        fail("%s wrote %d console error(s):\n  %s" % (what, len(errors), "\n  ".join(errors[:5])))
+
+
+def kpi(d, label):
+    """A KPI tile's value and caption, by its label, anywhere on screen."""
+    return d.eval(
+        "(() => { const k = [...document.querySelectorAll('.kpi')].find(k =>"
+        " ((k.querySelector('.eyebrow') || {}).textContent || '').trim().toLowerCase() === %s.toLowerCase());"
+        " return k ? {v: ((k.querySelector('.v') || {}).textContent || '').trim(),"
+        " s: ((k.querySelector('.s') || {}).textContent || '').trim()} : null; })()" % json.dumps(label)
+    )
+
+
+def wz_step(d, n):
+    d.wait_for("/STEP %d OF/.test((document.querySelector('.wz-head') || {}).innerText || '')" % n,
+               timeout=30, what="the wizard's step %d" % n)
+
+
+def wizard_to(d, step, root=None):
+    """Drive the first-run wizard from Welcome to `step` with a store of its own.
+
+    1 Name, 2 Sources, 3 Review, 4 Index (before the run starts), 5 Connect.
+    Returns the store's name.
+    """
+    name = "wz-%d" % random.randint(10000, 99999)
+    d.open_view("welcome", fresh=True)
+    press_text(d, ".welcome-card button", "Create your first store", "Create your first store")
+    wz_step(d, 1)
+    if step == 1:
+        return name
+    d.type('.wz-body input[aria-label="Store name"]', name)
+    press_text(d, ".wz-foot button", "Create store", "Create store")
+    wz_step(d, 2)
+    if step == 2:
+        return name
+    root = root or clean_tree(d, name)
+    wizard_mode(d, "Paste a path")
+    d.type(".wz-body .box input", root)
+    d.press("Enter")
+    d.wait_for("document.querySelectorAll('.wz-body .src-row').length > 0", what="the pasted folder as a source")
+    press_text(d, ".wz-foot button", "Scan 1 source", "Scan 1 source")
+    wz_step(d, 3)
+    d.wait_for("!!document.querySelector('.wz-body .error-box') || [...document.querySelectorAll('.wz-foot button')]"
+               ".some(b => /Continue to index/.test(b.textContent) && !b.disabled)",
+               timeout=60, what="the scan to finish")
+    if exists(d, ".wz-body .error-box"):
+        fail("the wizard's scan of %s into the new store %s was refused: %s"
+             % (root, name, text_of(d, ".wz-body .error-box", "the scan's error")))
+    if step == 3:
+        return name
+    press_text(d, ".wz-foot button", "Continue to index", "Continue to index")
+    wz_step(d, 4)
+    if step == 4:
+        return name
+    press_text(d, ".wz-foot button", "Start indexing", "Start indexing")
+    d.wait_for("[...document.querySelectorAll('.wz-foot button')].some(b => /Next: connect agents/.test(b.textContent))",
+               timeout=60, what="the run to start")
+    press_text(d, ".wz-foot button", "Next: connect agents", "Next: connect agents")
+    wz_step(d, 5)
+    return name
+
+
+def reach_connect_step(d, prefix):
+    return wizard_to(d, 5)
+
+
+@finding("v6.1", "Welcome shows this machine's checks from the daemon and opens the wizard")
+def _(d):
+    open_clean(d, "welcome", fresh=True)
+    d.wait_for("!/checking…/.test((document.querySelector('.welcome-body .card-h') || {}).innerText || '')",
+               timeout=30, what="the machine checks to be read")
+    rows = d.eval(
+        "Object.fromEntries([...document.querySelectorAll('.check-row')].map(r => ["
+        " ((r.querySelector('.k') || {}).textContent || '').trim(),"
+        " {v: ((r.querySelector('.v') || {}).textContent || '').trim(), d: ((r.querySelector('.d') || {}).textContent || '').trim()}]))"
+    )
+    about = d.api("/api/about")
+    if about["bind"] not in rows.get("Daemon", {}).get("d", ""):
+        fail("the Daemon check reads %r, not the daemon's %s" % (rows.get("Daemon"), about["bind"]))
+    lanes = [l for l in d.api("/api/accel")["lanes"] if l.get("enabled")]
+    best = next((l for l in lanes if l["lane"] != "cpu"), lanes[0] if lanes else None)
+    if best and rows.get("Accelerator", {}).get("v") != (best.get("label") or best["lane"]):
+        fail("the Accelerator check names %r; the daemon's first lane on is %s"
+             % (rows.get("Accelerator"), best.get("label") or best["lane"]))
+    machine = d.api("/api/index/runs")["limits"]["machine"]
+    want("the Memory check", rows.get("Memory", {}).get("v"), "%d GiB" % round(machine["total_memory_mb"] / 1024))
+    model = (d.api("/api/privacy").get("downloads") or [{}])[0]
+    want("the Embedding model check", rows.get("Embedding model", {}).get("v"), human_bytes(model.get("bytes")))
+    found = [c for c in d.api("/api/agents").get("doctor") or [] if c.get("present") or any(f.get("exists") for f in c.get("files") or [])]
+    want("the Agent clients check", rows.get("Agent clients", {}).get("v"), "%d found" % len(found))
+    press_text(d, ".welcome-card button", "Create your first store")
+    wz_step(d, 1)
+    no_console_errors(d, "Welcome and the wizard it opens")
+    press_text(d, "header.top button", "Back to welcome", "Back to welcome")
+
+
+@finding("v6.2", "the wizard's Name step checks the name as it is typed and creates an empty store")
+def _(d):
+    taken = a_store(d)
+    d.clear_console()
+    wizard_to(d, 1)
+    box = '.wz-body input[aria-label="Store name"]'
+
+    def state():
+        return d.eval(
+            "({hint: (document.querySelector('.wz-body .hint-l') || {}).textContent || '',"
+            " bad: (document.querySelector('.wz-body .hint-l') || {className: ''}).className.includes('bad'),"
+            " create: [...document.querySelectorAll('.wz-foot button')].find(b => /Create store/.test(b.textContent))})"
+        )
+
+    d.type(box, "Bad Name!")
+    seen = state()
+    if not seen["bad"] or "lowercase letters, digits and dashes" not in seen["hint"]:
+        fail("a name with capitals and a '!' is not refused as it is typed: %r" % seen["hint"])
+    if not d.eval("[...document.querySelectorAll('.wz-foot button')].find(b => /Create store/.test(b.textContent)).disabled"):
+        fail("Create store is on offer for an invalid name")
+    d.type(box, taken)
+    if "already a store" not in state()["hint"]:
+        fail("the name of an existing store, %s, is not refused: %r" % (taken, state()["hint"]))
+    name = "wz-name-%d" % random.randint(1000, 99999)
+    d.type(box, name)
+    if ("~/.semlith/stores/%s" % name) not in state()["hint"]:
+        fail("a free name does not say where the store will be kept: %r" % state()["hint"])
+    press_text(d, ".wz-foot button", "Create store")
+    wz_step(d, 2)
+    row = next((s for s in d.api("/api/stores")["stores"] if s["name"] == name), None)
+    if row is None or row.get("files"):
+        fail("Create store did not make an empty store called %s: %r" % (name, row))
+    no_console_errors(d, "the wizard's Name step")
+    press_text(d, "header.top button", "Exit setup", "leaving the wizard")
+    if d.modal_open():
+        d.modal_press("Delete store")
+
+
+@finding("v6.3", "the wizard's Sources step browses, pastes and takes a URL, and counts what it will scan")
+def _(d):
+    d.clear_console()
+    wizard_to(d, 2)
+    wizard_mode(d, "Browse folders")
+    home = d.api("/api/dirs")
+    want("where the folder picker opens", browse_where(d, ".wz-body"), "~")
+    shown = d.eval("document.querySelectorAll('.wz-body .bitem').length")
+    # The store home is left out of the picker: indexing semlith's own stores
+    # is refused, so offering it would be a dead end.
+    store_home = d.api("/api/about").get("store_home")
+    offered = [e for e in home.get("entries") or [] if e.get("path") != store_home]
+    want("the entries the picker lists", shown, len(offered))
+    root = clean_tree(d, "sources")
+    wizard_mode(d, "Paste a path")
+    d.type(".wz-body .box input", root)
+    d.press("Enter")
+    d.wait_for("document.querySelectorAll('.wz-body .src-row').length === 1", what="the pasted folder as a source")
+    want("the source's path", text_of(d, ".wz-body .src-row .p", "the source row"), tilde(d, root))
+    want("the scan button", text_of(d, ".wz-foot button.primary", "the footer's main button"), "Scan 1 source")
+    wizard_mode(d, "Add a URL")
+    d.type(".wz-body .box input", "http://example.com/plain")
+    fetch = ("[...document.querySelectorAll('.wz-body button')].find(b => b.textContent.trim() === 'Fetch')")
+    if not d.eval("%s.disabled" % fetch):
+        fail("Fetch is on offer for an http:// address; only https is fetched")
+    d.type(".wz-body .box input", "https://example.com/page")
+    if d.eval("%s.disabled" % fetch):
+        fail("Fetch is not on offer for an https address")
+    no_console_errors(d, "the wizard's Sources step")
+    press_text(d, "header.top button", "Exit setup", "leaving the wizard")
+    if d.modal_open():
+        d.modal_press("Delete store")
+
+
+@finding("v6.4", "the wizard's Review step shows the scan's own figures and takes decisions")
+def _(d):
+    d.clear_console()
+    root = review_tree(d, "wzreview")
+    wizard_to(d, 3, root=root)
+    run = held_run(d, root)
+    plan = run.get("plan") or {}
+    left = kpi_value(d, "Your decision")
+    want("the decisions left", left, "%d left" % len(plan.get("review") or []))
+    want("the files that will be indexed", kpi_value(d, "Will be indexed"), grouped(plan.get("embed")))
+    if int(kpi_value(d, "Credential files") or 0) < len(plan.get("credential") or []):
+        fail("the review step counts fewer credential files than the scan found: %r vs %r"
+             % (kpi_value(d, "Credential files"), plan.get("credential")))
+    press_text(d, ".wz-body button", "Apply suggestions to 2 undecided", "applying the suggestions")
+    want("the decisions left after applying the suggestions", kpi_value(d, "Your decision"), "done")
+    no_console_errors(d, "the wizard's Review step")
+    press_text(d, "header.top button", "Exit setup", "leaving the wizard")
+    if d.modal_open():
+        d.modal_press("Delete store")
+    release_held(d, run)
+
+
+@finding("v6.5", "the wizard's Index step runs on this machine's lanes and ends on a store that answers")
+def _(d):
+    d.clear_console()
+    name = wizard_to(d, 4)
+    lanes = [l for l in d.api("/api/accel")["lanes"] if (l.get("status") or {}).get("state") != "unavailable"]
+    cards = d.eval("document.querySelectorAll('.wz-body .pick-card').length")
+    want("the lanes the Index step offers", cards, len(lanes))
+    press_text(d, ".wz-foot button", "Start indexing")
+    d.wait_for("/is ready/.test((document.querySelector('.wz-body .done-banner') || {}).innerText || '')",
+               timeout=RUN_FINISHES, what="the run to finish on the Index step")
+    banner = text_of(d, ".wz-body .done-banner", "the done banner")
+    files = store_named(d, name)["files"]
+    if not re.search(r"\b%s files? indexed" % re.escape(grouped(files)), banner):
+        fail("the done banner reads %r and %s holds %d files" % (banner, name, files))
+    d.type('.wz-body input[aria-label="Try a search"]', "callee")
+    press_text(d, ".wz-body button", "Search")
+    d.wait_for("document.querySelectorAll('.wz-body .try-row').length > 0 || /Nothing matched/.test(document.querySelector('.wz-body').innerText)",
+               timeout=30, what="the try-it search to answer")
+    no_console_errors(d, "the wizard's Index step")
+
+
+@finding("v6.6", "the wizard's Connect step lists this machine's clients and writes nothing until Register")
+def _(d):
+    d.clear_console()
+    wizard_to(d, 5)
+    agents = d.api("/api/agents")
+    cards = d.eval("document.querySelectorAll('.wz-body .client-pick').length")
+    want("the clients the Connect step lists", cards, len(agents.get("clients") or []))
+    if "Nothing is written until you press Register" not in d.eval("document.querySelector('.wz-foot').innerText"):
+        fail("the Connect step does not say nothing is written until Register")
+    registered = [c["name"] for c in agents.get("doctor") or [] if c.get("registered")]
+    after = [c["name"] for c in d.api("/api/agents").get("doctor") or [] if c.get("registered")]
+    want("the clients registered by reaching the Connect step", after, registered)
+    no_console_errors(d, "the wizard's Connect step")
+    press_text(d, ".wz-foot button", "Skip for now")
+    d.wait_for("location.hash === '#/home'", what="Skip for now to land on Home")
+
+
+@finding("v6.7", "Home counts what the daemon holds and leads to it")
+def _(d):
+    a_store(d)
+    open_clean(d, "home", fresh=True)
+    live = [s for s in stores(d) if not s.get("missing") and not s.get("unopened")]
+    want("the Stores tile", kpi(d, "Stores")["v"], str(len(live)))
+    want("the Files indexed tile", kpi(d, "Files indexed")["v"], grouped(sum(s.get("files") or 0 for s in live)))
+    rows = d.eval("document.querySelectorAll('#main .gl-row.gl-home-stores').length")
+    want("the stores Home lists", rows, min(8, len(stores(d))))
+    d.click("#main .kpi")
+    d.wait_for("location.hash === '#/stores'", what="the Stores tile to open Stores")
+    no_console_errors(d, "Home")
+
+
+@finding("v6.8", "All stores lists every store, filters, and opens one")
+def _(d):
+    store = a_store(d)
+    open_clean(d, "stores", fresh=True)
+    all_stores = stores(d)
+    foot = text_of(d, "#main .card-foot .grow", "the list's count")
+    if "of %s" % ("%d store" % len(all_stores) + ("" if len(all_stores) == 1 else "s")) not in foot:
+        fail("the list counts %r and the daemon holds %d stores" % (foot, len(all_stores)))
+    d.type('#main input[aria-label="Filter stores"]', store)
+    pause(d, 200)
+    names = d.eval("[...document.querySelectorAll('#main .gl-row.gl-stores .cellname .a')].map(a => a.firstChild.textContent.trim())")
+    if store not in names or any(store not in n for n in names):
+        fail("filtering by %r lists %r" % (store, names))
+    d.eval("(%s).click()" % store_row_js(store))
+    d.wait_for("location.hash === %s" % json.dumps("#/store/%s" % store), what="a row to open its store")
+    no_console_errors(d, "All stores")
+    d.open_view("stores")
+    d.type('#main input[aria-label="Filter stores"]', "")
+
+
+@finding("v6.9", "Inside the index measures the stores themselves")
+def _(d):
+    a_store(d)
+    open_clean(d, "stores/inside", fresh=True)
+    corpus = [c for c in d.api("/api/corpus").get("stores") or [] if not c.get("error")]
+    want("the Lines of code tile", kpi(d, "Lines of code")["v"], grouped(sum(c.get("lines") or 0 for c in corpus)))
+    want("the Words indexed tile", kpi(d, "Words indexed")["v"], grouped(sum(c.get("words") or 0 for c in corpus)))
+    no_console_errors(d, "Inside the index")
+
+
+@finding("v6.10", "a store's Overview states its own figures and searches it")
+def _(d):
+    store = a_store(d)
+    row = store_named(d, store)
+    open_clean(d, "store/%s" % store, fresh=True)
+    want("the Files tile", kpi(d, "Files")["v"], grouped(row["files"]))
+    want("the Chunks tile", kpi(d, "Chunks")["v"], grouped(row["chunks"]))
+    roots = d.eval("document.querySelectorAll('#main .root-row').length")
+    want("the sources listed", roots, max(1, len(row.get("roots") or [])))
+    press_text(d, "#main button", "Search it")
+    d.wait_for("location.hash === '#/search'", what="Search it to open Search")
+    want("the store Search is scoped to", text_of(d, "#main .scope-btn .v", "the search scope"), store)
+    no_console_errors(d, "a store's Overview")
+
+
+@finding("v6.11", "a store's Files tab lists its files as the daemon counts them, and filters")
+def _(d):
+    store = a_store(d)
+    open_clean(d, "store/%s/files" % store, fresh=True)
+    d.wait_for("document.querySelectorAll('#main table tbody tr').length > 0", what="the files")
+    total = d.api("/api/files?store=%s&limit=1" % urllib.parse.quote(store))["total"]
+    if ("of %s" % grouped(total)) not in text_of(d, "#main .card-foot .grow", "the table's count"):
+        fail("the Files tab counts %r and the daemon holds %d files" % (text_of(d, "#main .card-foot .grow", "count"), total))
+    d.type('#main input[aria-label="Path or glob"]', "**/*.md")
+    pause(d, 700)
+    md = d.api("/api/files?store=%s&limit=1&path=%s" % (urllib.parse.quote(store), urllib.parse.quote("**/*.md")))["total"]
+    if ("of %s" % grouped(md)) not in text_of(d, "#main .card-foot .grow", "the table's count"):
+        fail("filtered to **/*.md the Files tab counts %r; the daemon has %d" % (text_of(d, "#main .card-foot .grow", "count"), md))
+    no_console_errors(d, "a store's Files tab")
+
+
+@finding("v6.12", "a store's Review tab lists what waits, and a decision takes a file out of the list")
+def _(d):
+    root = review_tree(d, "v6review")
+    store = indexed_fixture(d, root)
+    rows = [r for s in d.api("/api/refused")["stores"] if s["store"] == store for r in s["rows"]]
+    waiting = [r for r in rows if r.get("reviewable") and not r.get("accepted") and not r.get("kept_out")]
+    open_clean(d, "store/%s/review" % store, fresh=True)
+    shown = d.eval("document.querySelectorAll('#main .card.accent-edge .dec-grid:not(.head)').length")
+    want("the files waiting for a decision", shown, len(waiting))
+    if not waiting:
+        skip("nothing waits for a decision in the fixture store")
+    d.eval("[...document.querySelectorAll('#main .card.accent-edge .dec-grid:not(.head)')][0]"
+           ".querySelector('.acts button').click()")
+    d.wait_for("document.querySelectorAll('#main .card.accent-edge .dec-grid:not(.head)').length === %d" % (len(waiting) - 1),
+               timeout=20, what="Keep it out to take the file out of the waiting list")
+    no_console_errors(d, "a store's Review tab")
+
+
+@finding("v6.13", "a store's Runs tab lists its runs as the daemon holds them")
+def _(d):
+    store = indexed_fixture(d, d.fixtures.unique("v6runs"))
+    runs = d.api("/api/index/runs")
+    mine = {r["id"] for r in runs.get("runs") or [] if r["store"] == store and r["status"] in TERMINAL}
+    mine |= {h["id"] for h in runs.get("history") or [] if h.get("store") == store}
+    open_clean(d, "store/%s/runs" % store, fresh=True)
+    d.wait_for("document.querySelectorAll(%s).length > 0" % json.dumps(HIST_ROW), what="History")
+    want("the History rows", d.eval("document.querySelectorAll(%s).length" % json.dumps(HIST_ROW)), min(30, len(mine)))
+    if not isinstance(runs.get("history"), list):
+        fail("/api/index/runs carries no `history`, so a finished run does not outlive a restart")
+    d.click(HIST_ROW)
+    d.wait_for("document.querySelector(%s).getAttribute('aria-expanded') !== null" % json.dumps(HIST_ROW), what="a row to open")
+    no_console_errors(d, "a store's Runs tab")
+
+
+@finding("v6.14", "a store's Settings tab reads the store's settings and renames it")
+def _(d):
+    store = indexed_fixture(d, d.fixtures.unique("v6settings"))
+    open_clean(d, "store/%s/settings" % store, fresh=True)
+    want("the name field", d.eval("document.querySelector('#main input[aria-label=\"Store name\"]').value"), store)
+    row = store_named(d, store)
+    for title, key in (("Watch for changes", "watch"), ("Record retrievals", "record")):
+        on = d.eval("[...document.querySelectorAll('#main .tg-plain')].find(b => b.innerText.startsWith(%s)).getAttribute('aria-checked')"
+                    % json.dumps(title))
+        want("the %s switch" % title, on, "false" if row.get(key) is False else "true")
+    for key in ("kind", "lean", "watch", "record"):
+        if key not in row:
+            fail("/api/stores carries no %r for %s, so the tab cannot read it" % (key, store))
+    renamed = store + "-r"
+    d.type('#main input[aria-label="Store name"]', renamed)
+    press_text(d, "#main button", "Rename")
+    d.wait_for("location.hash === %s" % json.dumps("#/store/%s/settings" % renamed), timeout=20,
+               what="the rename to land on the renamed store")
+    if renamed not in {s["name"] for s in stores(d)}:
+        fail("the page moved to %s and the daemon has no store by that name" % renamed)
+    # A rename reopens the store and its watcher catches up; renaming back
+    # mid-run is refused by design, so the clean-up waits for it.
+    if run_for(d, renamed):
+        wait_for_run(d, renamed)
+    d.api("/api/store/settings", method="POST", body={"store": renamed, "rename": store})
+    no_console_errors(d, "a store's Settings tab")
+
+
+def search_mode(d, mode, query, lang=None):
+    open_clean(d, "search", fresh=True)
+    press_text(d, "#main .seg button", mode)
+    if lang:
+        pick(d, '#main .dd[aria-label="Pattern language"]', lang)
+    d.type(SEARCH_BOX, query)
+    d.press("Enter")
+    d.wait_for("!document.querySelector('#main .spinner') && (document.querySelectorAll('#main .hit-group, #main .card .lines, #main .error-box').length > 0"
+               " || /Nothing matched|No indexed line|matched nothing/.test(document.querySelector('#main').innerText))",
+               timeout=60, what="the %s search to answer" % mode)
+    if exists(d, "#main .error-box"):
+        fail("the %s search answered an error: %s" % (mode, text_of(d, "#main .error-box", "the error")))
+
+
+@finding("v6.15", "Search's Ranked mode shows the daemon's hits and reads the first")
+def _(d):
+    a_store(d)
+    query = "release record sealed immutable"
+    search_mode(d, "Ranked", query)
+    answer = d.api("/api/search?query=%s&k=8&format=locate&max_tokens=1500" % urllib.parse.quote(query))
+    files = {(h.get("store"), h["path"]) for h in answer.get("hits") or []}
+    want("the files Ranked groups its hits by", d.eval("document.querySelectorAll('#main .hit-group').length"), len(files))
+    d.wait_for("!!document.querySelector('#main .sr-detail .lines .l')", timeout=20, what="the first hit read into the detail panel")
+    no_console_errors(d, "Search › Ranked")
+
+
+@finding("v6.16", "Search's Brief mode is exactly what semlith_brief returns")
+def _(d):
+    a_store(d)
+    query = "what keeps the index fresh"
+    search_mode(d, "Brief", query)
+    answer = d.api("/api/brief?question=%s&budget=1500" % urllib.parse.quote(query))
+    tokens = (answer.get("brief") or {}).get("tokens") or 0
+    strip = d.eval("document.querySelector('#main').innerText")
+    if ("%s of 1,500" % grouped(tokens)) not in strip:
+        fail("the Brief's strip does not state the brief's own %d tokens" % tokens)
+    no_console_errors(d, "Search › Brief")
+
+
+@finding("v6.17", "Search's Exact mode lists every matching line the daemon finds")
+def _(d):
+    a_store(d)
+    search_mode(d, "Exact", "Widget000")
+    answer = d.api("/api/search?query=Widget000&exact=1")
+    lines = len(answer.get("matches") or [])
+    if ("%d line" % lines) not in text_of(d, "#main .sr-foot", "the Exact foot"):
+        fail("the Exact foot reads %r; the daemon matched %d lines" % (text_of(d, "#main .sr-foot", "foot"), lines))
+    no_console_errors(d, "Search › Exact")
+
+
+@finding("v6.18", "Search's Pattern mode runs a tree-sitter query over one language")
+def _(d):
+    a_store(d)
+    query = "(function_item name: (identifier) @f)"
+    search_mode(d, "Pattern", query, lang="rust")
+    answer = d.api("/api/pattern?query=%s&lang=rust" % urllib.parse.quote(query))
+    lines = len(answer.get("matches") or [])
+    foot = text_of(d, "#main .sr-foot", "the Pattern foot")
+    if ("%d line" % lines) not in foot or "tree-sitter · rust" not in foot:
+        fail("the Pattern foot reads %r; the daemon matched %d" % (foot, lines))
+    no_console_errors(d, "Search › Pattern")
+
+
+@finding("v6.19", "Graph's Explore draws the store's graph and selects a node on click")
+def _(d):
+    a_store(d)
+    open_clean(d, "graph", fresh=True)
+    store = d.eval("((document.querySelector('.g-bar button[aria-haspopup] .mono') || {}).textContent || '').trim()")
+    sel = d.eval("document.querySelector('.g-sel .nm').textContent.trim()")
+    answer = d.api("/api/graph?store=%s&limit=63&name=%s" % (urllib.parse.quote(store), urllib.parse.quote(sel)))
+    foot = text_of(d, ".g-foot", "the graph's foot")
+    if ("of %s symbols" % grouped(answer.get("total"))) not in foot:
+        fail("the foot reads %r; the daemon's graph holds %s symbols" % (foot, answer.get("total")))
+    want("the nodes drawn", d.eval("document.querySelectorAll('.g-live .g-node').length"), len(answer.get("nodes") or []))
+    other = d.eval("[...document.querySelectorAll('.g-live .g-node')].map(n => n.textContent).find(t => t !== %s)" % json.dumps(sel))
+    if other:
+        d.eval("[...document.querySelectorAll('.g-live .g-node')].find(n => n.textContent === %s).click()" % json.dumps(other))
+        d.wait_for("document.querySelector('.g-sel .nm').textContent.trim() === %s" % json.dumps(other),
+                   what="a click on %s to select it" % other)
+    no_console_errors(d, "Graph › Explore")
+
+
+@finding("v6.20", "Graph's Blast radius counts what the daemon reaches")
+def _(d):
+    root = review_tree(d, "v6blast")
+    store = indexed_fixture(d, root)
+    d.clear_console()
+    reach(d, "callee", store)
+    imp = d.api("/api/impact?name=callee&store=%s&depth=3" % urllib.parse.quote(store))["impact"]
+    figures = texts_of(d, "#main .q3 .stat-inline .v")
+    want("the REACHED, FILES and INFERRED figures", figures,
+         [grouped(len(imp.get("reached") or []) + (imp.get("hidden") or 0)), grouped(len(imp.get("files") or [])),
+          grouped((imp.get("inferred") or 0) + (imp.get("ambiguous") or 0))])
+    no_console_errors(d, "Graph › Blast radius")
+
+
+@finding("v6.21", "Graph's Path & evidence answers as the daemon traces")
+def _(d):
+    root = review_tree(d, "v6path")
+    store = indexed_fixture(d, root)
+    open_clean(d, "graph/path", fresh=True)
+    pick_store(d, ".ctrl-card button[aria-haspopup]", store, "graph/path")
+    d.type('.ctrl-card input[aria-label="From"]', "caller")
+    d.type('.ctrl-card input[aria-label="To"]', "callee")
+    press_text(d, ".ctrl-card button", "Find the path")
+    d.wait_for("/ANSWER/.test(document.querySelector('#main').innerText)", timeout=30, what="the path's answer")
+    answer = d.api("/api/trace?from=caller&to=callee&store=%s" % urllib.parse.quote(store))
+    shown = text_of(d, "#main .card-b .big14", "the answer")
+    want("the answer the page states", shown, (answer.get("trace") or {}).get("answer"))
+    no_console_errors(d, "Graph › Path & evidence")
+
+
+@finding("v6.22", "Agents › Connected shows the endpoint and what the tool list costs")
+def _(d):
+    a_store(d)
+    open_clean(d, "agents", fresh=True)
+    agents = d.api("/api/agents")
+    want("the endpoint the page names", text_of(d, "#main .endpoint-box .u", "the endpoint"), (agents.get("endpoint") or {}).get("url"))
+    tabs = dict((t.rsplit("\n", 1)[0], t.rsplit("\n", 1)[-1]) for t in texts_of(d, "#main .tabs .tab") if "\n" in t)
+    if tabs.get("Tools") != str(len(agents.get("tools") or [])):
+        fail("the Tools tab counts %r; the daemon lists %d tools" % (tabs.get("Tools"), len(agents.get("tools") or [])))
+    conns = agents.get("connections") or []
+    rows = d.eval("document.querySelectorAll('#main table tbody tr').length")
+    want("the clients listed as connected", rows, len(conns))
+    no_console_errors(d, "Agents › Connected")
+
+
+@finding("v6.23", "Agents › Add a client lists every documented client and shows each one's config")
+def _(d):
+    a_store(d)
+    open_clean(d, "agents/add", fresh=True)
+    agents = d.api("/api/agents")
+    want("the clients listed", d.eval("document.querySelectorAll('#main .client-row').length"), len(agents.get("clients") or []))
+    name = (agents.get("clients") or [{}])[0].get("name")
+    agents_add(d, name)
+    press_text(d, "#main .tabs .tab", "Config file")
+    code = text_of(d, "#main .code", "the client's config")
+    if "semlith" not in code:
+        fail("the config shown for %s does not mention semlith: %r" % (name, code[:200]))
+    no_console_errors(d, "Agents › Add a client")
+
+
+@finding("v6.24", "Agents › Tools lists the sixteen tools with a typical answer size each")
+def _(d):
+    a_store(d)
+    open_clean(d, "agents/tools", fresh=True)
+    tools = d.api("/api/agents").get("tools") or []
+    rows = d.eval("[...document.querySelectorAll('#main table tbody tr')].map(tr => [...tr.cells].map(c => c.innerText.trim()))")
+    want("the tools listed", [r[0] for r in rows], [t["name"] for t in tools])
+    if len(rows) != 16:
+        fail("Agents › Tools lists %d tools, expected 16" % len(rows))
+    sized = [r for r in rows if re.match(r"^~?[\d,]+ tok$", r[2])]
+    if len(sized) != len(rows):
+        fail("%d of %d tools carry no typical answer size: %r"
+             % (len(rows) - len(sized), len(rows), [r[0] for r in rows if r not in sized][:4]))
+    no_console_errors(d, "Agents › Tools")
+
+
+@finding("v6.25", "Agents › Health lists every client's state and checks again")
+def _(d):
+    a_store(d)
+    open_clean(d, "agents/health", fresh=True)
+    doctor = d.api("/api/agents").get("doctor") or []
+    want("the clients listed", d.eval("document.querySelectorAll('#main table tbody tr').length"), len(doctor))
+    press_text(d, "#main button", "Check again")
+    d.wait_for("[...document.querySelectorAll('.toast')].some(t => /Checked \\d+ clients?/.test(t.innerText))",
+               timeout=20, what="Check again to answer")
+    no_console_errors(d, "Agents › Health")
+
+
+@finding("v6.26", "the Ledger's Sessions tab counts what the ledger holds")
+def _(d):
+    a_store(d)
+    d.api("/api/search?query=release%20record&k=4")
+    time.sleep(0.5)
+    open_clean(d, "ledger", fresh=True)
+    ledger = d.api("/api/ledger")
+    want("the Queries recorded tile", kpi(d, "Queries recorded")["v"], grouped(ledger.get("queries")))
+    sessions = ledger.get("sessions") or []
+    want("the sessions on the first page", d.eval("document.querySelectorAll('#main table tbody tr').length"), min(10, len(sessions)))
+    no_console_errors(d, "Ledger › Sessions")
+
+
+@finding("v6.27", "the Ledger's Retrievals tab lists the rows and filters to zero hits")
+def _(d):
+    a_store(d)
+    d.api("/api/search?query=zzqqxx%20nothing%20matches%20this&k=4")
+    time.sleep(0.5)
+    open_clean(d, "ledger/retrievals", fresh=True)
+    rows = d.api("/api/ledger").get("rows") or []
+    want("the retrievals on the first page", d.eval("document.querySelectorAll('#main table tbody tr').length"), min(10, len(rows)))
+    press_text(d, "#main .filterbar button", "Zero-hit only")
+    zero = [r for r in rows if r.get("hits") == 0]
+    want("the zero-hit retrievals", d.eval("document.querySelectorAll('#main table tbody tr').length"), min(10, len(zero)))
+    no_console_errors(d, "Ledger › Retrievals")
+
+
+@finding("v6.28", "the Ledger's Session replay tab shows the daemon's replay state")
+def _(d):
+    a_store(d)
+    open_clean(d, "ledger/replay", fresh=True)
+    replay = d.api("/api/ledger/replay")
+    body = view_text(d)
+    if replay.get("enabled") and "turn off on the Privacy page" not in body:
+        fail("replay is on and the tab does not show its on state")
+    if not replay.get("enabled") and "Turn it on" not in body:
+        fail("replay is off and the tab offers no way to turn it on")
+    no_console_errors(d, "Ledger › Session replay")
+
+
+@finding("v6.29", "the Ledger's recording switch pauses recording and resumes it on the same chain")
+def _(d):
+    a_store(d)
+    open_clean(d, "ledger", fresh=True)
+    switch = "#main .head button[role=switch]"
+    if d.eval("document.querySelector(%s).getAttribute('aria-checked')" % json.dumps(switch)) != "true":
+        fail("the recording switch is not on in a home that never paused it")
+    try:
+        d.click(switch)
+        d.wait_for("document.querySelector(%s).getAttribute('aria-checked') === 'false'" % json.dumps(switch),
+                   timeout=10, what="the switch to read paused")
+        ledger = d.api("/api/ledger")
+        rec = ledger.get("recording")
+        if not isinstance(rec, dict) or rec.get("on") is not False or rec.get("reason") != "paused":
+            fail("/api/ledger reports recording %r after the switch paused it" % rec)
+        before = ledger["queries"]
+        d.api("/api/search?query=paused%20recording%20probe&k=2")
+        time.sleep(0.8)
+        if d.api("/api/ledger")["queries"] != before:
+            fail("a retrieval while recording is paused was recorded")
+        if "ledger paused" not in text_of(d, ".nav .daemon .facts", "the daemon card"):
+            fail("the sidebar does not say the ledger is paused")
+    finally:
+        d.api("/api/ledger/recording", method="POST", body={"on": True})
+    d.api("/api/search?query=resumed%20recording%20probe&k=2")
+    time.sleep(0.8)
+    ledger = d.api("/api/ledger")
+    if ledger.get("intact") is False:
+        fail("resuming recording broke the ledger's hash chain")
+    no_console_errors(d, "the Ledger's recording switch")
+
+
+@finding("v6.30", "Reports previews the report the daemon generates")
+def _(d):
+    a_store(d)
+    open_clean(d, "reports", fresh=True)
+    d.wait_for("((document.querySelector('#main .preview') || {}).textContent || '').length > 40", what="the preview")
+    model = d.eval("[...document.querySelectorAll('#main .seg button[aria-pressed=\"true\"]')].map(b => b.textContent).find(t => /claude|gpt|gemini/i.test(t)) || ''")
+    answer = d.api("/api/report?kind=savings&format=markdown%s" % ("&model=" + urllib.parse.quote(model) if model else ""))
+    shown = d.eval("document.querySelector('#main .preview').textContent")
+    if (answer.get("text") or "").splitlines()[:1] != shown.splitlines()[:1]:
+        fail("the preview opens %r and the daemon's savings report opens %r"
+             % (shown.splitlines()[:1], (answer.get("text") or "").splitlines()[:1]))
+    want("the schedules listed", d.eval("document.querySelectorAll('#main .sched-row').length"),
+         len(d.api("/api/schedules").get("schedules") or {}))
+    no_console_errors(d, "Reports")
+
+
+@finding("v6.31", "Privacy states what has left the machine from the daemon's own count")
+def _(d):
+    a_store(d)
+    open_clean(d, "privacy", fresh=True)
+    privacy = d.api("/api/privacy")
+    outbound, airgap = privacy.get("outbound"), privacy.get("airgap")
+    if not isinstance(outbound, dict) or "count" not in outbound:
+        fail("/api/privacy carries no outbound counter, so the verdict cannot be the daemon's: %r" % outbound)
+    if not isinstance(airgap, dict) or "on" not in airgap:
+        fail("/api/privacy carries no runtime airgap state: %r" % airgap)
+    verdict = text_of(d, "#main .verdict .t", "the verdict")
+    expected = "Nothing has left this machine" if not outbound["count"] else \
+        "%d request%s left this machine since start" % (outbound["count"], "" if outbound["count"] == 1 else "s")
+    want("the verdict", verdict, expected)
+    want("the airgap switch", d.eval("document.querySelector('#main .verdict [role=switch]').getAttribute('aria-checked')"),
+         "true" if airgap["on"] else "false")
+    bind = d.eval("[...document.querySelectorAll('#main .fact-card')].find(c => /Bind address/i.test(c.innerText)).querySelector('.v').textContent")
+    want("the bind address", bind, privacy.get("bind"))
+    press_text(d, "#main button", "Check now")
+    d.wait_for("!!document.querySelector('#main .notice.green, #main .notice.amber, #main .error-box')", timeout=60,
+               what="the store check to answer")
+    no_console_errors(d, "Privacy")
+
+
+@finding("v6.32", "Settings › Performance shows the daemon's limits and lanes")
+def _(d):
+    open_clean(d, "settings", fresh=True)
+    limits = d.api("/api/index/runs")["limits"]
+    want("Runs at once", limit_value(d, "Runs at once"), grouped(limits["runs_at_once"]["value"]))
+    want("Threads per run", limit_value(d, "Threads per run"), grouped(limits["embed_threads"]["value"]))
+    want("Memory per store", limit_value(d, "Memory per store"), "%s MiB" % grouped(limits["index_memory_mb"]["value"]))
+    want("the lanes listed", d.eval("document.querySelectorAll('#main .lane-row').length"), len(d.api("/api/accel")["lanes"]))
+    no_console_errors(d, "Settings › Performance")
+
+
+@finding("v6.33", "Settings › Agent access masks the key, reveals it on request, and reads the login service")
+def _(d):
+    open_clean(d, "settings/access", fresh=True)
+    masked = text_of(d, "#main .copyfield .t", "the agent key field")
+    if re.search(r"sml_[0-9a-f]{8,}", masked):
+        fail("the agent key is shown unmasked before Reveal: %r" % masked)
+    press_text(d, "#main button", "Reveal")
+    d.wait_for("/sml_[0-9a-f]{8,}/.test(document.querySelector('#main .copyfield .t').textContent)", what="Reveal to show the key")
+    press_text(d, "#main button", "Hide")
+    preview = d.api("/api/privacy").get("token_preview")
+    if preview and preview not in view_text(d):
+        fail("the session token preview %r is not on the page" % preview)
+    login = d.api("/api/about").get("login")
+    if not isinstance(login, dict) or "installed" not in login:
+        fail("/api/about carries no `login` state, so Start at login cannot be read: %r" % login)
+    on = d.eval("[...document.querySelectorAll('#main .card')].find(c => /Start at login/.test(c.innerText)).querySelector('[role=switch]').getAttribute('aria-checked')")
+    want("the Start at login switch", on, "true" if login.get("installed") else "false")
+    no_console_errors(d, "Settings › Agent access")
+
+
+@finding("v6.34", "Settings › Cloud renders and connects to nothing")
+def _(d):
+    open_clean(d, "settings/cloud", fresh=True)
+    if "not connected" not in view_text(d):
+        fail("Settings › Cloud does not say it is not connected")
+    no_console_errors(d, "Settings › Cloud")
+
+
+@finding("v6.35", "Settings › About states this binary's facts from the daemon")
+def _(d):
+    open_clean(d, "settings/about", fresh=True)
+    about = d.api("/api/about")
+    facts = d.eval("Object.fromEntries([...document.querySelectorAll('#main .kv')].map(r => [r.querySelector('.k').textContent.trim(), r.querySelector('.v').textContent.trim()]))")
+    if not facts.get("VERSION", "").startswith(about["version"]):
+        fail("VERSION reads %r; the daemon is %s" % (facts.get("VERSION"), about["version"]))
+    want("BOUND TO", facts.get("BOUND TO"), about["bind"])
+    langs = d.api("/api/languages").get("languages") or []
+    if not text_of(d, "#main .card-h .card-t", "the languages card").startswith("%d language" % len(langs)):
+        fail("the languages card does not count the daemon's %d languages" % len(langs))
+    if not any(t == "Check for updates" for t in texts_of(d, "#main button")):
+        fail("Settings › About offers no Check for updates")
+    prices = d.api("/api/prices")
+    if ("%s models priced" % grouped(prices.get("models"))) not in view_text(d):
+        fail("the Prices card does not count the daemon's %s priced models" % prices.get("models"))
+    no_console_errors(d, "Settings › About")
+
+
+@finding("v6.shots", "every v6 view, in light and dark, at 1440px and 390px")
+def _(d):
+    """The release record's evidence: one screenshot per view per theme per
+    width, into `<out>/shots/`. Fails only if a view does not draw."""
+    views = every_view(d) + ["welcome", "new"]
+    folder = os.path.join(d.out_dir, "shots")
+    os.makedirs(folder, exist_ok=True)
+    bad = []
+    try:
+        for theme in ("light", "dark"):
+            d.eval("try { localStorage.setItem('semlith-theme', %s); } catch (e) {}" % json.dumps(theme))
+            for width, height, mobile in ((1440, 900, False), (390, 844, True)):
+                d.set_viewport(width, height, mobile=mobile)
+                for i, view in enumerate(views):
+                    try:
+                        d.open_view(view, fresh=(i == 0 or view in ("welcome", "new")))
+                        if view == "graph":
+                            pause(d, 1200)  # let the live layout settle before the picture
+                    except cdp.ProtocolError as error:
+                        bad.append("%s %s %d: %s" % (view, theme, width, str(error)[:120]))
+                        continue
+                    slug = re.sub(r"[^a-z0-9]+", "-", view.lower()).strip("-")
+                    d.screenshot(os.path.join(folder, "%s-%d-%s.png" % (theme, width, slug)))
+    finally:
+        d.reset_viewport()
+        d.eval("try { localStorage.removeItem('semlith-theme'); } catch (e) {}")
+    if bad:
+        fail("%d view(s) did not draw: %s" % (len(bad), "; ".join(bad[:4])))

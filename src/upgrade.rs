@@ -121,6 +121,11 @@ pub struct Check {
 /// Resolve the newest release and compare it against the running binary.
 /// Changes nothing.
 pub fn check() -> Result<Check> {
+    // Here and not only in the CLI: the portal's Check button reaches this
+    // through the daemon, and the Privacy page's switch can airgap it.
+    if let Some(reason) = offline() {
+        anyhow::bail!("{reason}");
+    }
     let installed = env!("CARGO_PKG_VERSION").to_string();
     let latest = latest_tag()?;
     let available = newer(&latest, &installed);
@@ -476,8 +481,8 @@ fn octal(bytes: &[u8]) -> Option<u64> {
 /// is still a binary whose user deserves to be told a newer release exists.
 pub fn offline() -> Option<&'static str> {
     embed::airgap().then_some(
-        "SEMLITH_AIRGAP is set, so this run will not reach the network. \
-         Upgrade on a connected machine and copy the binary across.",
+        "airgap is on (SEMLITH_AIRGAP, --airgap or the Privacy page), so this run will \
+         not reach the network. Upgrade on a connected machine and copy the binary across.",
     )
 }
 
@@ -569,6 +574,7 @@ fn owned(current: &Path) -> bool {
 /// unauthenticated and off the API rate limit.
 fn latest_tag() -> Result<String> {
     let url = format!("{}/{REPO}/releases/latest", origin());
+    crate::add::note_outbound("upgrade", &url);
     let response = agent()
         .get(&url)
         .call()
@@ -616,6 +622,7 @@ fn get(url: &str, cap: u64, show_progress: bool) -> Result<Vec<u8>> {
         bar
     });
     let fetched = (|| -> Result<Vec<u8>> {
+        crate::add::note_outbound("upgrade", url);
         let mut response = agent()
             .get(url)
             .call()

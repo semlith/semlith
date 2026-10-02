@@ -30,6 +30,7 @@ pub mod coreml;
 pub mod cuda;
 pub mod daemon;
 pub mod doctor;
+pub mod drop;
 pub mod embed;
 pub mod filter;
 pub mod fleet;
@@ -38,6 +39,7 @@ pub mod fleet;
 mod formats;
 pub mod gpu;
 pub mod graph;
+pub mod helpers;
 pub mod home;
 pub mod hook;
 pub mod http;
@@ -1231,6 +1233,9 @@ const SCAN_RULES: u32 = 2;
 /// an older release wrote until somebody edited it.
 const GRAPH_RULES: u32 = 3;
 
+/// How many paths of each not-indexed class a plan lists.
+const PLAN_PATHS: usize = 50;
+
 /// One file or folder the scan phase says a person could accept.
 #[derive(Debug, Clone, Serialize)]
 pub struct Review {
@@ -1242,6 +1247,37 @@ pub struct Review {
     pub matches: Vec<keyscan::Match>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u8>,
+    /// `keyscan::assess`'s fields — risk, band, likely, tone, kind, why,
+    /// evidence, suggest — beside the row, as `/api/refused` carries them.
+    #[serde(flatten)]
+    pub assessment: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Review {
+    fn new(
+        path: String,
+        class: &str,
+        rule: String,
+        matches: Vec<keyscan::Match>,
+        confidence: Option<u8>,
+    ) -> Self {
+        let stored: Vec<serde_json::Value> = matches
+            .iter()
+            .filter_map(|m| serde_json::to_value(m).ok())
+            .collect();
+        let assessment = match keyscan::assess(class, &path, &stored, confidence) {
+            serde_json::Value::Object(map) => map,
+            _ => Default::default(),
+        };
+        Self {
+            path,
+            class: class.to_string(),
+            rule,
+            matches,
+            confidence,
+            assessment,
+        }
+    }
 }
 
 /// What a run would do, before it embeds anything (2.7).
@@ -1254,6 +1290,10 @@ pub struct Plan {
     pub unchanged: usize,
     /// Not indexed, by class.
     pub not_indexed: std::collections::BTreeMap<String, usize>,
+    /// The first [`PLAN_PATHS`] paths of each not-indexed class, so a page
+    /// can list what was left out rather than only count it.
+    #[serde(serialize_with = "serialize_plain_lists")]
+    pub not_indexed_paths: std::collections::BTreeMap<String, Vec<String>>,
     /// What a person could accept, one entry each.
     pub review: Vec<Review>,
     /// Credential files: listed, never offered.
@@ -1474,6 +1514,14 @@ pub struct Semlith {
     /// What this caller may index. The default is the command line's: the
     /// deny-list, and no confinement.
     pub boundary: Boundary,
+    /// Whether walks honour `.gitignore` and the global gitignore. The
+    /// store's `gitignore` setting (0.35.0); the deny-list, the hidden-file
+    /// rule, `.semlithignore` and the secret scan apply either way.
+    pub gitignore: bool,
+    /// Re-embed every file this pass reaches, whatever its recorded hash, and
+    /// without the vector cache: a forced re-index (0.35.0) exists to replace
+    /// what is stored, and a cache hit would hand back the same vectors.
+    pub(crate) force: bool,
     /// Size, mtime and content hash of each file the scan phase read, so the
     /// embed pass that follows it does not read an unchanged file twice.
     prehashed: std::collections::HashMap<PathBuf, (u64, i64, String)>,
@@ -1572,6 +1620,8 @@ impl Semlith {
             generation,
             quiet: false,
             boundary: Boundary::default(),
+            gitignore: true,
+            force: false,
             prehashed: Default::default(),
             scrub: false,
         })
@@ -1902,7 +1952,7 @@ impl Semlith {
         store::acceptances(&self.db)
             .unwrap_or_default()
             .into_iter()
-            .filter(|a| a.class == store::class::POLICY)
+            .filter(|a| a.class == store::class::POLICY && a.mode != "refused")
             .map(|a| PathBuf::from(a.path))
             .collect()
     }
@@ -1912,7 +1962,7 @@ impl Semlith {
     fn walk(&self, roots: &[PathBuf]) -> Walked {
         let allowed = self.accepted_folders();
         let started = std::time::Instant::now();
-        let mut walked = walk_allowing(roots, &allowed);
+        let mut walked = walk_allowing(roots, &allowed, self.gitignore);
         walked.walk_ms = started.elapsed().as_millis() as u64;
         walked
     }
@@ -1938,28 +1988,32 @@ impl Semlith {
             .into_iter()
             .map(|p| (p, false))
             .chain(walked.files.into_iter().map(|p| (p, true)));
-        let not = |plan: &mut Plan, class: &str| {
+        let not = |plan: &mut Plan, class: &str, path: &Path| {
             *plan.not_indexed.entry(class.to_string()).or_insert(0) += 1;
+            let listed = plan.not_indexed_paths.entry(class.to_string()).or_default();
+            if listed.len() < PLAN_PATHS {
+                listed.push(path.to_string_lossy().into_owned());
+            }
         };
         for dir in &walked.generated {
-            plan.review.push(Review {
-                path: dir.to_string_lossy().into_owned(),
-                class: store::class::POLICY.to_string(),
-                rule: "a generated or vendored folder the walk steps over".to_string(),
-                matches: Vec::new(),
-                confidence: None,
-            });
-            not(&mut plan, store::class::POLICY);
+            plan.review.push(Review::new(
+                dir.to_string_lossy().into_owned(),
+                store::class::POLICY,
+                "a generated or vendored folder the walk steps over".to_string(),
+                Vec::new(),
+                None,
+            ));
+            not(&mut plan, store::class::POLICY, dir);
         }
-        for _ in &walked.unreadable {
-            not(&mut plan, store::class::UNINDEXABLE);
+        for (path, _) in &walked.unreadable {
+            not(&mut plan, store::class::UNINDEXABLE, path);
         }
         for path in &walked.credentials {
             plan.credential.push(path.to_string_lossy().into_owned());
-            not(&mut plan, store::class::CREDENTIAL);
+            not(&mut plan, store::class::CREDENTIAL, path);
         }
-        for _ in &walked.excluded {
-            not(&mut plan, store::class::EXCLUDED);
+        for (path, _) in &walked.excluded {
+            not(&mut plan, store::class::EXCLUDED, path);
         }
         let boundary = self.boundary.resolved(home.as_deref());
         for (path, walked) in all {
@@ -1967,42 +2021,48 @@ impl Semlith {
             if let Some(refusal) = boundary.refuses(&path, walked) {
                 if refusal.credential {
                     plan.credential.push(key);
-                    not(&mut plan, store::class::CREDENTIAL);
+                    not(&mut plan, store::class::CREDENTIAL, &path);
                 } else {
-                    not(&mut plan, store::class::EXCLUDED);
+                    not(&mut plan, store::class::EXCLUDED, &path);
                 }
                 continue;
             }
             let Ok(meta) = std::fs::metadata(&path) else {
-                not(&mut plan, store::class::UNINDEXABLE);
+                not(&mut plan, store::class::UNINDEXABLE, &path);
                 continue;
             };
             if !meta.is_file() || meta.len() == 0 {
-                not(&mut plan, store::class::UNINDEXABLE);
+                not(&mut plan, store::class::UNINDEXABLE, &path);
                 continue;
             }
             let accepted = store::acceptance(&self.db, &key)?;
+            // Kept out by a person: decided, so not offered again, and not
+            // indexed until the decision is reset.
+            if let Some(kept) = accepted.as_ref().filter(|a| a.mode == "refused") {
+                not(&mut plan, &kept.class.clone(), &path);
+                continue;
+            }
             if meta.len() > chunk::MAX_FILE_BYTES
                 && !accepted
                     .as_ref()
                     .is_some_and(|a| a.class == store::class::POLICY)
             {
-                plan.review.push(Review {
-                    path: key,
-                    class: store::class::POLICY.to_string(),
-                    rule: format!(
+                plan.review.push(Review::new(
+                    key,
+                    store::class::POLICY,
+                    format!(
                         "over {} MiB ({} MiB)",
                         chunk::MAX_FILE_BYTES / (1024 * 1024),
                         meta.len() / (1024 * 1024)
                     ),
-                    matches: Vec::new(),
-                    confidence: None,
-                });
-                not(&mut plan, store::class::POLICY);
+                    Vec::new(),
+                    None,
+                ));
+                not(&mut plan, store::class::POLICY, &path);
                 continue;
             }
             let Ok(bytes) = std::fs::read(&path) else {
-                not(&mut plan, store::class::UNINDEXABLE);
+                not(&mut plan, store::class::UNINDEXABLE, &path);
                 continue;
             };
             let hash = blake3::hash(&bytes).to_hex().to_string();
@@ -2031,7 +2091,7 @@ impl Semlith {
             let text = match chunk::extract(&path, &bytes) {
                 Ok(text) => text,
                 Err(_) => {
-                    not(&mut plan, store::class::UNINDEXABLE);
+                    not(&mut plan, store::class::UNINDEXABLE, &path);
                     continue;
                 }
             };
@@ -2059,14 +2119,15 @@ impl Semlith {
                 keyscan::Decision::Refuse(rule) => {
                     let live: Vec<keyscan::Match> =
                         found.into_iter().filter(|m| m.dummy.is_none()).collect();
-                    plan.review.push(Review {
-                        path: key,
-                        class: store::class::CONTENT.to_string(),
-                        confidence: live.iter().map(|m| m.confidence).max(),
+                    let confidence = live.iter().map(|m| m.confidence).max();
+                    plan.review.push(Review::new(
+                        key,
+                        store::class::CONTENT,
                         rule,
-                        matches: live,
-                    });
-                    not(&mut plan, store::class::CONTENT);
+                        live,
+                        confidence,
+                    ));
+                    not(&mut plan, store::class::CONTENT, &path);
                 }
             }
         }
@@ -2108,9 +2169,20 @@ impl Semlith {
             anyhow::bail!("mode is redacted, as-is or refused, not {mode:?}");
         }
         let row = store::refusal(&self.db, &key)?;
+        // No row yet is a file a held scan offered for review before any pass
+        // recorded it (0.35.0's wizard decides there): a folder or a file
+        // over the cap is the policy class, anything else is content.
+        let unrecorded = || {
+            let at = Path::new(&key);
+            if at.is_dir() || std::fs::metadata(at).is_ok_and(|m| m.len() > chunk::MAX_FILE_BYTES) {
+                store::class::POLICY
+            } else {
+                store::class::CONTENT
+            }
+        };
         let class = row
             .as_ref()
-            .map_or(store::class::CONTENT, |r| r.class.as_str())
+            .map_or_else(unrecorded, |r| r.class.as_str())
             .to_string();
         if !(store::class::reviewable(&class) || class == store::class::DUMMY) {
             anyhow::bail!(
@@ -2118,8 +2190,11 @@ impl Semlith {
                 class
             );
         }
-        if mode == "refused" && class != store::class::DUMMY {
-            anyhow::bail!("only a file let through as test dummies can be refused instead");
+        // `refused` is a person keeping the file out (0.35.0's Keep out): of a
+        // dummy-only file that would otherwise be indexed, and of a content or
+        // policy row so it leaves the waiting list until the decision is reset.
+        if mode == "redacted" && class == store::class::POLICY {
+            anyhow::bail!("{key} holds nothing to redact; index it as it is or keep it out");
         }
         let accepted = self.writing(|me| {
             let salt = store::salt(&me.db)?;
@@ -2600,18 +2675,22 @@ impl Semlith {
             rescan,
             regraph,
             allow_secrets: self.boundary.allow_secrets,
-            hashes: store::all_hashes(&self.db)?,
+            hashes: if self.force {
+                Default::default()
+            } else {
+                store::all_hashes(&self.db)?
+            },
             uncounted: store::uncounted(&self.db)?,
             over_cap: store::acceptances(&self.db)?
                 .into_iter()
-                .filter(|a| a.class == store::class::POLICY)
+                .filter(|a| a.class == store::class::POLICY && a.mode != "refused")
                 .map(|a| a.path)
                 .collect(),
             prehashed,
             each: each.cloned(),
             tokenizer,
             clocks: pipeline::Clocks::default(),
-            cache: accel::cache_in_use().then(|| cache::Scope::of(&self.model)),
+            cache: (accel::cache_in_use() && !self.force).then(|| cache::Scope::of(&self.model)),
             variants: accel::cache_variants(),
             lookups: Default::default(),
             hits: Default::default(),
@@ -2622,6 +2701,7 @@ impl Semlith {
         let mut run_lanes: std::collections::BTreeMap<String, usize> = Default::default();
         let (cpu_back, cpu_returned) = std::sync::mpsc::channel();
         let prepare_threads = pipeline::prepare_threads();
+        let gitignore = self.gitignore;
 
         std::thread::scope(|scope| -> Result<()> {
             let prefetch = pipeline::Prefetch::start(scope, first, sealed, &ctx, prepare_threads);
@@ -2629,7 +2709,7 @@ impl Semlith {
             let mut walker = pending_walk.map(|(roots, accepted)| {
                 scope.spawn(move || {
                     let started = std::time::Instant::now();
-                    let mut walked = walk_allowing(&roots, &accepted);
+                    let mut walked = walk_allowing(&roots, &accepted, gitignore);
                     walked.walk_ms = started.elapsed().as_millis() as u64;
                     walked
                 })
@@ -5641,6 +5721,18 @@ pub fn serialize_plain_list<S: serde::Serializer>(
     s.collect_seq(paths.iter().map(|p| plain(p)))
 }
 
+/// [`serialize_plain_list`] for lists grouped by a key.
+pub fn serialize_plain_lists<S: serde::Serializer>(
+    groups: &std::collections::BTreeMap<String, Vec<String>>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.collect_map(
+        groups
+            .iter()
+            .map(|(k, paths)| (k, paths.iter().map(|p| plain(p)).collect::<Vec<String>>())),
+    )
+}
+
 /// Serialize a stored path in the form a person reads, leaving the value in
 /// memory as the store's own key. One attribute per field beats a call at every
 /// place a struct reaches JSON, and the CLI's `--json`, the portal and the MCP
@@ -6139,8 +6231,9 @@ fn sibling_exists(parent: &Path, manifest: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn walk(roots: &[PathBuf]) -> Walked {
-    walk_allowing(roots, &[])
+    walk_allowing(roots, &[], true)
 }
 
 /// The bytes a run's files count for, one `stat` each: microseconds against
@@ -6338,7 +6431,7 @@ fn git_recency(paths: &[PathBuf]) -> std::collections::HashMap<PathBuf, i64> {
 }
 
 /// [`walk`], descending into the generated folders a person accepted (2.5).
-fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
+fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf], gitignore: bool) -> Walked {
     let mut out = Vec::new();
     let mut named = Vec::new();
     let mut unreadable = Vec::new();
@@ -6374,9 +6467,9 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
         let mut builder = ignore::WalkBuilder::new(root);
         builder
             .hidden(true)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
+            .git_ignore(gitignore)
+            .git_global(gitignore)
+            .git_exclude(gitignore)
             .parents(true)
             // Honour `.gitignore` even outside a git repo. A notes or docs
             // folder is a perfectly normal thing to index, and a `.gitignore`

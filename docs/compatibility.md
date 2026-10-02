@@ -36,6 +36,7 @@ break, and is treated as one.
 | The install scripts | `install.sh` and `install.ps1` stay at the root of the `main` branch, so the two `raw.githubusercontent.com` URLs in the README keep working. They keep honouring `SEMLITH_VERSION`, `SEMLITH_HOME`, `SEMLITH_YES` and `SEMLITH_NO_SERVICE`, and they keep verifying the download against the release's `SHA256SUMS` before writing anything. When `semlith.com` exists it will redirect to these URLs rather than replace them. |
 | Release archives | One archive per target, named `semlith-<tag>-<target>`, holding a directory of that name with the binary in it, and a `SHA256SUMS` asset beside them in GNU `sha256sum` format. `semlith upgrade` and both scripts read that layout. From 0.14.0 the Linux archives hold `libonnxruntime.so` beside the binary as well, and every file in the archive is unpacked. |
 | `semlith setup --yes` | Runs every step with its default and no prompt, so a script or an agent can install semlith unattended. |
+| CLI flags added in 0.35.0 | `setup --file-managers` adds "Index with semlith" to the file manager — a Finder Quick Action in `~/Library/Services`, an Explorer verb under `HKCU\Software\Classes\{Directory,*}\shell\semlith` with a Send to entry, or a Nautilus script, a Dolphin service menu and a Thunar action — each running `semlith index` on the selected paths. `setup --no-file-managers` removes them; the two conflict. Without either, `setup` asks with no as the default, and `--yes` leaves them as they are, so nothing is added unasked. |
 | `semlith upgrade --check` | Exits 0 when the installed version is current and 10 when a newer release exists, and changes nothing either way. |
 | Exit codes | Whether a given outcome exits zero or non-zero. A blocked index run exits non-zero; a search that finds nothing exits zero, because finding nothing is an answer. |
 | MCP tool names | `semlith_search`, `semlith_stats`, `semlith_files`, `semlith_index`, `semlith_add`, `semlith_forget`, `semlith_symbol`, `semlith_neighbors`, `semlith_path`, from 0.15.0 `semlith_languages`, and from 0.16.0 `semlith_read` and `semlith_pattern`. `semlith_impact` was on this list until 0.13.0 removed it; see the break below. |
@@ -122,10 +123,9 @@ page carried a forty-eight-row table of every embedding model a store could be
 built with, of which one row is a model any given machine has fetched; the v4
 design has no place for it and the page it sat on is now seven facts and the
 language table. Nothing was withdrawn — `semlith models` prints the full list
-and `/api/models` answers exactly as before. `/api/pattern` has had no portal
-view in every release so far, for the reason recorded in `tests/portal.rs`: a
-tree-sitter query in S-expression syntax is not something anyone types into a
-browser box.
+and `/api/models` answers exactly as before. `/api/pattern` had no portal view
+until 0.35.0, which made it Search's fourth mode beside Ranked, Brief and
+Exact, with a language picker and the query in S-expression syntax.
 
 **Ranking scores and result ordering.** The `score` on a hit is a reciprocal
 rank fusion score. It orders results within one query and means nothing across
@@ -1372,6 +1372,34 @@ left untouched, and the stanza is printed with the reason.
 | `GET /api/agents` | `connections` is one entry per app and transport, with `sessions` and `version` (the versions seen, comma-separated); `queries` is summed across the sessions. |
 | `semlith mcp` ↔ daemon | The proxy sends a `Semlith-Host` header naming the app that started it, a `notifications/semlith/alive` heartbeat every 30 s and `notifications/semlith/closed` when its client hangs up; `DELETE /mcp` ends an HTTP session. A failed call is retried for up to 20 s while the discovery file names a live daemon. |
 | `semlith mcp` | The start line on stderr reads `semlith <version>: forwarding MCP to the semlith daemon at http://127.0.0.1:<port>`. |
+
+## 0.35.0
+
+The portal's v6 pages are drawn from these. Every field below is added beside
+what was there, except the three marked as a change of shape.
+
+| Surface | Change |
+|---|---|
+| `registry.json` | Each store entry gains `kind` (`code`/`docs`/`both`, default `both`), `lean` (`code`/`docs`/`either`, default `either`), `watch`, `record` and `gitignore` (each default `true`). An older binary ignores them; an entry without them reads as the defaults, which are what every store did before. |
+| `settings.json` | New keys `ledger_paused` and `airgap`, absent meaning off. `session_replay` absent now means **on**; a file that wrote `false` stays off. |
+| A store directory | A new `runs.jsonl`: finished index runs, newest 50 kept. An older binary never opens it. |
+| `POST /api/store/create` | New: `{name, kind}` → `{name, dir, kind}`; an empty store, served at once. |
+| `POST /api/store/settings` | New: `{store, rename?, kind?, lean?, watch?, record?, gitignore?}` → `{name, kind, lean, watch, record, gitignore}`. A rename moves the store's directory with its name. |
+| `GET /api/stores` | Rows gain `kind`, `lean`, `watch`, `record`, `gitignore`; with `?detail=1` (or `?coverage=1`) also `readers_count` and `languages_count`. |
+| Searches and briefs | With no `prefer`, each store's `lean` applies to its half of the answer, over MCP as well as the portal. `either`, the default, is no bias, so nothing changes until a store sets one. |
+| `GET /api/search` | `format=locate` hits carry `line`, the tool's one line; the answer carries `tokens`, and with `max_tokens` the tool's own cut and `truncated: {shown, total}`. |
+| `GET /api/brief` | Gains `text` (what `semlith_brief` returns, byte for byte) and `prefer`. |
+| `GET /api/ledger` | **Shape change:** `recording` is `{on, reason}` (`flag`, `env`, `paused` or null), not a boolean. Gains `break: {store, row, at}` when the chain does not verify. |
+| `POST /api/ledger/recording`, `POST /api/ledger/verify` | New. Pause/resume (persisted); re-walk every chain, and with `repair` append one note row per break. A note row (`tool = 'note'`) is in the chain and in no total. |
+| `GET /api/about` | Gains `recording` and `login: {installed, mechanism, path, last_start}`. `ledger` is the live state (false while paused). |
+| `GET /api/privacy` | **Shape change:** `airgap` is `{on, reason}` (`flag`, `env`, `runtime` or null). Gains `outbound: {count, since, recent: [{at, what, host}]}`. |
+| `POST /api/airgap`, `POST /api/login-item` | New. The runtime airgap refuses what `--airgap` refuses; the login item installs or removes the service `semlith setup` installs. |
+| `GET /api/refused` | Rows gain `risk`, `band`, `likely`, `tone`, `kind`, `why`, `evidence`, `suggest`; scan-plan review items carry the same, and plans gain `not_indexed_paths`. |
+| `POST /api/refused/decide`, `GET /api/decisions` | New: bulk `in`/`redact`/`out`/`reset`, and the decisions table. `/api/refused/accept` and `/revoke` also take `files`. Keep out is an acceptance with mode `refused`, now allowed for any reviewable class. |
+| `GET /api/index/runs` | Gains `history`. Live run `kind` may also be `reindex`, `rebuild` or `files`. |
+| `POST /api/index` | `{store, files}` re-indexes those files forced; `{store}` with no path re-indexes the store (`force: true` re-embeds unchanged files too); `gitignore: false` walks past `.gitignore` and is kept on the store. |
+| `POST /api/agents/register` | Takes `{clients, action}` with `action` `register` or `unregister`. `GET /api/agents` client rows gain `id` and `registered`; `tools` rows gain `answers`, `typical_tokens` and `typical_source`. |
+| `semlith start --no-ledger` | Now stops the rows written by agents through `/mcp` too, not only the portal's. |
 
 ## What a break would look like
 

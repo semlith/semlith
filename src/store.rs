@@ -1018,60 +1018,82 @@ impl LanguageCoverage {
 /// name this store holds. A second rule here would be a second answer to "what
 /// share resolves", and the README quotes this one.
 pub fn coverage_by_language(db: &Connection) -> Result<Vec<LanguageCoverage>> {
-    use std::collections::BTreeMap;
-    let mut by_language: BTreeMap<String, LanguageCoverage> = BTreeMap::new();
-    let language = |path: &str| -> String {
-        crate::graph::language_of(std::path::Path::new(path))
-            .unwrap_or("other")
-            .to_string()
-    };
+    cached_by_graph(db, "coverage", || coverage_by_language_uncached(db))
+}
 
-    let mut stmt = db.prepare("SELECT path, graph FROM files")?;
+fn coverage_by_language_uncached(db: &Connection) -> Result<Vec<LanguageCoverage>> {
+    use std::collections::{BTreeMap, HashMap};
+    let mut by_language: BTreeMap<String, LanguageCoverage> = BTreeMap::new();
+    // Each file's language worked out once, by id. The edge pass below used
+    // to parse a path per edge: three million of them on the 879k-chunk
+    // corpus, which made the Index health report take half a minute.
+    let mut language_of: HashMap<i64, String> = HashMap::new();
+
+    let mut stmt = db.prepare("SELECT id, path, graph FROM files")?;
     let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+        ))
     })?;
     for row in rows {
-        let (path, graph) = row?;
-        let entry = by_language.entry(language(&path)).or_default();
+        let (id, path, graph) = row?;
+        let language = crate::graph::language_of(std::path::Path::new(&path))
+            .unwrap_or("other")
+            .to_string();
+        let entry = by_language.entry(language.clone()).or_default();
         entry.files += 1;
         if graph.as_deref() == Some("timeout") {
             entry.parser_failed += 1;
         }
+        language_of.insert(id, language);
     }
+    let lang = |id: i64| {
+        language_of
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| "other".to_string())
+    };
 
-    let mut stmt = db.prepare(
-        "SELECT f.path, COUNT(*) FROM symbols s JOIN files f ON f.id = s.file_id GROUP BY f.path",
-    )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    let mut stmt = db.prepare("SELECT file_id, COUNT(*) FROM symbols GROUP BY file_id")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
     for row in rows {
-        let (path, count) = row?;
-        by_language.entry(language(&path)).or_default().definitions +=
+        let (file, count) = row?;
+        by_language.entry(lang(file)).or_default().definitions +=
             usize::try_from(count).unwrap_or(0);
     }
 
-    // One row per edge, and the definition count of its target beside it.
+    // Counted per file, whether the extractor settled the edge, and how many
+    // definitions its target has -- none, one or several, which is all the
+    // row needs, so the count stops at two.
     let mut stmt = db.prepare(
-        "SELECT f.path, e.confidence, (SELECT COUNT(*) FROM symbols d WHERE d.name = e.dst) \
-         FROM edges e JOIN symbols s ON s.id = e.src JOIN files f ON f.id = s.file_id \
-         WHERE e.kind = 'calls'",
+        "SELECT s.file_id, e.confidence = 'extracted',
+                (SELECT COUNT(*) FROM (SELECT 1 FROM symbols d WHERE d.name = e.dst LIMIT 2)) AS defs,
+                COUNT(*)
+         FROM edges e JOIN symbols s ON s.id = e.src
+         WHERE e.kind = 'calls'
+         GROUP BY s.file_id, 2, defs",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
+            r.get::<_, i64>(0)?,
+            r.get::<_, bool>(1)?,
             r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
         ))
     })?;
     for row in rows {
-        let (path, confidence, definitions) = row?;
-        let entry = by_language.entry(language(&path)).or_default();
-        if confidence == crate::graph::EXTRACTED {
-            entry.extracted += 1;
+        let (file, extracted, definitions, count) = row?;
+        let count = usize::try_from(count).unwrap_or(0);
+        let entry = by_language.entry(lang(file)).or_default();
+        if extracted {
+            entry.extracted += count;
         } else {
             match definitions {
-                0 => entry.unresolved += 1,
-                1 => entry.resolved += 1,
-                _ => entry.ambiguous += 1,
+                0 => entry.unresolved += count,
+                1 => entry.resolved += count,
+                _ => entry.ambiguous += count,
             }
         }
     }
@@ -1408,6 +1430,35 @@ pub fn image(db: &Connection, id: i64) -> Result<Option<ImageRow>> {
         .optional()?)
 }
 
+/// `(tool, excerpt_tokens)` for every ledger row that names its tool, the
+/// newest `limit` of them: what the Agents page's typical answer sizes are
+/// the median of.
+pub fn excerpt_tokens_by_tool(db: &Connection, limit: usize) -> Result<Vec<(String, i64)>> {
+    let mut stmt = db.prepare(
+        "SELECT tool, excerpt_tokens FROM retrievals WHERE tool IS NOT NULL \
+         ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Every indexed image, for the decisions table's "read as image" rows.
+pub fn image_rows(db: &Connection) -> Result<Vec<ImageRow>> {
+    let mut stmt = db.prepare(
+        "SELECT i.id, f.path, i.width, i.height FROM images i \
+         JOIN files f ON f.id = i.file_id ORDER BY f.path",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ImageRow {
+            id: r.get(0)?,
+            path: r.get(1)?,
+            width: r.get(2)?,
+            height: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// The image ids belonging to `path`, before its row is deleted.
 ///
 /// Read rather than returned by `delete_file`, because the cascade that removes
@@ -1690,28 +1741,56 @@ pub fn symbols_scoped(
     prefix: Option<&str>,
     limit: usize,
 ) -> Result<Vec<SymbolRow>> {
-    let (predicate, binds) = match prefix {
-        Some(p) => {
-            let pattern = format!("*{}*", p.to_lowercase());
-            ("lower(f.path) GLOB ?".to_string(), vec![pattern])
-        }
-        None => ("1".to_string(), Vec::new()),
-    };
     // Busiest first. A scope filled with symbols that touch nothing draws a
     // field of dots: technically the graph, and of no use to anyone looking at
     // it. Ordering by how connected a symbol is puts the shape on the screen.
+    let Some(p) = prefix else {
+        return busiest_symbols(db, limit);
+    };
+    let pattern = format!("*{}*", p.to_lowercase());
     let sql = format!(
         "SELECT {SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
-         WHERE {predicate} AND s.kind != 'module'
+         WHERE lower(f.path) GLOB ?1 AND s.kind != 'module'
          ORDER BY (
            (SELECT COUNT(*) FROM edges e WHERE e.src = s.id)
            + (SELECT COUNT(*) FROM edges e WHERE e.dst = s.name)
-         ) DESC, f.path, s.start_line LIMIT ?"
+         ) DESC, f.path, s.start_line LIMIT ?2"
     );
     let mut stmt = db.prepare(&sql)?;
-    let mut args: Vec<Value> = binds.into_iter().map(Value::Text).collect();
-    args.push(Value::Integer(limit as i64));
-    let rows = stmt.query_map(rusqlite::params_from_iter(args), symbol_row)?;
+    let rows = stmt.query_map(params![pattern, limit as i64], symbol_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// The busiest symbols of a whole store, for [`symbols_scoped`] with no scope.
+///
+/// Ordering every symbol by two correlated counts took 32 s on the 879k-chunk
+/// corpus, and it is the Graph page's first fetch. Here each direction is
+/// counted once, on its own index, for the most-targeted names and the busiest
+/// sources, and only those are ordered: about a second on the same corpus. A
+/// symbol is missed only by being busy in neither direction on its own, which
+/// a symbol worth opening on is not. A name counted as a target counts for
+/// every definition of it, as the full count did.
+fn busiest_symbols(db: &Connection, limit: usize) -> Result<Vec<SymbolRow>> {
+    let candidates = (limit * 4).max(64) as i64;
+    let sql = format!(
+        "WITH ins AS (SELECT dst AS name, COUNT(*) AS n FROM edges GROUP BY dst ORDER BY n DESC LIMIT ?1),
+              outs AS (SELECT src AS id, COUNT(*) AS n FROM edges GROUP BY src ORDER BY n DESC LIMIT ?1),
+              picked AS (
+                SELECT s.id FROM symbols s JOIN ins ON s.name = ins.name
+                UNION
+                SELECT id FROM outs
+              )
+         SELECT {SYMBOL_COLUMNS} FROM picked
+         JOIN symbols s ON s.id = picked.id
+         JOIN files f ON f.id = s.file_id
+         WHERE s.kind != 'module'
+         ORDER BY (
+           COALESCE((SELECT n FROM outs WHERE outs.id = s.id), (SELECT COUNT(*) FROM edges e WHERE e.src = s.id))
+           + COALESCE((SELECT n FROM ins WHERE ins.name = s.name), 0)
+         ) DESC, f.path, s.start_line LIMIT ?2"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map(params![candidates, limit as i64], symbol_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -1798,7 +1877,54 @@ pub fn defined_more_than(db: &Connection, name: &str, limit: usize) -> Result<bo
 /// rather than to a dependency that was never indexed — that is what the
 /// hidden-by-default unresolved targets are about, not this.
 pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<EdgeEnd>> {
-    edges_out_below(db, name, kinds, None)
+    edges_out_below(db, name, kinds, None, None)
+}
+
+/// How many edges touch `name`, and how many of them are certain, counted on
+/// the indexes alone: `(resolved, total)`.
+///
+/// For the graph page's choice of where to open, which only compares counts.
+/// An edge in counts as certain when the extractor said so; an edge out when
+/// the extractor said so or its target has exactly one definition, which is
+/// how [`edges_out`] settles the common case. An out edge to a name nothing
+/// defines is not counted, as [`edges_out`] does not return it.
+pub fn edge_counts(db: &Connection, name: &str) -> Result<(usize, usize)> {
+    let navigational = crate::graph::not_navigational("h.kind");
+    let (in_total, in_sure): (i64, i64) = db.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(confidence IN ('extracted', 'resolved')), 0)
+         FROM edges WHERE dst = ?1",
+        [name],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let (out_total, out_sure): (i64, i64) = db.query_row(
+        &format!(
+            "SELECT COUNT(*), COALESCE(SUM(e.confidence = 'extracted' OR
+                 (SELECT COUNT(*) FROM (SELECT 1 FROM symbols h WHERE h.name = e.dst AND {navigational} LIMIT 2)) = 1), 0)
+             FROM edges e JOIN symbols src ON src.id = e.src
+             WHERE src.name = ?1
+               AND EXISTS (SELECT 1 FROM symbols h WHERE h.name = e.dst AND {navigational})"
+        ),
+        [name],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok((
+        (in_sure + out_sure) as usize,
+        (in_total + out_total) as usize,
+    ))
+}
+
+/// [`edges_out`] restricted to edges whose target is one of `targets`, settled
+/// exactly as [`edges_out`] settles them.
+///
+/// For the graph page, which draws only edges with both ends on the canvas: on
+/// the 879k-chunk corpus `edges_out("main")` joins 706,461 candidate rows in
+/// about ten seconds to keep the handful that point at a drawn name, and the
+/// page asks once per drawn node.
+pub fn edges_out_to(db: &Connection, name: &str, targets: &[String]) -> Result<Vec<EdgeEnd>> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    edges_out_below(db, name, &[], None, Some(targets))
 }
 
 /// [`edges_out`] without the edges whose target has more than `hub`
@@ -1816,7 +1942,7 @@ pub fn edges_out_short_of_hubs(
     kinds: &[String],
     hub: usize,
 ) -> Result<Vec<EdgeEnd>> {
-    edges_out_below(db, name, kinds, Some(hub))
+    edges_out_below(db, name, kinds, Some(hub), None)
 }
 
 fn edges_out_below(
@@ -1824,6 +1950,7 @@ fn edges_out_below(
     name: &str,
     kinds: &[String],
     hub: Option<usize>,
+    targets: Option<&[String]>,
 ) -> Result<Vec<EdgeEnd>> {
     let filter = kind_predicate(kinds, "e.kind");
     // An edge's target is resolved by name, so without this a configuration key
@@ -1839,6 +1966,11 @@ fn edges_out_below(
         ),
         None => String::new(),
     };
+    // Bound after the kinds, in the order the holes appear.
+    let to_targets = match targets {
+        Some(t) => format!("AND e.dst IN ({})", vec!["?"; t.len()].join(", ")),
+        None => String::new(),
+    };
     let sql = format!(
         "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path, src.start_line, e.line
          FROM symbols src
@@ -1846,12 +1978,18 @@ fn edges_out_below(
          JOIN edges e ON e.src = src.id
          JOIN symbols s ON s.name = e.dst AND {target}
          JOIN files f ON f.id = s.file_id
-         WHERE src.name = ?1 AND {filter} {short_of_hub}
+         WHERE src.name = ?1 AND {filter} {to_targets} {short_of_hub}
          ORDER BY f.path, s.start_line"
     );
     let mut stmt = db.prepare(&sql)?;
     let mut binds: Vec<Value> = vec![Value::Text(name.to_string())];
     binds.extend(kinds.iter().map(|k| Value::Text(k.clone())));
+    binds.extend(
+        targets
+            .unwrap_or(&[])
+            .iter()
+            .map(|t| Value::Text(t.clone())),
+    );
     let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
         Ok(Reached {
             symbol: symbol_row(r)?,
@@ -2206,6 +2344,54 @@ pub fn edges_in(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Edg
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// At most `limit` of [`edges_in`], the extractor's certain edges first.
+///
+/// For a drawing, which has room for a few dozen callers: `new` has hundreds
+/// of thousands of them on the 879k-chunk corpus, and reading them all to draw
+/// sixty took most of the Graph page's twenty seconds.
+pub fn edges_in_first(db: &Connection, name: &str, limit: usize) -> Result<Vec<EdgeEnd>> {
+    let sql = format!(
+        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.line
+         FROM edges e
+         JOIN symbols s ON s.id = e.src
+         JOIN files f ON f.id = s.file_id
+         WHERE e.dst = ?1
+         ORDER BY CASE e.confidence WHEN 'extracted' THEN 0 WHEN 'resolved' THEN 0 WHEN 'ambiguous' THEN 1 ELSE 2 END,
+                  f.path, s.start_line
+         LIMIT ?2"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map(params![name, limit as i64], |r| {
+        Ok(EdgeEnd {
+            symbol: symbol_row(r)?,
+            kind: r.get(8)?,
+            confidence: r.get(9)?,
+            definitions: 1,
+            from_path: None,
+            from_line: None,
+            line: r.get(10)?,
+            means: None,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// The names with the most edges in or out, busiest first, each counted once
+/// on its own index. For the graph page's choice of where to open: a name with
+/// seven hundred definitions is one candidate, not seven hundred.
+pub fn busiest_names(db: &Connection, limit: usize) -> Result<Vec<String>> {
+    let candidates = (limit * 4).max(64) as i64;
+    let mut stmt = db.prepare(
+        "WITH ins AS (SELECT dst AS name, COUNT(*) AS n FROM edges GROUP BY dst ORDER BY n DESC LIMIT ?1),
+              outs AS (SELECT s.name AS name, COUNT(*) AS n FROM edges e JOIN symbols s ON s.id = e.src
+                       WHERE s.kind != 'module' GROUP BY s.name ORDER BY n DESC LIMIT ?1)
+         SELECT name FROM (SELECT name, n FROM ins UNION ALL SELECT name, n FROM outs)
+         GROUP BY name ORDER BY SUM(n) DESC, name LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![candidates, limit as i64], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// One edge into a name, with the definitions of that name it resolves to.
 #[derive(Debug, Clone)]
 pub struct Incoming {
@@ -2519,7 +2705,7 @@ pub fn unfilled(db: &Connection, since: i64) -> Result<Vec<Unfilled>> {
                 COALESCE(query_id, '')
            FROM retrievals
           WHERE usage_source IS NULL AND at >= ?1 AND client NOT IN ('cli', 'portal')
-            AND COALESCE(tool, '') != 'raw-read'
+            AND COALESCE(tool, '') NOT IN ('raw-read', 'note')
           ORDER BY at, id",
     )?;
     let rows = q.query_map(params![since], |r| {
@@ -2758,7 +2944,7 @@ pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
     let mut stmt = db.prepare(&format!(
         "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, hash,
                 query_id, {USAGE_COLUMNS}
-         FROM retrievals ORDER BY id DESC LIMIT ?1"
+         FROM retrievals WHERE COALESCE(tool, '') != 'note' ORDER BY id DESC LIMIT ?1"
     ))?;
     let rows = stmt.query_map(params![limit as i64], |r| {
         Ok(Retrieval {
@@ -2802,7 +2988,9 @@ pub enum LedgerScope {
 /// what it was.
 pub fn ledger_keys(db: &Connection, store: &str, scope: LedgerScope) -> Result<Vec<String>> {
     let sql = match scope {
-        LedgerScope::All => "SELECT DISTINCT query_id, id FROM retrievals",
+        LedgerScope::All => {
+            "SELECT DISTINCT query_id, id FROM retrievals WHERE COALESCE(tool, '') != 'note'"
+        }
         LedgerScope::Credited => "SELECT DISTINCT query_id, id FROM retrievals WHERE hits > 0",
         LedgerScope::Estimated => {
             "SELECT DISTINCT query_id, id FROM retrievals
@@ -2832,7 +3020,8 @@ pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
     Ok(db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)), COUNT(DISTINCT client),
                 COALESCE(SUM(excerpt_tokens), 0),
-                COALESCE(SUM(whole_file_tokens), 0) FROM retrievals",
+                COALESCE(SUM(whole_file_tokens), 0) FROM retrievals
+         WHERE COALESCE(tool, '') != 'note'",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?)
@@ -2885,7 +3074,7 @@ pub fn ledger_savings_since(db: &Connection, since: i64) -> Result<Savings> {
     )?;
     let total: i64 = db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE at >= ?1",
+         WHERE at >= ?1 AND COALESCE(tool, '') != 'note'",
         [since],
         |r| r.get(0),
     )?;
@@ -2955,7 +3144,7 @@ pub fn ledger_misses(db: &Connection) -> Result<Misses> {
     )?;
     let zero_hit: i64 = db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE hits = 0 AND (tool IS NULL OR tool != ?1)",
+         WHERE hits = 0 AND (tool IS NULL OR tool NOT IN (?1, 'note'))",
         params![crate::ledger::RAW_READ],
         |r| r.get(0),
     )?;
@@ -2980,16 +3169,97 @@ pub struct Misses {
 /// How many retrievals each client made, most first.
 pub fn ledger_clients(db: &Connection) -> Result<Vec<(String, i64)>> {
     let mut stmt = db.prepare(
-        "SELECT client, COUNT(*) FROM retrievals GROUP BY client ORDER BY COUNT(*) DESC, client",
+        "SELECT client, COUNT(*) FROM retrievals WHERE COALESCE(tool, '') != 'note'
+         GROUP BY client ORDER BY COUNT(*) DESC, client",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// The `tool` of a ledger note: a row the chain carries that is not a
+/// retrieval, and no total counts.
+pub const NOTE_TOOL: &str = "note";
+
+/// The rows a note has re-anchored the chain after: their ids.
+fn acknowledged(db: &Connection) -> Result<std::collections::HashSet<i64>> {
+    let mut stmt = db.prepare("SELECT query FROM retrievals WHERE tool = ?1")?;
+    let rows = stmt.query_map(params![NOTE_TOOL], |r| r.get::<_, String>(0))?;
+    let mut out = std::collections::HashSet::new();
+    for text in rows {
+        let text = text?;
+        if let Some(rest) = text.split("after row ").nth(1) {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if let Ok(id) = digits.parse() {
+                out.insert(id);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Re-anchor the chain after a row that does not verify, by appending a
+/// note row onto the current head (0.35.0's Re-verify with repair).
+///
+/// Nothing recorded is edited or deleted: the note says which row broke, and
+/// [`ledger_break`] accepts that row as it stands from then on. The edit is
+/// still visible, in the note, which is what an audit trail owes its reader.
+pub fn ledger_note(db: &Connection, broken: i64) -> Result<()> {
+    let query = format!("chain re-anchored after row {broken} was edited or removed");
+    record_retrieval(
+        db,
+        &NewRetrieval {
+            client_version: "",
+            client: "semlith",
+            session: "",
+            tool: NOTE_TOOL,
+            query: &query,
+            hits: 0,
+            micros: 0,
+            excerpt_tokens: 0,
+            whole_file_tokens: 0,
+            stale_hits: 0,
+            tokenizer: crate::ledger::CHARS4,
+            query_id: "",
+        },
+    )
+}
+
+/// Append a note for every unacknowledged break, first to last, and say which
+/// rows they were. Bounded, so a chain broken at every row is not a loop.
+pub fn ledger_repair(db: &Connection) -> Result<Vec<i64>> {
+    let mut noted = Vec::new();
+    while let Some(id) = ledger_break(db)? {
+        if noted.contains(&id) || noted.len() >= 1_000 {
+            break;
+        }
+        ledger_note(db, id)?;
+        noted.push(id);
+    }
+    Ok(noted)
+}
+
+/// When a ledger row was written, by id.
+pub fn retrieval_at(db: &Connection, id: i64) -> Result<Option<i64>> {
+    Ok(db
+        .query_row(
+            "SELECT at FROM retrievals WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// How many rows the chain holds, notes included: what a verify walked.
+pub fn ledger_rows(db: &Connection) -> Result<i64> {
+    Ok(db.query_row("SELECT COUNT(*) FROM retrievals", [], |r| r.get(0))?)
+}
+
 /// Re-walk the chain and return the id of the first row that does not verify.
 ///
-/// `None` means the ledger is intact.
+/// `None` means the ledger is intact. A row a note re-anchored after
+/// ([`ledger_note`]) is accepted as it stands, and the walk goes on from it.
 pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
+    let acked = acknowledged(db)?;
     let mut stmt = db.prepare(
         "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
                 session, tool, stale_hits, tokenizer
@@ -3005,6 +3275,10 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
             (r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?);
         let prev: String = r.get(8)?;
         let hash: String = r.get(9)?;
+        if acked.contains(&id) {
+            expected = hash;
+            continue;
+        }
         if prev != expected {
             return Ok(Some(id));
         }
@@ -3821,8 +4095,9 @@ pub fn corpus(db: &Connection, language_of: impl Fn(&str) -> String) -> Result<C
             // `micros`, which is what the column is called. Asking for `ms`
             // did not fail loudly — the row read errored and the fallback
             // reported a store that had never been queried.
-            "SELECT micros / 1000 FROM retrievals ORDER BY micros
-              LIMIT 1 OFFSET (SELECT COUNT(*) FROM retrievals) / 2",
+            "SELECT micros / 1000 FROM retrievals WHERE COALESCE(tool, '') != 'note'
+              ORDER BY micros LIMIT 1 OFFSET (SELECT COUNT(*) FROM retrievals
+              WHERE COALESCE(tool, '') != 'note') / 2",
             [],
             |r| r.get(0),
         )
@@ -3904,6 +4179,7 @@ pub fn ledger_sessions(db: &Connection, limit: usize) -> Result<Vec<SessionRow>>
                     AND r2.client = retrievals.client AND r2.model IS NOT NULL
                   GROUP BY r2.model ORDER BY COUNT(*) DESC LIMIT 1)
          FROM retrievals
+         WHERE COALESCE(tool, '') != 'note'
          GROUP BY COALESCE(session, ''), client
          ORDER BY MAX(at) DESC
          LIMIT ?1",
@@ -3931,7 +4207,9 @@ pub fn ledger_sessions(db: &Connection, limit: usize) -> Result<Vec<SessionRow>>
 /// From the rows themselves rather than from a benchmark, so the figure is
 /// what this machine actually served rather than what it can serve.
 pub fn ledger_latency(db: &Connection) -> Result<(i64, i64)> {
-    let mut stmt = db.prepare("SELECT micros FROM retrievals ORDER BY micros")?;
+    let mut stmt = db.prepare(
+        "SELECT micros FROM retrievals WHERE COALESCE(tool, '') != 'note' ORDER BY micros",
+    )?;
     let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
     let all: Vec<i64> = rows.collect::<rusqlite::Result<_>>()?;
     if all.is_empty() {
@@ -3970,6 +4248,7 @@ pub fn ledger_zero_hit_queries_since(
 ) -> Result<Vec<(String, i64)>> {
     let mut stmt = db.prepare(
         "SELECT query, COUNT(*) AS n FROM retrievals WHERE hits = 0 AND at >= ?1
+           AND COALESCE(tool, '') != 'note'
          GROUP BY query ORDER BY n DESC, query LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {
@@ -4003,7 +4282,8 @@ pub struct RetrievalRow {
 pub fn ledger_retrievals(db: &Connection, since: i64, limit: usize) -> Result<Vec<RetrievalRow>> {
     let mut stmt = db.prepare(
         "SELECT at, client, COALESCE(tool, ''), query, hits, excerpt_tokens, whole_file_tokens
-         FROM retrievals WHERE at >= ?1 ORDER BY at DESC, id DESC LIMIT ?2",
+         FROM retrievals WHERE at >= ?1 AND COALESCE(tool, '') != 'note'
+         ORDER BY at DESC, id DESC LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {
         Ok(RetrievalRow {
@@ -4113,30 +4393,56 @@ pub fn where_defined(db: &Connection, names: &[String]) -> Result<Vec<(String, S
 /// on a store that indexes application code every standard-library call is
 /// one of these, and the list is long and uninteresting past the first few.
 pub fn unresolved_targets(db: &Connection, limit: usize) -> Result<(Vec<(String, i64)>, i64)> {
-    let target = crate::graph::not_navigational("d.kind");
-    let sql = format!(
-        "SELECT e.dst, COUNT(*) AS n
-         FROM edges e
-         WHERE e.kind IN ('calls', 'imports')
-           AND NOT EXISTS (SELECT 1 FROM symbols d WHERE d.name = e.dst AND {target})
-         GROUP BY e.dst
-         ORDER BY n DESC, e.dst
-         LIMIT ?1"
-    );
-    let mut stmt = db.prepare(&sql)?;
-    let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    let top: Vec<(String, i64)> = rows.collect::<rusqlite::Result<_>>()?;
-    let distinct: i64 = db.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM (SELECT e.dst FROM edges e
-             WHERE e.kind IN ('calls', 'imports')
-               AND NOT EXISTS (SELECT 1 FROM symbols d WHERE d.name = e.dst AND {target})
-             GROUP BY e.dst)"
-        ),
-        [],
-        |r| r.get(0),
-    )?;
-    Ok((top, distinct))
+    // One pass, and one existence test per distinct target rather than per
+    // edge; the top list and the count come from the same rows. Two passes of
+    // a per-edge test were most of the Index health report on the 879k-chunk
+    // corpus. Cached per store until its graph changes, as the report is
+    // asked for again and again while it is being read.
+    let mut all = cached_by_graph(db, "unresolved", || {
+        let target = crate::graph::not_navigational("d.kind");
+        let mut stmt = db.prepare(&format!(
+            "WITH t AS (SELECT dst, COUNT(*) AS n FROM edges
+                        WHERE kind IN ('calls', 'imports') GROUP BY dst)
+             SELECT dst, n FROM t
+             WHERE NOT EXISTS (SELECT 1 FROM symbols d WHERE d.name = t.dst AND {target})"
+        ))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    })?;
+    let distinct = all.len() as i64;
+    all.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    all.truncate(limit);
+    Ok((all, distinct))
+}
+
+/// A figure computed over a whole store's graph, kept until the graph's
+/// symbol or edge count moves. The health report's aggregates read millions
+/// of rows on a large store and give the same answer until something is
+/// indexed or forgotten.
+fn cached_by_graph<T: Clone + Send + 'static>(
+    db: &Connection,
+    what: &str,
+    compute: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    use std::any::Any;
+    type Slot = (String, (i64, i64), Box<dyn Any + Send>);
+    static CACHE: std::sync::Mutex<Vec<Slot>> = std::sync::Mutex::new(Vec::new());
+    let key = format!("{what}|{}", db.path().unwrap_or(""));
+    let stats = graph_stats(db)?;
+    if let Some((_, _, value)) = CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(k, st, _)| *k == key && *st == stats)
+        && let Some(value) = value.downcast_ref::<T>()
+    {
+        return Ok(value.clone());
+    }
+    let value = compute()?;
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.retain(|(k, _, _)| *k != key);
+    cache.push((key, stats, Box::new(value.clone())));
+    Ok(value)
 }
 
 /// How many names this store defines more than once.

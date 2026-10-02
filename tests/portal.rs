@@ -7,7 +7,14 @@
 //!
 //! The subcommand list is read out of `--help` rather than out of a constant,
 //! so adding a command and forgetting the portal fails here instead of shipping.
-//! The tool list is read off a running daemon, for the same reason.
+//! The tool list is read off a running daemon, for the same reason. The routes
+//! the page calls are read out of `app.js`, so a page that calls a route the
+//! daemon does not serve fails here rather than in a browser.
+//!
+//! 0.35.0 rebuilt the portal to design v6: nine pages in three groups, a page
+//! per store, a Welcome screen and a store wizard. The old Files, Index,
+//! Inside the index, Impact, Doctor, About and Cloud pages became tabs and
+//! sections of the new ones; `MOVED` below is the list of where each went.
 //!
 //! ```sh
 //! cargo test --test portal
@@ -18,101 +25,133 @@ use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+const APP_JS: &str = include_str!("../src/portal/app.js");
+const STYLE: &str = include_str!("../src/portal/style.css");
+const INDEX_HTML: &str = include_str!("../src/portal/index.html");
+const ROUTES_RS: &str = include_str!("../src/routes.rs");
+const PORTAL_MD: &str = include_str!("../docs/portal.md");
+
 /// Commands with no portal view, and why.
 ///
 /// `start` is the daemon serving the portal — a view of itself is the portal.
-/// `mcp` is a stdio protocol server; the Agents view documents it, but it has
+/// `mcp` is a stdio protocol server; the Agents page documents it, but it has
 /// no state of its own for a route to report.
 ///
-/// `pattern` takes a tree-sitter query in S-expression syntax. Nobody writes
-/// one of those from memory, so a page for it is a box you can only fill by
-/// pasting from documentation — which makes it a worse manual, not a view. The
-/// capability is real and stays on the CLI and over MCP, where the caller is an
-/// agent that can write the query; the Agents page lists the tool and says what
-/// it does.
-///
-/// `read` has a view, and it is the Search page. Reading one span is the second
-/// stage of a search — the button is on the hit that raised the question, with
-/// the span already in hand. A page of its own could only be started by
-/// retyping a coordinate you got from Search, which is why there is no longer
-/// one. `/api/read` is what that button calls.
-///
 /// `models` had a view until 0.27.0: a forty-eight-row table on the About page,
-/// of which one row is a model this machine has actually fetched. The v4 design
-/// has no place for it, and the page it sat on is seven facts and a language
-/// table. The capability is untouched — `semlith models` prints the full list
-/// and `/api/models` still answers, for anything that reads it — so what is
-/// gone is a table, not a thing a user could do. This is the one knowing
-/// exception to the portal-parity rule in this release, and it is recorded in
-/// `docs/compatibility.md` as well as here, because an exemption argued in one
-/// place is an exemption nobody outside this file can find.
-const NO_VIEW: [&str; 5] = ["start", "mcp", "pattern", "read", "models"];
+/// of which one row is a model this machine has actually fetched. Design v6
+/// has no place for it either: Settings › About names the model the stores
+/// use, which is the one row that was ever about this machine. The capability
+/// is untouched — `semlith models` prints the full list and `/api/models` still
+/// answers, for anything that reads it — so what is gone is a table, not a
+/// thing a user could do. It is recorded in `docs/compatibility.md` as well as
+/// here, because an exemption argued in one place is an exemption nobody
+/// outside this file can find.
+///
+/// Until 0.35.0 `pattern` and `read` were here too. Both have a view now:
+/// `pattern` is Search's fourth mode, and `read` is the "Read whole symbol"
+/// button in Search's detail panel. Each is in `VIEWS` with the route its view
+/// calls, so the route is probed rather than excused.
+const NO_VIEW: [&str; 3] = ["start", "mcp", "models"];
 
 /// Which route is a command's portal view. Adding a command means adding a
 /// line here, which is the whole point: the compiler cannot notice a missing
 /// view, and this list is the thing a reviewer looks at.
+///
+/// Every route named here is one `app.js` actually calls;
+/// `every_parity_route_is_one_the_page_calls` checks that, so a row cannot
+/// point at a route the page stopped using.
 const VIEWS: &[(&str, &str)] = &[
+    // The store wizard's scan and index, and a store's Re-index and Re-index
+    // selected on its Files and Runs tabs.
     ("index", "/api/index"),
+    // The wizard's Sources step, "Add a URL": one https request.
     ("add", "/api/add"),
-    // The daemon *is* the watcher, and the Stores view is where its event feed
-    // and per-store "watching" flag are read from.
+    // The daemon *is* the watcher. Each store's watching flag and Home's
+    // Watcher feed are read from the stores route; the store Settings tab's
+    // "Watch for changes" switch posts to `/api/store/settings`, which
+    // `every_route_the_page_calls_is_served` covers.
     ("watch", "/api/stores"),
     ("search", "/api/search"),
+    // Search's Brief mode, the same assembly the tool returns.
     ("brief", "/api/brief"),
+    // Search's Read whole symbol, in the detail panel of a hit.
+    ("read", "/api/read"),
+    // Search's Pattern mode, a tree-sitter query over one language.
+    ("pattern", "/api/pattern"),
+    // Stores › All stores, and every store's Overview tab.
     ("stats", "/api/stores"),
+    // A store's Files tab. The cross-store Files page is gone (item 19 of the
+    // 0.35.0 contract): Search's path filter covers it.
     ("files", "/api/files"),
+    // A store's Files tab, Forget on selected rows, and Privacy's scan rows.
     ("forget", "/api/forget"),
+    // Welcome's and Stores' "Adopt an existing .semlith".
     ("adopt", "/api/adopt"),
-    // `semlith trust` is the Stores page's "Trust this store", beside a store
-    // the daemon can see but has not been told to open.
+    // The store Settings tab's Trust, beside a store the daemon can see but
+    // has not been told to open.
     ("trust", "/api/trust"),
-    // `semlith languages` is the About page's language table, which the v3
-    // design puts there rather than on a page of its own. `/api/languages` is
-    // still what fills it; the route named here is the page's own, because a
-    // parity row has to point at a view somebody can open.
-    ("languages", "/api/about"),
-    ("setup", "/api/setup"),
-    // A check and an install both reach the network, so neither is something a
-    // route answers to a GET that a browser might replay.
+    // Settings › About's language table, which the page fills from this route.
+    ("languages", "/api/languages"),
+    // `semlith setup` registers semlith with the agents on this machine. In
+    // the portal that is Agents › Add a client and the wizard's Connect step,
+    // both of which post here. The other steps have their own surfaces: Start
+    // at login (Settings › Agent access, `/api/login-item`), the model download
+    // (Welcome and the wizard). The file-manager helpers are the CLI's only
+    // (`semlith setup --file-managers`): the owner dropped the portal card in
+    // 0.35.0, since a drop onto the page already does what they offered.
+    ("setup", "/api/agents/register"),
+    // Settings › About: Check for updates, then Install. Both reach the
+    // network, so neither is something a route answers to a GET that a
+    // browser might replay.
     ("upgrade", "/api/upgrade"),
+    // Graph › Explore's selected-node panel and Search's One hop around.
     ("symbol", "/api/symbol"),
     ("neighbors", "/api/neighbors"),
-    ("path", "/api/path"),
-    ("impact", "/api/impact"),
+    // Graph › Path & evidence merges `path` and `trace` into one tab (v6):
+    // the chain, its confidence per hop and the supporting lines are one
+    // answer, and the page asks `/api/trace` for it. `/api/path` is still
+    // served for anything that reads it; the page does not call it.
+    ("path", "/api/trace"),
     ("trace", "/api/trace"),
+    // Graph › Blast radius.
+    ("impact", "/api/impact"),
+    // Reports: the builder, its live preview and Save to disk.
     ("report", "/api/report"),
-    // `semlith schedule` is the Reports page's Schedules card. The card is the
-    // view and `/api/schedules` is what fills it, so both surfaces read the one
-    // file the daemon owns rather than each keeping a list.
+    // Reports' Schedules card. The card is the view and `/api/schedules` is
+    // what fills it, so both surfaces read the one file the daemon owns.
     ("schedule", "/api/schedules"),
+    // The Ledger page.
     ("ledger", "/api/ledger"),
-    // The Agents page's Model prices card names the table and fetches a
-    // fresh one.
+    // Reports' savings card prices at a chosen model and has Update prices;
+    // Settings › About has the Prices card with the same button.
     ("prices", "/api/prices"),
-    // `semlith key` is the Agents page's Rotate button, which posts here.
+    // Settings › Agent access, the agent key's Rotate.
     ("key", "/api/key"),
-    // `semlith drop` is the Stores page's Delete, behind its second click.
+    // `semlith drop` is Forget this store: the store Settings tab and the
+    // Stores row menu, behind a confirmation.
     ("drop", "/api/store/delete"),
-    // `semlith compact` is the Stores page's Compact, which asks first.
+    // Stores' Compact N and the row menu's Compact, and the store Settings
+    // tab's Compact.
     ("compact", "/api/store/compact"),
-    // `semlith scan` is the Privacy page's Scan section: the same
-    // `Semlith::scan` behind both, with a Forget button per row that posts to
-    // `/api/forget`, the daemon's one eviction path.
+    // Privacy's Check what the stores hold: the same `Semlith::scan` behind
+    // both, with a Forget button per row that posts to `/api/forget`, the
+    // daemon's one eviction path.
     ("scan", "/api/privacy/scan"),
-    // `semlith refused` is the Index page's scan panel, which reads the same
-    // `refusals` table for the files a scan held back, and Files ▸ Decisions,
-    // which undoes one file's accept or refusal per click.
+    // A store's Review tab reads the same `refusals` table for the files a
+    // scan held back, and decides on them through `/api/refused/decide` —
+    // singly or in bulk, by a person, never by an agent (0.35.0, item 19).
     ("refused", "/api/refused"),
-    // `semlith doctor` is the Doctor page, which reads the same two functions
-    // the command prints and posts its repairs to the same engine.
-    ("doctor", "/api/doctor"),
+    // `semlith doctor` is Agents › Health: the per-client report the command
+    // prints, which `/api/agents` carries as its `doctor` block, beside the
+    // machine checks from the privacy rules.
+    ("doctor", "/api/agents"),
     // `semlith hook` is never typed by a person: a client runs it, and what a
     // person wants to see is whether it is installed, stale or absent for each
-    // client -- which is what `doctor` reports and what the Agents page draws
-    // from the same source. The view of a hook is its state, not its output.
-    ("hook", "/api/doctor"),
-    // `semlith accel` is the Index page's Machine limits card, under
-    // "Accelerators": a switch per lane with its device, state and share.
+    // client — which is the hook column of Agents › Health, read from the
+    // same report. The view of a hook is its state, not its output.
+    ("hook", "/api/agents"),
+    // Settings › Performance, "Where embedding runs": a switch per lane with
+    // its device, state and share.
     ("accel", "/api/accel"),
 ];
 
@@ -120,41 +159,49 @@ const VIEWS: &[(&str, &str)] = &[
 const TOOL_VIEWS: &[(&str, &str)] = &[
     ("semlith_search", "/api/search"),
     ("semlith_stats", "/api/stores"),
-    // As above: the table moved to About, so that is where the view is.
-    ("semlith_languages", "/api/about"),
+    // As above: the table is on Settings › About, filled from this route.
+    ("semlith_languages", "/api/languages"),
     ("semlith_files", "/api/files"),
-    // Both tools are agent-facing and neither has a page: `semlith_read` is the
-    // Search page's second stage, and `semlith_pattern` is a query syntax no
-    // one types into a browser. The Agents page is where a person sees that
-    // they exist and what they are for, so that is the view named here.
-    // The Brief view on the Search page, which is the same assembly this tool
-    // returns -- the parity rule applied in the release that added it, not the
-    // one after next.
+    // The Brief mode on the Search page, which is the same assembly this tool
+    // returns — the parity rule applied in the release that added it.
     ("semlith_brief", "/api/brief"),
-    ("semlith_read", "/api/agents"),
-    ("semlith_pattern", "/api/agents"),
+    // Until 0.35.0 these two pointed at the Agents page, which lists every
+    // tool. Each has a view of its own now: Read whole symbol, and Search's
+    // Pattern mode.
+    ("semlith_read", "/api/read"),
+    ("semlith_pattern", "/api/pattern"),
     ("semlith_index", "/api/index"),
     ("semlith_add", "/api/add"),
     ("semlith_forget", "/api/forget"),
     ("semlith_symbol", "/api/symbol"),
     ("semlith_neighbors", "/api/neighbors"),
-    ("semlith_path", "/api/path"),
+    // Path & evidence, as for the command.
+    ("semlith_path", "/api/trace"),
     ("semlith_impact", "/api/impact"),
     ("semlith_trace", "/api/trace"),
     ("semlith_report", "/api/report"),
 ];
 
-/// Which verb a route answers on.
+/// Which verb a parity route answers on.
 ///
 /// One list, because there were three of these and they had already drifted
 /// apart from each other — a route added to one and forgotten in the next is a
 /// test that passes by asking the wrong question and reports 405 as a missing
-/// view.
+/// view. The routes the page calls carry their verb with them (see
+/// `page_calls`), so this only has to cover the parity maps.
 fn method_for(route: &str) -> &'static str {
     match route {
-        "/api/index" | "/api/add" | "/api/forget" | "/api/adopt" | "/api/trust"
-        | "/api/upgrade" | "/api/key" | "/api/endpoint" | "/api/store/delete"
-        | "/api/store/compact" => "POST",
+        "/api/index"
+        | "/api/add"
+        | "/api/forget"
+        | "/api/adopt"
+        | "/api/trust"
+        | "/api/upgrade"
+        | "/api/key"
+        | "/api/endpoint"
+        | "/api/store/delete"
+        | "/api/store/compact"
+        | "/api/agents/register" => "POST",
         _ => "GET",
     }
 }
@@ -300,23 +347,8 @@ impl Daemon {
 
     /// A GET route's body, parsed.
     fn json(&self, path: &str) -> serde_json::Value {
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("the daemon listens");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(90)))
-            .unwrap();
-        let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
-             Connection: close\r\n\r\n",
-            self.port, self.token
-        );
-        stream.write_all(request.as_bytes()).unwrap();
-        stream.flush().unwrap();
-
-        let mut raw = Vec::new();
-        stream.read_to_end(&mut raw).unwrap();
-        let text = String::from_utf8_lossy(&raw).into_owned();
-        let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
-        serde_json::from_str(body).unwrap_or_else(|e| panic!("{path} is not JSON: {e}\n{text}"))
+        let (_, body) = self.get(path);
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("{path} is not JSON: {e}\n{body}"))
     }
 }
 
@@ -398,28 +430,31 @@ fn every_cli_command_has_a_portal_view() {
     }
 }
 
+/// A row in `NO_VIEW` for a command that no longer exists, or that also has a
+/// row in `VIEWS`, is an exemption nobody is arguing any more.
+#[test]
+fn every_exemption_is_for_a_command_that_exists_and_has_no_row() {
+    let commands = subcommands();
+    for name in NO_VIEW {
+        assert!(
+            commands.iter().any(|c| c == name),
+            "NO_VIEW excuses `semlith {name}`, which --help does not list"
+        );
+        assert!(
+            !VIEWS.iter().any(|(command, _)| *command == name),
+            "`semlith {name}` is in NO_VIEW and in VIEWS; it is one or the other"
+        );
+    }
+}
+
 /// The same rule for the MCP surface, which is the other half of what an agent
 /// can do and therefore the other half of what the portal owes a view for.
 #[test]
 fn every_mcp_tool_has_a_portal_view() {
     let daemon = Daemon::start();
-
-    let body = {
-        let mut stream = TcpStream::connect(("127.0.0.1", daemon.port)).unwrap();
-        let request = format!(
-            "GET /api/agents HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\nConnection: close\r\n\r\n",
-            daemon.port, daemon.token
-        );
-        stream.write_all(request.as_bytes()).unwrap();
-        let mut raw = String::new();
-        stream.read_to_string(&mut raw).unwrap();
-        raw.split_once("\r\n\r\n")
-            .map(|(_, b)| b.to_string())
-            .unwrap()
-    };
-    let agents: serde_json::Value = serde_json::from_str(&body).expect("the agents route is JSON");
-    // Each entry is `{ name, about }` from 0.13.0: the page lists what each
-    // tool is for beside its name, read from the tool's own definition.
+    let agents = daemon.json("/api/agents");
+    // Each entry is `{ name, about }` from 0.13.0: Agents › Tools lists what
+    // each tool is for beside its name, read from the tool's own definition.
     let tools: Vec<String> = agents["tools"]
         .as_array()
         .expect("a tool list")
@@ -457,7 +492,7 @@ fn every_mcp_tool_has_a_portal_view() {
 
 /// Every tool the MCP server actually serves has a parity row.
 ///
-/// The test above reads the Agents route, which now derives its list from
+/// The test above reads the Agents route, which derives its list from
 /// `mcp::tool_names()` rather than repeating it — so this asserts against the
 /// server's own definitions directly, and a tool added to `mcp::tools` with no
 /// route and no row fails here rather than shipping invisible.
@@ -479,6 +514,150 @@ fn every_tool_the_server_defines_has_a_parity_row() {
     }
 }
 
+/// Every `(verb, route)` the page calls, read out of `app.js`.
+///
+/// Not a JavaScript parser: every `/api/…` in a line that is not a comment is a
+/// route the page calls, and it is a POST when the text before it is
+/// `post("` or ``post(` ``, a GET otherwise — `api(…)` and the `SOURCES` table
+/// both read. The query string is dropped. A change of calling style that this
+/// misses shows up as the floor in `the_page_calls_are_read_out_of_app_js`
+/// failing, not as a silent pass.
+fn page_calls() -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    for line in APP_JS.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+            continue;
+        }
+        let mut rest = line;
+        let mut consumed = 0;
+        while let Some(at) = rest.find("/api/") {
+            let before = &line[..consumed + at];
+            let path: String = rest[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-'))
+                .collect();
+            let quoted = before.ends_with('"') || before.ends_with('`') || before.ends_with('\'');
+            if quoted {
+                let verb = if before.ends_with("post(\"") || before.ends_with("post(`") {
+                    "POST"
+                } else {
+                    "GET"
+                };
+                let path = path.trim_end_matches('/').to_string();
+                if !out.iter().any(|(v, p)| *v == verb && *p == path) {
+                    out.push((verb, path));
+                }
+            }
+            consumed += at + 5;
+            rest = &line[consumed..];
+        }
+    }
+    out
+}
+
+/// The extraction above finds what the page plainly calls, so a page that
+/// changed how it calls its routes fails here before the served-route test
+/// passes over an empty list.
+#[test]
+fn the_page_calls_are_read_out_of_app_js() {
+    let calls = page_calls();
+    for want in [
+        ("GET", "/api/changes"),
+        ("GET", "/api/stores"),
+        ("GET", "/api/index/runs"),
+        ("POST", "/api/index"),
+        ("POST", "/api/refused/decide"),
+        ("POST", "/api/store/settings"),
+    ] {
+        assert!(
+            calls.iter().any(|(v, p)| *v == want.0 && p == want.1),
+            "page_calls did not find {want:?} in app.js; found {calls:?}"
+        );
+    }
+    assert!(
+        calls.len() >= 50,
+        "only {} routes read out of app.js: {calls:?}",
+        calls.len()
+    );
+}
+
+/// Routes the page calls that this test does not send a request to, and why.
+/// Each is checked against the router's own source instead, so a route that is
+/// missing still fails; what is skipped is only the request.
+const NOT_PROBED: &[(&str, &str, &str)] = &[
+    (
+        "POST",
+        "/api/rotate",
+        "replaces the session token this test holds, so every later probe would answer 401 — \
+         which is not 404, and so passes without asking anything",
+    ),
+    (
+        "POST",
+        "/api/doctor/gpu",
+        "runs every lane's check, and the first may download a lane's components: a network \
+         fetch in an offline suite",
+    ),
+    (
+        "POST",
+        "/api/login-item",
+        "installs or removes the login service; launchd, systemd and schtasks are not \
+         redirected by HOME, so a probe could reach the owner's real service",
+    ),
+];
+
+/// Every route the page calls is served, on the verb the page calls it with.
+///
+/// The parity maps say which route is a command's view; this says the page and
+/// the daemon agree about every route the page uses, which is the half a
+/// rewrite of `app.js` can break without touching a command. A route that is
+/// in `NOT_PROBED` must still have its arm in `src/routes.rs`.
+#[test]
+fn every_route_the_page_calls_is_served() {
+    let daemon = Daemon::start();
+    let mut missing = Vec::new();
+    for (verb, route) in page_calls() {
+        if NOT_PROBED.iter().any(|(v, r, _)| *v == verb && *r == route) {
+            let arm = match verb {
+                "POST" => [
+                    format!("(_, true, \"{route}\")"),
+                    format!("(_, _, \"{route}\") if get || post"),
+                ],
+                _ => [
+                    format!("(true, _, \"{route}\")"),
+                    format!("(_, _, \"{route}\") if get || post"),
+                ],
+            };
+            if !arm.iter().any(|a| ROUTES_RS.contains(a.as_str())) {
+                missing.push(format!("{verb} {route} (no arm in src/routes.rs)"));
+            }
+            continue;
+        }
+        let status = daemon.status(verb, &route);
+        if status == 404 || status == 405 {
+            missing.push(format!("{verb} {route} answered {status}"));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "app.js calls routes the daemon does not serve:\n  {}",
+        missing.join("\n  ")
+    );
+}
+
+/// Every route a parity row names is one the page actually calls — a view is
+/// what a person can open, and a route nothing on the page fetches is not one.
+#[test]
+fn every_parity_route_is_one_the_page_calls() {
+    let calls = page_calls();
+    for (name, route) in VIEWS.iter().chain(TOOL_VIEWS.iter()) {
+        assert!(
+            calls.iter().any(|(_, p)| p == route),
+            "{name} names {route} as its view, and app.js never calls it"
+        );
+    }
+}
+
 /// Nothing the portal serves may reach for another origin, because the policy
 /// the server sends would block it — on a machine with a network as well as on
 /// one without. The unit test in `src/portal` checks the bytes; this checks
@@ -487,15 +666,7 @@ fn every_tool_the_server_defines_has_a_parity_row() {
 fn what_the_portal_serves_names_no_other_origin() {
     let daemon = Daemon::start();
     for route in ["/", "/style.css", "/app.js"] {
-        let mut stream = TcpStream::connect(("127.0.0.1", daemon.port)).unwrap();
-        let request = format!(
-            "GET {route} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\nConnection: close\r\n\r\n",
-            daemon.port, daemon.token
-        );
-        stream.write_all(request.as_bytes()).unwrap();
-        let mut raw = String::new();
-        stream.read_to_string(&mut raw).unwrap();
-        let body = raw.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+        let (_, body) = daemon.get(route);
         let parsed = body.replace("http://www.w3.org/2000/svg", "");
         assert!(
             !parsed.contains("http://") && !parsed.contains("https://"),
@@ -504,20 +675,14 @@ fn what_the_portal_serves_names_no_other_origin() {
     }
 }
 
-/// A sanity check on the list above: every route it names is one the portal
-/// module actually serves or the router actually routes, not a path somebody
-/// hoped for.
+/// A sanity check on the maps above: every route they name is one the router
+/// actually routes, not a path somebody hoped for.
 #[test]
 fn no_view_in_the_map_is_a_route_that_does_not_exist() {
     let daemon = Daemon::start();
-    let routes: Vec<&str> = VIEWS
-        .iter()
-        .chain(TOOL_VIEWS.iter())
-        .map(|(_, route)| *route)
-        .collect();
     let mut seen: Vec<&str> = Vec::new();
-    for route in routes {
-        if seen.contains(&route) {
+    for (_, route) in VIEWS.iter().chain(TOOL_VIEWS.iter()) {
+        if seen.contains(route) {
             continue;
         }
         seen.push(route);
@@ -526,25 +691,26 @@ fn no_view_in_the_map_is_a_route_that_does_not_exist() {
     }
 }
 
-/// Every route 0.20.0 added, with the verb it answers on.
+/// What the page polls to read live, with the verb it answers on.
 ///
 /// The parity map above pairs a *command* with its view, which is the rule
-/// AGENTS.md states. These four are not a command's view — they are what the
-/// page polls to read live — so they need their own row here or nothing would
-/// notice one of them being dropped.
+/// AGENTS.md states. These are not a command's view — they are what the page
+/// polls — so they keep their own rows here, beside the general check above,
+/// so that dropping one names itself.
 const LIVE_ROUTES: &[(&str, &str)] = &[
-    // What is indexing and how far it has got, for a page or a script.
+    // What is indexing and how far it has got: the header's run pill, each
+    // store's Runs tab and the wizard's Index step.
     ("GET", "/api/index/runs"),
     // One run's log after a cursor. Asked with no store on purpose: naming one
     // that does not exist is a 404 about the *store*, which is the right answer
     // and indistinguishable here from the route being missing.
     ("GET", "/api/index/log"),
-    // The repositories under a folder, for the Index page's checklist and for
-    // `semlith index --projects`.
+    // The repositories under a folder, for the wizard's Keep together / One
+    // store each and for `semlith index --projects`.
     ("GET", "/api/projects"),
     // The six change counters the whole live portal is driven by.
     ("GET", "/api/changes"),
-    // The three machine settings.
+    // Settings › Performance's limits.
     ("POST", "/api/index/settings"),
 ];
 
@@ -558,20 +724,37 @@ fn every_route_the_live_portal_polls_is_served() {
     }
 }
 
+/// The six domains `/api/changes` reports, which `DOMAIN_KEYS` in `app.js`
+/// maps to what each one refetches.
+const DOMAINS: [&str; 6] = ["stores", "runs", "clients", "ledger", "events", "privacy"];
+
 /// `/api/changes` is the one clock, so it has to carry all six domains: a page
 /// watching a domain this route does not report would never refetch it, and
-/// would be the one stale panel on an otherwise live portal.
+/// would be the one stale panel on an otherwise live portal. The page's own
+/// table has to name the same six, or a counter that moves refetches nothing.
 #[test]
 fn the_changes_route_reports_every_domain() {
     let daemon = Daemon::start();
     let changes = daemon.json("/api/changes");
-    for domain in ["stores", "runs", "clients", "ledger", "events", "privacy"] {
+    for domain in DOMAINS {
         assert!(
             changes
                 .get(domain)
                 .and_then(serde_json::Value::as_u64)
                 .is_some(),
             "/api/changes does not report {domain}: {changes}"
+        );
+    }
+
+    let start = APP_JS
+        .find("const DOMAIN_KEYS = {")
+        .expect("app.js maps domains to keys in DOMAIN_KEYS");
+    let block = &APP_JS[start..];
+    let block = &block[..block.find("\n};").expect("DOMAIN_KEYS is closed")];
+    for domain in DOMAINS {
+        assert!(
+            block.contains(&format!("\n  {domain}: [")),
+            "DOMAIN_KEYS in app.js does not say what {domain} refetches"
         );
     }
 }
@@ -625,16 +808,18 @@ fn a_deleted_root_moves_the_stores_counter() {
     );
 }
 
-/// The two flags 0.20.0 adds to `index` have a surface on the page, which is
+/// The two flags 0.20.0 added to `index` have a surface on the page, which is
 /// what portal parity asks of a capability.
 ///
-/// `--each` is the Index page's target control, and `--projects` is its
-/// repository checklist. Asserted against the page's own source, because a
-/// flag documented in `--help` and absent from the portal is exactly the debt
-/// this repository says it does not carry.
+/// Until 0.35.0 both were on the Index page. Design v6 moves them into the
+/// store wizard's Sources step: `--projects` is the repository discovery that
+/// decides whether a folder holds several repositories, and `--each` is "One
+/// store each", which sends the wizard's run with `store: "each"`. Asserted
+/// against the page's own source, because a flag documented in `--help` and
+/// absent from the portal is exactly the debt this repository says it does not
+/// carry.
 #[test]
 fn the_index_flags_have_a_portal_surface() {
-    const APP_JS: &str = include_str!("../src/portal/app.js");
     let help = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
         .args(["index", "--help"])
         .output()
@@ -650,16 +835,17 @@ fn the_index_flags_have_a_portal_surface() {
         "index --help does not offer --projects"
     );
     assert!(
-        APP_JS.contains("each folder becomes its own store"),
-        "the Index page offers no `each` target, so --each has no portal view"
+        APP_JS.contains("\"One store each\"") && APP_JS.contains("? \"each\""),
+        "the wizard offers no One store each, or does not send it as `each`, so --each has \
+         no portal view"
     );
     assert!(
         APP_JS.contains("/api/projects"),
-        "the Index page never asks for projects, so --projects has no portal view"
+        "the wizard never asks for projects, so --projects has no portal view"
     );
 }
 
-/// The Privacy page's Rules section is the release's claims with the daemon's
+/// The Privacy page's rules section is the release's claims with the daemon's
 /// own reading beside each. A row that only stated the rule would be a sentence
 /// somebody wrote.
 #[test]
@@ -670,7 +856,7 @@ fn the_privacy_route_carries_a_rule_per_control_with_its_own_check() {
         .as_array()
         .expect("the privacy route carries no rules");
 
-    // Every control this release added, by the name the page shows.
+    // Every control, by the name the page shows.
     for want in [
         "header-borne token",
         "same-origin writes",
@@ -709,10 +895,11 @@ fn the_privacy_route_carries_a_rule_per_control_with_its_own_check() {
     }
 }
 
-/// The Index page's folder picker is confined to the user's home. With no home
-/// it used to root at the filesystem — `/` on unix, whichever volume the
-/// process started on under Windows — and then refuse the user's own profile
-/// as outside it. A picker that cannot be confined is refused instead (#71).
+/// The folder picker — the wizard's Browse and Adopt existing — is confined to
+/// the user's home. With no home it used to root at the filesystem — `/` on
+/// unix, whichever volume the process started on under Windows — and then
+/// refuse the user's own profile as outside it. A picker that cannot be
+/// confined is refused instead (#71).
 #[test]
 fn the_directory_browser_names_the_home_and_refuses_when_there_is_none() {
     let daemon = Daemon::start();
@@ -801,39 +988,62 @@ fn the_search_route_applies_the_offset_it_validates() {
 
 /// The canvas draws every kind the store holds.
 ///
-/// `EDGE_KINDS` in `app.js` is the filter the Graph page applies on every load,
-/// so a kind missing from it is fetched from `/api/graph` and dropped before
-/// painting — which `contains` and `aliases` were for two releases, while the
-/// rail went on counting them. The two lists are in different languages and
-/// cannot share a constant, so this is what keeps them from drifting again.
+/// Until 0.35.0 the Graph page kept an allow-list, `EDGE_KINDS`, and dropped
+/// any edge whose kind was not on it — which is how `contains` and `aliases`
+/// were fetched and never painted for two releases while the rail went on
+/// counting them. The v6 Explore tab has no allow-list: its filter removes an
+/// edge only when the chip for that kind or confidence is switched off, and
+/// keeps everything else, which it draws in the "other" ink. So the guarantee
+/// is now two checks rather than one list compared with another: every kind a
+/// chip filters is a kind the store stores (a chip for a kind that does not
+/// exist filters nothing), and the filter falls through to keeping the edge.
 #[test]
 fn the_graph_page_draws_every_edge_kind_the_store_stores() {
-    const APP_JS: &str = include_str!("../src/portal/app.js");
+    let stored = semlith::graph::KINDS;
+    let mut filtered = Vec::new();
+    for piece in APP_JS.split("e.kind === \"").skip(1) {
+        let kind = &piece[..piece.find('"').expect("a closed kind literal")];
+        filtered.push(kind);
+        assert!(
+            stored.contains(&kind),
+            "the Graph page filters edges of kind {kind:?}, which graph::KINDS does not have"
+        );
+    }
+    assert!(
+        !filtered.is_empty(),
+        "the Graph page filters no edge kind at all; the chips are gone or renamed"
+    );
+    assert!(
+        !APP_JS.contains("const EDGE_KINDS"),
+        "an EDGE_KINDS allow-list is back: a kind missing from it would be fetched and dropped"
+    );
 
-    let line = APP_JS
-        .lines()
-        .find(|line| line.starts_with("const EDGE_KINDS = "))
-        .expect("app.js declares EDGE_KINDS on one line");
-    let mut drawn: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
-    drawn.sort_unstable();
-
-    let mut stored: Vec<&str> = semlith::graph::KINDS.to_vec();
-    stored.sort_unstable();
-
-    assert_eq!(
-        drawn, stored,
-        "the Graph page's edge kinds and graph::KINDS disagree; a kind in one \
-         and not the other is either an edge nothing draws or a chip that \
-         filters nothing"
+    let start = APP_JS
+        .find("const keep = d.edges.filter(")
+        .expect("the Explore tab filters d.edges into `keep`");
+    let body = &APP_JS[start..];
+    let body = &body[..body.find("\n    });").expect("the filter is closed")];
+    assert!(
+        body.trim_end().ends_with("return true;"),
+        "the edge filter does not end by keeping the edge, so a kind with no chip may be dropped:\n{body}"
     );
 }
 
 /// Text the portal can render, with comments and interpolations removed.
 ///
 /// Not a JavaScript parser. It tracks the three quote characters, backslash
-/// escapes, `//` and `/* */`, and drops the `${...}` spans inside a template
-/// literal, which is all that is needed to decide whether a run of digits is a
-/// sentence a user reads or a note to whoever edits the file next.
+/// escapes, `//` and `/* */`, regular-expression literals, and drops the
+/// `${...}` spans inside a template literal, which is all that is needed to
+/// decide whether a run of digits is a sentence a user reads or a note to
+/// whoever edits the file next.
+///
+/// Regular expressions were added in 0.35.0: the v6 page strips quotes from a
+/// pasted path with `/^['"]|['"]$/g`, and a scanner that read that quote as
+/// the start of a string was out of step for the rest of the file — it read
+/// code as text and text as code, so both the version check and the selling
+/// check were asking about the wrong characters. A `/` starts a regex where a
+/// value is expected: after an operator, an opening bracket, a comma, a colon
+/// or at the start of a line, which is how the page writes every one of them.
 fn user_visible_strings(source: &str) -> Vec<String> {
     let src: Vec<char> = source.chars().collect();
     let mut out = Vec::new();
@@ -851,6 +1061,31 @@ fn user_visible_strings(source: &str) -> Vec<String> {
                     i += 1;
                 }
                 i += 2;
+            }
+            '/' if src[..i]
+                .iter()
+                .rev()
+                .find(|c| !c.is_whitespace())
+                .is_none_or(|c| "(,=:[!&|?{};+-*%<>~^".contains(*c)) =>
+            {
+                // A regex literal: skip to its closing `/`, honouring escapes
+                // and character classes, then its flags.
+                i += 1;
+                let mut class = false;
+                while i < src.len() && src[i] != '\n' {
+                    match src[i] {
+                        '\\' => i += 1,
+                        '[' => class = true,
+                        ']' => class = false,
+                        '/' if !class => break,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i += 1;
+                while i < src.len() && src[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
             }
             quote @ ('"' | '\'' | '`') => {
                 let mut literal = String::new();
@@ -930,16 +1165,14 @@ fn semver_like(text: &str) -> Option<String> {
 /// tell which build they describe. They were true of one build on one machine
 /// and went stale without failing anything, which is the defect
 /// `the_readme_carries_no_release_specific_content` exists to catch in the
-/// README. The portal is the same surface with a larger audience and had no
-/// such gate.
+/// README. The portal is the same surface with a larger audience.
 ///
-/// The live values are unaffected: About's version and binary rows and the
-/// setup screen's installed version are `${...}` interpolations of what the
-/// server just returned, and this reads none of them.
+/// The live values are unaffected: Settings › About's version and binary rows,
+/// the sidebar's version and the update card are `${...}` interpolations of
+/// what the server just returned, and this reads none of them. v6 shows one
+/// version string, the running binary's (0.35.0, item 2).
 #[test]
 fn the_portal_names_no_release_in_anything_a_user_reads() {
-    const APP_JS: &str = include_str!("../src/portal/app.js");
-
     for literal in user_visible_strings(APP_JS) {
         if let Some(found) = semver_like(&literal) {
             panic!(
@@ -951,14 +1184,13 @@ fn the_portal_names_no_release_in_anything_a_user_reads() {
     }
 }
 
-/// The Agents page's two newest cards have something to read.
+/// The Agents route carries what Settings › Agent access and Agents › Health
+/// read.
 ///
-/// From this release the endpoint can be installed as a login service, and the
-/// page that claims one endpoint for every client is the page that owes a
-/// reader the answer to whether this machine actually kept one across a reboot.
-/// Both halves — the service status and the per-client report — arrive on
-/// `/api/agents`, and a route that quietly stops sending either leaves the two
-/// cards blank with nothing failing anywhere else.
+/// The service status is the Start at login card; the per-client report is
+/// Agents › Health, Home's Agents card and the wizard's Connect step. A route
+/// that quietly stops sending either leaves those blank with nothing failing
+/// anywhere else.
 #[test]
 fn the_agents_route_reports_the_service_and_every_client() {
     let daemon = Daemon::start();
@@ -1005,15 +1237,15 @@ fn the_agents_route_reports_the_service_and_every_client() {
         .unwrap_or_else(|| panic!("/api/agents sends no doctor report: {agents}"));
     assert!(
         !clients.is_empty(),
-        "the doctor report on /api/agents is empty; the Agents page lists no client at all"
+        "the doctor report on /api/agents is empty; Agents › Health lists no client at all"
     );
     for client in clients {
         let name = client["name"]
             .as_str()
             .unwrap_or_else(|| panic!("a doctor entry with no name: {client}"));
-        // `in_use` is what the Agents page filters on — it shows the clients
-        // somebody here has, not the full catalogue — so an entry missing it
-        // would silently drop off the card.
+        // `in_use` is what the page filters on — it shows the clients somebody
+        // here has, not the full catalogue — so an entry missing it would
+        // silently drop off the card.
         for key in ["present", "registered", "fault", "in_use", "disabled_here"] {
             assert!(
                 client[key].is_boolean(),
@@ -1061,77 +1293,81 @@ fn the_agents_route_reports_the_service_and_every_client() {
     }
 }
 
-/// The sidebar: thirteen entries in four groups, in this order.
+/// The sidebar: nine entries in three groups, in this order (design v6).
 ///
-/// The entries are the v4 design's thirteen. The grouping is the v3 design's,
-/// taken back in 0.26.1: v4 flattened v3's four groups into two of six and
-/// seven, which reads as one long list with two headings in it. v3's fourth
-/// group was `Account`, holding License and About; the binary is free and
-/// there is no licence page, so the last group is the two pages that describe
-/// the machine this is running on.
-///
-/// Fourteen, not thirteen: `Index` and `Inside the index` are two pages in the
-/// design and were one here, so the indexing controls and the figures about
-/// what was indexed were stacked on one page. Splitting them is what the
-/// design draws, and the second half — the corpus — is the page nothing else
-/// in this product can show.
-///
-/// Doctor is deliberately not in the design's own list.
-/// It is a page this binary already serves, and `semlith doctor` would
-/// otherwise be the one command with no view — which the parity test above
-/// would fail anyway, from the other direction.
-const SIDEBAR: &[(&str, &str)] = &[
-    ("Workspace", "Stores"),
-    ("Workspace", "Files"),
-    ("Workspace", "Index"),
-    ("Workspace", "Inside the index"),
-    ("Explore", "Search"),
-    ("Explore", "Graph"),
-    ("Explore", "Impact"),
-    ("Operate", "Retrieval ledger"),
-    ("Operate", "Reports"),
-    ("Operate", "Agents"),
-    ("Operate", "Cloud"),
-    ("Operate", "Privacy"),
-    ("Machine", "Doctor"),
-    ("Machine", "About"),
+/// Until 0.35.0 it was fourteen pages in four groups. v6 rebuilds it around
+/// the jobs a user comes to do; the old pages are now tabs and sections of
+/// these nine, listed in `MOVED`. The store page (`#/store/<name>`) sits under
+/// Stores and lights its entry, so it has no row of its own here.
+const SIDEBAR: &[(&str, &str, &str)] = &[
+    ("Workspace", "home", "Home"),
+    ("Workspace", "stores", "Stores"),
+    ("Workspace", "search", "Search"),
+    ("Workspace", "graph", "Graph"),
+    ("Agents", "agents", "Agents"),
+    ("Agents", "ledger", "Ledger"),
+    ("Agents", "reports", "Reports"),
+    ("Machine", "privacy", "Privacy"),
+    ("Machine", "settings", "Settings"),
 ];
 
-/// The `{ group: …, id: …, label: … }` rows of `VIEWS`, in source order.
-fn sidebar_rows(source: &str) -> Vec<(String, String, String)> {
-    let start = source
-        .find("const VIEWS = [")
-        .expect("app.js defines VIEWS");
-    let body = &source[start..];
-    let end = body.find("\n];").expect("VIEWS is closed");
+/// The `["Group", ["id", …]]` rows of `NAV`, flattened in source order.
+fn nav_rows() -> Vec<(String, String)> {
+    let start = APP_JS.find("const NAV = [").expect("app.js defines NAV");
+    let body = &APP_JS[start + "const NAV = [".len()..];
+    let body = &body[..body.find("\n];").expect("NAV is closed")];
     let mut rows = Vec::new();
-    for line in body[..end].lines() {
-        let field = |name: &str| -> Option<String> {
-            let at = line.find(&format!("{name}: \""))?;
-            let rest = &line[at + name.len() + 3..];
-            Some(rest[..rest.find('"')?].to_string())
-        };
-        if let (Some(group), Some(id), Some(label)) = (field("group"), field("id"), field("label"))
-        {
-            rows.push((group, id, label));
+    for line in body.lines() {
+        let quoted: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
+        if let Some((group, ids)) = quoted.split_first() {
+            for id in ids {
+                rows.push((group.to_string(), id.to_string()));
+            }
         }
     }
     rows
 }
 
+/// `id: { title: "…", group: "…" }` from `PAGES`.
+fn page_entry(id: &str) -> Option<(String, String)> {
+    let start = APP_JS.find("const PAGES = {")?;
+    let body = &APP_JS[start..];
+    let body = &body[..body.find("\n};")?];
+    let line = body
+        .lines()
+        .find(|l| l.trim_start().starts_with(&format!("{id}: {{")))?;
+    let field = |name: &str| -> Option<String> {
+        let at = line.find(&format!("{name}: \""))?;
+        let rest = &line[at + name.len() + 3..];
+        Some(rest[..rest.find('"')?].to_string())
+    };
+    Some((field("title")?, field("group")?))
+}
+
 #[test]
-fn the_sidebar_is_the_thirteen_pages_in_four_groups_in_order() {
-    const APP_JS: &str = include_str!("../src/portal/app.js");
-    let rows = sidebar_rows(APP_JS);
+fn the_sidebar_is_the_nine_pages_in_three_groups_in_order() {
+    let rows = nav_rows();
     let got: Vec<(&str, &str)> = rows
         .iter()
-        .map(|(group, _, label)| (group.as_str(), label.as_str()))
+        .map(|(g, id)| (g.as_str(), id.as_str()))
         .collect();
+    let want: Vec<(&str, &str)> = SIDEBAR.iter().map(|(g, id, _)| (*g, *id)).collect();
     assert_eq!(
-        got,
-        SIDEBAR.to_vec(),
-        "the sidebar's groups, labels or order have moved"
+        got, want,
+        "the sidebar's groups, entries or order have moved"
     );
+
+    // The title and group a page carries agree with where the rail draws it:
+    // the breadcrumb and the tab title read `PAGES`, the rail reads `NAV`.
+    for (group, id, title) in SIDEBAR {
+        let (t, g) = page_entry(id).unwrap_or_else(|| panic!("PAGES has no entry for {id}"));
+        assert_eq!(&t, title, "{id} is titled {t:?} in PAGES");
+        assert_eq!(
+            &g, group,
+            "{id} is grouped under {g:?} in PAGES and {group:?} in NAV"
+        );
+    }
+
     // Each group contiguous: the rail draws a rule between groups, so an entry
     // in the wrong place splits a group into two.
     let mut groups: Vec<&str> = Vec::new();
@@ -1144,25 +1380,177 @@ fn the_sidebar_is_the_thirteen_pages_in_four_groups_in_order() {
             groups.push(group);
         }
     }
-    assert_eq!(groups, vec!["Workspace", "Explore", "Operate", "Machine"]);
+    assert_eq!(groups, vec!["Workspace", "Agents", "Machine"]);
 }
 
 #[test]
 fn every_sidebar_entry_has_a_mark_and_something_to_render() {
-    const APP_JS: &str = include_str!("../src/portal/app.js");
-    for (_, id, label) in sidebar_rows(APP_JS) {
+    for (_, id, title) in SIDEBAR {
         assert!(
             APP_JS.contains(&format!("\n  {id}: \"M")),
-            "{label} has no entry in NAV_ICONS, so the rail would draw a gap"
+            "{title} has no icon in `I`, so the rail would draw a gap"
         );
         assert!(
-            APP_JS.contains(&format!("\n  {id}: ")) && APP_JS.contains(&format!("{id}View")),
-            "{label} has no view function, so the entry navigates to nothing"
+            APP_JS.contains(&format!("\nVIEWS.{id} = {{")),
+            "{title} has no view, so the entry navigates to nothing"
         );
     }
+    // The pages that are not in the rail: a store's own page, the Welcome
+    // screen and the store wizard.
+    assert!(
+        APP_JS.contains("\nVIEWS.store = {"),
+        "no store page behind #/store/<name>"
+    );
+    assert!(
+        APP_JS.contains("route.page === \"welcome\"")
+            && APP_JS.contains("function welcomeScreen()"),
+        "no Welcome screen behind #/welcome"
+    );
+    assert!(
+        APP_JS.contains("route.page === \"new\"") && APP_JS.contains("function wizardScreen("),
+        "no store wizard behind #/new"
+    );
 }
 
-/// The governing rule of the v4 design: the binary is free and complete, so
+/// Where each surface of a page 0.35.0 removed went, and what proves it is
+/// there: a tab's `[id, label]`, a button's text, or the route its control
+/// posts to.
+///
+/// Item 19 of the 0.35.0 contract: views v6 does not draw are folded into v6
+/// slots, not dropped. Only the cross-store Files list is dropped, because
+/// Search's path filter covers it. A row that fails here is a capability that
+/// lost its surface in the rewrite.
+const MOVED: &[(&str, &str, &str)] = &[
+    ("Files", "a store's Files tab", r#"["files", "Files"]"#),
+    ("Index", "a store's Runs tab", r#"["runs", "Runs""#),
+    ("Index", "the store wizard", "function wizardScreen("),
+    (
+        "Inside the index",
+        "Stores › Inside the index (#/stores/inside)",
+        r#"["inside", "Inside the index"]"#,
+    ),
+    (
+        "Impact",
+        "Graph › Blast radius (#/graph/blast)",
+        r#"["blast", "Blast radius"]"#,
+    ),
+    (
+        "path and trace",
+        "Graph › Path & evidence (#/graph/path)",
+        r#"["path", "Path & evidence"]"#,
+    ),
+    (
+        "Doctor",
+        "Agents › Health (#/agents/health)",
+        r#"["health", "Health""#,
+    ),
+    (
+        "About",
+        "Settings › About (#/settings/about)",
+        r#"["about", "About""#,
+    ),
+    (
+        "Cloud",
+        "Settings › Cloud (#/settings/cloud)",
+        r#"["cloud", "Cloud""#,
+    ),
+    (
+        "pattern",
+        "Search's Pattern mode",
+        r#"["pattern", "Pattern""#,
+    ),
+    (
+        "prices",
+        "Reports' savings card and Settings › About",
+        "\"Update prices\")",
+    ),
+    (
+        "usage from client logs",
+        "the Ledger's switch",
+        "post(\"/api/ledger/usage\"",
+    ),
+    (
+        "root re-point",
+        "a store's Settings tab",
+        "post(\"/api/root\"",
+    ),
+    ("trust", "a store's Settings tab", "post(\"/api/trust\""),
+    (
+        "Install update",
+        "Settings › About",
+        "`Install ${up.latest}`",
+    ),
+    (
+        "retention",
+        "Settings › Performance",
+        "\"history_retention_days\"",
+    ),
+];
+
+#[test]
+fn every_surface_of_a_removed_page_has_a_place_in_v6() {
+    for (old, new, needle) in MOVED {
+        assert!(
+            APP_JS.contains(needle),
+            "{old} was to live on {new}, and app.js has no {needle:?}"
+        );
+    }
+    // Prices are on two surfaces, so the button is drawn twice.
+    assert!(
+        APP_JS.matches("\"Update prices\")").count() >= 2,
+        "Update prices is on Reports and Settings › About; app.js draws it fewer than twice"
+    );
+}
+
+/// Bulk acceptance by a person (0.35.0, item 19).
+///
+/// Until 0.35.0 a refused file was accepted one at a time, by a person, never
+/// by an agent. The owner reversed the first half: the store Review tab and
+/// the wizard's Review step decide on a selection, and the route takes a list.
+/// The second half stands — it is enforced by the route, not the page, and is
+/// tested where the route is. What this checks is that every decision the page
+/// sends is a list of files, so no surface is left on the one-file form.
+#[test]
+fn the_review_surfaces_decide_on_a_list_of_files() {
+    let calls: Vec<&str> = APP_JS
+        .split("post(\"/api/refused/decide\", {")
+        .skip(1)
+        .map(|rest| &rest[..rest.find('}').expect("a closed body")])
+        .collect();
+    assert!(
+        calls.len() >= 2,
+        "the Review tab and the wizard's Review step both decide; app.js posts {} decisions",
+        calls.len()
+    );
+    for body in calls {
+        assert!(
+            body.contains("files"),
+            "a decision is posted without a list of files: {{{body}}}"
+        );
+    }
+    assert!(
+        !APP_JS.contains("/api/refused/accept") && !APP_JS.contains("/api/refused/revoke"),
+        "the page still calls the one-file accept or revoke route"
+    );
+}
+
+/// Session replay is on by default (0.35.0, item 19).
+///
+/// It was off by default until 0.35.0; the owner reversed that. A fresh
+/// settings file reads as on, and the Privacy page's switch shows what this
+/// route says. A user who turned it off explicitly stays off — that half is a
+/// settings-file property, tested beside `home::Settings`.
+#[test]
+fn session_replay_is_on_for_a_fresh_settings_file() {
+    let daemon = Daemon::start();
+    let replay = daemon.json("/api/ledger/replay");
+    assert_eq!(
+        replay["enabled"], true,
+        "a fresh daemon reports session replay off: {replay}"
+    );
+}
+
+/// The governing rule since the v4 design: the binary is free and complete, so
 /// no paid surface survives anywhere in the portal.
 ///
 /// Checked over what the page can render rather than over the source, because
@@ -1170,8 +1558,6 @@ fn every_sidebar_entry_has_a_mark_and_something_to_render() {
 /// allowed through is "key", and only as the agent key.
 #[test]
 fn nothing_the_portal_renders_offers_to_sell_anything() {
-    const APP_JS: &str = include_str!("../src/portal/app.js");
-    const STYLE: &str = include_str!("../src/portal/style.css");
     const FORBIDDEN: [&str; 8] = [
         "Pro",
         "Team",
@@ -1190,10 +1576,8 @@ fn nothing_the_portal_renders_offers_to_sell_anything() {
                 continue;
             }
             // `upgrade` is also what `semlith upgrade` does to the binary,
-            // which is a command this portal has a page for and not an offer
-            // to sell anything.
-            // `upgrade` is also what `semlith upgrade` does to the binary,
-            // and the route behind that page. Neither is an offer to sell.
+            // and the route behind Settings › About's update card. Neither is
+            // an offer to sell.
             if needle == "upgrade"
                 && (lower.contains("semlith upgrade")
                     || lower.contains("upgrading")
@@ -1206,7 +1590,7 @@ fn nothing_the_portal_renders_offers_to_sell_anything() {
                 continue;
             }
             // "team" inside an ordinary word is not the word — and "a team
-            // ledger" on the Cloud page is a description of the hosted
+            // ledger" on Settings › Cloud is a description of the hosted
             // service, not a tier of this binary. The design's own copy says
             // it, and it is the one place allowed.
             if needle == "team"
@@ -1235,8 +1619,8 @@ fn nothing_the_portal_renders_offers_to_sell_anything() {
     // And the one word the design lets through: `key`, as the agent key.
     //
     // Checked as the phrases that would mean a licence rather than by
-    // allow-listing every sentence that mentions the credential — the portal
-    // has a page about the agent key and most of its copy says "key".
+    // allow-listing every sentence that mentions the credential — Settings ›
+    // Agent access is about the agent key and most of its copy says "key".
     for literal in user_visible_strings(APP_JS) {
         let lower = literal.to_lowercase();
         for phrase in [
@@ -1259,11 +1643,10 @@ fn nothing_the_portal_renders_offers_to_sell_anything() {
     }
 }
 
-/// Every tool the server advertises is on the Agents page with no marker
-/// saying it costs anything, and the cost row is measured rather than stated.
+/// Every tool the server advertises is on Agents › Tools with no marker saying
+/// it costs anything, and the cost row is measured rather than stated.
 #[test]
 fn the_agents_page_marks_no_tool_as_paid_and_measures_the_list() {
-    const APP_JS: &str = include_str!("../src/portal/app.js");
     assert!(
         !APP_JS.contains("· paid") && !APP_JS.contains("\"paid\""),
         "a tool is marked paid"
@@ -1276,17 +1659,24 @@ fn the_agents_page_marks_no_tool_as_paid_and_measures_the_list() {
     );
 }
 
-/// The Cloud page describes the service and contacts nothing.
+/// Settings › Cloud describes the service and contacts nothing.
+///
+/// It was a page of its own until 0.35.0; v6 makes it a Settings section. The
+/// guarantee is unchanged: no connected state until the cloud client (0.38.0),
+/// and no command behind it.
 #[test]
-fn the_cloud_page_is_the_not_connected_state_and_has_no_client() {
-    const APP_JS: &str = include_str!("../src/portal/app.js");
+fn the_cloud_section_is_the_not_connected_state_and_has_no_client() {
     assert!(
-        APP_JS.contains("async function cloudView()"),
-        "no Cloud page"
+        APP_JS.contains("function seCloud()"),
+        "no Cloud section in Settings"
     );
     assert!(
-        APP_JS.contains("Semlith Cloud is one hosted store"),
-        "the Cloud page lost its lead copy"
+        APP_JS.contains("One hosted store for a whole organisation"),
+        "the Cloud section lost its lead copy"
+    );
+    assert!(
+        APP_JS.contains("pill(\"not connected\""),
+        "the Cloud section does not say it is not connected"
     );
     // No connected state in this release: `cloudConnected` would be the flag
     // that draws one, and there is none.
@@ -1301,25 +1691,36 @@ fn the_cloud_page_is_the_not_connected_state_and_has_no_client() {
     );
 }
 
-/// No bar is sized by a `style` attribute written into the markup.
+/// No element is sized or coloured by a `style` attribute.
 ///
 /// The portal is served under `style-src 'self'` with no `unsafe-inline`, so
 /// a width written that way is blocked and the bar renders at its default
 /// size — silently, which is how three bars shipped at full width in
 /// development before the browser drive caught them. Dynamic sizes go
-/// through the CSSOM, as the tooltip's position has since 0.11.0.
+/// through the CSSOM (`node.style.width = …`), which the policy allows.
 #[test]
 fn nothing_the_portal_builds_carries_an_inline_style_attribute() {
-    const APP_JS: &str = include_str!("../src/portal/app.js");
     let mut offenders = Vec::new();
     for (i, line) in APP_JS.lines().enumerate() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("//") || trimmed.starts_with('*') {
             continue;
         }
-        // `el(…, { style: … })` and `"style":` both set the attribute.
-        if trimmed.contains("style:") || trimmed.contains("\"style\"") {
-            offenders.push(format!("{}: {}", i + 1, trimmed));
+        // `el(…, { style: … })` and `"style":` set the attribute through the
+        // element builder, `setAttribute("style", …)` sets it directly, and a
+        // `style=` inside a string is markup somebody is about to parse.
+        if trimmed.contains("style:")
+            || trimmed.contains("\"style\"")
+            || trimmed.contains("setAttribute(\"style\"")
+            || trimmed.contains("setAttribute('style'")
+            || trimmed.contains("style=")
+        {
+            offenders.push(format!("app.js:{}: {}", i + 1, trimmed));
+        }
+    }
+    for (i, line) in INDEX_HTML.lines().enumerate() {
+        if line.contains("style=") || line.contains("<style") {
+            offenders.push(format!("index.html:{}: {}", i + 1, line.trim()));
         }
     }
     assert!(
@@ -1327,4 +1728,26 @@ fn nothing_the_portal_builds_carries_an_inline_style_attribute() {
         "these would be dropped by the portal's own content-security policy:\n  {}",
         offenders.join("\n  ")
     );
+}
+
+/// `docs/portal.md` documents every page (AGENTS.md, "Portal parity"): each
+/// sidebar page has a section, and so do the three screens outside the rail.
+#[test]
+fn the_portal_doc_has_a_section_for_every_page() {
+    let headings: Vec<&str> = PORTAL_MD
+        .lines()
+        .filter_map(|l| l.strip_prefix("## "))
+        .collect();
+    for (_, _, title) in SIDEBAR {
+        assert!(
+            headings.contains(title),
+            "docs/portal.md has no `## {title}` section"
+        );
+    }
+    for title in ["Welcome", "The store wizard", "A store's page"] {
+        assert!(
+            headings.contains(&title),
+            "docs/portal.md has no `## {title}` section"
+        );
+    }
 }

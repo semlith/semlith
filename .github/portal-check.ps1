@@ -500,6 +500,34 @@ foreach ($route in @('models', 'languages', 'privacy', 'about', 'agents', 'setup
     Check "portal/$route" "/api/$route answers" -When $script:up { Get-Json "/api/$route" | Out-Null }
 }
 
+# The v6 page (0.35.0) reads these on its pages and its one live poll. Each is
+# asked the way the page asks it, so a route the page depends on cannot go
+# missing from a build without this list saying which.
+foreach ($route in @('stores', 'index/runs', 'refused', 'corpus', 'accel', 'schedules', 'prices',
+                     'ledger', 'ledger/replay', 'changes', 'stores?coverage=1')) {
+    Check "portal/v6/$route" "/api/$route answers for the v6 page" -When $script:up { Get-Json "/api/$route" | Out-Null }
+}
+
+# The page's own assets are compiled into the binary and need no token: the
+# two logos it swaps by theme and the five bundled fonts the CSP lets it load.
+Check 'portal/v6/assets-public' 'the v6 page loads its logos and fonts without a token' -When $script:up {
+    foreach ($asset in @('/logo.svg', '/logo-dark.svg', '/fonts/IBMPlexSans-Regular.woff2',
+                         '/fonts/IBMPlexSans-Medium.woff2', '/fonts/IBMPlexSans-SemiBold.woff2',
+                         '/fonts/IBMPlexMono-Regular.woff2', '/fonts/IBMPlexMono-Medium.woff2')) {
+        $r = Api $asset -NoToken
+        if ($r.StatusCode -ne 200) { Fail "GET $asset without a token was $($r.StatusCode)" }
+    }
+}
+
+# The change counters are the page's one clock: six domains, each a number,
+# polled once a second. A missing domain is a page that never repaints it.
+Check 'portal/v6/changes-shape' 'the live poll names all six domains' -When $script:up {
+    $c = Get-Json '/api/changes'
+    foreach ($domain in @('stores', 'runs', 'clients', 'ledger', 'events', 'privacy')) {
+        if ($null -eq $c.$domain) { Fail "/api/changes has no '$domain' counter: $($c | ConvertTo-Json -Compress)" }
+    }
+}
+
 # ---------------------------------------------------------------------- parity
 # Every CLI answer and its portal equivalent come from one store, so they must
 # not disagree. A portal that quietly reads a different store is worse than one

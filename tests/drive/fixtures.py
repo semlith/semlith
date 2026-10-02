@@ -19,6 +19,7 @@ looks like.
 
 import json
 import os
+import random
 import shutil
 import subprocess
 import tempfile
@@ -182,7 +183,7 @@ class Fixtures:
 
     # ---------------------------------------------------------------- pieces
 
-    def _write_corpus(self, directory, count, prefix="file"):
+    def _write_corpus(self, directory, count, prefix="file", salt=None):
         os.makedirs(directory, exist_ok=True)
         for index in range(count):
             name = "%s_%03d" % (prefix, index)
@@ -196,6 +197,9 @@ class Fixtures:
                     "symbol": "Widget%03d" % index,
                     "index": index,
                 }
+            if salt:
+                mark = "%s %d" % (salt, index)
+                body += "\n<!-- %s -->\n" % mark if path.endswith(".md") else "\n// %s\n" % mark
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(body)
         return directory
@@ -337,8 +341,12 @@ class Fixtures:
         file count makes it.
         """
         self._unique += 1
+        # A line no other corpus has, at the end so no line number moves: a
+        # second drive on the same daemon would otherwise be answered by the
+        # vector cache and finish before the 8.x checks can watch it.
+        salt = "%s-%d-%d" % (prefix, self._unique, random.randint(0, 10**12))
         return self._write_corpus(
-            os.path.join(self.root, "%s-%d" % (prefix, self._unique)), count, prefix=prefix
+            os.path.join(self.root, "%s-%d" % (prefix, self._unique)), count, prefix=prefix, salt=salt
         )
 
     def doomed(self):
@@ -360,6 +368,24 @@ class Fixtures:
 
     def remove_doomed(self):
         shutil.rmtree(self.doomed(), ignore_errors=True)
+
+    def cased(self):
+        """Folders and files whose names differ in case, for finding 4.4.
+
+        Upper and lower case mixed in both halves, so a picker that sorts
+        case-sensitively puts `Beta` above `alpha` and is caught doing it, and
+        a file beside the folders, so finding 4.5 has a mix to read.
+        """
+        if getattr(self, "_cased", None):
+            return self._cased
+        directory = os.path.join(self.root, "cased")
+        for name in ("alpha", "Beta", "gamma", "Delta"):
+            os.makedirs(os.path.join(directory, name), exist_ok=True)
+        for name in ("apple.md", "Banana.md", "cherry.md"):
+            with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+                handle.write(DOC % {"name": name})
+        self._cased = directory
+        return directory
 
 
 if __name__ == "__main__":

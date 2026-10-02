@@ -477,6 +477,7 @@ pub fn download(part: &Part, dir: &Path, progress: &mut dyn FnMut(u64)) -> Resul
         .timeout_global(Some(std::time::Duration::from_secs(3 * 3600)))
         .build()
         .into();
+    crate::add::note_outbound("pack", part.url);
     let mut response = agent
         .get(part.url)
         .call()

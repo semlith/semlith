@@ -304,6 +304,7 @@ pub fn update() -> Result<Table> {
         .timeout_global(Some(std::time::Duration::from_secs(60)))
         .build()
         .new_agent();
+    crate::add::note_outbound("prices", SOURCE_URL);
     let mut response = agent
         .get(SOURCE_URL)
         .call()

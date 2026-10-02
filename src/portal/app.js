@@ -4,16 +4,22 @@
  * binary, so there is nothing to bundle and nothing to fetch: what you read
  * here is what runs.
  *
- * Every view is a function that returns an element, and the router swaps one
- * for another inside <main>. The shell around it — topbar, rail, drawer — is
- * built once and then mutated in place. That split matters: rebuilding the
- * shell to open a menu used to re-run the current view, which re-hit the API
- * and threw away whatever the user had typed into it.
+ * Laid out after design v6 (2026-10-01): a Welcome screen and a store wizard
+ * outside the shell, and inside it nine pages in three groups — Home, Stores
+ * (with one page per store), Search, Graph, Agents, Ledger, Reports, Privacy,
+ * Settings. Every view is a function that builds an element from the data
+ * cache; the router swaps one for another inside <main>. Parts of a view that
+ * move with live data are painted in place, so a field being typed into is
+ * never rebuilt under the cursor.
+ *
+ * The server's policy is `style-src 'self'`: a `style` attribute is dropped
+ * without a word, so nothing here writes one. Classes come from style.css and
+ * data-driven sizes go through the CSSOM (`node.style.width = …`).
  */
 
 "use strict";
 
-// ---------------------------------------------------------------- helpers
+// ------------------------------------------------------------------ helpers
 
 /** Build an element. Attributes in `props`, children as the rest. */
 function el(tag, props, ...kids) {
@@ -21,105 +27,113 @@ function el(tag, props, ...kids) {
   for (const [key, value] of Object.entries(props || {})) {
     if (value === null || value === undefined || value === false) continue;
     if (key === "class") node.className = value;
-    else if (key === "text") node.textContent = value;
-    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    // Always its own text node, even empty, so a redraw patched in place
+    // edits the words rather than adding or removing a node.
+    else if (key === "text") node.append(document.createTextNode(String(value)));
+    else if (key.startsWith("on") && typeof value === "function") listen(node, key.slice(2), value);
     else node.setAttribute(key, value === true ? "" : String(value));
   }
-  for (const kid of kids.flat()) {
+  for (const kid of kids.flat(Infinity)) {
     if (kid === null || kid === undefined || kid === false) continue;
     node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
   }
-  return node;
-}
-
-/** Append children to an element and return the element, for use inline. */
-function appended(node, ...kids) {
-  for (const kid of kids.flat()) if (kid) node.append(kid);
-  return node;
-}
-
-/* What a page shows while its first request is in flight.
- *
- * The mark is a four-by-four grid of cells, five of them amber, so the wait
- * is the mark assembling itself rather than the word "Loading…" on an empty
- * page. Sixteen spans and one keyframe: no image to fetch, nothing to
- * animate in JavaScript, and it inherits the theme because the cells are
- * painted with the same two tokens everything else uses.
- *
- * The cells are indexed so the stylesheet can stagger them along the
- * diagonal, and the five the real mark paints amber carry `hot`, so what
- * assembles is this product's mark and not a generic spinner.
- */
-const LOADER_HOT = new Set([1, 6, 7, 9, 14]);
-
-function loadingView(what) {
-  const cells = [];
-  for (let i = 0; i < 16; i++) {
-    cells.push(el("span", { class: LOADER_HOT.has(i) ? "cell hot" : "cell", "data-i": String(i) }));
+  // Every drawn checkbox carries its tick as an inline SVG, shown when it is
+  // checked: the design's tick, with no image URL for the CSP to refuse.
+  if (node.classList.contains("cb")) {
+    const tick = icon("M5 12.5l4.5 4.5L19 7.5", 12, { w: 3.2 });
+    tick.setAttribute("class", "i cb-tick");
+    node.append(tick);
   }
-  return el(
-    "div",
-    { class: "view loading", role: "status", "aria-live": "polite" },
-    el("div", { class: "mark", "aria-hidden": "true" }, cells),
-    el("span", { class: "what", text: what ? `Reading ${what.toLowerCase()}…` : "Reading…" }),
-    el("span", { class: "track" }, el("span", { class: "run" })),
-  );
+  return node;
 }
 
-/* The second stage of a wait: the shape of what is coming.
- *
- * The page-wide loader covers the view's own request. A panel that fetches
- * after the page has drawn — the graph's health cards, the map, the agents
- * list — is a second wait, and it used to be a line of grey text where a
- * card was about to be. A skeleton says how much is coming and stops the
- * layout jumping when it lands.
- *
- * `widths` are percentages, one per line, so a skeleton of a list of names
- * does not look like a skeleton of a paragraph.
- */
-function skeleton(...widths) {
-  return el(
-    "div",
-    { class: "skel", "aria-hidden": "true" },
-    widths.map((width) => {
-      const line = el("span", { class: "line" });
-      line.style.width = `${width}%`;
-      return line;
-    }),
-  );
+/* Handlers go through one listener per event that reads the node's current
+ * handler, so a redraw patched in place (morph) can hand an old node the new
+ * closure without adding a second listener. */
+function listen(node, type, fn) {
+  if (!node.__h) node.__h = {};
+  if (!(type in node.__h)) node.addEventListener(type, (e) => node.__h[type] && node.__h[type](e));
+  node.__h[type] = fn;
 }
 
-/** `rows` skeleton lines of alternating length, for a list of unknown size. */
-function skeletonRows(rows) {
-  const widths = [];
-  for (let i = 0; i < rows; i++) widths.push([92, 78, 85, 64][i % 4]);
-  return skeleton(...widths);
+/* Patch the live tree a into the freshly drawn b, keeping every node whose
+ * place and tag still match: a pressed button stays the same button, a field
+ * being typed in keeps its text and focus, a scrolled box keeps its offset.
+ * A subtree marked data-morph-keep is left alone (a log something else is
+ * filling). Only for views whose drawing is synchronous: a view that fills a
+ * node later holds the new node, which this throws away. */
+function morph(a, b) {
+  if (a.nodeType !== b.nodeType || (a.nodeType === 1 && a.tagName !== b.tagName)) {
+    a.replaceWith(b);
+    return;
+  }
+  if (a.nodeType !== 1) {
+    if (a.data !== b.data) a.data = b.data;
+    return;
+  }
+  const keep = a.getAttribute("data-morph-keep");
+  if (keep && keep === b.getAttribute("data-morph-keep")) return;
+  for (const { name } of [...a.attributes]) if (!b.hasAttribute(name)) a.removeAttribute(name);
+  for (const { name, value } of [...b.attributes]) if (a.getAttribute(name) !== value) a.setAttribute(name, value);
+  if ("value" in b && a !== document.activeElement && a.value !== b.value) a.value = b.value;
+  if ("checked" in b && a.checked !== b.checked) a.checked = b.checked;
+  for (const [type, fn] of Object.entries(b.__h || {})) listen(a, type, fn);
+  if (a.__h) for (const type of Object.keys(a.__h)) if (!b.__h || !(type in b.__h)) a.__h[type] = null;
+  const ak = [...a.childNodes];
+  const bk = [...b.childNodes];
+  for (let i = 0; i < bk.length; i++) {
+    if (i < ak.length) morph(ak[i], bk[i]);
+    else a.append(bk[i]);
+  }
+  for (let i = bk.length; i < ak.length; i++) ak[i].remove();
+}
+
+/** A button. Every clickable thing in the portal is one, so Tab reaches it. */
+function btn(props, ...kids) {
+  const p = { type: "button", ...props };
+  // A control whose work takes a moment says so: while the promise its
+  // handler returns is pending it is marked busy, shows a spinner and ignores
+  // presses, so a switch that waits on the daemon is never pressed twice or
+  // taken for broken. Not `disabled`: disabling the focused button drops a
+  // keyboard user's focus to the page. Synchronous handlers are untouched.
+  if (typeof p.onclick === "function") {
+    const handler = p.onclick;
+    p.onclick = (e) => {
+      const node = e.currentTarget;
+      if (node?.classList.contains("busy")) return;
+      const out = handler(e);
+      if (out && typeof out.then === "function" && node) {
+        node.classList.add("busy");
+        node.setAttribute("aria-busy", "true");
+        node.setAttribute("aria-disabled", "true");
+        const done = () => {
+          node.classList.remove("busy");
+          node.removeAttribute("aria-busy");
+          node.removeAttribute("aria-disabled");
+        };
+        out.then(done, done);
+      }
+      return out;
+    };
+  }
+  return el("button", p, ...kids);
 }
 
 /** Replace an element's children. */
 function fill(node, ...kids) {
   node.replaceChildren();
-  for (const kid of kids.flat()) {
+  for (const kid of kids.flat(Infinity)) {
     if (kid === null || kid === undefined || kid === false) continue;
     node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
   }
   return node;
 }
 
-/* Write words into a node that a live poll keeps rewriting.
- *
- * `textContent =` swaps the node's text child for a new one even when the words
- * are the same, so a card written once a second replaced a child per field per
- * second — which a live region re-announces, a selection loses and a
- * MutationObserver reports as churn. This edits the one text node's data, and
- * only when the words moved. A bare Text node works too, for the words inside
- * a pill that sit beside its dot. */
+/* Write words into a node a live poll keeps rewriting, editing its one text
+ * node only when the words moved — a replaced child is re-announced by a live
+ * region and loses a selection. */
 function setText(node, value) {
   const text = value === null || value === undefined ? "" : String(value);
-  if (node.nodeType === Node.TEXT_NODE) {
-    if (node.data !== text) node.data = text;
-    return node;
-  }
   const only = node.firstChild;
   if (only && only === node.lastChild && only.nodeType === Node.TEXT_NODE) {
     if (only.data !== text) only.data = text;
@@ -129,80 +143,22 @@ function setText(node, value) {
   return node;
 }
 
-/* Put a parent's children into `want`'s order, moving only what is out of place.
- *
- * Appending every child in turn re-parents all of them on every call, and a
- * node that is taken out and put back loses its focus and the scroll position
- * of everything inside it. The Index page did that to every run card once a
- * second, so a focused Pause button was blurred before anyone could press it
- * twice and a log scrolled back to read was thrown to its top.
- *
- * What stays is the longest run of children already in the wanted order, and
- * only the rest move — so one card finishing and dropping below the live ones
- * is one move, not one for every card it passes. The focused node is always
- * among those that stay. A node not yet in `parent` is inserted where it
- * belongs, which is an insertion and not a move. A node named twice is placed
- * once: two answers can name one run while a store is being opened. */
-function arrange(parent, want) {
-  const order = [...new Set(want.filter(Boolean))];
-  const rank = new Map(order.map((node, i) => [node, i]));
-  const present = [...parent.children].filter((child) => rank.has(child));
-  const focused = present.findIndex((child) => child.contains(document.activeElement));
-  const items = present.map((child, at) => ({ at, value: rank.get(child) }));
-  const pivot = focused >= 0 ? items[focused].value : -1;
-  const staying =
-    focused < 0
-      ? increasing(items)
-      : [
-          ...increasing(items.filter((item) => item.at < focused && item.value < pivot)),
-          focused,
-          ...increasing(items.filter((item) => item.at > focused && item.value > pivot)),
-        ];
-  const stays = new Set(staying.map((at) => present[at]));
-  let next = null;
-  for (let i = order.length - 1; i >= 0; i--) {
-    const node = order[i];
-    const placed =
-      node.parentNode === parent && (next ? node.nextElementSibling === next : !node.nextElementSibling);
-    if (!stays.has(node) && !placed) parent.insertBefore(node, next);
-    next = node;
-  }
+/** A bar whose fill is `pct` of its track. The width is set through the CSSOM. */
+function bar(pct, cls) {
+  const fillNode = el("i");
+  fillNode.style.width = `${Math.max(0, Math.min(100, pct || 0)).toFixed(1)}%`;
+  return el("div", { class: cls ? `bar ${cls}` : "bar" }, fillNode);
 }
 
-/** The `at`s of a longest strictly increasing run of `value`s, in order. */
-function increasing(items) {
-  const tails = [];
-  const before = [];
-  items.forEach((item, k) => {
-    let lo = 0;
-    let hi = tails.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (items[tails[mid]].value < item.value) lo = mid + 1;
-      else hi = mid;
-    }
-    before[k] = lo > 0 ? tails[lo - 1] : -1;
-    tails[lo] = k;
-  });
-  const out = [];
-  for (let k = tails.length ? tails[tails.length - 1] : -1; k >= 0; k = before[k]) out.unshift(items[k].at);
-  return out;
+/** Move a bar made by `bar` to a new value without rebuilding it. */
+function setBar(node, pct) {
+  const fillNode = node.firstElementChild;
+  if (fillNode) fillNode.style.width = `${Math.max(0, Math.min(100, pct || 0)).toFixed(1)}%`;
 }
 
-/* The session token.
- *
- * It arrives once, in the query of the URL the daemon printed, and from then on
- * it lives in this page and in sessionStorage — never in a cookie. A cookie
- * would be attached to a request any page on any other 127.0.0.1 port made,
- * because every port on localhost is the same site; a header is attached only
- * by this page.
- *
- * The token is taken out of the address bar as soon as it is read, so it is not
- * in the history, not in a bookmark, and not in what someone screenshots. The
- * reload path is why sessionStorage is here at all: refreshing the page sends a
- * request this script did not make, so the URL it reloads must not need to
- * carry the token.
- */
+/* The session token. It arrives once in the URL the daemon printed, moves into
+ * this page and sessionStorage, and is taken out of the address bar at once —
+ * never a cookie, because every port on localhost is the same site. */
 const TOKEN_HEADER = "Semlith-Token";
 
 const session = (() => {
@@ -213,14 +169,12 @@ const session = (() => {
     if (fromUrl) {
       token = fromUrl;
       sessionStorage.setItem(KEY, token);
-      const clean = location.pathname + location.hash;
-      history.replaceState(null, "", clean || "/");
+      history.replaceState(null, "", location.pathname + location.hash || "/");
     } else {
       token = sessionStorage.getItem(KEY) || "";
     }
   } catch (_) {
-    /* A browser with storage disabled still works for as long as this document
-     * lives; only the reload stops surviving. */
+    /* storage refused: the token lives as long as this document */
   }
   return {
     get: () => token,
@@ -235,86 +189,72 @@ const session = (() => {
   };
 })();
 
-/** The headers every request to this daemon carries. */
 function authed(extra) {
   return { ...(extra || {}), [TOKEN_HEADER]: session.get() };
 }
 
-/* An image the store indexed, fetched rather than linked.
- *
- * A browser attaches no header to an `<img src>`, and since 0.14.0 the token is
- * a header, so the bytes are read through `fetch` and handed to the element
- * directly.
- *
- * A `data:` URL rather than an object URL, which is what this used until
- * 0.16.0 and why no preview ever appeared: the policy the server sends is
- * `img-src 'self' data:`, and a `blob:` URL is neither, so every one of them
- * was refused before it decoded. `data:` costs the base64 third and has no
- * handle to revoke — acceptable because the body panel holds one picture at a
- * time. Widening the policy to `blob:` would have been the other fix, and the
- * policy is the thing this product is checkable on. */
-function imagePreview(path) {
-  const img = el("img", { class: "preview", alt: "" });
-  const failed = () =>
-    img.replaceWith(el("pre", { class: "muted", text: `${path} could not be read` }));
-  fetch(`/api/image?path=${encodeURIComponent(path)}`, {
-    credentials: "omit",
-    headers: authed(),
-  })
-    .then((response) => (response.ok ? response.blob() : Promise.reject(response.statusText)))
-    .then((blob) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        img.src = String(reader.result);
-      };
-      reader.onerror = failed;
-      reader.readAsDataURL(blob);
-    })
-    .catch(failed);
-  return img;
-}
+/** True once a request has failed to reach the daemon at all. */
+let daemonDown = false;
+
+// Requests on their way, by path, with when each left: what the browser drive
+// reports when a page never finishes loading.
+const INFLIGHT = (window.__semlithInflight = new Map());
 
 async function api(path, options) {
+  const key = `${((options || {}).method || "GET").toUpperCase()} ${path}#${Math.random().toString(36).slice(2, 6)}`;
+  INFLIGHT.set(key, performance.now());
+  try {
+    return await fetchJson(path, options);
+  } finally {
+    INFLIGHT.delete(key);
+  }
+}
+
+async function fetchJson(path, options) {
   const options_ = options || {};
-  const response = await fetch(path, {
-    // No cookie is sent because there is none to send, and saying so keeps a
-    // future one from being attached by accident.
-    credentials: "omit",
-    ...options_,
-    headers: authed(options_.headers),
-  });
+  let response;
+  try {
+    response = await fetch(path, { credentials: "omit", ...options_, headers: authed(options_.headers) });
+  } catch (e) {
+    noteDaemon(false);
+    throw new Error("The daemon is not answering. Is `semlith start` still running?");
+  }
+  noteDaemon(true);
   if (!response.ok) {
     let detail = response.statusText;
     try {
       const body = await response.json();
       if (body && body.error) detail = body.error;
     } catch (_) {
-      /* an empty body is what 401 sends on purpose */
+      /* 401 sends an empty body on purpose */
     }
-    throw new Error(detail || "request failed");
+    if (response.status === 401) detail = "This tab's session token is not the daemon's. Open the portal from the URL `semlith start` printed.";
+    const error = new Error(detail || "request failed");
+    error.status = response.status;
+    throw error;
   }
-  return response.json();
+  const type = response.headers.get("Content-Type") || "";
+  if (type.includes("application/json")) return response.json();
+  return response.blob();
 }
 
 function post(path, body) {
   return api(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(body || {}),
   });
 }
 
-const NUM = new Intl.NumberFormat();
-const n = (value) => NUM.format(value || 0);
+const NUM = new Intl.NumberFormat("en-US");
+const n = (value) => NUM.format(Math.round(Number(value) || 0));
+const plural = (count, one, many) => `${n(count)} ${count === 1 ? one : many || `${one}s`}`;
 
-/** `part` as a percentage of `whole`, for a bar's own reading of itself.
- *
- * One decimal under 10%, none above: `0.4%` and `62%` are both the precision
- * a reader can use, and `0%` beside a visible sliver reads as a bug. */
-function share(part, whole) {
+function pct(part, whole, digits) {
   if (!whole) return "0%";
-  const pct = (part / whole) * 100;
-  return `${pct < 10 ? pct.toFixed(1) : Math.round(pct)}%`;
+  const value = (part / whole) * 100;
+  if (digits !== undefined) return `${value.toFixed(digits)}%`;
+  return `${value < 10 && value > 0 ? value.toFixed(1) : Math.round(value)}%`;
 }
 
 function bytes(value) {
@@ -328,50 +268,189 @@ function bytes(value) {
   return `${unit === 0 ? size : size.toFixed(1)} ${units[unit]}`;
 }
 
-/** The offset this machine is on, as `+05:30`, for a clock that says so. */
+/** Tokens in the short form the design uses: 1.2M, 384k, 912. */
+function short(value) {
+  const v = Math.abs(Number(value) || 0);
+  const sign = Number(value) < 0 ? "−" : "";
+  if (v >= 1e9) return `${sign}${(v / 1e9).toFixed(1)}B`;
+  if (v >= 1e6) return `${sign}${(v / 1e6).toFixed(1)}M`;
+  if (v >= 1e4) return `${sign}${Math.round(v / 1e3)}k`;
+  if (v >= 1e3) return `${sign}${(v / 1e3).toFixed(1)}k`;
+  return `${sign}${Math.round(v)}`;
+}
+
+function dollars(value) {
+  const v = Number(value) || 0;
+  if (v === 0) return "$0";
+  if (Math.abs(v) < 0.01) return "<$0.01";
+  return `$${v.toFixed(v >= 100 ? 0 : 2)}`;
+}
+
 function zone() {
-  // `getTimezoneOffset` is minutes *behind* UTC, so its sign is the opposite
-  // of the one written in a timestamp.
   const minutes = -new Date().getTimezoneOffset();
   const sign = minutes < 0 ? "-" : "+";
   const off = Math.abs(minutes);
   return `${sign}${String(Math.floor(off / 60)).padStart(2, "0")}:${String(off % 60).padStart(2, "0")}`;
 }
 
-function when(unix) {
+/** How long ago, in the words the design uses: "just now", "4m ago". */
+function ago(unix) {
   if (!unix) return "never";
   const seconds = Math.max(0, Math.floor(Date.now() / 1000) - unix);
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 45) return "just now";
+  if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))}m ago`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86400)}d ago`;
+  if (seconds < 86400 * 30) return `${Math.floor(seconds / 86400)}d ago`;
+  return new Date(unix * 1000).toISOString().slice(0, 10);
 }
 
+/** A clock time with its offset, so a portal time and a ledger row agree. */
 function clock(unix) {
-  // With the offset. This printed the browser's local time while `semlith
-  // ledger` printed UTC, with neither saying which — so a portal event and a
-  // ledger row for the same moment were hours apart and nothing admitted it.
+  return new Date(unix * 1000).toTimeString().slice(0, 5);
+}
+
+function clockFull(unix) {
   return `${new Date(unix * 1000).toTimeString().slice(0, 8)} ${zone()}`;
 }
 
+function dayClock(unix) {
+  const d = new Date(unix * 1000);
+  const today = new Date();
+  const same = d.toDateString() === today.toDateString();
+  const yesterday = new Date(today.getTime() - 86400000).toDateString() === d.toDateString();
+  const time = d.toTimeString().slice(0, 5);
+  if (same) return `today ${time}`;
+  if (yesterday) return `yesterday ${time}`;
+  return `${d.toISOString().slice(5, 10)} ${time}`;
+}
+
+function spellTook(ms) {
+  if (ms < 1000) return `${(ms / 1000).toFixed(1)}s`;
+  const all = Math.round(ms / 1000);
+  if (all < 60) return `${all}s`;
+  if (all < 3600) return `${Math.floor(all / 60)}m ${String(all % 60).padStart(2, "0")}s`;
+  return `${Math.floor(all / 3600)}h ${String(Math.floor(all / 60) % 60).padStart(2, "0")}m`;
+}
+
+function spellLeft(ms) {
+  if (ms === null || ms === undefined) return "estimating…";
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 10) return "almost done";
+  if (seconds < 60) return `${Math.round(seconds / 5) * 5}s left`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `${minutes} min left`;
+  return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min left`;
+}
+
+function perSecond(value) {
+  return value >= 10 ? n(Math.round(value)) : Number(value || 0).toFixed(1);
+}
+
+/** The tail of a path, for a store root in a narrow column. */
+function tilde(path, home) {
+  const p = String(path || "");
+  const h = home || state.home;
+  if (h && p.startsWith(h)) return `~${p.slice(h.length)}`;
+  return p;
+}
+
+// A long path, shortened for the page: home as ~, then the middle cut so the
+// start (where it lives) and the end (what it is) both stay. The full path
+// goes in the element's tooltip; see pathEl.
+// A long path keeps its end, which is the part that tells two apart: the
+// start is cut, at a folder boundary where one is near.
+function shortPath(path, max) {
+  const t = tilde(path);
+  const limit = max || 52;
+  if (t.length <= limit) return t;
+  let tail = t.slice(t.length - (limit - 1));
+  const cut = tail.search(/[\\/]/);
+  if (cut > 0 && cut < tail.length / 3) tail = tail.slice(cut);
+  return `…${tail}`;
+}
+
+/** Any path-shaped text as a span that, when it does not fit, loses its start
+ * rather than its end; the whole value is on hover. */
+function pathSpan(text, cls, tip) {
+  return el("span", { class: `${cls ? `${cls} ` : ""}ell-start`, "data-tip": String(tip ?? text) }, el("bdi", { text: String(text) }));
+}
+
+/** A path as a span: cut from the start to fit, with the whole of it on hover. */
+function pathEl(path, max, cls) {
+  const short = shortPath(path, max);
+  return el("span", { class: `${cls || "t-mono-sm"} ell-start`, "data-tip": String(path) }, el("bdi", { text: short }));
+}
+
+// Every absolute path inside a sentence, shortened the same way.
+function shortPaths(text, max) {
+  return String(text || "").replace(/(?:[A-Za-z]:\\|\/)[^\s,;'")]+/g, (p) => shortPath(p, max || 44));
+}
+
+function baseName(path) {
+  const parts = String(path).split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
+function stillness() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+async function copy(text, word) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    const area = el("textarea", { class: "offscreen" });
+    area.value = text;
+    document.body.append(area);
+    area.select();
+    try {
+      document.execCommand("copy");
+    } catch (__) {
+      /* nothing else to try */
+    }
+    area.remove();
+  }
+  toast(word || "Copied");
+}
+
+function download(name, data, type) {
+  const blob = data instanceof Blob ? data : new Blob([data], { type: type || "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = el("a", { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+// --------------------------------------------------------------------- icons
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-/** An inline icon. Decorative: the control around it carries the name. */
-function icon(d, size, solid) {
+/** An inline icon, stroked in the current colour. Decorative. */
+function icon(d, size, opts) {
+  const o = opts || {};
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("width", String(size || 16));
-  svg.setAttribute("height", String(size || 16));
-  // A shape that is a shape rather than a stroke — the three dots of a menu
-  // control. Drawn as strokes they are zero-length segments whose whole size
-  // is the line width, which is as faint as a mark can be.
-  svg.setAttribute("fill", solid ? "currentColor" : "none");
-  svg.setAttribute("stroke", solid ? "none" : "currentColor");
-  svg.setAttribute("stroke-width", "1.7");
+  svg.setAttribute("width", String(size || 14));
+  svg.setAttribute("height", String(size || 14));
+  svg.setAttribute("class", "i");
+  svg.setAttribute("fill", o.solid ? "currentColor" : "none");
+  svg.setAttribute("stroke", o.solid ? "none" : "currentColor");
+  svg.setAttribute("stroke-width", String(o.w || 1.7));
   svg.setAttribute("stroke-linecap", "round");
   svg.setAttribute("stroke-linejoin", "round");
   svg.setAttribute("aria-hidden", "true");
   for (const segment of String(d).split("|")) {
+    if (segment.startsWith("circle:")) {
+      const [cx, cy, r] = segment.slice(7).split(",");
+      const c = document.createElementNS(SVG_NS, "circle");
+      c.setAttribute("cx", cx);
+      c.setAttribute("cy", cy);
+      c.setAttribute("r", r);
+      svg.append(c);
+      continue;
+    }
     const path = document.createElementNS(SVG_NS, "path");
     path.setAttribute("d", segment);
     svg.append(path);
@@ -379,791 +458,473 @@ function icon(d, size, solid) {
   return svg;
 }
 
-const ICONS = {
-  menu: "M4 7h16|M4 12h16|M4 17h16",
-  search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z|M20 20l-3.5-3.5",
-  plus: "M12 5v14|M5 12h14",
-  sun: "M12 3v2|M12 19v2|M3 12h2|M19 12h2|M5.6 5.6 7 7|M17 17l1.4 1.4|M18.4 5.6 17 7|M7 17l-1.4 1.4|M12 7.8a4.2 4.2 0 1 0 0 8.4 4.2 4.2 0 0 0 0-8.4z",
-  folder: "M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17z",
-  file: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z|M14 3v5h5",
-  up: "M5 12h14|M11 6l-6 6 6 6",
-  // `up` reversed: the mark the design puts on a link that carries you on to
-  // the next page rather than back to the last one.
-  arrowRight: "M5 12h14|M13 6l6 6-6 6",
-  alert: "M12 9v4|M12 17h.01|M12 4 3 19h18z",
-  monitor: "M4 5h16v10H4z|M9 19h6|M12 15v4",
-  moon: "M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z",
-  copy: "M9 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z|M6 15H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v1",
-  // Three filled dots, as circles rather than as dotted strokes.
-  more:
-    "M12 4.1a2 2 0 1 0 0 4 2 2 0 0 0 0-4z|M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4z|"
-    + "M12 15.9a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
-  // Three tracks with a handle on each: the machine's three numbers.
-  sliders: "M4 7h10|M18 7h2|M4 12h4|M12 12h8|M4 17h11|M19 17h1|M15 5v4|M9 10v4|M16 15v4",
-  // The explorer tree's marks: a disclosure chevron, and a folder drawn open.
-  chevron: "M9 6l6 6-6 6",
-  folderOpen: "M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v1H7.2a1.5 1.5 0 0 0-1.4 1L3.6 18.5|M3.6 18.5 6 12h15l-2.4 6.5z",
+const I = {
+  home: "M4 11 12 4l8 7v9h-5v-6H9v6H4Z",
+  stores: "M12 3 3 7.5 12 12l9-4.5L12 3ZM3 12l9 4.5 9-4.5M3 16.5 12 21l9-4.5",
+  search: "M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM20 20l-4.8-4.8",
+  searchSm: "circle:11,11,7|m20 20-3.5-3.5",
+  graph: "M4 5h4v4H4ZM15 15h5v5h-5ZM6 9v4h5v4h4",
+  agents: "M5 11h14v9H5ZM9 3h6v5H9ZM12 8v3M9 15h.01M15 15h.01",
+  ledger: "M5 3h14v18H5ZM9 8h6M9 12h6M9 16h4",
+  reports: "M14 3H7a1.5 1.5 0 0 0-1.5 1.5v15A1.5 1.5 0 0 0 7 21h10a1.5 1.5 0 0 0 1.5-1.5V7.5ZM14 3v4.5h4.5M9.5 17v-3M12 17v-5M14.5 17v-2",
+  privacy: "M12 3 5 6v5c0 4.5 3 8.3 7 10 4-1.7 7-5.5 7-10V6Z",
+  settings: "M4 7h10M18 7h2M4 12h4M12 12h8M4 17h12M20 17h0M14 5v4M8 10v4M16 15v4",
+  menu: "M4 7h16M4 12h16M4 17h16",
+  plus: "M12 5v14M5 12h14",
+  arrow: "M5 12h14M13 6l6 6-6 6",
+  back: "M19 12H5M11 6l-6 6 6 6",
+  check: "M5 12.5l4.5 4.5L19 7",
+  x: "M6 6l12 12M18 6 6 18",
+  folder: "M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v8.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5Z",
+  file: "M14 3H7a1.5 1.5 0 0 0-1.5 1.5v15A1.5 1.5 0 0 0 7 21h10a1.5 1.5 0 0 0 1.5-1.5V7.5ZM14 3v4.5h4.5",
+  link: "M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1",
+  paste: "M9 4h6v3H9ZM7 5.5H5.5v15h13v-15H17M9 12h6M9 16h4",
+  upload: "M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",
+  download: "M12 4v11M7 10l5 5 5-5M5 20h14",
+  info: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM12 11v6M12 7.5v.5",
+  alert: "M12 3 2 20h20ZM12 10v4M12 17v.5",
+  more: "circle:12,5,1.8|circle:12,12,1.8|circle:12,19,1.8",
+  chevDown: "m6 9 6 6 6-6",
+  chevRight: "m9 6 6 6-6 6",
+  chevLeft: "m15 6-6 6 6 6",
+  clock: "circle:12,12,8|M12 8v4l2.5 2",
+  swap: "M7 7h12l-3-3M17 17H5l3 3",
+  copy: "M8 8h12v12H8ZM16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3",
+  sun: "M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7ZM12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4",
+  moon: "M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z",
+  system: "M3.5 5h17v11h-17ZM9 20h6M12 16v4",
+  shield: "M12 3 5 6v5c0 4.5 3 8.3 7 10 4-1.7 7-5.5 7-10V6Z",
+  layers: "M12 3 3 7.5 12 12l9-4.5L12 3ZM3 12l9 4.5 9-4.5M3 16.5 12 21l9-4.5",
 };
 
-/* The nav marks, from the design. `|` separates subpaths so one mark can be
- * more than a single stroke. */
+// ------------------------------------------------------------- primitives
 
-const NAV_ICONS = {
-  stores: "M12 4l8 4-8 4-8-4 8-4|M4 12l8 4 8-4|M4 16.5l8 4 8-4",
-  files: "M6 3h7l5 5v13H6z|M13 3v5h5",
-  index: "M4 6h16|M4 12h10|M4 18h13",
-  // The design's own mark for this page: two book spines. What is already on
-  // the shelf, as against `index`, which is the list of what to put there.
-  corpus: "M5 4h6v16H5z|M13 4h6v16h-6",
-  search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z|M16.2 16.2 20 20",
-  graph: "M5 6h4v4H5z|M15 14h4v4h-4z|M9 8h4v8h2",
-  // v3's mark: a plain ruled page. The folded corner it grew in v4 reads as a
-  // document you were handed rather than as a record this machine keeps.
-  ledger: "M5 4h14v16H5z|M8 9h8|M8 13h8|M8 17h5",
-  agents: "M9 3h6v5H9z|M12 8v3|M5 11h14v9H5z|M9 15h.01|M15 15h.01",
-  privacy: "M12 3l7 3v6c0 4.3-3 7.3-7 9-4-1.7-7-4.7-7-9V6z",
-  // A trace with a beat in it: this page is a reading of the machine, and the
-  // rail is icons only — a nav item that rendered nothing was the one item
-  // with no way to tell what it was.
-  doctor: "M3 12h3l2-5 3 10 2.5-7 1.5 2h6",
-  about: "M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z|M12 11v5|M12 8h.01",
-  // v3's mark, back: a line climbing to a point, with the axis it climbs to.
-  impact: "M4 18l5-6 4 3 7-9|M20 6h-4|M20 6v4",
-  reports: "M6 3h8l4 4v14H6z|M14 3v4h4|M9 17v-3|M12 17v-6|M15 17v-4",
-  cloud: "M7.5 18a4 4 0 0 1 .3-8A5 5 0 0 1 17 9.6 3.6 3.6 0 0 1 16.5 18z",
-};
-
-/** A button that copies text and says so for a moment.
- *
- * Invisible until the pointer enters the block it belongs to — see `.copy` in
- * the stylesheet — so a page never shows a column of copy buttons competing
- * with the content they copy. */
-function copyButton(getText, label, word) {
-  const was = label || "Copy";
-  // A field wide enough to hold a command has room for the word; the icon is
-  // for a code block, where the control sits over the text it copies.
-  const face = () => (word ? was : icon(ICONS.copy, 14));
-  const button = el("button", {
-    class: "button secondary small copy",
-    type: "button",
-    "aria-label": was,
-    title: was,
-    onclick: async () => {
-      const text = typeof getText === "function" ? getText() : getText;
-      try {
-        await navigator.clipboard.writeText(text);
-      } catch (_) {
-        // No clipboard permission, or an insecure context. Selecting the text
-        // is still a way to copy it, and silently doing nothing is not.
-        const area = el("textarea", { class: "offscreen" });
-        area.value = text;
-        document.body.append(area);
-        area.select();
-        try {
-          document.execCommand("copy");
-        } catch (__) {
-          /* nothing else to try */
-        }
-        area.remove();
-      }
-      button.classList.add("done");
-      fill(button, "Copied");
-      setTimeout(() => {
-        button.classList.remove("done");
-        fill(button, face());
-      }, 1400);
-    },
-  });
-  fill(button, face());
-  return button;
-}
-
-function copyField(command, word) {
-  return el(
-    "div",
-    { class: word ? "copyfield worded" : "copyfield" },
-    el("code", { class: "text", text: command }),
-    copyButton(command, "Copy", word),
-  );
-}
-
-/** A code block with its copy control over the top-right corner. */
-function codeBlock(text, label) {
-  return el(
-    "div",
-    { class: "code-block" },
-    el("pre", { class: "code", text }),
-    copyButton(text, label || "Copy"),
-  );
-}
-
-/* A command, a path or an identifier set inside a sentence.
- *
- * This is what makes the capitalisation rule read as a rule rather than as a
- * typo: the product is "Semlith" in prose and `semlith` is a command, and the
- * only thing that tells a reader which one they are looking at is that one of
- * them is set in mono. */
-function mono(text) {
-  return el("code", { class: "mono", text });
-}
-
-/** A paragraph of prose, where any part may be a mono command. */
-function says(...parts) {
-  return el("p", { class: "subtitle" }, parts);
-}
-
-/** A failure. Coloured like a problem, because it is one. */
-function error(message) {
-  return el(
-    "div",
-    { class: "error", role: "alert" },
-    icon(ICONS.alert, 17),
-    el("span", { class: "what", text: message }),
-  );
-}
-
-/** An absence. Nothing went wrong; there is simply nothing here. */
-function empty(message) {
-  return el("div", { class: "empty" }, message);
-}
-
-/* ------------------------------------------------------------------- tips */
-
-/* One tooltip for the whole portal.
- *
- * The element lives at the end of <body> and is positioned against the
- * viewport, which is the whole point: the previous implementation was a
- * `::after` on the element being described, and `.table-wrap` carries
- * `overflow: auto`, so a scroll container clipped it. The Files page's path
- * tip — the reason the feature exists — was the one that could not be read.
- *
- * A pointer places it beside the pointer and it follows as the pointer moves,
- * which is how the Graph canvas's card has always behaved and how the design
- * draws every hover: one behaviour everywhere, rather than a card that tracks
- * the mouse on one page and hangs off an element's corner on the next. Focus
- * has no pointer, so a keyboard-shown tip hangs off the focused element
- * instead, above it and flipped below when there is no room. */
-const tip = {
-  node: null,
-  owner: null,
-
-  ensure() {
-    if (!this.node) {
-      this.node = el("div", { class: "tip", role: "tooltip", "aria-hidden": "true" });
-      document.body.append(this.node);
-    }
-    return this.node;
-  },
-
-  /** Fill and open it; the caller places it. */
-  open(content, owner) {
-    const node = this.ensure();
-    this.owner = owner || null;
-    fill(node, content);
-    node.setAttribute("aria-hidden", "false");
-    node.dataset.open = "true";
-    return node;
-  },
-
-  /** Hang it off a viewport rectangle: `content` is a string or an element. */
-  show(content, rect, owner) {
-    const node = this.open(content, owner);
-    // Measured after filling and before positioning: the size depends on the
-    // text, and a stale measurement puts the flip decision on the wrong side.
-    // `offset*` rather than the bounding box, which the opening scale shrinks.
-    const width = node.offsetWidth;
-    const height = node.offsetHeight;
-    const margin = 8;
-    let left = rect.left;
-    if (left + width > window.innerWidth - margin) {
-      left = Math.max(margin, window.innerWidth - margin - width);
-    }
-    let top = rect.top - height - 6;
-    // Above by default, below when there is no room — the flip the criterion
-    // asks for, and the reason this is measured against the viewport.
-    if (top < margin) top = rect.bottom + 6;
-    node.style.left = `${Math.max(margin, Math.round(left))}px`;
-    node.style.top = `${Math.round(top)}px`;
-  },
-
-  /** Keep an open tip beside the pointer: above and to the right of it,
-   * flipped to the left or below at the viewport's edge, as the design's
-   * `tipMove` places it. */
-  follow(x, y) {
-    const node = this.node;
-    if (!node) return;
-    const width = node.offsetWidth;
-    const height = node.offsetHeight;
-    const margin = 10;
-    let left = x + 14;
-    let top = y - height - 14;
-    if (left + width > window.innerWidth - margin) left = Math.max(margin, x - width - 14);
-    if (top < margin) top = y + 20;
-    node.style.left = `${Math.round(left)}px`;
-    node.style.top = `${Math.round(top)}px`;
-  },
-
-  /** What an element's own tip says: a card when it carries one, else text. */
-  contentOf(target) {
-    return target.hasAttribute("data-tip-title") ? tipCardOf(target) : target.getAttribute("data-tip");
-  },
-
-  /** Hang a tip off an element, for focus, which has no pointer to follow. */
-  at(target) {
-    this.show(this.contentOf(target), target.getBoundingClientRect(), target);
-  },
-
-  /** Open a tip beside a point: the canvases, and every pointer hover. */
-  atPoint(x, y, content, owner) {
-    this.open(content, owner);
-    this.follow(x, y);
-  },
-
-  hide(owner) {
-    if (!this.node) return;
-    if (owner && this.owner !== owner) return;
-    this.node.dataset.open = "false";
-    this.node.setAttribute("aria-hidden", "true");
-    this.owner = null;
-  },
-};
-
-/* Delegated, so a tip costs nothing per row: every table in the portal renders
- * its rows fresh, and binding two listeners to each of a thousand cells is how
- * a scroll starts to stutter. */
-function wireTips() {
-  const find = (node) => (node && node.closest ? node.closest("[data-tip], [data-tip-title]") : null);
-
-  document.addEventListener("pointerover", (e) => {
-    const target = find(e.target);
-    if (target) {
-      // Moving between an element's own children fires this again; the tip
-      // is already showing, and refilling it would only reset its fade.
-      if (tip.owner !== target) tip.atPoint(e.clientX, e.clientY, tip.contentOf(target), target);
-    } else if (tip.owner && tip.owner.nodeType) tip.hide();
-  });
-  // Follows the pointer across the element it describes, as the canvas's does.
-  document.addEventListener("pointermove", (e) => {
-    if (tip.owner && tip.owner.nodeType && tip.owner.contains(e.target)) tip.follow(e.clientX, e.clientY);
-  });
-  document.addEventListener("pointerout", (e) => {
-    const target = find(e.target);
-    // Into one of its own children is not leaving it.
-    if (target && !(e.relatedTarget && target.contains(e.relatedTarget))) tip.hide(target);
-  });
-  // Keyboard parity: focus shows the same label a hover does.
-  document.addEventListener("focusin", (e) => {
-    const target = find(e.target);
-    if (target) tip.at(target);
-  });
-  document.addEventListener("focusout", (e) => {
-    const target = find(e.target);
-    if (target) tip.hide(target);
-  });
-  // A fixed tip does not travel with the row it describes, so it leaves when
-  // the row does. Capture, because the scroll happens inside a card.
-  window.addEventListener("scroll", () => tip.hide(), true);
-  window.addEventListener("resize", () => tip.hide());
-}
-
-/* ----------------------------------------------------------------- table */
-
-/* One table for the whole portal: Stores, Files, Languages, the About model
- * list and the Agents client list all render through this. Five hand-written
- * tables is how one page gains sorting and the other four do not.
- *
- * Columns are `{ key, label, className, sortable, value, render }`. `value`
- * pulls the sort key out of a row; `render` returns the cell's content. A
- * table is client-side by default — its rows are already in hand — and
- * `server: true` hands sorting and paging back to the caller instead, which is
- * what the Files table needs: sorting has to order the whole store rather than
- * the page of it that happens to be loaded.
- */
-const PER_PAGE = [5, 10, 25, 50];
-
-/* A table's page, page size and sort, by `spec.remember`, for a page that is
- * redrawn whole on a live update. The Stores page is: every watcher write
- * redraws it, and each redraw put the reader back on page 1 at 5 a page. */
-const TABLE_VIEWS = new Map();
-
-function dataTable(spec) {
-  const columns = spec.columns;
-  const view = TABLE_VIEWS.get(spec.remember) || {
-    page: 1,
-    perPage: spec.perPage || 5,
-    sort: spec.sort || null,
-    dir: spec.dir || "asc",
-  };
-  if (spec.remember) TABLE_VIEWS.set(spec.remember, view);
-  let rows = spec.rows || [];
-  let total = spec.total === undefined ? rows.length : spec.total;
-
-  const headRow = el("tr", {});
-  const body = el("tbody", {});
-  const foot = el("div", { class: "table-foot" });
-  const table = el(
-    "table",
-    { class: spec.className || null },
-    // A caption, always. Four of these tables had neither a caption nor an
-    // `aria-label`, so a screen reader announced "table" and left the reader
-    // to work out which one from its columns.
-    spec.caption ? el("caption", { class: "sr-only", text: spec.caption }) : null,
-    el("thead", {}, headRow),
-    body,
-  );
-  // `grow: false` for a table that shares a page with other blocks: stretching
-  // a three-row table down a 900px page to fill it is empty space pretending
-  // to be a table.
-  const node = el(
-    "div",
-    { class: spec.grow ? "card table-card grow" : "card table-card" },
-    el("div", { class: "table-wrap" }, table),
-    foot,
-  );
-
-  function pages() {
-    return Math.max(1, Math.ceil(total / view.perPage));
-  }
-
-  function sorted() {
-    if (!view.sort) return rows;
-    const column = columns.find((c) => c.key === view.sort);
-    if (!column || !column.value) return rows;
-    const sign = view.dir === "desc" ? -1 : 1;
-    // A copy: sorting the caller's array in place would reorder the data
-    // behind whatever else is reading it.
-    return [...rows].sort((a, b) => {
-      // Rows with no value in this column sink, whichever way the sort runs.
-      // A column where most rows are blank otherwise hides its own data:
-      // sorting the About page's SIZE column ascending put all forty-three
-      // dashes first and the five real sizes on the last page.
-      if (column.empty) {
-        const blank = Number(column.empty(a)) - Number(column.empty(b));
-        if (blank) return blank;
-      }
-      const x = column.value(a);
-      const y = column.value(b);
-      if (typeof x === "number" && typeof y === "number") return (x - y) * sign;
-      return String(x).localeCompare(String(y), undefined, { numeric: true }) * sign;
-    });
-  }
-
-  function shown() {
-    if (spec.server) return rows;
-    const from = (view.page - 1) * view.perPage;
-    return sorted().slice(from, from + view.perPage);
-  }
-
-  function changed() {
-    if (spec.server && spec.onChange) spec.onChange({ ...view });
-    else paint();
-  }
-
-  function sortBy(key) {
-    if (view.sort === key) view.dir = view.dir === "asc" ? "desc" : "asc";
-    else {
-      view.sort = key;
-      view.dir = "asc";
-    }
-    view.page = 1;
-    changed();
-  }
-
-  function paintHead() {
-    fill(
-      headRow,
-      columns.map((column) => {
-        const on = view.sort === column.key;
-        if (column.head) {
-          // A header that is a control rather than a label — the select-all
-          // box above a column of checkboxes.
-          return el("th", { class: column.className || null }, column.head());
-        }
-        if (column.sortable === false) {
-          return el("th", { class: column.className || null, text: column.label });
-        }
-        return el(
-          "th",
-          {
-            class: column.className || null,
-            "aria-sort": on ? (view.dir === "asc" ? "ascending" : "descending") : "none",
-          },
-          el(
-            "button",
-            { class: "sort", type: "button", onclick: () => sortBy(column.key) },
-            column.label,
-            el("span", { class: "arrow", text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
-          ),
-        );
-      }),
-    );
-  }
-
-  function paintBody() {
-    const page = shown();
-    fill(
-      body,
-      page.map((row, i) =>
-        el(
-          "tr",
-          {},
-          columns.map((column) =>
-            el(
-              "td",
-              { class: column.className || null },
-              column.render ? column.render(row, i) : String(column.value ? column.value(row) : ""),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  function paintFoot() {
-    const from = total === 0 ? 0 : (view.page - 1) * view.perPage + 1;
-    const to = Math.min(total, view.page * view.perPage);
-    fill(
-      foot,
-      el("span", { class: "meta", text: `${n(from)}–${n(to)} of ${n(total)}` }),
-      el("span", { class: "divider-v" }),
-      el("span", { class: "eyebrow sm", text: "per page" }),
-      el(
-        "span",
-        { class: "chips" },
-        PER_PAGE.map((size) =>
-          el("button", {
-            class: "chip",
-            type: "button",
-            "aria-pressed": String(size === view.perPage),
-            text: String(size),
-            onclick: () => {
-              view.perPage = size;
-              view.page = 1;
-              changed();
-            },
-          }),
-        ),
-      ),
-      el("span", { class: "spacer" }),
-      el("button", {
-        class: "button secondary small",
-        type: "button",
-        text: "Prev",
-        disabled: view.page <= 1,
-        onclick: () => {
-          view.page -= 1;
-          changed();
-        },
-      }),
-      el("span", { class: "meta", text: `Page ${n(view.page)} / ${n(pages())}` }),
-      el("button", {
-        class: "button secondary small",
-        type: "button",
-        text: "Next",
-        disabled: view.page >= pages(),
-        onclick: () => {
-          view.page += 1;
-          changed();
-        },
-      }),
-    );
-  }
-
-  function paint() {
-    // A remembered page can be past the end once rows have gone.
-    view.page = Math.min(view.page, pages());
-    paintHead();
-    paintBody();
-    paintFoot();
-  }
-
-  paint();
-
-  return {
-    node,
-    /** Replace the rows. `count` is the whole-store total in server mode. */
-    update(next, count) {
-      rows = next || [];
-      total = count === undefined ? rows.length : count;
-      if (view.page > pages()) view.page = pages();
-      paint();
-    },
-    /** What the server should sort and page by. */
-    query: () => ({ ...view }),
-  };
-}
-
-/* The server-side folder picker.
- *
- * One component, used by the Index page to choose what to index and by the
- * Stores page to choose a directory to adopt. It browses the daemon's
- * filesystem rather than the browser's, because the daemon is what has to open
- * the path — a `<input type=file webkitdirectory>` hands over a list of file
- * objects and not the one thing needed, which is the path itself.
- */
-function folderPicker(options) {
-  const { onChoose, choose, onError, multiple } = options || {};
-  const card = el("div", { class: "card picker", hidden: true });
-  /* Paths ticked across however many directories were walked into. Kept out
-   * here rather than per render, so browsing into a folder and back does not
-   * throw away what was already chosen. */
-  const ticked = new Set();
-
-  function done() {
-    card.hidden = true;
-    if (onChoose) onChoose(multiple ? [...ticked] : undefined);
-    ticked.clear();
-  }
-
-  async function open(path) {
-    let data;
-    try {
-      data = await api(`/api/dirs?path=${encodeURIComponent(path || "")}`);
-    } catch (e) {
-      if (onError) onError(e.message);
-      return false;
-    }
-    card.hidden = false;
-    fill(
-      card,
-      el(
-        "div",
-        { class: "crumbs" },
-        el(
-          "button",
-          {
-            class: "button secondary small",
-            type: "button",
-            disabled: !data.parent,
-            onclick: () => open(data.parent),
-          },
-          icon(ICONS.up, 15),
-          "Up",
-        ),
-        el("span", { class: "where", text: data.path }),
-        el("span", { class: "spacer" }),
-        multiple
-          ? el("button", {
-              class: "button small",
-              type: "button",
-              text: ticked.size
-                ? `Use ${ticked.size} folder${ticked.size === 1 ? "" : "s"}`
-                : "Use this folder",
-              onclick: () => {
-                // Nothing ticked means the folder being looked at, which is
-                // what pressing the button while standing in one plainly means.
-                if (!ticked.size) ticked.add(data.path);
-                done();
-              },
-            })
-          : el("button", {
-              class: "button small",
-              type: "button",
-              text: choose || "Use this folder",
-              onclick: () => {
-                card.hidden = true;
-                if (onChoose) onChoose(data.path);
-              },
-            }),
-        el("button", {
-          class: "button secondary small",
-          type: "button",
-          text: "Close",
-          onclick: () => {
-            card.hidden = true;
-          },
-        }),
-      ),
-      el(
-        "div",
-        { class: "entries" },
-        data.entries.length
-          ? data.entries.map((entry) => {
-              // A file in a folder picker is not selectable, and rendering
-              // it at full contrast beside the folders that are says
-              // otherwise. Dimmed when it cannot be chosen, which in the
-              // multiple case is always.
-              const inert = multiple && !entry.dir;
-              const row = el(
-                "button",
-                {
-                  class: inert ? "entry inert" : "entry",
-                  type: "button",
-                  disabled: inert,
-                  title: entry.path,
-                  onclick: () => {
-                    if (entry.dir) open(entry.path);
-                    else {
-                      card.hidden = true;
-                      if (onChoose) onChoose(multiple ? [entry.path] : entry.path);
-                    }
-                  },
-                },
-                icon(entry.dir ? ICONS.folder : ICONS.file),
-                el("span", { class: "name", text: entry.name }),
-                // What "Adopt existing .semlith" is looking for. Nothing in
-                // the listing used to tell an adoptable folder from any other,
-                // which is the surface of the adopt feature not working.
-                entry.adoptable ? pill("a store", "good") : null,
-              );
-              if (!multiple || !entry.dir) return row;
-              /* The tick is its own control beside the row, not the row
-               * itself: walking into a folder and choosing it are different
-               * intentions and one button cannot mean both. */
-              const box = el("input", {
-                type: "checkbox",
-                class: "tick",
-                "aria-label": `Index ${entry.name}`,
-                checked: ticked.has(entry.path),
-                onchange: () => {
-                  if (box.checked) ticked.add(entry.path);
-                  else ticked.delete(entry.path);
-                  open(data.path);
-                },
-              });
-              return el("div", { class: "entry-row" }, box, row);
-            })
-          : el("div", { class: "card pad" }, empty("Nothing here that Semlith can index.")),
-      ),
-    );
-    return true;
-  }
-
-  return {
-    node: card,
-    open,
-    close: () => {
-      card.hidden = true;
-    },
-    isOpen: () => !card.hidden,
-  };
-}
-
-/** A path on one line, truncated at the start, whole on hover.
- *
- * The end is the part that identifies a file: every row on the Files page
- * begins with the same `/Users/...` and differs in its last segment, so cutting
- * the end throws away the only part worth reading. */
-function pathCell(value, className) {
+function pill(text, tone, opts) {
+  const o = opts || {};
   return el(
     "span",
-    {
-      class: className ? `one-line tail ${className}` : "one-line tail",
-      "data-tip": value,
-      // The browser's own tooltip as well as the portal's. The styled one is
-      // better and it is not the only reader: a value with no `title` is a
-      // truncated path nothing but the DOM inspector can recover.
-      title: value,
-    },
-    el("bdi", { text: value }),
+    { class: `pill ${tone || "grey"}${o.sm ? " sm" : ""}`, "data-tip": o.tip || null },
+    o.dot === false ? null : el("span", { class: `dot ${dotTone(tone)}${o.pulse ? " pulse" : ""}` }),
+    text,
   );
 }
 
-/** A value on one line, truncated at the end, whole on hover. */
-function lineCell(value, className) {
-  return el("span", {
-    class: className ? `one-line ${className}` : "one-line",
-    "data-tip": value,
-    title: value,
-    text: value,
+function dotTone(tone) {
+  return { green: "green", amber: "amber", blue: "blue", red: "red" }[tone] || "";
+}
+
+function dot(tone, pulse) {
+  return el("span", { class: `dot ${dotTone(tone)}${pulse ? " pulse" : ""}` });
+}
+
+/** An on / off switch: the design's track and knob, as a real button. */
+function toggle(on, label, onChange, opts) {
+  const o = opts || {};
+  const node = btn(
+    {
+      class: `switch${o.cls ? ` ${o.cls}` : ""}${on ? " on" : ""}`,
+      role: "switch",
+      "aria-checked": String(!!on),
+      disabled: o.disabled || null,
+      "data-tip": o.tip || null,
+      onclick: () => onChange(!on),
+    },
+    el("span", { class: "tg" }),
+    label || null,
+  );
+  return node;
+}
+
+/** The design's toggle row: a bordered card with a switch, a title and a line. */
+function toggleRow(on, title, sub, onChange, opts) {
+  const o = opts || {};
+  return btn(
+    {
+      class: `${o.plain ? "tg-plain" : "tg-row"}${on ? " on" : ""}`,
+      role: "switch",
+      "aria-checked": String(!!on),
+      disabled: o.disabled || null,
+      "data-tip": o.tip || null,
+      onclick: () => onChange(!on),
+    },
+    el("span", { class: "tg" }),
+    el("span", { class: "col" }, el("span", { class: `t${o.big ? " big" : ""}`, text: title }), sub ? el("span", { class: "s", text: sub }) : null),
+  );
+}
+
+/** A drawn checkbox. `state` is true, false or "mixed". */
+function checkbox(stateValue, onChange, label) {
+  return btn({
+    class: "cb",
+    role: "checkbox",
+    "aria-checked": stateValue === "mixed" ? "mixed" : String(!!stateValue),
+    "aria-label": label || "Select",
+    onclick: (e) => {
+      e.stopPropagation();
+      onChange(stateValue !== true);
+    },
   });
 }
 
-/** An input with a real label. A placeholder is not one: it leaves on typing. */
-function labelled(id, text, input) {
-  input.id = id;
-  return [el("label", { class: "sr-only", for: id, text }), input];
-}
-
-/* One page header for the whole portal.
- *
- * The title, its status pill immediately beside it, and any page actions at
- * the end of that row; the subtitle on a row of its own at the page's full
- * width. Every page uses it, so a pill is never floated to the far side of a
- * header away from the title it describes, and a subtitle is never squeezed
- * into a narrow column by a button sitting opposite it. */
-function pageHead(title, subtitle, extra) {
-  const { pill, actions } = extra || {};
+/** A segmented control. `items` are `[value, label, count?]`. */
+function seg(items, current, onPick, opts) {
+  const o = opts || {};
   return el(
     "div",
-    { class: "page-head" },
-    el(
-      "div",
-      { class: "line" },
-      el("h1", { text: title }),
-      pill || null,
-      actions ? el("span", { class: "spacer" }) : null,
-      actions ? el("div", { class: "actions" }, actions) : null,
+    { class: `seg${o.cls ? ` ${o.cls}` : ""}`, role: "group", "aria-label": o.label || null },
+    items.map(([value, label, count, tip]) =>
+      btn(
+        {
+          "aria-pressed": String(value === current),
+          "data-tip": tip || null,
+          disabled: o.disabled && o.disabled(value) ? true : null,
+          onclick: () => onPick(value),
+        },
+        label,
+        count !== undefined && count !== null ? el("span", { class: "n", text: String(count) }) : null,
+      ),
     ),
-    subtitle ? el("p", { class: "subtitle", text: subtitle }) : null,
   );
 }
 
-/* A row's actions, behind one control.
- *
- * A column of buttons per row is a column of noise, and the destructive one
- * sits a mis-aimed click away from the ordinary one. The menu is a single
- * host appended to the body for the same reason the tooltip is: a popup
- * inside a cell is clipped by the table's own `overflow: auto`. */
+/** Tabs along a rule. `items` are `[id, label, count?]`. */
+function tabs(items, current, onPick, opts) {
+  const o = opts || {};
+  return el(
+    "div",
+    { class: `tabs${o.cls ? ` ${o.cls}` : ""}`, role: "tablist" },
+    items.map(([id, label, count, tone]) =>
+      btn(
+        { class: "tab", role: "tab", "aria-selected": String(id === current), onclick: () => onPick(id) },
+        label,
+        count !== undefined && count !== null && count !== "" ? el("span", { class: `count${tone ? ` ${tone}` : ""}`, text: String(count) }) : null,
+      ),
+    ),
+    o.extra || null,
+  );
+}
+
+function kpi(label, value, sub, opts) {
+  const o = opts || {};
+  const tag = o.onclick ? "button" : "div";
+  const node = el(
+    tag,
+    { class: `kpi${o.warn ? " warn" : ""}`, type: o.onclick ? "button" : null, onclick: o.onclick || null, "data-tip": o.tip || null, "data-tip-rows": o.rows || null },
+    el("span", { class: "eyebrow", text: label }),
+    el("span", { class: "v", text: value }),
+    sub ? el("span", { class: "s", text: sub }) : null,
+  );
+  return node;
+}
+
+function cardHead(title, ...extra) {
+  return el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: title }), ...extra);
+}
+
+function meta(text) {
+  return el("span", { class: "card-meta", text });
+}
+
+function lnk(text, onclick, cls) {
+  return btn({ class: `lnk${cls ? ` ${cls}` : ""}`, onclick }, text);
+}
+
+function empty(text, cls) {
+  return el("div", { class: `empty${cls ? ` ${cls}` : ""}` }, text);
+}
+
+function errorBox(message) {
+  return el("div", { class: "error-box", role: "alert", text: message });
+}
+
+function copyBtn(getText, label, cls, word) {
+  return btn(
+    {
+      class: `btn ${cls || "xs"}`,
+      onclick: () => copy(typeof getText === "function" ? getText() : getText, word),
+    },
+    label || "Copy",
+  );
+}
+
+/** A command or path in a field with a Copy button beside it. */
+function copyField(text, opts) {
+  const o = opts || {};
+  return el(
+    "div",
+    { class: `copyfield${o.cls ? ` ${o.cls}` : ""}` },
+    el("span", { class: "t", text }),
+    ...(o.actions || []),
+    o.noCopy ? null : copyBtn(text, "Copy", o.btn || "xxs"),
+  );
+}
+
+function codeBlock(text, opts) {
+  const o = opts || {};
+  return el(
+    "div",
+    { class: `code${o.cls ? ` ${o.cls}` : ""}` },
+    text,
+    o.noCopy ? null : btn({ class: "copy-on", onclick: () => copy(text, o.word) }, "Copy"),
+  );
+}
+
+// ------------------------------------------------------------------- tooltip
+
+/* One rich tooltip for the page. An element carries `data-tip` (the title) and
+ * optionally `data-tip-rows` ("label::value||label::value") and
+ * `data-tip-color` (a swatch). It follows the pointer, eased, and hangs off a
+ * focused element for the keyboard. The rows are built as nodes rather than
+ * HTML, because a `style` attribute in markup would be dropped. */
+const tip = {
+  node: null,
+  card: null,
+  cur: null,
+  shown: false,
+  x: 0,
+  y: 0,
+  tx: 0,
+  ty: 0,
+  raf: 0,
+  timer: 0,
+  last: null,
+
+  ensure() {
+    if (this.node) return;
+    this.lab = el("span", { class: "lab" });
+    this.sw = el("span", { class: "sw", hidden: true });
+    this.rows = el("div", { class: "rows", hidden: true });
+    this.card = el("div", { class: "card-in" }, el("div", { class: "hd" }, this.sw, this.lab), this.rows);
+    this.node = el("div", { class: "tip", role: "tooltip", "aria-hidden": "true" }, this.card);
+    document.body.append(this.node);
+  },
+
+  find(target) {
+    const host = target && target.closest ? target.closest("[data-tip]") : null;
+    if (!host) return null;
+    const title = host.getAttribute("data-tip");
+    if (!title) return null;
+    return {
+      el: host,
+      title,
+      rows: host.getAttribute("data-tip-rows") || "",
+      color: host.getAttribute("data-tip-color") || "",
+      full: host.hasAttribute("data-tip-full"),
+    };
+  },
+
+  render(f) {
+    this.ensure();
+    this.lab.textContent = f.title;
+    this.lab.className = f.full ? "lab full" : "lab";
+    this.sw.hidden = !f.color;
+    if (f.color) this.sw.style.background = f.color;
+    const rows = f.rows ? f.rows.split("||").filter(Boolean).map((r) => r.split("::")) : [];
+    this.rows.hidden = !rows.length;
+    fill(
+      this.rows,
+      rows.map(([k, v]) => el("div", { class: "rw" }, el("span", { class: "k", text: k }), el("span", { class: "v", text: v || "" }))),
+    );
+  },
+
+  place(e) {
+    if (!this.cur || !e) return;
+    const w = this.card.offsetWidth;
+    const h = this.card.offsetHeight;
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    let x = e.clientX + 14;
+    let y = e.clientY + 20;
+    let ox = "left";
+    let oy = "top";
+    if (x + w > W - 8) {
+      x = e.clientX - w - 14;
+      ox = "right";
+    }
+    if (y + h > H - 8) {
+      y = e.clientY - h - 14;
+      oy = "bottom";
+    }
+    x = Math.max(8, Math.min(W - w - 8, x));
+    y = Math.max(8, Math.min(H - h - 8, y));
+    this.tx = x;
+    this.ty = y;
+    this.card.style.transformOrigin = `${oy} ${ox}`;
+    if (!this.shown || stillness()) {
+      this.x = x;
+      this.y = y;
+      this.node.style.transform = `translate3d(${x}px,${y}px,0)`;
+      if (!this.shown) {
+        this.shown = true;
+        this.node.style.opacity = "1";
+        this.card.style.transform = "scale(1)";
+      }
+      return;
+    }
+    if (!this.raf) {
+      const step = () => {
+        const dx = this.tx - this.x;
+        const dy = this.ty - this.y;
+        this.x += dx * 0.28;
+        this.y += dy * 0.28;
+        if (Math.abs(dx) < 0.3 && Math.abs(dy) < 0.3) {
+          this.x = this.tx;
+          this.y = this.ty;
+          this.raf = 0;
+        } else this.raf = requestAnimationFrame(step);
+        this.node.style.transform = `translate3d(${this.x.toFixed(1)}px,${this.y.toFixed(1)}px,0)`;
+      };
+      this.raf = requestAnimationFrame(step);
+    }
+  },
+
+  /** For focus, which has no pointer: under the element, or above it. */
+  at(target) {
+    const f = this.find(target);
+    if (!f) return;
+    this.cur = f;
+    this.render(f);
+    const r = f.el.getBoundingClientRect();
+    this.place({ clientX: r.left, clientY: r.bottom - 12 });
+  },
+
+  hide() {
+    clearTimeout(this.timer);
+    if (!this.cur) return;
+    this.cur = null;
+    this.shown = false;
+    cancelAnimationFrame(this.raf);
+    this.raf = 0;
+    if (this.node) {
+      this.node.style.opacity = "0";
+      this.card.style.transform = "scale(0.97)";
+    }
+  },
+
+  wire() {
+    document.addEventListener(
+      "pointerover",
+      (e) => {
+        if (graphDragging) return;
+        const f = this.find(e.target);
+        if (!f) {
+          this.hide();
+          return;
+        }
+        const c = this.cur;
+        if (c && c.el === f.el && c.title === f.title && c.rows === f.rows) return;
+        clearTimeout(this.timer);
+        this.last = e;
+        const show = () => {
+          this.cur = f;
+          this.render(f);
+          this.place(this.last || e);
+        };
+        if (c) show();
+        else this.timer = setTimeout(() => f.el.isConnected && show(), 220);
+      },
+      true,
+    );
+    document.addEventListener(
+      "pointermove",
+      (e) => {
+        this.last = { clientX: e.clientX, clientY: e.clientY };
+        if (!this.cur) return;
+        if (!this.cur.el.isConnected) return this.hide();
+        this.place(e);
+      },
+      { passive: true },
+    );
+    document.addEventListener("pointerdown", () => this.hide(), true);
+    document.addEventListener("focusin", (e) => {
+      if (e.target.matches(":focus-visible")) this.at(e.target);
+    });
+    document.addEventListener("focusout", () => this.hide());
+    window.addEventListener("scroll", () => this.hide(), true);
+  },
+};
+
+/** `data-tip-rows` from pairs, skipping empty values. */
+function rows(pairs) {
+  return pairs
+    .filter(([, v]) => v !== null && v !== undefined && v !== "")
+    .map(([k, v]) => `${k}::${v}`)
+    .join("||");
+}
+
+// ------------------------------------------------------------- menu, modal
+
 const menu = {
   node: null,
   owner: null,
-
   ensure() {
     if (this.node) return this.node;
     this.node = el("div", { class: "menu", role: "menu", hidden: true });
     document.body.append(this.node);
-    // One listener each, not one per menu: the host outlives every row that
-    // opens it.
     document.addEventListener("pointerdown", (e) => {
       if (this.node.hidden) return;
       if (this.node.contains(e.target) || (this.owner && this.owner.contains(e.target))) return;
       this.close();
     });
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") this.close();
+      // Up and down move through the items, as they do in a system list.
+      if ((e.key === "ArrowDown" || e.key === "ArrowUp") && !this.node.hidden) {
+        const items = [...this.node.querySelectorAll(".menu-item:not([disabled])")];
+        const i = items.indexOf(document.activeElement);
+        const next = items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length];
+        if (next) {
+          next.focus();
+          e.preventDefault();
+        }
+      }
+      if (e.key === "Escape" && !this.node.hidden) {
+        const owner = this.owner;
+        this.close();
+        if (owner) owner.focus();
+      }
     });
     window.addEventListener("resize", () => this.close());
-    // A menu anchored to a row in a scrolling table has to go when the row
-    // moves, rather than hang over the wrong one.
-    window.addEventListener("scroll", () => this.close(), true);
+    window.addEventListener("scroll", (e) => !this.node.contains(e.target) && this.close(), true);
     return this.node;
   },
-
-  /** `items` are `{ label, tone, onclick }`; `at` is the control it hangs off. */
-  open(at, items) {
+  /** `items` are `{ label, hint, tone, checked, onclick }` or null for none. */
+  open(at, items, opts) {
     const node = this.ensure();
     if (this.owner === at && !node.hidden) return this.close();
     this.owner = at;
     at.setAttribute("aria-expanded", "true");
     fill(
       node,
-      items.map((item) =>
-        el("button", {
-          class: item.tone ? `menu-item ${item.tone}` : "menu-item",
-          type: "button",
-          role: "menuitem",
-          text: item.label,
-          onclick: () => {
-            this.close();
-            item.onclick();
+      items.filter(Boolean).map((item) =>
+        btn(
+          {
+            class: `menu-item${item.tone ? ` ${item.tone}` : ""}`,
+            role: item.checked !== undefined ? "menuitemradio" : "menuitem",
+            "aria-checked": item.checked !== undefined ? String(!!item.checked) : null,
+            disabled: item.disabled || null,
+            onclick: () => {
+              this.close();
+              item.onclick();
+            },
           },
-        }),
+          el("span", { class: "ell", text: item.label }),
+          item.hint ? el("span", { class: "hint", text: item.hint }) : null,
+        ),
       ),
     );
+    node.style.minWidth = `${(opts && opts.width) || 200}px`;
     node.hidden = false;
     const box = node.getBoundingClientRect();
     const rect = at.getBoundingClientRect();
-    const margin = 8;
-    let left = rect.right - box.width;
-    left = Math.min(Math.max(margin, left), window.innerWidth - margin - box.width);
+    let left = opts && opts.alignLeft ? rect.left : rect.right - box.width;
+    left = Math.min(Math.max(8, left), window.innerWidth - 8 - box.width);
     let top = rect.bottom + 6;
-    if (top + box.height > window.innerHeight - margin) top = rect.top - box.height - 6;
+    if (top + box.height > window.innerHeight - 8) top = rect.top - box.height - 6;
     node.style.left = `${Math.round(left)}px`;
-    node.style.top = `${Math.round(Math.max(margin, top))}px`;
-    node.querySelector(".menu-item")?.focus();
+    node.style.top = `${Math.round(Math.max(8, top))}px`;
+    const first = node.querySelector(".menu-item[aria-checked='true']") || node.querySelector(".menu-item");
+    if (first) first.focus();
   },
-
   close() {
     if (!this.node) return;
     this.node.hidden = true;
@@ -1172,188 +933,703 @@ const menu = {
   },
 };
 
-/** The control that opens one, for the end of a table row. */
-function rowMenu(items) {
-  const button = el("button", {
-    class: "button secondary small icon",
-    type: "button",
-    "aria-haspopup": "menu",
-    "aria-expanded": "false",
-    "aria-label": "Actions",
-    title: "Actions",
-    onclick: () => menu.open(button, items()),
-  });
-  fill(button, icon(ICONS.more, 18, true));
-  return button;
+/** The portal's dropdown, drawn like the Graph's store picker (a button with
+ * a thin chevron, and the menu): in place of the system <select>, which draws
+ * differently on every OS and cannot be styled to match. `options` are
+ * `[value, label, hint?]`; `cls` sizes it (sm by default, beside 28px
+ * fields). The chosen value is on `data-value`. */
+function dropdown({ label, value, options, onChange, cls, width }) {
+  const cur = options.find((o) => String(o[0]) === String(value)) || options[0] || ["", ""];
+  const b = btn(
+    {
+      class: `btn dd ${cls || "sm"}`,
+      "aria-haspopup": "menu",
+      "aria-expanded": "false",
+      "aria-label": label,
+      "data-value": String(cur[0]),
+      onclick: (e) => {
+        e.stopPropagation();
+        menu.open(
+          b,
+          options.map(([v, text, hint]) => ({ label: text, hint, checked: String(v) === String(b.getAttribute("data-value")), onclick: () => {
+            b.setAttribute("data-value", String(v));
+            b.firstChild.textContent = text;
+            onChange(v);
+          } })),
+          { width: width || Math.max(160, b.offsetWidth), alignLeft: true },
+        );
+      },
+    },
+    el("span", { class: "ell", text: cur[1] }),
+    icon(I.chevDown, 12, { w: 2 }),
+  );
+  return b;
 }
 
-/** A status pill. One shape, and a dot only where it reports a state. */
-function pill(text, tone, props) {
+/** The row menu's three-dot control. */
+function moreButton(items, label) {
+  const b = btn(
+    {
+      class: "btn icon",
+      "aria-haspopup": "menu",
+      "aria-expanded": "false",
+      "aria-label": label || "Actions",
+      "data-tip": label || "Actions",
+      onclick: (e) => {
+        e.stopPropagation();
+        menu.open(b, items());
+      },
+    },
+    icon(I.more, 13, { solid: true }),
+  );
+  return b;
+}
+
+/* The confirm modal. `ask` resolves true on OK and false on Cancel/Escape.
+ * `extra` is a node shown under the body — a "also delete" option, a list. */
+function ask({ title, body, ok, cancel, danger, extra, wide }) {
+  return new Promise((resolve) => {
+    const before = document.activeElement;
+    const keep = before && before.getAttribute ? before.getAttribute("data-keep") : null;
+    const done = (value) => {
+      scrim.remove();
+      document.removeEventListener("keydown", onKey, true);
+      // Back to the control that opened it, or its redrawn copy.
+      const back = before && before.isConnected ? before : keep ? document.querySelector(`[data-keep="${keep}"]`) : null;
+      if (back && back.focus) back.focus();
+      resolve(value);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        done(false);
+      }
+    };
+    const okButton = btn({ class: `btn ${danger ? "danger" : "primary"}`, onclick: () => done(true) }, ok || "OK");
+    const modal = el(
+      "div",
+      { class: `modal${wide ? " wide" : ""}`, role: "dialog", "aria-modal": "true", "aria-label": title },
+      el("div", { class: "mt", text: title }),
+      body ? el("div", { class: "mb" }, body) : null,
+      extra || null,
+      el("div", { class: "acts" }, btn({ class: "btn", onclick: () => done(false) }, cancel || "Cancel"), okButton),
+    );
+    // Closed by its buttons or Escape only: a click outside, or one that
+    // starts inside (selecting the path, say) and ends outside, is not an
+    // answer.
+    const scrim = el("div", { class: "modal-scrim" }, modal);
+    document.body.append(scrim);
+    document.addEventListener("keydown", onKey, true);
+    okButton.focus();
+  });
+}
+
+let toastTimer = 0;
+function toast(message, bad) {
+  document.querySelectorAll(".toast").forEach((t) => t.remove());
+  const node = el(
+    "div",
+    { class: `toast${bad ? " bad" : ""}${state.screen === "wizard" ? " up" : ""}`, role: "status", "aria-live": "polite" },
+    icon(bad ? I.x : I.check, 14, { w: 2.6 }),
+    el("span", { text: message }),
+  );
+  document.body.append(node);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => node.remove(), bad ? 5200 : 2800);
+}
+
+/** Run a write, toast its failure, and hand back its answer or null. */
+async function act(fn, okMessage) {
+  try {
+    const out = await fn();
+    if (okMessage) toast(typeof okMessage === "function" ? okMessage(out) : okMessage);
+    return out;
+  } catch (e) {
+    toast(e.message, true);
+    return null;
+  }
+}
+
+// --------------------------------------------------------------------- grid
+
+/* One table for the portal: sortable headers with an arrow, a rows-per-page
+ * select, a numbered pager, and multi-select with "select all N matching".
+ * `spec`:
+ *   key        remembers sort, page and size across repaints
+ *   columns    [{ key, label, cls, sort (row→value), render (row→node), head }]
+ *   rows       every row (client-side) — or `total` + `onQuery` for server side
+ *   id         row → stable id, needed for selection
+ *   select     true to show checkboxes; `canSelect(row)` narrows it
+ *   actions    sel → nodes for the selection bar
+ *   empty      text when nothing matches, `onClear` adds "Clear the filters"
+ *   foot       extra text before the pager
+ *   per        default page size
+ */
+const GRID_VIEWS = new Map();
+
+function grid(spec) {
+  const view = GRID_VIEWS.get(spec.key) || { page: 1, per: spec.per || 10, sort: spec.sort || null, dir: spec.dir || "asc", sel: new Set(), all: false };
+  if (spec.key) GRID_VIEWS.set(spec.key, view);
+  const node = el("div", { class: "grid-wrap" });
+  let rowsIn = spec.rows || [];
+
+  function sorted() {
+    if (spec.server || !view.sort) return rowsIn;
+    const column = spec.columns.find((c) => c.key === view.sort);
+    if (!column || !column.sort) return rowsIn;
+    const sign = view.dir === "desc" ? -1 : 1;
+    return [...rowsIn].sort((a, b) => {
+      const x = column.sort(a);
+      const y = column.sort(b);
+      if (typeof x === "number" && typeof y === "number") return (x - y) * sign;
+      return String(x ?? "").localeCompare(String(y ?? ""), undefined, { numeric: true }) * sign;
+    });
+  }
+  const total = () => (spec.server ? spec.total || 0 : rowsIn.length);
+  const pages = () => Math.max(1, Math.ceil(total() / view.per));
+  const selectable = (row) => spec.select && (!spec.canSelect || spec.canSelect(row));
+
+  function changed() {
+    if (spec.server && spec.onQuery) spec.onQuery({ page: view.page, per: view.per, sort: view.sort, dir: view.dir });
+    paint();
+  }
+
+  function paint() {
+    view.page = Math.min(view.page, pages());
+    const all = sorted();
+    const shown = spec.server ? all : all.slice((view.page - 1) * view.per, view.page * view.per);
+    const shownSelectable = shown.filter(selectable);
+    const allIds = all.filter(selectable).map((r) => spec.id(r));
+    // A selection is of rows still in the set: a filter that removes a row
+    // removes it from what a bulk action would touch.
+    if (!spec.server) for (const id of [...view.sel]) if (!allIds.includes(id)) view.sel.delete(id);
+    const pageState = shownSelectable.length && shownSelectable.every((r) => view.sel.has(spec.id(r))) ? true : shownSelectable.some((r) => view.sel.has(spec.id(r))) ? "mixed" : false;
+    const head = el(
+      "tr",
+      {},
+      spec.select
+        ? el(
+            "th",
+            { class: "cbx" },
+            checkbox(pageState, (on) => {
+              for (const r of shownSelectable) on ? view.sel.add(spec.id(r)) : view.sel.delete(spec.id(r));
+              view.all = false;
+              paint();
+            }, "Select this page"),
+          )
+        : null,
+      spec.columns.map((c) => {
+        const thCls = (c.cls || "").split(" ").filter((x) => x === "r" || x === "cbx").join(" ") || null;
+        if (!c.sort) return el("th", { class: thCls, text: c.label || "" });
+        const on = view.sort === c.key;
+        return el(
+          "th",
+          { class: thCls, "aria-sort": on ? (view.dir === "asc" ? "ascending" : "descending") : "none" },
+          btn(
+            {
+              class: "sort",
+              onclick: () => {
+                if (view.sort === c.key) view.dir = view.dir === "asc" ? "desc" : "asc";
+                else {
+                  view.sort = c.key;
+                  view.dir = c.firstDir || "asc";
+                }
+                view.page = 1;
+                changed();
+              },
+            },
+            c.label,
+            el("span", { class: "ar", text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
+          ),
+        );
+      }),
+    );
+    const body = el(
+      "tbody",
+      {},
+      shown.map((row, i) => {
+        const id = spec.select ? spec.id(row) : null;
+        const on = id !== null && view.sel.has(id);
+        return el(
+          "tr",
+          { class: on ? "sel" : null },
+          spec.select
+            ? el(
+                "td",
+                { class: "cbx" },
+                selectable(row)
+                  ? checkbox(on, (v) => {
+                      v ? view.sel.add(id) : view.sel.delete(id);
+                      view.all = false;
+                      paint();
+                    })
+                  : null,
+              )
+            : null,
+          spec.columns.map((c) => el("td", { class: c.cls || null }, c.render ? c.render(row, i) : String(c.sort ? c.sort(row) ?? "" : ""))),
+        );
+      }),
+    );
+    const count = view.sel.size;
+    // A server-paged grid holds one page; "all matching" is the whole result
+    // set, which the bulk action reads again with the same filters.
+    const matching = spec.server ? total() : allIds.length;
+    const selbar =
+      spec.select && count
+        ? el(
+            "div",
+            { class: "selbar" },
+            el("span", { class: "what", text: view.all ? `All ${n(matching)} matching selected` : `${n(count)} selected` }),
+            !view.all && matching > count
+              ? lnk(`Select all ${n(matching)} matching`, () => {
+                  allIds.forEach((x) => view.sel.add(x));
+                  view.all = true;
+                  paint();
+                }, "strong")
+              : null,
+            lnk("Clear selection", () => {
+              view.sel.clear();
+              view.all = false;
+              paint();
+            }, "muted"),
+            el("span", { class: "spacer" }),
+            el("div", { class: "row gap6" }, spec.actions ? spec.actions([...view.sel], () => {
+              view.sel.clear();
+              view.all = false;
+              paint();
+            }, { all: view.all, total: matching }) : null),
+          )
+        : null;
+    const from = total() ? (view.page - 1) * view.per + 1 : 0;
+    const to = Math.min(total(), view.page * view.per);
+    fill(
+      node,
+      selbar,
+      el("div", { class: "tw" }, el("table", { class: spec.cls || null }, spec.caption ? el("caption", { class: "sr-only", text: spec.caption }) : null, el("thead", {}, head), body)),
+      // A server-paged grid is waiting on its first answer until it has one:
+      // "No file matches" there read as an empty store.
+      !total() && spec.loading
+        ? el("div", { class: "empty lg tb row gap10", role: "status" }, el("span", { class: "spinner" }), spec.loadingText || "Loading…")
+        : !total()
+          ? el("div", { class: "empty lg tb" }, spec.empty || "Nothing here yet.", spec.onClear ? [" ", lnk("Clear the filters", spec.onClear)] : null)
+          : null,
+      spec.noFoot
+        ? null
+        : el(
+            "div",
+            { class: "card-foot" },
+            el("span", { class: "grow", text: spec.loading && !total() ? "reading…" : `${n(from)}–${n(to)} of ${n(total())}${spec.foot && total() ? ` · ${spec.foot}` : ""}` }),
+            pager(view, pages(), changed),
+          ),
+    );
+  }
+
+  if (spec.server && spec.loading === undefined) spec.loading = true;
+  paint();
+  return {
+    node,
+    update(next, totalCount) {
+      rowsIn = next || [];
+      if (totalCount !== undefined) spec.total = totalCount;
+      spec.loading = false;
+      node.classList.remove("is-loading");
+      paint();
+    },
+    // A new query is on its way: rows already shown stay, dimmed, rather than
+    // the table emptying under the reader.
+    loading() {
+      spec.loading = true;
+      node.classList.add("is-loading");
+      if (!rowsIn.length) paint();
+    },
+    selected: () => [...view.sel],
+    // Every row the filters let through, in the order on screen: what an
+    // export writes, so a file says what the table said.
+    shown: () => sorted(),
+    clear() {
+      view.sel.clear();
+      paint();
+    },
+    view,
+  };
+}
+
+/** Rows-per-page and a numbered pager, as the design draws it under every table. */
+function pager(view, pages, changed) {
+  const go = (p) => {
+    view.page = Math.max(1, Math.min(pages, p));
+    changed();
+  };
+  const nums = [];
+  const add = (p) => nums.push(btn({ class: "pg", "aria-current": p === view.page ? "page" : null, onclick: () => go(p) }, String(p)));
+  if (pages <= 7) for (let p = 1; p <= pages; p++) add(p);
+  else {
+    add(1);
+    const lo = Math.max(2, view.page - 1);
+    const hi = Math.min(pages - 1, view.page + 1);
+    if (lo > 2) nums.push(el("span", { class: "gap", text: "…" }));
+    for (let p = lo; p <= hi; p++) add(p);
+    if (hi < pages - 1) nums.push(el("span", { class: "gap", text: "…" }));
+    add(pages);
+  }
+  const select = dropdown({
+    label: "Rows per page",
+    value: view.per,
+    options: [10, 25, 50, 100].map((v) => [v, String(v)]),
+    cls: "xs mono",
+    width: 90,
+    onChange: (v) => {
+      view.per = Number(v);
+      view.page = 1;
+      changed();
+    },
+  });
   return el(
-    "span",
-    { class: tone ? `pill ${tone}` : "pill", ...(props || {}) },
-    tone ? el("i", {}) : null,
-    text,
+    "div",
+    { class: "pager" },
+    el("span", { class: "row gap6" }, "Rows", select),
+    el(
+      "div",
+      { class: "nums" },
+      btn({ class: "pg", "aria-label": "Previous page", disabled: view.page <= 1 ? true : null, onclick: () => go(view.page - 1) }, icon(I.chevLeft, 14, { w: 2 })),
+      nums,
+      btn({ class: "pg", "aria-label": "Next page", disabled: view.page >= pages ? true : null, onclick: () => go(view.page + 1) }, icon(I.chevRight, 14, { w: 2 })),
+    ),
   );
 }
 
-// ---------------------------------------------------------------- state
+/** A sortable header for a CSS-grid list. */
+function sortHead(label, key, view, onChange, cls) {
+  const on = view.sort === key;
+  return el(
+    "span",
+    { class: cls || null },
+    btn(
+      {
+        class: "sortable",
+        onclick: () => {
+          if (view.sort === key) view.dir = view.dir === "asc" ? "desc" : "asc";
+          else {
+            view.sort = key;
+            view.dir = "asc";
+          }
+          view.page = 1;
+          onChange();
+        },
+      },
+      label,
+      el("span", { class: "ar", text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
+    ),
+  );
+}
 
-const NARROW = "(max-width: 899px)";
+// -------------------------------------------------------------------- loader
 
-const state = {
-  stores: [],
-  theme: "light",
-  navOpen: !window.matchMedia(NARROW).matches,
-  /** Carried from the welcome screen into the Index view's path field. */
-  pendingPath: "",
-  /** Carried from a search hit into the Graph page, or into Search. */
-  pendingSymbol: "",
-  /** The symbol the Impact page is about, so the Graph page's "Blast radius"
-   * link has somewhere to put it and coming back does not clear the answer. */
-  impactSymbol: "",
-  /** The store that symbol was picked in, so Impact answers about the same
-   * store the Graph was showing rather than every open one. */
-  impactStore: "",
-  pendingQuery: "",
-  /** The last search, kept so leaving the page and coming back does not throw
-   * the question away along with its answers. */
-  search: { query: "", stores: [] },
-  /** How many clients are talking to the daemon, for the sidebar card. */
-  agents: null,
-  /** Whether this daemon records retrievals, for the same card. */
-  ledger: null,
-  /** The last `/api/index/runs` answer, shared by the navigation's count and
-   * the Index page's cards. */
-  runs: null,
-  /** The Index page's painter while that page is on screen, so one fetch of
-   * the runs route serves both readers. */
-  onRuns: null,
-  /** The open page's reader of a changed store list, if it has one. */
-  onStores: null,
-};
-
-/* Pages, in the design's grouping. The ones the roadmap puts in a later
- * release — Inside the index, Reports, License — are deliberately absent
- * rather than stubbed: a nav item that leads nowhere is worse than one that
- * does not exist yet. Everything listed here is free on every tier. */
-/* The v4 sidebar: two groups, thirteen entries, in this order.
- *
- * Doctor is the thirteenth and is not in the design's list. It is a surface
- * this binary already ships, and dropping it would leave `semlith doctor` the
- * one command with no page — the parity rule cuts both ways. */
-/* The sidebar, in four groups.
- *
- * The v3 design grouped the pages as Workspace, Explore, Operate and Account,
- * and v4 flattened that to two: six pages under Workspace and seven under
- * Operate. Two groups of six and seven is a list with two headings in it —
- * long enough to scan rather than read — so this takes v3's shape back.
- * `Account` held License and About; the binary is free and there is no
- * licence page, so the last group is the two pages that describe the machine
- * this is running on.
- *
- * Every page is in exactly one group. The v4 design draws thirteen and this
- * is fourteen: `Index` and `Inside the index` are two pages there and were
- * one here, which is why the indexing controls and the corpus figures were
- * stacked on top of each other.
- */
-const VIEWS = [
-  { group: "Workspace", id: "stores", label: "Stores", title: "Stores" },
-  { group: "Workspace", id: "files", label: "Files", title: "Files" },
-  { group: "Workspace", id: "index", label: "Index", title: "Index" },
-  { group: "Workspace", id: "corpus", label: "Inside the index", title: "Inside the index" },
-  { group: "Explore", id: "search", label: "Search", title: "Search" },
-  { group: "Explore", id: "graph", label: "Graph", title: "Graph" },
-  { group: "Explore", id: "impact", label: "Impact", title: "Impact" },
-  { group: "Operate", id: "ledger", label: "Retrieval ledger", title: "Retrieval ledger" },
-  { group: "Operate", id: "reports", label: "Reports", title: "Reports" },
-  { group: "Operate", id: "agents", label: "Agents", title: "Agents" },
-  { group: "Operate", id: "cloud", label: "Cloud", title: "Cloud" },
-  { group: "Operate", id: "privacy", label: "Privacy", title: "Privacy" },
-  { group: "Machine", id: "doctor", label: "Doctor", title: "Doctor" },
-  { group: "Machine", id: "about", label: "About", title: "About" },
+/* The boot animation and the per-page loader, after the design, driven by real
+ * loading: each is shown while a screen's first fetches are pending and
+ * removed the frame they answer. A page whose data is already cached shows
+ * neither. With reduced motion the tiles do not move. */
+const LOADER_TIPS = [
+  "Press `/` anywhere in the portal to jump straight to search.",
+  "Every agent uses one endpoint. Connect a client once and it can reach all your stores.",
+  "Watched sources re-index themselves when files change, so manual re-index runs are rarely needed.",
+  "Files that look like credentials stay out of the index until you decide on them in Review.",
+  "Your `.gitignore` rules are respected, so build output and vendored code never get embedded.",
+  "Everything Semlith keeps lives under `~/.semlith`. Your code is indexed and searched on this machine.",
+  "Keep code and docs in separate stores when you want sharper, less noisy results.",
+  "Use “Search it” on a store’s page to search that store alone.",
+  "Session replay in the Ledger shows what an agent did after each answer.",
+  "Fewer tokens compares what agents were sent with reading every matching file in full.",
+  "Runs queue behind each other up to the limit in Settings, and each one lives in the daemon.",
+  "A long run can be paused and resumed later without losing progress.",
+  "Prefer the terminal? `semlith index ~/path` does what the new-store wizard does.",
+  "Undecided files in Review stay out. Nothing is embedded until you have decided on it.",
+  "Agents › Health lists every client found on this machine and whether it can reach Semlith.",
 ];
 
-/** The sidebar's count, kept with the data it describes rather than with the
- * render that happened to be running when it changed. */
-function paintStoreCount() {
-  const node = document.getElementById("daemon-stores");
-  if (!node) return;
-  const many = state.stores.length;
-  const parts = [`${many} store${many === 1 ? "" : "s"}`];
-  // Only once the answer is known: "0 agents" while the route is still in
-  // flight reads as a fact rather than as a question nobody has asked yet.
-  if (state.agents !== null) {
-    parts.push(`${state.agents} agent${state.agents === 1 ? "" : "s"}`);
+function nextTip() {
+  let i = 0;
+  try {
+    i = (parseInt(localStorage.getItem("semlith-tip") || "-1", 10) + 1) % LOADER_TIPS.length;
+    localStorage.setItem("semlith-tip", String(i));
+  } catch (_) {
+    i = Math.floor(Math.random() * LOADER_TIPS.length);
   }
-  // The design's daemon card states it here, on every page: the ledger is on
-  // by default and a reader should not have to open the Ledger page to find
-  // out whether this daemon is recording.
-  if (state.ledger !== null) parts.push(state.ledger ? "ledger on" : "ledger off");
-  node.textContent = parts.join(" · ");
+  return LOADER_TIPS[(i * 7) % LOADER_TIPS.length];
 }
 
-/** How many clients are connected, from whichever page last asked. */
-function noteAgents(data) {
-  state.agents = (data.connections || []).length;
-  paintStoreCount();
+const TILE_MAP = "LOMMLOMOOMDDMDOX";
+const TILE_INK = { L: "#85A8B8", O: "#EFA53C", M: "#6E93A6", D: "#446980", X: "#2F4B60" };
+
+/** Open a loader. `full` is the boot screen; otherwise it covers `area`.
+ * Returns a function that removes it. */
+function openLoader(full, area) {
+  const reduce = stillness();
+  const vmin = Math.min(window.innerWidth, window.innerHeight);
+  const S = Math.round(full ? Math.min(156, vmin * 0.32) : Math.min(76, vmin * 0.2));
+  const t = S * 0.2134;
+  const p = S * 0.2622;
+  const grey = isDark() ? "#3E4E5B" : "#B3C0CA";
+  const stage = el("div", { class: "stage" });
+  stage.style.width = `${S}px`;
+  stage.style.height = `${S}px`;
+  const tiles = TILE_MAP.split("").map((k, i) => {
+    const r = Math.floor(i / 4);
+    const c = i % 4;
+    const d = el("div", { class: "tile" });
+    Object.assign(d.style, {
+      left: `${(c * p).toFixed(2)}px`,
+      top: `${(r * p).toFixed(2)}px`,
+      width: `${t.toFixed(2)}px`,
+      height: `${t.toFixed(2)}px`,
+      borderRadius: `${(t * 0.19).toFixed(2)}px`,
+      background: TILE_INK[k],
+    });
+    stage.append(d);
+    return { d, r, c, k };
+  });
+  const cap = el("div", { class: "cap" });
+  const status = el("div", { class: "status", text: "collecting chunks" });
+  if (full) cap.append(el("div", { class: "word", text: "Semlith" }), status);
+  else {
+    const txt = el("div", { class: "tiptxt" });
+    nextTip()
+      .split("`")
+      .forEach((part, i) => part && txt.append(i % 2 ? el("code", { text: part }) : document.createTextNode(part)));
+    cap.append(el("div", { class: "tipbox" }, el("div", { class: "tiplab", text: "Tip" }), txt));
+  }
+  const ov = el("div", { class: full ? "ld" : "ld area", role: "status", "aria-label": "Loading Semlith" }, stage, cap);
+  if (!full && area) {
+    const b = area.getBoundingClientRect();
+    if (b.width > 0 && b.height > 0) Object.assign(ov.style, { inset: "auto", left: `${b.left}px`, top: `${b.top}px`, width: `${b.width}px`, height: `${b.height}px` });
+  }
+  document.body.append(ov);
+  const timers = [];
+  const at = (ms, fn) => timers.push(setTimeout(fn, ms));
+  let alive = true;
+  if (!reduce && ov.animate) {
+    if (full) {
+      const cluster = { L: 0, M: 1, D: 2, X: 2, O: 3 };
+      const R = vmin * 0.46;
+      tiles.forEach((x, rank) => {
+        const delay = rank * 40 + cluster[x.k] * 90;
+        const a = Math.random() * Math.PI * 2;
+        const dist = R * (0.55 + Math.random() * 0.45);
+        const dx = Math.cos(a) * dist;
+        const dy = Math.sin(a) * dist;
+        const rot = (Math.random() - 0.5) * 200;
+        x.d.animate(
+          [
+            { transform: `translate(${dx}px,${dy}px) rotate(${rot}deg) scale(.5)`, opacity: 0 },
+            { offset: 0.26, transform: `translate(${dx * 0.93}px,${dy * 0.93}px) rotate(${rot * 0.85}deg) scale(.58)`, opacity: 1, easing: "cubic-bezier(.2,.9,.25,1.14)" },
+            { transform: "none", opacity: 1 },
+          ],
+          { duration: 1000, delay, fill: "both" },
+        );
+        x.d.animate([{ backgroundColor: grey }, { backgroundColor: grey, offset: 0.7 }, { backgroundColor: TILE_INK[x.k] }], { duration: 1000, delay, fill: "both" });
+      });
+      at(520, () => alive && (status.textContent = "clustering by meaning"));
+      at(1700, () => alive && (status.textContent = "linked · ready"));
+    }
+    const shuffle = () => {
+      const perm = tiles.map((_, i) => i).sort(() => Math.random() - 0.5);
+      tiles.forEach((x, i) => {
+        const q = perm[i];
+        const dx = ((q % 4) - x.c) * p;
+        const dy = (Math.floor(q / 4) - x.r) * p;
+        x.d.animate([{ transform: `translate(${dx}px,${dy}px) scale(.45)`, opacity: 0.4 }, { transform: "none", opacity: 1 }], {
+          duration: 620,
+          delay: (x.r + x.c) * 22,
+          easing: "cubic-bezier(.5,0,.1,1.25)",
+          fill: "backwards",
+        });
+      });
+    };
+    const wave = () =>
+      tiles.forEach((x) =>
+        x.d.animate([{ transform: "none" }, { offset: 0.4, transform: "translateY(-12%) scale(1.08)", filter: "brightness(1.12)" }, { transform: "none" }], {
+          duration: 480,
+          delay: (x.r + x.c) * 60,
+          easing: "ease-in-out",
+        }),
+      );
+    // Loops for as long as the wait does: the loader reports a wait, it is
+    // not a fixed-length show.
+    const loop = (start) => {
+      if (!alive) return;
+      shuffle();
+      at(820, () => alive && wave());
+      at(1450, () => loop(false));
+      return start;
+    };
+    at(full ? 1800 : 0, () => loop(true));
+  }
+  return () => {
+    if (!alive) return;
+    alive = false;
+    timers.forEach(clearTimeout);
+    ov.remove();
+  };
 }
 
-// ----------------------------------------------------------------- live
+// --------------------------------------------------------------------- state
 
-/* One clock for the whole page.
- *
- * The daemon keeps a counter per data domain — stores, runs, clients, ledger,
- * events, privacy — and bumps it in the one function that writes that domain.
- * This polls those six integers once a second, works out which moved, and
- * refetches only those, through the routes each view already uses. A quiet
- * daemon with a tab open therefore costs one small request a second and
- * nothing else.
- *
- * It is a poll rather than a server-sent stream because a stream holds one of
- * the daemon's eight HTTP workers for as long as the tab is open, which is the
- * constraint the whole run-state design exists to respect. Six integers a
- * second is cheaper than the connection would be and cannot exhaust the pool.
- *
- * Every live view registers here. No view starts a timer of its own: a second
- * timer is a second clock, and two clocks are how one panel updates and the
- * one beside it does not. */
-const live = {
-  /** The counter value each domain was last acted on at. */
-  seen: {},
-  /** `{ domains, run }`, cleared on every navigation. */
-  watchers: [],
-  timer: null,
+const state = {
+  screen: "app",
+  route: { page: "home", parts: [] },
+  theme: "system",
+  tier: "l",
+  navOpen: true,
+  home: "",
+  /** The wizard's working state, while it is open. */
+  wz: null,
+  /** Carried into Search and Graph from another page. */
+  pending: {},
+  /** This session's searches, newest first. */
+  recents: [],
+  /** The run a stop dialog or a button just changed, painted before the poll. */
+  dismissed: new Set(),
+  version: "",
 };
 
-/** Ask to be called when any of these domains is written. */
-function watchLive(domains, run) {
-  live.watchers.push({ domains, run });
+const store = (name) => (data.stores?.stores || []).find((s) => s.name === name);
+const liveStores = () => (data.stores?.stores || []).filter((s) => !s.missing && !s.unopened);
+
+// ---------------------------------------------------------------- data cache
+
+/* Every route the portal reads, by name. A page lists the names it needs; the
+ * router shows it at once when they are all in hand (and refreshes them behind
+ * it), and shows the page loader only while one of them is still on its way. */
+const SOURCES = {
+  stores: "/api/stores",
+  about: "/api/about",
+  agents: "/api/agents",
+  ledger: "/api/ledger",
+  privacy: "/api/privacy",
+  runs: "/api/index/runs",
+  refused: "/api/refused",
+  decisions: "/api/refused?decisions=1",
+  detail: "/api/stores?detail=1",
+  corpus: "/api/corpus",
+  accel: "/api/accel",
+  schedules: "/api/schedules",
+  prices: "/api/prices",
+  replay: "/api/ledger/replay",
+  languages: "/api/languages",
+  graphpeek: () => `/api/graph?${new URLSearchParams({ store: (graphPeekFor = graphStore()), limit: "12" })}`,
+  graphmap: () => `/api/map?${new URLSearchParams({ store: (graphMapFor = graphStore()), shown: "12" })}`,
+  coverage: "/api/stores?coverage=1",
+};
+
+const data = {};
+const loading = {};
+const loadedAt = {};
+
+function load(key, force) {
+  if (!force && data[key] !== undefined) return Promise.resolve(data[key]);
+  if (loading[key]) return loading[key];
+  // A source may depend on the page (the graph's store): then it is a function.
+  const p = api(typeof SOURCES[key] === "function" ? SOURCES[key]() : SOURCES[key])
+    .then((value) => {
+      data[key] = value;
+      loadedAt[key] = Date.now();
+      if (key === "stores" || key === "coverage") noteStores(value);
+      if (key === "runs") holdPausing(value), noteRuns();
+      if (key === "about") noteAbout(value);
+      return value;
+    })
+    .finally(() => {
+      delete loading[key];
+    });
+  loading[key] = p;
+  return p;
 }
 
-/** Drop every watcher. Called as a view is replaced, so nothing left behind
- * keeps refetching for a page that is no longer on screen. */
-function resetLive() {
-  live.watchers = [];
+// Runs a Pause was just pressed on, until when. A poll that left before the
+// click answers "running" after it; for a few seconds that is read as the
+// "pausing" the click already showed, until the daemon says otherwise.
+const PAUSING = new Map();
+function holdPausing(value) {
+  const now = Date.now();
+  for (const r of (value && value.runs) || []) {
+    const key = `${r.store}:${r.id}`;
+    const until = PAUSING.get(key);
+    if (!until) continue;
+    if (r.status !== "running" || now > until) PAUSING.delete(key);
+    else r.status = "pausing";
+  }
 }
+
+function loadMany(keys, force) {
+  return Promise.all(keys.map((k) => load(k, force).catch((e) => ({ __error: e }))));
+}
+
+const cached = (keys) => keys.every((k) => data[k] !== undefined);
+
+/** Refetch and repaint whatever on screen reads these. */
+async function refresh(keys) {
+  const list = Array.isArray(keys) ? keys : [keys];
+  await loadMany(list, true);
+  // A store that appears while the first-run screen is up — made from the
+  // terminal, say — ends the first run.
+  if (state.screen === "welcome" && state.route.page !== "welcome" && (data.stores?.stores || []).length) return render();
+  paintChrome();
+  if (current.onData) current.onData(list);
+  else if (current.live && list.some((k) => current.live.includes(k))) {
+    // A view that names what it draws from a live domain is redrawn only when
+    // that part moved, so a run's progress does not rebuild a settings form.
+    if (current.view && current.view.sig) {
+      const sig = current.view.sig(current.route);
+      if (sig === current.sig) return;
+      current.sig = sig;
+    }
+    repaint();
+  }
+}
+
+function noteStores(value) {
+  if (value === data.coverage) data.stores = value;
+  const first = liveStores()[0];
+  if (!state.home && first && first.dir) {
+    const m = first.dir.match(/^(\/Users\/[^/]+|\/home\/[^/]+|[A-Z]:\\Users\\[^\\]+)/);
+    if (m) state.home = m[1];
+  }
+}
+
+function noteAbout(about) {
+  state.version = about.version || "";
+  if (about.store_home && !state.home) {
+    const m = String(about.store_home).match(/^(.*)[\\/]\.semlith/);
+    if (m) state.home = m[1];
+  }
+}
+
+// --------------------------------------------------------------------- live
+
+/* One clock for the whole page: six change counters, polled once a second;
+ * only the routes behind the counters that moved are refetched. A hidden tab
+ * asks nothing. No view starts a timer of its own. */
+const live = { seen: {}, timer: null };
+
+const DOMAIN_KEYS = {
+  stores: ["stores", "refused", "decisions"],
+  runs: ["runs"],
+  clients: ["agents"],
+  ledger: ["ledger"],
+  events: ["stores"],
+  privacy: ["privacy", "refused", "decisions"],
+};
 
 async function pollChanges() {
-  // A hidden tab asks nothing. Its `seen` values stay where they were, so the
-  // first poll after it comes back sees everything that moved meanwhile and
-  // fires each watcher once rather than once per missed second.
   if (document.visibilityState === "hidden") return;
   let counters;
   try {
     counters = await api("/api/changes");
   } catch (_) {
-    // A daemon that has stopped answering is not a reason to tear the page
-    // down; the next tick tries again.
     return;
   }
   const moved = [];
   for (const [domain, value] of Object.entries(counters)) {
-    // The first read is a baseline, not a change: everything the page drew on
-    // load is already current.
     if (live.seen[domain] === undefined) {
       live.seen[domain] = value;
       continue;
@@ -1364,12781 +1640,7421 @@ async function pollChanges() {
     }
   }
   if (!moved.length) return;
-  /* The sidebar's store count is on every page, so it follows the stores
-   * domain on every page rather than only where a view asked. A store deleted
-   * by a stop on the Index page used to stay counted until a reload. */
+  const keys = new Set();
+  for (const d of moved) for (const k of DOMAIN_KEYS[d] || []) if (data[k] !== undefined || k === "stores" || k === "runs") keys.add(k);
+  // The figures that are expensive to read are dropped rather than refetched:
+  // the next page that wants them reads them again.
   if (moved.includes("stores")) {
-    refreshStores()
-      .then(() => state.onStores && state.onStores())
-      .catch(() => {});
+    delete data.corpus;
+    delete data.coverage;
+    if (state.route.page === "store") keys.add("detail");
+    else delete data.detail;
   }
-  for (const watcher of live.watchers) {
-    if (watcher.domains.some((domain) => moved.includes(domain))) {
-      try {
-        watcher.run(moved);
-      } catch (_) {
-        /* one view's refresh failing must not stop the others' */
-      }
-    }
-  }
+  if (keys.size) refresh([...keys]);
 }
 
 function startLive() {
   if (live.timer) return;
   live.timer = setInterval(pollChanges, 1000);
-  // Straight away on return rather than up to a second later: coming back to a
-  // tab and watching it sit stale is the thing this replaces.
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") pollChanges();
+  document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && pollChanges());
+}
+
+/** The runs that are not finished, per store. */
+const LIVE_RUN = new Set(["queued", "review", "running", "pausing", "paused", "held", "stopping"]);
+
+function runsOf(name) {
+  return (data.runs?.runs || []).filter((r) => r.store === name);
+}
+
+function activeRun(name) {
+  const all = (data.runs?.runs || []).filter((r) => LIVE_RUN.has(r.status) && (!name || r.store === name));
+  return all.find((r) => r.status === "running") || all[0] || null;
+}
+
+// How far a run is, over all of it. Reading finishes long before embedding
+// does, so a bar on bytes read reached 100 % and then sat there (or went back
+// to 0 when embedding began). The daemon's pending_share is the part of the
+// whole run still to do; the bar is the rest, never moving backwards within a
+// run and never reaching 100 % before the run is done.
+const RUN_HIGH = new Map();
+function runPct(run) {
+  if (!run) return 0;
+  if (run.status === "done") return 100;
+  let p;
+  if (typeof run.pending_share === "number") p = (1 - run.pending_share) * 100;
+  else if (run.bytes_total) p = (run.bytes / run.bytes_total) * 50;
+  else p = run.total ? (run.scanned / run.total) * 50 : 0;
+  const key = `${run.store}:${run.id}:${run.started_at || run.submitted || ""}`;
+  const high = Math.max(RUN_HIGH.get(key) || 0, Math.min(99, Math.max(0, p)));
+  RUN_HIGH.set(key, high);
+  return high;
+}
+
+// Time left from the share still to do and the time spent so far, which
+// holds through embedding where the daemon's own estimate covers reading only.
+function runLeftMs(run) {
+  if (!run || run.status !== "running") return null;
+  const done = runPct(run) / 100;
+  if (done < 0.05 || !run.elapsed_ms) return run.eta_ms ?? null;
+  return Math.round((run.elapsed_ms - (run.queued_ms || 0)) * (1 - done) / done);
+}
+
+let lastRunState = {};
+function noteRuns() {
+  // A run that finished while the page was open says so once, wherever the
+  // reader is.
+  const now = {};
+  for (const r of data.runs?.runs || []) now[r.id] = r.status;
+  for (const [id, before] of Object.entries(lastRunState)) {
+    const after = now[id];
+    if (LIVE_RUN.has(before) && after === "done") {
+      const run = (data.runs.runs || []).find((x) => String(x.id) === id);
+      if (run && !(state.screen === "wizard" && state.wz && state.wz.store === run.store)) toast(`${run.store} is indexed and ready`);
+    }
+  }
+  lastRunState = now;
+  for (const fn of [...runsListeners]) {
+    try {
+      fn();
+    } catch (_) {
+      /* one listener failing must not stop the rest */
+    }
+  }
+}
+
+/* Anything that wants to hear when the runs answer changes: the wizard, a
+ * store's Runs tab. Each returns its own way off. */
+const runsListeners = new Set();
+function onRunsChange(fn) {
+  runsListeners.add(fn);
+  return () => runsListeners.delete(fn);
+}
+
+// ------------------------------------------------------------------- theme
+
+function isDark() {
+  if (state.theme === "dark") return true;
+  if (state.theme === "light") return false;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+function applyTheme() {
+  // The attribute is always written, as `light` or `dark`: "system" follows
+  // `prefers-color-scheme` live through the listener below.
+  document.documentElement.setAttribute("data-theme", isDark() ? "dark" : "light");
+  for (const img of document.querySelectorAll("img.logo24")) img.src = isDark() ? "logo-dark.svg" : "logo.svg";
+  for (const g of document.querySelectorAll(".theme")) {
+    for (const b of g.children) b.setAttribute("aria-pressed", String(b.dataset.value === state.theme));
+  }
+}
+
+function setTheme(next) {
+  state.theme = next;
+  try {
+    localStorage.setItem("semlith-theme", next);
+  } catch (_) {
+    /* private window */
+  }
+  applyTheme();
+}
+
+function themeControl() {
+  return el(
+    "div",
+    { class: "theme", role: "group", "aria-label": "Theme" },
+    [
+      ["light", "Light", I.sun],
+      ["dark", "Dark", I.moon],
+      ["system", "System", I.system],
+    ].map(([value, label, d]) =>
+      btn(
+        {
+          "data-value": value,
+          "aria-pressed": String(state.theme === value),
+          "aria-label": `${label} theme`,
+          "data-tip": `${label}${value === "system" ? " · follows this machine" : ""}`,
+          onclick: () => setTheme(value),
+        },
+        icon(d, 14),
+      ),
+    ),
+  );
+}
+
+function logo() {
+  return el("img", { class: "logo24", src: isDark() ? "logo-dark.svg" : "logo.svg", alt: "Semlith", width: 24, height: 24 });
+}
+
+// -------------------------------------------------------------------- router
+
+const PAGES = {
+  home: { title: "Home", group: "Workspace" },
+  stores: { title: "Stores", group: "Workspace" },
+  search: { title: "Search", group: "Workspace" },
+  graph: { title: "Graph", group: "Workspace" },
+  agents: { title: "Agents", group: "Agents" },
+  ledger: { title: "Ledger", group: "Agents" },
+  reports: { title: "Reports", group: "Agents" },
+  privacy: { title: "Privacy", group: "Machine" },
+  settings: { title: "Settings", group: "Machine" },
+};
+const NAV = [
+  ["Workspace", ["home", "stores", "search", "graph"]],
+  ["Agents", ["agents", "ledger", "reports"]],
+  ["Machine", ["privacy", "settings"]],
+];
+
+function parseHash() {
+  const raw = (location.hash || "").replace(/^#\/?/, "");
+  const parts = raw.split("/").filter(Boolean).map(decodeURIComponent);
+  const page = parts.shift() || "home";
+  return { page, parts };
+}
+
+/** Navigate. `go("store", name, "runs")` writes `#/store/<name>/runs`. */
+function go(page, ...parts) {
+  const hash = `#/${[page, ...parts.filter((p) => p !== undefined && p !== null && p !== "")].map(encodeURIComponent).join("/")}`;
+  if (state.tier === "s" && state.navOpen) setNav(false);
+  if (location.hash === hash) render();
+  else location.hash = hash;
+}
+
+/** The view on screen: its node, its live keys, and its in-place painter. */
+let current = { node: null, live: [], onData: null };
+let renderGen = 0;
+let pageLoader = null;
+
+const VIEWS = {};
+
+async function render() {
+  const route = parseHash();
+  state.route = route;
+  const root = document.getElementById("root");
+  const stores = liveStores();
+  const hasAny = (data.stores?.stores || []).length > 0;
+
+  if (route.page === "new") {
+    state.screen = "wizard";
+    current = { node: null, live: [], onData: null };
+    shell.main = null;
+    const node = wizardScreen(route.parts);
+    fill(root, node);
+    return;
+  }
+  if (route.page === "welcome" || (!hasAny && !["store", "settings", "privacy", "agents"].includes(route.page))) {
+    state.screen = "welcome";
+    shell.main = null;
+    current = { node: null, live: [], onData: null };
+    fill(root, welcomeScreen());
+    return;
+  }
+  state.screen = "app";
+  if (!shell.main || !root.contains(shell.main)) {
+    fill(root, buildShell());
+    applyTier(true);
+  }
+  const view = VIEWS[route.page] || VIEWS.home;
+  const pageId = VIEWS[route.page] ? route.page : "home";
+  const navId = pageId === "store" ? "stores" : pageId;
+  for (const node of document.querySelectorAll("[data-nav]")) {
+    if (node.getAttribute("data-nav") === navId) node.setAttribute("aria-current", "page");
+    else node.removeAttribute("aria-current");
+  }
+  paintCrumb();
+  document.title = `Semlith · ${pageId === "store" ? route.parts[0] || "Store" : PAGES[pageId].title}`;
+
+  const mine = ++renderGen;
+  const needs = view.needs ? view.needs(route) : [];
+  if (pageLoader) {
+    pageLoader();
+    pageLoader = null;
+  }
+  shell.main.className = view.fill ? "main fill" : "main";
+  if (!cached(needs)) {
+    fill(shell.main);
+    pageLoader = openLoader(false, shell.main);
+    await loadMany(needs);
+    if (pageLoader) {
+      pageLoader();
+      pageLoader = null;
+    }
+    if (mine !== renderGen) return;
+  } else {
+    // Shown at once from the cache, and brought up to date behind it.
+    const stale = needs.filter((k) => Date.now() - (loadedAt[k] || 0) > 4000);
+    if (stale.length) loadMany(stale, true).then(() => mine === renderGen && (current.onData ? current.onData(stale) : repaint()));
+  }
+  if (mine !== renderGen) return;
+  mount(view, route);
+}
+
+function mount(view, route) {
+  let node;
+  const holder = { live: view.live || [], onData: null };
+  try {
+    node = view.render(route, holder);
+  } catch (e) {
+    console.error(e);
+    node = el("div", { class: "page" }, errorBox(`This page failed to draw: ${e.message}`));
+  }
+  current = { node, live: holder.live, onData: holder.onData, view, route, sig: view.sig ? view.sig(route) : null };
+  fill(shell.main, node);
+  paintChrome();
+}
+
+/* Draw the current view again from the cache, keeping the scroll position and
+ * the focused field. Inputs carry `data-keep` so the new copy can be found. */
+function repaint() {
+  if (!shell.main || !current.view) return;
+  const at = shell.main.scrollTop;
+  const inner = [...shell.main.querySelectorAll("[data-scroll-keep]")].map((n) => [n.getAttribute("data-scroll-keep"), n.scrollTop]);
+  const focus = document.activeElement;
+  const keep = focus && focus.getAttribute ? focus.getAttribute("data-keep") : null;
+  const sel = keep && "selectionStart" in focus ? [focus.selectionStart, focus.selectionEnd] : null;
+  // A view that draws synchronously is patched in place, so nothing under the
+  // reader is rebuilt; the rest are drawn again.
+  if (current.view.morph && current.view.morph(current.route) && shell.main.firstChild) {
+    const holder = { live: current.view.live || [], onData: null };
+    let node;
+    try {
+      node = current.view.render(current.route, holder);
+    } catch (e) {
+      console.error(e);
+      return mount(current.view, current.route);
+    }
+    morph(shell.main.firstChild, node);
+    current = { ...current, live: holder.live, onData: holder.onData, sig: current.view.sig ? current.view.sig(current.route) : null };
+    paintChrome();
+    return;
+  }
+  mount(current.view, current.route);
+  shell.main.scrollTop = at;
+  for (const [k, top] of inner) {
+    const n = shell.main.querySelector(`[data-scroll-keep="${k}"]`);
+    if (n) n.scrollTop = top;
+  }
+  if (keep) {
+    const again = shell.main.querySelector(`[data-keep="${keep}"]`);
+    if (again) {
+      again.focus();
+      if (sel && again.setSelectionRange) {
+        try {
+          again.setSelectionRange(sel[0], sel[1]);
+        } catch (_) {
+          /* not a text field */
+        }
+      }
+    }
+  }
+}
+
+// --------------------------------------------------------------------- shell
+
+const shell = {};
+
+function buildShell() {
+  const navToggle = btn({ class: "btn icon32", "aria-label": "Toggle menu", "data-tip": "Toggle menu", onclick: () => setNav(!state.navOpen) }, icon(I.menu, 15, { w: 1.8 }));
+  const crumb = el("div", { class: "crumb" });
+  const runPill = btn({ class: "run-pill hide-xs", hidden: true, onclick: () => runPill.dataset.store && go("store", runPill.dataset.store, "runs") });
+  const top = el(
+    "header",
+    { class: "top" },
+    navToggle,
+    btn({ class: "brand", "aria-label": "Semlith — go to Home", onclick: () => go("home") }, logo(), el("span", { class: "word hide-sm", text: "Semlith" })),
+    el("span", { class: "vrule hide-sm" }),
+    crumb,
+    runPill,
+    el("span", { class: "spacer" }),
+    btn(
+      { class: "ask", "aria-label": "Ask the index a question", onclick: () => go("search") },
+      icon(I.searchSm, 14, { w: 1.8 }),
+      el("span", { class: "t hide-sm", text: "Ask the index a question" }),
+      el("span", { class: "kbd hide-sm", text: "/" }),
+    ),
+    btn({ class: "btn primary", onclick: () => openWizard() }, icon(I.plus, 14, { w: 2.2 }), el("span", { class: "hide-sm", text: "New store" })),
+    el("div", { class: "hide-xs" }, themeControl()),
+  );
+  const navGroups = NAV.map(([label, ids]) =>
+    el(
+      "div",
+      { class: "nav-group" },
+      el("div", { class: "nav-label", text: label }),
+      ids.map((id) =>
+        btn(
+          { class: "nav-item", "data-nav": id, onclick: () => go(id) },
+          icon(I[id], 15, { w: 1.6 }),
+          el("span", { class: "lab", text: PAGES[id].title }),
+          el("span", { class: "nav-badge", "data-badge": id, hidden: true }),
+        ),
+      ),
+    ),
+  );
+  const daemonFacts = el("div", { class: "facts" });
+  const nav = el(
+    "nav",
+    { class: "nav", "aria-label": "Sections" },
+    navGroups,
+    el("div", { class: "spacer" }),
+    el("div", { class: "daemon" }, el("div", { class: "who" }, dot("green"), "daemon running"), daemonFacts),
+  );
+  nav.querySelector(".daemon .dot").classList.add("slow");
+  const rail = el(
+    "nav",
+    { class: "rail", "aria-label": "Sections" },
+    NAV.map(([, ids]) =>
+      el(
+        "div",
+        { class: "rail-group" },
+        ids.map((id) =>
+          btn(
+            { class: "rail-item", "data-nav": id, "aria-label": PAGES[id].title, "data-tip": PAGES[id].title, onclick: () => go(id) },
+            icon(I[id], 17, { w: 1.6 }),
+            el("span", { class: "rb", "data-rail-badge": id, hidden: true }),
+          ),
+        ),
+      ),
+    ),
+    el("div", { class: "spacer" }),
+    el("span", { class: "rail-daemon", "data-tip": "Daemon running", "data-tip-color": "var(--green)" }, el("span", { class: "dot green d7 slow" })),
+  );
+  const scrim = el("div", { class: "nav-scrim", hidden: true, onclick: () => setNav(false) });
+  const down = el("div", { class: "daemon-down", hidden: true, role: "alert" }, icon(I.alert, 15), el("span", { text: "The daemon is not answering. Start it again with `semlith start`; this page reconnects by itself." }));
+  const main = el("main", { class: "main", id: "main" });
+  const row = el("div", { class: "shell-row" }, nav, scrim, rail, main);
+  Object.assign(shell, { top, crumb, runPill, nav, rail, scrim, main, daemonFacts, down, navToggle });
+  const app = el("div", { id: "app" }, top, down, row);
+  // The width tier is the app's, not the window's, so a split-screen browser
+  // gets the phone layout when it is phone-sized.
+  const measure = () => applyTier(false);
+  try {
+    new ResizeObserver(measure).observe(app);
+  } catch (_) {
+    window.addEventListener("resize", measure);
+  }
+  return app;
+}
+
+function applyTier(first) {
+  const app = document.getElementById("app");
+  if (!app) return;
+  const w = app.clientWidth || window.innerWidth;
+  const tier = w < 760 ? "s" : w < 1100 ? "m" : "l";
+  if (tier !== state.tier || first) {
+    state.tier = tier;
+    state.navOpen = tier === "l";
+  }
+  setNav(state.navOpen);
+}
+
+function setNav(open) {
+  state.navOpen = open;
+  if (!shell.nav) return;
+  shell.nav.hidden = !open;
+  shell.rail.hidden = open || state.tier === "s";
+  shell.scrim.hidden = !(open && state.tier === "s");
+  shell.navToggle.setAttribute("aria-expanded", String(open));
+}
+
+function paintCrumb() {
+  if (!shell.crumb) return;
+  const { page, parts } = state.route;
+  const isStore = page === "store";
+  const title = isStore ? "Stores" : (PAGES[page] || PAGES.home).title;
+  fill(
+    shell.crumb,
+    btn({ class: "page-link", onclick: () => go(isStore ? "stores" : page) }, title),
+    isStore && parts[0] ? [el("span", { class: "sep", text: "/" }), el("span", { class: "leaf", text: parts[0] })] : null,
+  );
+}
+
+function noteDaemon(up) {
+  if (daemonDown === !up) return;
+  daemonDown = !up;
+  if (shell.down) shell.down.hidden = up;
+}
+
+/** Everything on the shell that follows data: badges, the run pill, the card. */
+function paintChrome() {
+  if (!shell.nav) return;
+  const reviewN = (data.refused?.stores || []).reduce((a, s) => a + (s.review || 0), 0);
+  const noAgent = data.agents ? !registeredClients().length : false;
+  const badges = { stores: reviewN ? String(reviewN) : "", agents: noAgent ? "!" : "" };
+  for (const node of document.querySelectorAll("[data-badge]")) {
+    const b = badges[node.getAttribute("data-badge")] || "";
+    node.hidden = !b;
+    node.className = "nav-badge amber";
+    setText(node, b);
+  }
+  for (const node of document.querySelectorAll("[data-rail-badge]")) {
+    const id = node.getAttribute("data-rail-badge");
+    node.hidden = !badges[id];
+    const host = node.parentElement;
+    host.setAttribute(
+      "data-tip-rows",
+      id === "stores" && badges.stores ? `to review::${badges.stores} files` : id === "agents" && badges.agents ? "status::no agent registered yet" : "",
+    );
+  }
+  const run = activeRun();
+  const pillNode = shell.runPill;
+  if (run) {
+    const p = Math.floor(runPct(run));
+    const word = { paused: "Paused", pausing: "Pausing", queued: "Queued", review: "Waiting for review", stopping: "Stopping", held: "Held" }[run.status] || (run.kind === "compact" ? "Compacting" : "Indexing");
+    pillNode.hidden = false;
+    pillNode.dataset.store = run.store;
+    pillNode.className = `run-pill hide-xs${run.status === "review" || run.status === "paused" ? " amber" : ""}`;
+    fill(pillNode, dot(run.status === "review" || run.status === "paused" ? "amber" : "green", run.status === "running"), `${word} ${run.store}${run.status === "review" ? "" : ` · ${p}%`}`, bar(p, "w46"));
+    pillNode.setAttribute("data-tip", "Open this store's runs");
+  } else pillNode.hidden = true;
+  const stores = liveStores().length;
+  const agents = connectedCount();
+  const rec = recordingWord();
+  fill(shell.daemonFacts, `${location.host} · sole writer`, el("br"), `${plural(stores, "store")} · ${agents ? `${plural(agents, "agent")} connected` : `${plural(registeredClients().length, "agent")} registered`} · ledger ${rec}`);
+  const railDaemon = shell.rail.querySelector(".rail-daemon");
+  if (railDaemon) railDaemon.setAttribute("data-tip-rows", rows([["address", location.host], ["role", "sole writer"], ["stores", String(stores)], ["agents", String(agents)], ["ledger", rec]]));
+}
+
+function connectedCount() {
+  return (data.agents?.connections || []).length;
+}
+
+function registeredClients() {
+  return (data.agents?.doctor || []).filter((c) => c.registered);
+}
+
+/** The ledger's state, in the word the daemon card uses. */
+function recordingWord() {
+  const r = data.ledger?.recording ?? data.about?.recording ?? data.about?.ledger;
+  if (r && typeof r === "object") return r.on ? "on" : r.reason === "paused" ? "paused" : "off";
+  if (r === undefined || r === null) return "on";
+  return r ? "on" : "off";
+}
+
+function recordingOn() {
+  return recordingWord() === "on";
+}
+
+// ------------------------------------------------------------------- welcome
+
+/* First run: nothing indexed yet. The checks on the right are read from the
+ * daemon — its address, the accelerator lanes, the machine's memory, whether
+ * the embedding model is already on disk, and which agent clients are here. */
+function welcomeScreen() {
+  const checks = el("div", { class: "col" });
+  const checkLine = meta("checking…");
+  const steps = [
+    ["1", "Name a store", "One index, one model, as many as you like", "10 s"],
+    ["2", "Add folders or drop files", "Read where they sit — nothing is copied", "30 s"],
+    ["3", "Review what looks sensitive", "Credentials are never indexed; you decide the grey zone", "1 min"],
+    ["4", "Index", "In the background, on the fastest lane this machine has", "minutes"],
+    ["5", "Connect your agents", "Claude Code, Cursor and the rest, in one step", "20 s"],
+  ];
+  const node = el(
+    "div",
+    { id: "app" },
+    el("header", { class: "top wide-pad" }, logo(), el("span", { class: "wordmark", text: "Semlith" }), state.version ? el("span", { class: "count-chip", text: state.version }) : null, el("span", { class: "spacer" }), themeControl()),
+    el(
+      "div",
+      { class: "welcome-body" },
+      el(
+        "div",
+        { class: "welcome-grid" },
+        el(
+          "div",
+          { class: "welcome-card" },
+          el("span", { class: "first-run" }, el("span", { class: "dot amber" }), "FIRST RUN · NOTHING INDEXED YET"),
+          el(
+            "div",
+            { class: "col gap6" },
+            el("div", { class: "welcome-h", text: "Give your agents a memory of your code, kept on this machine." }),
+            el("div", { class: "welcome-lead", text: "Semlith reads your folders once, keeps a searchable index under ~/.semlith, and answers every agent over one local endpoint. Your first store takes a few minutes." }),
+          ),
+          el(
+            "div",
+            { class: "steps5" },
+            steps.map(([num, t, d, time]) =>
+              el("div", { class: "s" }, el("span", { class: "num-circle", text: num }), el("div", { class: "col" }, el("span", { class: "t-m", text: t }), el("span", { class: "muted t-sm", text: d })), el("span", { class: "t-mono muted", text: time })),
+            ),
+          ),
+          el(
+            "div",
+            { class: "row" },
+            btn({ class: "btn primary lg", onclick: () => openWizard({ onboarding: true }) }, "Create your first store", icon(I.arrow, 15, { w: 2 })),
+            btn({ class: "btn lg t-m", onclick: () => adoptFlow() }, "Adopt an existing .semlith"),
+          ),
+          el(
+            "div",
+            { class: "term-hint" },
+            el("span", { class: "muted t-sm", text: "Prefer the terminal?" }),
+            btn({ class: "term-copy", onclick: () => copy("semlith index ~/path/to/folder") }, "semlith index ~/path/to/folder", el("span", { class: "c", text: "Copy" })),
+          ),
+        ),
+        el(
+          "div",
+          { class: "card flexcol" },
+          el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "This machine" }), checkLine),
+          checks,
+          el("div", { class: "grow" }),
+          el("div", { class: "shield-foot" }, icon(I.shield, 16), el("span", { text: "Nothing leaves this machine. The embedding model is the only download setup needs, and it asks before it makes it." })),
+        ),
+      ),
+    ),
+  );
+  const row = (k, v, d, kind) =>
+    el(
+      "div",
+      { class: "check-row" },
+      el("span", { class: "ic" }, kind === "wait" ? el("span", { class: "spinner" }) : kind === "pend" ? el("span", { class: "check-pend" }) : kind === "bad" ? el("span", { class: "check-bad" }, icon(I.x, 11, { w: 3 })) : el("span", { class: "check-ok" }, icon(I.check, 11, { w: 3 }))),
+      el("div", { class: "col gap2" }, el("div", { class: "row base nowrap" }, el("span", { class: "k", text: k }), el("span", { class: "v", text: v })), d ? el("span", { class: "d", text: d }) : null),
+    );
+  const paint = () => {
+    const about = data.about;
+    const accel = data.accel;
+    const priv = data.privacy;
+    const agents = data.agents;
+    const limits = data.runs?.limits;
+    const list = [];
+    list.push(about ? row("Daemon", "running", `${about.bind} · loopback only, the sole writer`) : row("Daemon", "checking…", "", "wait"));
+    if (accel) {
+      const lanes = (accel.lanes || []).filter((l) => l.enabled);
+      const best = lanes.find((l) => l.lane !== "cpu") || lanes[0];
+      list.push(row("Accelerator", best ? best.label || best.lane : "CPU", best ? `${best.device || "device named when it starts"} · ${laneWord(best.status)}` : "the CPU carries the work"));
+    } else list.push(row("Accelerator", "checking…", "", "wait"));
+    if (limits && limits.machine) {
+      const m = limits.machine;
+      list.push(row("Memory", `${(m.total_memory_mb / 1024).toFixed(0)} GiB`, `${(m.available_memory_mb / 1024).toFixed(1)} GiB free · room for ${plural(limits.runs_at_once?.value || 1, "run")} at a time`));
+    } else list.push(row("Memory", "checking…", "", "wait"));
+    if (priv) {
+      const model = (priv.downloads || [])[0];
+      list.push(
+        model && model.cached
+          ? row("Embedding model", bytes(model.bytes), "On disk already. Nothing to download.")
+          : row("Embedding model", model ? bytes(model.bytes) : "—", priv.airgap ? "Not on disk, and airgap is on: pre-seed the model cache first." : "Not on disk yet. Fetched once, when you start the first run.", "pend"),
+      );
+    } else list.push(row("Embedding model", "checking…", "", "wait"));
+    if (agents) {
+      const found = (agents.doctor || []).filter((c) => c.present || (c.files || []).some((f) => f.exists));
+      list.push(row("Agent clients", `${found.length} found`, found.length ? found.map((c) => c.name).slice(0, 5).join(", ") + (found.length > 5 ? ` and ${found.length - 5} more` : "") : "None found yet — any MCP client can connect later"));
+    } else list.push(row("Agent clients", "checking…", "", "wait"));
+    list.push(row("Telemetry", "none", "No analytics and no update check of its own"));
+    fill(checks, list);
+    const waiting = list.filter((r) => r.querySelector(".spinner")).length;
+    const pending = priv && !((priv.downloads || [])[0] || {}).cached;
+    setText(checkLine, waiting ? "checking…" : pending ? "ready · 1 download pending" : "ready");
+  };
+  paint();
+  for (const key of ["about", "accel", "privacy", "agents", "runs"]) load(key).then(paint).catch(paint);
+  return node;
+}
+
+// A folder listing without the store home: indexing semlith's own stores
+// is refused anyway, so offering them is a dead end.
+function browsable(entries) {
+  const home = data.about?.store_home;
+  return (entries || []).filter((e) => !home || e.path !== home);
+}
+
+function laneWord(status) {
+  const s = (status && status.state) || "idle";
+  if (s === "compiling") return `compiling ${status.percent || 0}%`;
+  if (s === "downloading") return `downloading ${status.percent || 0}%`;
+  if (s === "ready" || s === "running" || s === "idle") return "ready";
+  return s;
+}
+
+/** Adopt a `.semlith` somewhere under home: pick the folder, the daemon opens it. */
+async function adoptFlow() {
+  // The adopt runs inside the picker, so a refusal is shown there, at the same
+  // folder, and the person can pick another without starting over.
+  const out = await pickFolder({ title: "Adopt an existing store", ok: "Adopt this store", hint: "Folders holding a store are marked.", confirm: (path) => post("/api/adopt", { path }) });
+  if (!out) return;
+  toast(`Adopted ${out.name || out.store || "the store"}`);
+  await load("stores", true);
+  go("stores");
+}
+
+/** A modal folder browser over `/api/dirs`, confined to home by the daemon. */
+function pickFolder({ title, ok, hint, start, confirm }) {
+  return new Promise((resolve) => {
+    let dir = start || "";
+    let listing = null;
+    const list = el("div", { class: "browse-grid" });
+    const where = el("span", { class: "dir" });
+    const up = btn({ class: "btn xs" }, icon(I.back, 13, { w: 1.8 }), "Up");
+    const err = el("div", {});
+    const modal = el(
+      "div",
+      { class: "modal wide", role: "dialog", "aria-modal": "true", "aria-label": title },
+      el("div", { class: "mt", text: title }),
+      hint ? el("div", { class: "mb", text: hint }) : null,
+      el("div", { class: "card" }, el("div", { class: "browse-head" }, up, where), list),
+      err,
+      el("div", { class: "acts" }, btn({ class: "btn", onclick: () => done(null) }, "Cancel"), btn({ class: "btn primary", onclick: (e) => listing && choose(e.currentTarget) }, ok || "Use this folder")),
+    );
+    // Closed by Cancel, its close button or Escape only: a click outside, or
+    // one that starts inside and ends outside, is not a choice.
+    const scrim = el("div", { class: "modal-scrim" }, modal);
+    const onKey = (e) => e.key === "Escape" && done(null);
+    function done(v) {
+      scrim.remove();
+      document.removeEventListener("keydown", onKey, true);
+      resolve(v);
+    }
+    async function choose(button) {
+      if (!confirm) return done(listing.path);
+      button.disabled = true;
+      try {
+        done(await confirm(listing.path));
+      } catch (e) {
+        toast(e.message, true);
+        fill(err, errorBox(e.message));
+        button.disabled = false;
+      }
+    }
+    up.addEventListener("click", () => listing && listing.parent && open(listing.parent));
+    async function open(path) {
+      try {
+        listing = await api(`/api/dirs?path=${encodeURIComponent(path || "")}`);
+        dir = listing.path;
+        state.home = state.home || listing.home;
+        setText(where, tilde(dir, listing.home));
+        up.disabled = !listing.parent;
+        fill(err);
+        fill(
+          list,
+          browsable(listing.entries)
+            .filter((e) => e.dir)
+            .map((e) =>
+              el(
+                "div",
+                { class: "bitem" },
+                btn({ class: "open", onclick: () => open(e.path) }, icon(I.folder, 14, { w: 1.6 }), el("span", { class: "name", text: e.name })),
+                e.adoptable ? el("span", { class: "pill green sm", text: "a store" }) : null,
+              ),
+            ),
+        );
+      } catch (e) {
+        fill(err, errorBox(e.message));
+      }
+    }
+    document.body.append(scrim);
+    document.addEventListener("keydown", onKey, true);
+    open(dir);
   });
 }
 
-/** Every run the daemon knows about, refetched when the runs domain moves.
- *
- * One fetch serves both readers — the navigation's count on every page, and
- * the Index page's cards — because two fetches of one route is how a count in
- * the sidebar disagrees with the cards beside it. */
-let runsAsked = 0;
-let runsPainted = 0;
+// -------------------------------------------------------------------- wizard
 
-/** Make every runs read still in flight too old to paint. */
-function supersedeRuns() {
-  runsPainted = ++runsAsked;
-}
+/* Name, Sources, Review, Index — and Connect on first run. Each step is real:
+ * step 1 creates an empty named store, step 2 browses the daemon's filesystem
+ * and resolves dropped items to their real paths, step 3 is the daemon's scan
+ * held for review, step 4 is the run itself, step 5 registers clients. */
+const NAME_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
-async function refreshRuns() {
-  // Numbered, because two can be in flight: the poll's, and the one a button
-  // makes after its own POST. The poll's can be the older question and still
-  // arrive second, and painting it put "Pause" back on a button that had just
-  // turned to "Resume" for a second before the next poll turned it back.
-  const mine = ++runsAsked;
-  let data;
-  try {
-    data = await api("/api/index/runs");
-  } catch (_) {
-    return state.runs;
-  }
-  if (mine < runsPainted) return state.runs;
-  runsPainted = mine;
-  state.runs = data;
-  paintRunCount();
-  if (state.onRuns) state.onRuns(data);
-  return data;
-}
-
-/** "2 indexing" in the navigation, on every page, so a run is never something
- * that happened out of sight. */
-function paintRunCount() {
-  const on = (state.runs?.runs || []).filter((run) => TICKING.has(run.status) && run.status !== "review").length;
-  const waiting = (state.runs?.queue || []).length;
-  // A run waiting for a person is not indexing; it is named apart.
-  const review = (state.runs?.runs || []).filter((run) => run.status === "review").length;
-  for (const node of document.querySelectorAll(".run-count")) {
-    const parts = [];
-    if (on) parts.push(`${on} indexing`);
-    if (waiting) parts.push(`${waiting} queued`);
-    if (review) parts.push(`${review} waiting for review`);
-    node.textContent = parts.join(" · ");
-    node.hidden = !parts.length;
-  }
-}
-
-/** The statuses a run is still in. */
-const TICKING = new Set(["queued", "review", "running", "pausing", "paused", "held", "stopping"]);
-
-/** Draw the view on screen again, keeping where the reader had scrolled to.
- *
- * What a live table wants is the rows it would have had on a reload, and the
- * view functions already know how to produce exactly that from the routes they
- * read. Redrawing them is therefore one line per page rather than a second,
- * incremental renderer per page — and a second renderer is how a table ends up
- * disagreeing with the reload of itself.
- *
- * The Index page does not use this: its cards hold logs and scroll positions
- * of their own, so it paints in place. */
-async function repaintView() {
-  if (!shell.main) return;
-  const at = scrollHolder()?.scrollTop ?? 0;
-  await render();
-  const holder = scrollHolder();
-  if (holder) holder.scrollTop = at;
-}
-
-/* The element that actually scrolls on the page that is open.
- *
- * This used to read `.scroller`, which never scrolled: `.view` carries
- * `overflow-y: auto` and is the scroll container, and `.scroller` is a stack
- * inside it that takes the leftover height. So a live repaint of the ledger or
- * the Stores table read 0 and wrote 0 back, and a reader watching rows arrive
- * was returned to the top every time one did. `.view` first, and `.scroller`
- * kept after it for any page that grows its own inner scroller later. */
-function scrollHolder() {
-  if (!shell.main) return null;
-  return shell.main.querySelector(".view") || shell.main.querySelector(".scroller");
-}
-
-
-// ---------------------------------------------------------------- graph
-
-/* The colours the canvas draws with, read from the stylesheet rather than
- * repeated here: the page is themed by CSS custom properties, and a canvas
- * cannot inherit one. Re-read on every paint so a theme switch is picked up. */
-function graphInk() {
-  const style = getComputedStyle(document.documentElement);
-  const read = (name, fallback) => (style.getPropertyValue(name) || fallback).trim();
+function blankWizard(opts) {
+  const o = opts || {};
   return {
-    edge: read("--line", "#dce3e8"),
-    hot: read("--blue", "#4c7088"),
-    node: read("--panel", "#ffffff"),
-    nodeLine: read("--line", "#dce3e8"),
-    text: read("--ink-2", "#3a4d5e"),
-    nearFill: read("--blue-soft", "#e3ecf2"),
-    nearLine: read("--blue", "#4c7088"),
-    nearText: read("--ink", "#1e2a35"),
-    // The tone an ambiguous edge is drawn in: the same amber the badge uses,
-    // so the canvas and the rail say one thing.
-    warn: read("--amber-ink", "#7a4e0a"),
-    sel: read("--accent", "#f0a43c"),
-    selLine: read("--accent-edge", "#c97f14"),
-    selText: read("--accent-ink", "#1e2a35"),
-    muted: read("--muted", "#64778a"),
+    onboarding: !!o.onboarding,
+    existing: o.store || null,
+    step: o.store ? 2 : 1,
+    name: o.store || "",
+    kind: "both",
+    created: o.store || null,
+    sources: [],
+    mode: null,
+    browse: { dir: "", listing: null, sel: new Set(), error: "" },
+    pathDraft: "",
+    urlDraft: "",
+    split: "together",
+    watch: true,
+    gitignore: true,
+    drag: false,
+    scan: { state: "idle", runs: [], error: "" },
+    decisions: {},
+    decSel: new Set(),
+    decShow: "all",
+    decRisk: "any",
+    open: {},
+    started: [],
+    record: true,
+    watchAfter: true,
+    tryQ: "",
+    tried: null,
+    clientSel: new Set(),
+    reg: "idle",
+    regResult: null,
+    manual: false,
+    nameSuggest: [],
   };
 }
 
-/* Stores that could not be read, over a page drawn from the ones that could.
- *
- * Issue #129: one store whose database cannot be opened used to make every
- * route that reads across stores answer `500 disk I/O error`, so the Graph page
- * drew nothing and the message named neither the store nor the fact that the
- * others were fine. The routes answer partially now, and this is the other half
- * — a page that quietly returned four stores' results where a reader expected
- * five would be the same defect wearing a 200.
- *
- * Derived from the response every time, never accumulated: a store that comes
- * back — a drive plugged in again — is simply absent from the next `failed`, and
- * a notice that had remembered it would outlive the problem.
- *
- * No button. The remedy is `semlith drop`, and a one-click drop beside what may
- * be an unplugged volume is how somebody loses a store they could have had back
- * by plugging it in. The command is text they run themselves.
- */
-function unreadableNotice(failed) {
-  if (!failed || !failed.length) return null;
-  const many = failed.length > 1;
+// What the summary says about sources: the new ones, and for an existing
+// store what it already reads, so adding to it never reads as "none".
+function sourcesLine() {
+  const w = state.wz;
+  const added = w.sources.map((x) => baseName(x.path)).join(", ");
+  const had = w.existing ? (store(w.existing)?.roots || []).length : 0;
+  if (!had) return added || "none yet";
+  const kept = `${plural(had, "root")} already`;
+  return added ? `${kept} + ${added}` : kept;
+}
+
+function openWizard(opts) {
+  state.wz = blankWizard(opts);
+  go("new");
+}
+
+function wizardScreen() {
+  if (!state.wz) state.wz = blankWizard({});
+  const w = state.wz;
+  const host = el("div", { id: "app" });
+  const top = el("header", { class: "top wide-pad" });
+  const body = el("div", { class: "wz-scroll", "data-scroll-keep": "wz" });
+  const foot = el("div", { class: "wz-foot" });
+  host.append(top, body, foot);
+  let paintGen = 0;
+
+  // Data the steps read, fetched once.
+  loadMany(["stores", "runs", "accel", "privacy", "agents"]).then(() => paint());
+
+  function labels() {
+    return ["Name", "Sources", "Review", "Index"].concat(w.onboarding ? ["Connect"] : []);
+  }
+
+  function run() {
+    const ids = new Set(w.started);
+    return (data.runs?.runs || []).filter((r) => ids.has(r.id));
+  }
+  function scanRuns() {
+    const ids = new Set(w.scan.runs);
+    return (data.runs?.runs || []).filter((r) => ids.has(r.id));
+  }
+
+  function plan() {
+    const held = scanRuns().filter((r) => r.plan);
+    const items = held.flatMap((r) => (r.plan.review || []).map((it) => ({ ...it, store: r.store, risk: riskOf(it) })));
+    const notIndexed = {};
+    const paths = {};
+    for (const r of held) {
+      for (const [cls, count] of Object.entries(r.plan.not_indexed || {})) notIndexed[cls] = (notIndexed[cls] || 0) + count;
+      for (const [cls, list] of Object.entries(r.plan.not_indexed_paths || {})) paths[cls] = (paths[cls] || []).concat(list);
+      if (r.plan.credential && r.plan.credential.length) paths.credential = (paths.credential || []).concat(r.plan.credential);
+    }
+    const decided = items.filter((d) => w.decisions[d.path]);
+    const accepted = decided.filter((d) => w.decisions[d.path] === "in" || w.decisions[d.path] === "redact").length;
+    const embed = held.reduce((a, r) => a + (r.plan.embed || 0), 0);
+    const embedBytes = held.reduce((a, r) => a + (r.plan.embed_bytes || 0), 0);
+    const unchanged = held.reduce((a, r) => a + (r.plan.unchanged || 0), 0);
+    const eta = held.length && held.every((r) => r.plan.eta_ms != null) ? held.reduce((a, r) => a + r.plan.eta_ms, 0) : null;
+    return {
+      held,
+      items,
+      undecided: items.length - decided.length,
+      accepted,
+      embed,
+      embedBytes,
+      unchanged,
+      eta,
+      notIndexed,
+      paths,
+      credential: (notIndexed.credential || 0) || (paths.credential || []).length,
+      skipped: Object.entries(notIndexed).filter(([c]) => c !== "credential" && c !== "content" && c !== "policy").reduce((a, [, v]) => a + v, 0),
+    };
+  }
+
+  function nameState() {
+    const nm = w.name.trim();
+    const taken = (data.stores?.stores || []).some((s) => s.name === nm && s.name !== w.created);
+    const fmtOk = NAME_RE.test(nm);
+    const ok = fmtOk && !taken;
+    const msg = !nm
+      ? ["Lowercase letters, digits and dashes. Agents see this name when they choose where to look.", ""]
+      : !fmtOk
+        ? ["Use lowercase letters, digits and dashes — for example research-notes.", "bad"]
+        : taken
+          ? [`“${nm}” is already a store on this machine. Pick another name.`, "bad"]
+          : [`Available · kept at ~/.semlith/stores/${nm}`, "ok"];
+    return { nm, ok, msg };
+  }
+
+  async function exit() {
+    if (w.onboarding && !w.created) {
+      state.wz = null;
+      return go("welcome");
+    }
+    const r = run().find((x) => LIVE_RUN.has(x.status) && x.status !== "review");
+    if (w.created && !w.existing && !r && !(store(w.created) && store(w.created).files)) {
+      const del = await ask({
+        title: "Leave without indexing?",
+        body: `The store ${w.created} stays, empty. Add sources from its page whenever you're ready, or delete it now.`,
+        ok: "Delete store",
+        cancel: "Keep it",
+        danger: true,
+      });
+      if (del) {
+        for (const s of scanRuns()) await post("/api/index/control", { store: s.store, run: s.id, action: "stop", delete: true }).catch(() => {});
+        await act(() => post("/api/store/delete", { store: w.created }), `Deleted ${w.created}`);
+        await load("stores", true);
+      } else {
+        // A scan held for review is dropped either way: leaving is not a
+        // decision to index what it found.
+        for (const s of scanRuns().filter((x) => x.status === "review")) await post("/api/index/control", { store: s.store, run: s.id, action: "stop" }).catch(() => {});
+      }
+    }
+    state.wz = null;
+    if (w.created && (store(w.created) || w.existing)) go("store", w.created, r ? "runs" : "overview");
+    else go(liveStores().length ? "home" : "welcome");
+  }
+
+  function paint() {
+    const mine = ++paintGen;
+    if (!host.isConnected && mine > 1) return;
+    const L = labels();
+    const step = w.step;
+    const R = run();
+    const live = R.find((x) => LIVE_RUN.has(x.status));
+    const doneRun = R.length && R.every((x) => !LIVE_RUN.has(x.status));
+    const maxStep = w.created ? (w.sources.length ? (w.scan.state === "done" ? (R.length ? L.length : 4) : 3) : 2) : 1;
+    fill(
+      top,
+      logo(),
+      el("span", { class: "wordmark hide-sm", text: "Semlith" }),
+      el("span", { class: "vrule hide-sm" }),
+      el("span", { class: "hide-sm ink2 nowrap", text: w.onboarding ? "Set up Semlith" : w.existing ? `Add sources to ${w.existing}` : "New store" }),
+      el(
+        "div",
+        { class: "wz-steps" },
+        L.map((label, i) => {
+          const num = i + 1;
+          const done = num < step;
+          const cur = num === step;
+          const reach = num <= maxStep && num !== step && !(live && num < 4 && live.status !== "review");
+          return el(
+            "div",
+            { class: "wz-step" },
+            i ? el("span", { class: `ln${num <= step ? " done" : ""}` }) : null,
+            btn(
+              { disabled: reach ? null : true, "aria-current": cur ? "step" : null, onclick: () => reach && setStep(num) },
+              el("span", { class: `wz-circle${done ? " done" : cur ? " cur" : ""}` }, done ? icon(I.check, 11, { w: 3 }) : String(num)),
+              el("span", { class: `lab hide-sm${cur ? " cur" : done ? " done" : ""}`, text: label }),
+            ),
+          );
+        }),
+      ),
+      btn({ class: "btn", onclick: exit }, w.onboarding ? (step === 1 ? "Back to welcome" : "Exit setup") : "Cancel"),
+    );
+    const heads = {
+      1: ["Name your store", "A store is one index on this machine. You can add more sources to it later, and make as many stores as you like."],
+      2: ["Add what it should read", "Drop folders or files, browse to them, or paste a path. Semlith reads them in place and watches them for changes."],
+      3: [plan().undecided ? "Review before anything is indexed" : "Everything is decided", "Semlith checked every file for credentials and generated noise. Nothing has been embedded yet — this is your chance to say no."],
+      4: [R.length ? (doneRun ? "Indexed" : `Indexing ${w.created}`) : "Ready to index", R.length ? "Chunking, embedding and writing the graph — all on this machine." : "Where the work runs, and what to keep doing after. The defaults suit this machine."],
+      5: ["Connect your agents", `One endpoint, ${data.agents?.endpoint?.url || "on this machine"}, for every client. Semlith writes each client's config for you.`],
+    }[step];
+    const left = el(
+      "div",
+      { class: "stack" },
+      el("div", { class: "wz-head" }, el("span", { class: "eyebrow", text: `STEP ${step} OF ${L.length}` }), el("div", { class: "h", text: heads[0] }), el("div", { class: "lead", text: heads[1] })),
+      [null, step1, step2, step3, step4, step5][step](),
+    );
+    // Replacing the body empties it for a moment, which put the scroll back
+    // at the top on every decision; the offsets, the page's and any inner
+    // list's, are put back once the new body is in.
+    const at = body.scrollTop;
+    const inner = [...body.querySelectorAll("[data-scroll-keep]")].map((nd) => [nd.getAttribute("data-scroll-keep"), nd.scrollTop]);
+    fill(body, el("div", { class: "wz-body" }, left, summaryRail()));
+    body.scrollTop = at;
+    for (const [k, t] of inner) {
+      const nd = body.querySelector(`[data-scroll-keep="${k}"]`);
+      if (nd) nd.scrollTop = t;
+    }
+    paintFoot();
+  }
+
+  function setStep(n) {
+    w.step = n;
+    body.scrollTop = 0;
+    paint();
+  }
+
+  // ---- step 1: name
+  function step1() {
+    const ns = nameState();
+    const input = el("input", {
+      value: w.name,
+      placeholder: "e.g. docs, api, research-notes",
+      spellcheck: "false",
+      autocomplete: "off",
+      "aria-label": "Store name",
+      "data-keep": "wz-name",
+      oninput: (e) => {
+        const v = e.target.value.toLowerCase().replace(/\s+/g, "-");
+        if (v !== e.target.value) e.target.value = v;
+        w.name = v;
+        const s = nameState();
+        box.className = `namebox${!s.nm ? "" : s.ok ? " ok" : " bad"}`;
+        setText(hint, s.msg[0]);
+        hint.className = `hint-l${s.msg[1] ? ` ${s.msg[1]}` : ""}`;
+        tick.hidden = !s.ok;
+        paintFoot();
+        paintRail();
+      },
+      onkeydown: (e) => e.key === "Enter" && next(),
+    });
+    const tick = el("span", { class: "check-ok", hidden: !ns.ok }, icon(I.check, 11, { w: 3 }));
+    const box = el("div", { class: `namebox${!ns.nm ? "" : ns.ok ? " ok" : " bad"}` }, icon(I.layers, 16, { w: 1.6 }), input, tick);
+    const hint = el("div", { class: `hint-l${ns.msg[1] ? ` ${ns.msg[1]}` : ""}`, text: ns.msg[0] });
+    setTimeout(() => input.focus(), 0);
+    const suggestRow = el("div", { class: "row gap6" });
+    paintSuggest(suggestRow, input);
+    return el(
+      "div",
+      { class: "stack" },
+      el("div", { class: "card pad16" }, el("div", { class: "field-l" }, el("span", { class: "eyebrow", text: "Store name" }), box, hint), suggestRow),
+      el(
+        "div",
+        { class: "card pad16" },
+        el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "What will it hold?" }), meta("sets how search ranks results · change it any time")),
+        el(
+          "div",
+          { class: "auto-fit m180" },
+          [
+            ["code", "Code", "Repositories. Symbols and call edges are extracted, and search leans to code.", `tree-sitter · ${data.about?.languages || 46} languages`],
+            ["docs", "Docs & notes", "Markdown, PDF, Office, slides and notebooks. Search leans to prose.", "text · pdf · office · notebook"],
+            ["both", "Both", "Code beside its docs — the usual repository. Search weighs them equally.", "every reader", true],
+          ].map(([k, t, d, m, rec]) =>
+            btn(
+              { class: `pick-card${w.kind === k ? " on" : ""}`, "aria-pressed": String(w.kind === k), onclick: () => ((w.kind = k), paint()) },
+              el("div", { class: "row nowrap" }, el("span", { class: `radio${w.kind === k ? " on" : ""}` }), el("span", { class: "t", text: t }), rec ? el("span", { class: "rec", text: "usual" }) : null),
+              el("span", { class: "d", text: d }),
+              el("span", { class: "m", text: m }),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  async function paintSuggest(row, input) {
+    // Names from the folders this person keeps under home, not a fixed list.
+    try {
+      if (!w.nameSuggest.length) {
+        const listing = await api("/api/dirs");
+        state.home = state.home || listing.home;
+        w.nameSuggest = listing.entries
+          .filter((e) => e.dir)
+          .map((e) => e.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, ""))
+          .filter((x) => NAME_RE.test(x) && !["library", "applications", "desktop", "downloads", "movies", "music", "pictures", "public"].includes(x));
+      }
+    } catch (_) {
+      return;
+    }
+    const taken = new Set((data.stores?.stores || []).map((s) => s.name));
+    const list = w.nameSuggest.filter((x) => !taken.has(x) && x !== w.name).slice(0, 4);
+    if (!list.length) return;
+    fill(
+      row,
+      el("span", { class: "muted t-sm", text: "From folders you work in" }),
+      list.map((x) =>
+        btn(
+          {
+            class: "chip xs soft",
+            onclick: () => {
+              w.name = x;
+              input.value = x;
+              input.dispatchEvent(new Event("input"));
+            },
+          },
+          x,
+        ),
+      ),
+    );
+  }
+
+  // ---- step 2: sources
+  function step2() {
+    // A drop goes through three ways of finding where it sits, in order:
+    //  1. The real path, when the browser gives one: a drag that carries
+    //     path text (any browser), or Safari, which writes a dropped item's
+    //     path into a text field — the unseen catcher over the whole zone.
+    //  2. The daemon lookup, from the item's name, size and time.
+    //  3. The paste box, when the lookup finds nothing.
+    // In Safari the zone never accepts the drag itself: Safari decides while
+    // the drag moves whether a drop is text for a field, and a page that
+    // accepted it on the way in got a drop with no path in it. Chrome and
+    // Firefox write no path into a field and, unless the page accepts the
+    // drag, deliver no drop at all, so there the zone accepts it and goes
+    // straight to the lookup.
+    const native = /^Apple/.test(navigator.vendor || "");
+    const catcher = el("input", {
+      type: "text",
+      class: "drop-catch",
+      tabindex: "-1",
+      "aria-hidden": "true",
+      spellcheck: "false",
+      autocomplete: "off",
+      // Not a place to type: a click on the zone lands here.
+      onkeydown: (e) => !(e.metaKey || e.ctrlKey) && e.preventDefault(),
+      oninput: () => {
+        const text = catcher.value;
+        catcher.value = "";
+        endDrag();
+        if (!/(^|\s)(file:\/\/|\/|~\/|[A-Za-z]:\\)/.test(text)) return;
+        clearTimeout(w.dropWait);
+        w.dropWait = null;
+        addPasted(splitDropped(text));
+      },
+    });
+    const endDrag = () => {
+      w.drag = false;
+      zone.classList.remove("drag");
+      setText(zoneTitle, "Drop folders or files here");
+    };
+    const zone = el(
+      "div",
+      {
+        class: `dropzone${w.drag ? " drag" : ""}${native ? " native" : ""}`,
+        ondragover: (e) => {
+          if (!native) e.preventDefault();
+          if (!w.drag) {
+            w.drag = true;
+            zone.classList.add("drag");
+            setText(zoneTitle, "Let go to add");
+          }
+        },
+        ondragleave: (e) => {
+          if (zone.contains(e.relatedTarget)) return;
+          w.drag = false;
+          zone.classList.remove("drag");
+          setText(zoneTitle, "Drop folders or files here");
+        },
+        ondrop: (e) => {
+          endDrag();
+          // Paths the drag carries as text are exact, in every browser.
+          const text = e.dataTransfer && (e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain"));
+          if (text && /^(file:\/\/|\/|~\/|[A-Za-z]:\\)/m.test(text)) {
+            e.preventDefault();
+            clearTimeout(w.dropWait);
+            return addPasted(splitDropped(text));
+          }
+          // What the lookup needs has to be read now, while the drop lasts.
+          const taken = takeDrop(e.dataTransfer);
+          if (!native) {
+            e.preventDefault();
+            return resolveDrop(taken);
+          }
+          // Safari: not prevented, so it writes the paths into the catcher,
+          // whose input event adds them and cancels the lookup that otherwise
+          // runs after a moment.
+          catcher.value = "";
+          clearTimeout(w.dropWait);
+          w.dropWait = setTimeout(() => {
+            w.dropWait = null;
+            resolveDrop(taken);
+          }, 400);
+        },
+      },
+      catcher,
+      el("span", { class: "icon-tile" }, icon(I.upload, 19, { w: 1.7 })),
+    );
+    const zoneTitle = el("span", { class: "t", text: w.drag ? "Let go to add" : "Drop folders or files here" });
+    zone.append(
+      el("div", { class: "col gap2 center" }, zoneTitle, el("span", { class: "d", text: "Folders, single files or a mix. Nothing is copied or uploaded — semlith reads them where they sit." })),
+      el(
+        "div",
+        { class: "row" },
+        [
+          ["browse", "Browse folders", I.folder],
+          ["paste", "Paste a path", I.paste],
+          ["url", "Add a URL", I.link],
+        ].map(([m, label, d]) =>
+          btn({ class: `btn sm${w.mode === m ? " dark" : ""}`, "aria-pressed": String(w.mode === m), onclick: () => ((w.mode = w.mode === m ? null : m), paint()) }, icon(d, 14), label),
+        ),
+      ),
+    );
+    const parts = [zone];
+    if (w.mode === "browse") parts.push(browsePanel());
+    if (w.mode === "paste") parts.push(pastePanel());
+    if (w.mode === "url") parts.push(urlPanel());
+    const multi = w.sources.find((s) => s.repos > 1);
+    if (multi)
+      parts.push(
+        el(
+          "div",
+          { class: "notice blue" },
+          icon(I.info, 17, { w: 1.7 }),
+          el("div", { class: "body" }, el("span", { class: "ttl", text: `${tilde(multi.path)} holds ${multi.repos} repositories` }), el("span", { class: "sub", text: "Keep them in one store to search across them, or give each its own store so agents can aim at one." })),
+          el(
+            "div",
+            { class: "row gap6" },
+            [
+              ["together", "Keep together"],
+              ["split", "One store each"],
+            ].map(([v, label]) =>
+              btn({ class: "chip", "aria-pressed": String(w.split === v), onclick: () => ((w.split = v), v === "split" && toast("Each repository becomes its own store, named after its folder"), paint()) }, label),
+            ),
+          ),
+        ),
+      );
+    parts.push(
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "card-h" }, el("span", { class: "card-t", text: "Sources" }), el("span", { class: "count n20 ink", text: String(w.sources.length) }), el("span", { class: "spacer" }), meta(w.sources.length ? sourceTotal() : "")),
+        !w.sources.length ? empty("Nothing added yet. Drop something above, or pick a folder.", "lg") : null,
+        w.sources.map((s, i) =>
+          el(
+            "div",
+            { class: "src-row" },
+            el("span", { class: "icon-tile s28" }, icon(s.type === "url" ? I.link : s.type === "file" ? I.file : I.folder, 14, { w: 1.6 })),
+            el("div", { class: "col" }, pathSpan(s.type === "url" ? s.path : tilde(s.path), "p", s.path), el("span", { class: "m", text: sourceMeta(s) })),
+            el("div", { class: "row gap6" }, el("span", { class: "tag", text: s.type }), s.repos === 1 ? el("span", { class: "tag", text: "git" }) : null),
+            btn({ class: "x-btn", "aria-label": `Remove ${s.path}`, "data-tip": "Remove", onclick: () => (w.sources.splice(i, 1), paint()) }, icon(I.x, 13, { w: 2 })),
+          ),
+        ),
+        el(
+          "div",
+          { class: "toggles-foot" },
+          toggleRow(w.watch, "Watch for changes", "Re-index a file the moment it is saved.", (v) => ((w.watch = v), (w.watchAfter = v), paint())),
+          toggleRow(w.gitignore, "Respect .gitignore", "Skip what each repository already ignores.", (v) => ((w.gitignore = v), paint())),
+        ),
+      ),
+    );
+    return el("div", { class: "stack", onpaste: onPaste }, parts);
+  }
+
+  function sourceTotal() {
+    const folders = w.sources.filter((s) => s.type === "folder").length;
+    const files = w.sources.filter((s) => s.type === "file").length;
+    const urls = w.sources.filter((s) => s.type === "url").length;
+    return [folders && plural(folders, "folder"), files && plural(files, "file"), urls && plural(urls, "URL")].filter(Boolean).join(" · ");
+  }
+
+  function sourceMeta(s) {
+    if (s.type === "url") return "one https request · kept in the store's downloads folder";
+    if (s.type === "file") return s.dropped ? "dropped file · read where it sits" : "single file · read where it sits";
+    const bits = [];
+    if (s.repos > 1) bits.push(`${s.repos} repositories inside`);
+    else if (s.repos === 1) bits.push("a git repository");
+    if (s.count) bits.push(`${plural(s.count, "folder")} inside`);
+    bits.push(s.dropped ? "dropped · read in place" : "read in place");
+    return bits.join(" · ");
+  }
+
+  async function addSources(list) {
+    const have = new Set(w.sources.map((s) => s.path));
+    const fresh = list.filter((s) => s.path && !have.has(s.path));
+    if (!fresh.length) return;
+    w.sources.push(...fresh);
+    toast(fresh.length === 1 ? `Added ${baseName(fresh[0].path)}` : `Added ${fresh.length} sources`);
+    paint();
+    // What is inside each folder: repositories, by the daemon's own discovery,
+    // so "Keep together / One store each" is offered only where it is true.
+    for (const s of fresh.filter((x) => x.type === "folder")) {
+      try {
+        const found = await api(`/api/projects?path=${encodeURIComponent(s.path)}`);
+        s.repos = found.repositories ? (found.projects || []).length : 0;
+        s.repoPaths = found.repositories ? (found.projects || []).map((p) => p.path) : [];
+        s.count = (found.folders || []).length;
+      } catch (_) {
+        /* the path may be outside home; the scan is the real test */
+      }
+    }
+    paint();
+  }
+
+  function browsePanel() {
+    const b = w.browse;
+    if (!b.listing && !b.loading) {
+      b.loading = true;
+      api(`/api/dirs?path=${encodeURIComponent(b.dir || "")}`)
+        .then((l) => {
+          b.listing = l;
+          b.dir = l.path;
+          state.home = state.home || l.home;
+        })
+        .catch((e) => (b.error = e.message))
+        .finally(() => {
+          b.loading = false;
+          paint();
+        });
+    }
+    const l = b.listing;
+    const openDir = (path) => {
+      b.dir = path;
+      b.listing = null;
+      paint();
+    };
+    // A selection is drawn in place, not by repainting: a repaint between the
+    // two clicks of a double-click replaces the item, and the browser then
+    // sees two single clicks on two elements and no double-click.
+    const count = meta("");
+    const addBtn = btn(
+      {
+        class: "btn sm dark",
+        disabled: !l ? true : null,
+        onclick: () => {
+          const list = b.sel.size ? [...b.sel] : [l.path];
+          b.sel.clear();
+          w.mode = null;
+          addSources(list.map((p) => ({ path: p.path || p, type: p.type || "folder" })));
+        },
+      },
+      "",
+    );
+    const syncHead = () => {
+      count.textContent = `${b.sel.size} selected`;
+      count.hidden = !b.sel.size;
+      addBtn.textContent = b.sel.size ? `Add ${plural(b.sel.size, "item")}` : "Use this folder";
+    };
+    syncHead();
+    return el(
+      "div",
+      { class: "card" },
+      el(
+        "div",
+        { class: "browse-head" },
+        btn({ class: "btn xs", disabled: !l || !l.parent ? true : null, onclick: () => l && l.parent && openDir(l.parent) }, icon(I.back, 13, { w: 1.8 }), "Up"),
+        el("span", { class: "dir", text: l ? tilde(l.path, l.home) : "…" }),
+        count,
+        addBtn,
+      ),
+      el("div", { class: "browse-hint", text: "Click to select · double-click a folder to open it" }),
+      b.error ? errorBox(b.error) : null,
+      l
+        ? el(
+            "div",
+            { class: "browse-grid", "data-scroll-keep": "browse" },
+            browsable(l.entries).length
+              ? browsable(l.entries).map((e) => {
+                  const on = [...b.sel].some((x) => x.path === e.path);
+                  const toggleSel = () => {
+                    const hit = [...b.sel].find((x) => x.path === e.path);
+                    if (hit) b.sel.delete(hit);
+                    else b.sel.add({ path: e.path, type: e.dir ? "folder" : "file" });
+                    const now = !hit;
+                    item.classList.toggle("on", now);
+                    cb.setAttribute("aria-checked", String(now));
+                    syncHead();
+                  };
+                  const cb = checkbox(on, toggleSel, `Select ${e.name}`);
+                  const item = el(
+                    "div",
+                    { class: `bitem${on ? " on" : ""}${e.dir ? "" : " file"}` },
+                    cb,
+                    btn(
+                      {
+                        class: "open",
+                        "data-tip": e.dir ? `${e.name} — double-click to open` : e.name,
+                        onclick: toggleSel,
+                        // The two clicks before it toggled the item twice, so
+                        // the selection is as it was when the folder opens.
+                        ondblclick: () => e.dir && openDir(e.path),
+                      },
+                      icon(e.dir ? I.folder : I.file, 14, { w: 1.6 }),
+                      el("span", { class: "name", text: e.name }),
+                    ),
+                    e.adoptable ? el("span", { class: "note", text: "store" }) : null,
+                  );
+                  return item;
+                })
+              : empty("Nothing here."),
+          )
+        : el("div", { class: "empty" }, "Reading…"),
+    );
+  }
+
+  function pastePanel() {
+    const input = el("input", {
+      value: w.pathDraft,
+      placeholder: "~/work/api — Enter adds it, several lines add several",
+      spellcheck: "false",
+      "data-keep": "wz-path",
+      oninput: (e) => {
+        w.pathDraft = e.target.value;
+        addBtn.disabled = !w.pathDraft.trim();
+      },
+      onkeydown: (e) => e.key === "Enter" && addPasted(w.pathDraft),
+      onpaste: (e) => {
+        const text = e.clipboardData && e.clipboardData.getData("text");
+        if (text && text.includes("\n")) {
+          e.preventDefault();
+          addPasted(text);
+        }
+      },
+    });
+    const addBtn = btn({ class: "btn md dark", disabled: !w.pathDraft.trim() ? true : null, onclick: () => addPasted(w.pathDraft) }, "Add");
+    setTimeout(() => input.focus(), 0);
+    const known = [...new Set(liveStores().flatMap((s) => (s.roots || []).map((r) => r.path)))].filter((p) => !w.sources.some((x) => x.path === p)).slice(0, 4);
+    return el(
+      "div",
+      { class: "card pad" },
+      el("div", { class: "row nowrap" }, el("div", { class: "box h36 focus grow" }, el("span", { class: "lab", text: "path" }), input), addBtn),
+      known.length
+        ? el(
+            "div",
+            { class: "col" },
+            el("span", { class: "eyebrow sm", text: "Folders other stores already read" }),
+            known.map((p) => btn({ class: "suggest-row", onclick: () => addSources([{ path: p, type: "folder" }]) }, icon(I.folder, 13, { w: 1.6 }), pathSpan(tilde(p), "grow", p), el("span", { class: "note", text: "folder" }))),
+          )
+        : null,
+    );
+  }
+
+  /* Path text, as people paste it: quoted, `file://` URLs, a `~`, one per line. */
+  async function addPasted(text) {
+    const lines = String(text || "")
+      .split(/\r?\n/)
+      .map((x) => x.trim().replace(/^['"]|['"]$/g, ""))
+      .filter(Boolean)
+      .map((x) => {
+        if (x.startsWith("file://")) {
+          try {
+            x = decodeURIComponent(new URL(x).pathname);
+            if (/^\/[A-Za-z]:\//.test(x)) x = x.slice(1);
+          } catch (_) {
+            /* left as typed */
+          }
+        }
+        if (x === "~" || x.startsWith("~/")) x = (state.home || "") + x.slice(1);
+        return x;
+      });
+    if (!lines.length) return;
+    w.pathDraft = "";
+    const resolved = [];
+    for (const p of lines) {
+      if (/^https:\/\//.test(p)) {
+        resolved.push({ path: p, type: "url" });
+        continue;
+      }
+      // Asking the daemon whether it is a folder it can list; anything else is
+      // taken as a file, and the scan says if it is not readable.
+      let type = "file";
+      try {
+        await api(`/api/dirs?path=${encodeURIComponent(p)}`);
+        type = "folder";
+      } catch (e) {
+        if (/outside the home/.test(e.message)) {
+          toast(`${p} is outside your home folder, which the portal may not read`, true);
+          continue;
+        }
+      }
+      resolved.push({ path: p, type });
+    }
+    addSources(resolved);
+  }
+
+  function onPaste(e) {
+    if (e.target && e.target.matches && e.target.matches("input, textarea")) return;
+    const text = e.clipboardData && (e.clipboardData.getData("text/uri-list") || e.clipboardData.getData("text"));
+    if (text && /[\\/~]|^file:/.test(text)) {
+      e.preventDefault();
+      addPasted(text);
+    }
+  }
+
+  function urlPanel() {
+    const ok = () => /^https:\/\/\S+\.\S+/.test(w.urlDraft.trim());
+    const input = el("input", {
+      value: w.urlDraft,
+      placeholder: "A web address: a page, a PDF or a file on GitHub",
+      spellcheck: "false",
+      "data-keep": "wz-url",
+      oninput: (e) => {
+        w.urlDraft = e.target.value;
+        fetchBtn.disabled = !ok();
+      },
+      onkeydown: (e) => e.key === "Enter" && ok() && addUrl(),
+    });
+    const addUrl = () => {
+      addSources([{ path: w.urlDraft.trim(), type: "url" }]);
+      w.urlDraft = "";
+    };
+    const fetchBtn = btn({ class: "btn md dark", disabled: !ok() ? true : null, onclick: addUrl }, "Fetch");
+    setTimeout(() => input.focus(), 0);
+    const airgap = data.privacy?.airgap;
+    return el(
+      "div",
+      { class: "card pad" },
+      el("div", { class: "row nowrap" }, el("div", { class: "box h36 focus grow" }, el("span", { class: "lab", text: "url" }), input), fetchBtn),
+      el("div", { class: "muted t-sm pretty", text: "One https request for exactly this URL, made when the run starts. Nothing is crawled and no credential is sent. The file is kept in this store's downloads folder, never in your working tree." }),
+      airgap && (airgap === true || airgap.on) ? el("div", { class: "notice amber" }, el("span", { class: "sub", text: "Airgap is on, so this fetch will be refused. Turn it off on the Privacy page first." })) : null,
+    );
+  }
+
+  /* Drag and drop with real paths. No browser tells a page where a dropped
+   * item lives, and nothing is uploaded: the page sends each item's name, kind,
+   * size, time and — for a folder — its first-level names and a few file sizes,
+   * and the daemon finds the one place on this machine that matches. One match
+   * is added; several give a picker; none points at the path box. */
+  // Several dropped items written into one field: one per line, or file://
+  // URLs one after another on a line.
+  function splitDropped(text) {
+    return String(text || "")
+      .split(/\r?\n/)
+      // Written one after another on a line: file:// URLs, or absolute paths,
+      // each starting where a space is followed by a slash or a drive.
+      .flatMap((line) => line.trim().split(/\s+(?=file:\/\/|\/|[A-Za-z]:\\)/))
+      .filter(Boolean)
+      .join("\n");
+  }
+
+
+
+  // The drop's items, read while the event lasts: a DataTransfer is emptied
+  // the moment its event returns.
+  function takeDrop(transfer) {
+    const entries = [];
+    for (const it of Array.from((transfer && transfer.items) || [])) {
+      if (it.kind !== "file") continue;
+      const entry = it.webkitGetAsEntry ? it.webkitGetAsEntry() : null;
+      const file = it.getAsFile ? it.getAsFile() : null;
+      entries.push({ entry, file });
+    }
+    return entries;
+  }
+
+  async function resolveDrop(entries) {
+    const items = [];
+    if (!entries.length) return;
+    for (const { entry, file } of entries) {
+      const name = entry ? entry.name : file ? file.name : "";
+      if (!name) continue;
+      const dir = entry ? entry.isDirectory : false;
+      const item = { name, kind: dir ? "dir" : "file" };
+      if (file && !dir) {
+        item.size = file.size;
+        item.mtime = file.lastModified;
+      }
+      if (dir && entry.createReader) {
+        try {
+          const kids = await readEntries(entry.createReader());
+          item.children = kids.slice(0, 200).map((k) => k.name);
+          const files = kids.filter((k) => k.isFile).slice(0, 20);
+          item.child_files = (await Promise.all(files.map((f) => new Promise((res) => f.file((x) => res({ name: x.name, size: x.size, mtime: x.lastModified }), () => res(null)))))).filter(Boolean);
+        } catch (_) {
+          /* a folder the browser would not list still resolves by name */
+        }
+      }
+      items.push(item);
+    }
+    if (!items.length) return;
+    toast(`Finding ${items.length === 1 ? items[0].name : `${items.length} items`} on this machine…`);
+    let answer;
+    try {
+      answer = await post("/api/drop/resolve", { items, ...(state.pasteboardChange != null ? { pasteboard_change: state.pasteboardChange } : {}) });
+      if (answer.pasteboard_change != null) state.pasteboardChange = answer.pasteboard_change;
+    } catch (e) {
+      toast(`Could not resolve the drop: ${e.message}`, true);
+      w.mode = "paste";
+      return paint();
+    }
+    const add = [];
+    const unresolved = [];
+    for (const r of answer.results || []) {
+      if (r.status === "resolved" && r.path) add.push({ path: r.path, type: items.find((i) => i.name === r.name)?.kind === "dir" ? "folder" : "file", dropped: true });
+      else if (r.status === "ambiguous" && (r.candidates || []).length) {
+        const pick = await choosePath(r.name, r.candidates);
+        if (pick) add.push({ path: pick, type: items.find((i) => i.name === r.name)?.kind === "dir" ? "folder" : "file", dropped: true });
+      } else if (r.status === "refused") toast(`${r.name}: ${r.reason || "it sits in a temporary folder — extract it first"}`, true);
+      else unresolved.push(r.name);
+    }
+    if (add.length) {
+      // The person confirms every resolved path: it is shown before it is used.
+      const ok = await ask({
+        title: add.length === 1 ? "Add this path?" : `Add these ${add.length} paths?`,
+        body: "Found on this machine from what was dropped. Nothing was uploaded.",
+        extra: el("div", { class: "col gap4" }, add.map((a) => el("div", { class: "copyfield" }, pathSpan(a.path, "t")))),
+        ok: add.length === 1 ? "Add it" : "Add them",
+      });
+      if (ok) addSources(add);
+    }
+    if (unresolved.length) {
+      w.mode = "paste";
+      paint();
+      toast(`Could not find ${unresolved.join(", ")} — paste its path (${answer.os_copy_hint || "copy it from your file manager"})`, true);
+    }
+  }
+
+  function choosePath(name, candidates) {
+    return new Promise((resolve) => {
+      let picked = candidates[0];
+      const list = el(
+        "div",
+        { class: "col gap4" },
+        candidates.map((c, i) =>
+          btn(
+            {
+              class: "modal opt",
+              onclick: (e) => {
+                picked = c;
+                for (const b of list.children) b.querySelector(".radio").classList.toggle("on", b === e.currentTarget);
+              },
+            },
+            el("span", { class: `radio${i === 0 ? " on" : ""}` }),
+            el("span", { class: "mono anywhere", text: c }),
+          ),
+        ),
+      );
+      ask({ title: `Which ${name}?`, body: "More than one place on this machine matches what was dropped.", extra: list, ok: "Use this one", wide: true }).then((ok) => resolve(ok ? picked : null));
+    });
+  }
+
+  function readEntries(reader) {
+    return new Promise((resolve, reject) => {
+      const all = [];
+      const more = () =>
+        reader.readEntries((batch) => {
+          if (!batch.length || all.length >= 200) return resolve(all);
+          all.push(...batch);
+          more();
+        }, reject);
+      more();
+    });
+  }
+
+  // ---- step 3: review
+  function step3() {
+    if (w.scan.state === "idle") startScan();
+    if (w.scan.state === "error") return el("div", { class: "card" }, errorBox(w.scan.error), el("div", { class: "card-b" }, el("div", { class: "row" }, btn({ class: "btn", onclick: () => setStep(2) }, "Back to sources"), btn({ class: "btn primary", onclick: () => ((w.scan.state = "idle"), paint()) }, "Scan again"))));
+    const runs = scanRuns();
+    const scanning = w.scan.state !== "done";
+    if (scanning) {
+      const total = runs.reduce((a, r) => a + (r.total || 0), 0);
+      const realScanned = runs.reduce((a, r) => a + (r.scanned || 0), 0);
+      // Shown at the slower of the real scan and a pace of 4-8 seconds: a
+      // scan of a small folder is over in a blink, and a card that flashes
+      // past says nothing about what was checked. A slow scan is never
+      // hurried; the pace only holds a fast one back.
+      const real = w.scan.realDone ? 1 : total ? realScanned / total : 0;
+      const paced = Math.min(1, (Date.now() - (w.scan.began || Date.now())) / (w.scan.pace || 1));
+      const f = Math.min(real, paced);
+      const p = Math.max(3, f * 100);
+      const scanned = total ? Math.min(realScanned || total, Math.round(f * total)) : 0;
+      const stages = [
+        ["Walking the tree", f >= 0.15, f < 0.15, total ? plural(total, "file") : ""],
+        ["Reading and hashing", f >= 0.55, f >= 0.15 && f < 0.55, total ? `${n(scanned)} / ${n(total)}` : ""],
+        ["Checking for credentials", f >= 0.85, f >= 0.55 && f < 0.85, "content + names"],
+        ["Matching rules", f >= 1, f >= 0.85 && f < 1, ".gitignore · build"],
+      ];
+      paceScan();
+      return el(
+        "div",
+        { class: "card pad16" },
+        el("div", { class: "row base" }, el("span", { class: "card-t grow", text: `Scanning ${plural(w.sources.filter((s) => s.type !== "url").length, "source")}` }), el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
+        (() => {
+          const b = bar(p, "h8");
+          b.setAttribute("data-tip", `Scan · ${Math.floor(p)}%`);
+          b.setAttribute("data-tip-rows", stages.map((s) => `${s[0]}::${s[1] ? "done" : s[2] ? s[3] : "waiting"}`).join("||"));
+          return b;
+        })(),
+        el(
+          "div",
+          { class: "auto-fit m170 gap8" },
+          stages.map(([label, done, cur, m]) => el("div", { class: `stage-box${done ? " done" : cur ? " cur" : ""}` }, el("span", { class: `dot ${done ? "green" : cur ? "blue pulse" : "line"}` }), el("span", { class: "grow", text: label }), el("span", { class: "t-mono-sm", text: done ? "done" : cur ? m : "" }))),
+        ),
+        el("div", { class: "muted t-sm", text: "Names and hashes only. Nothing is embedded until you start the run." }),
+      );
+    }
+    return reviewPanel();
+  }
+
+  // While a scan is shown, the card is redrawn a few times a second so the
+  // paced bar moves; the scan reads as done only when the real scan has
+  // finished and the pace has run its course.
+  function paceScan() {
+    const scan = w.scan;
+    if (scan.tick) return;
+    scan.tick = setInterval(() => {
+      // Its own scan only: a scan started again is a new object.
+      if (!host.isConnected || w.scan !== scan || scan.state !== "scanning") {
+        clearInterval(scan.tick);
+        scan.tick = null;
+        return;
+      }
+      if (scan.realDone && Date.now() - scan.began >= scan.pace) {
+        clearInterval(scan.tick);
+        scan.tick = null;
+        scan.state = "done";
+      }
+      if (w.step === 3) paint();
+    }, 150);
+  }
+
+  async function startScan() {
+    w.scan = { state: "scanning", runs: [], error: "", began: Date.now(), pace: 4000 + Math.random() * 4000 };
+    const paths = w.sources.filter((s) => s.type !== "url").map((s) => s.path);
+    if (!paths.length) {
+      // Only URLs: nothing to scan. They are fetched when the run starts.
+      w.scan.state = "done";
+      return paint();
+    }
+    try {
+      const target = w.split === "split" ? "each" : w.created;
+      const splitPaths = w.split === "split" ? w.sources.flatMap((s) => (s.repoPaths && s.repoPaths.length ? s.repoPaths : [s.path])).filter((p) => !/^https:/.test(p)) : paths;
+      const out = await post("/api/index", { path: splitPaths, store: target, review: "always", gitignore: w.gitignore, add_roots: target !== "each" });
+      const errors = (out.runs || []).filter((r) => r.error);
+      if (errors.length) throw new Error(errors.map((r) => `${r.path}: ${r.error}`).join("; "));
+      w.scan.runs = (out.runs || []).map((r) => r.run).filter((x) => x !== undefined);
+      w.scan.stores = [...new Set((out.runs || []).map((r) => r.store))];
+      await load("runs", true);
+    } catch (e) {
+      w.scan = { state: "error", runs: [], error: e.message };
+    }
+    paint();
+  }
+
+  function reviewPanel() {
+    const P = plan();
+    const band = (r) => (r >= 70 ? "high" : r >= 30 ? "medium" : "low");
+    const sorted = [...P.items].sort((a, b) => b.risk - a.risk);
+    const inShow = (d) => w.decShow === "all" || (w.decShow === "open" ? !w.decisions[d.path] : !!w.decisions[d.path]);
+    const shown = sorted.filter((d) => inShow(d) && (w.decRisk === "any" || band(d.risk) === w.decRisk));
+    const selIds = P.items.filter((d) => w.decSel.has(d.path)).map((d) => d.path);
+    const shownSel = shown.filter((d) => w.decSel.has(d.path)).length;
+    const allSel = shown.length > 0 && shownSel === shown.length;
+    const setDec = (ids, v) => {
+      ids.forEach((id) => (v ? (w.decisions[id] = v) : delete w.decisions[id]));
+      paint();
+    };
+    const credOnly = (ids) => ids.filter((id) => P.items.find((d) => d.path === id)?.class === "credential");
+    const ACT = { out: "Keep out", redact: "Redact & index", in: "Index" };
+    const RES = { out: ["Kept out", "grey"], redact: ["Redacted · indexed", "amber"], in: ["Will be indexed", "blue"] };
+    const bulk = (v) => () => {
+      if (v && v !== "out" && credOnly(selIds).length) return toast("A credential file can only be kept out", true);
+      setDec(selIds, v);
+      w.decSel.clear();
+      paint();
+      if (v) toast(`${ACT[v]} — applied to ${plural(selIds.length, "file")}`);
+    };
+    const openShown = shown.filter((d) => !w.decisions[d.path]);
+    const cnt = (f) => sorted.filter(f).length;
+    const kpis = el(
+      "div",
+      { class: "q4" },
+      kpi("Will be indexed", n(P.embed + P.accepted), `${bytes(P.embedBytes)} of text${P.unchanged ? ` · ${n(P.unchanged)} unchanged` : ""}`),
+      kpi("Your decision", P.undecided ? `${P.undecided} left` : "done", `${P.items.length} in the grey zone`, { warn: P.undecided > 0 }),
+      kpi("Left out by rules", n(P.skipped), "ignored, generated, binary"),
+      kpi("Credential files", n(P.credential), "never indexed, not even with OK"),
+    );
+    const parts = [kpis];
+    if (P.items.length) {
+      parts.push(
+        el(
+          "div",
+          { class: "card" },
+          el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Needs your decision" }), meta(`${P.items.length - P.undecided} of ${P.items.length} decided · undecided files stay out`)),
+          el(
+            "div",
+            { class: "filterbar" },
+            seg(
+              [
+                ["all", "All", cnt(() => true)],
+                ["open", "Undecided", cnt((d) => !w.decisions[d.path])],
+                ["done", "Decided", cnt((d) => !!w.decisions[d.path])],
+              ],
+              w.decShow,
+              (v) => ((w.decShow = v), paint()),
+            ),
+            seg(
+              [
+                ["any", "Any risk", cnt((d) => inShow(d))],
+                ["high", "High", cnt((d) => inShow(d) && band(d.risk) === "high")],
+                ["medium", "Medium", cnt((d) => inShow(d) && band(d.risk) === "medium")],
+                ["low", "Low", cnt((d) => inShow(d) && band(d.risk) === "low")],
+              ],
+              w.decRisk,
+              (v) => ((w.decRisk = v), paint()),
+            ),
+            el("span", { class: "spacer" }),
+            openShown.length
+              ? btn(
+                  {
+                    class: "btn sm",
+                    onclick: () => {
+                      openShown.forEach((d) => (w.decisions[d.path] = d.suggest || "out"));
+                      w.decSel.clear();
+                      paint();
+                      toast(`Applied suggestions to ${plural(openShown.length, "file")} — undo any one`);
+                    },
+                  },
+                  `Apply suggestions to ${openShown.length} undecided`,
+                )
+              : null,
+          ),
+          el(
+            "div",
+            { class: "gl-scroll" },
+            el(
+              "div",
+              { class: "minw780" },
+              el(
+                "div",
+                { class: "dec-grid head" },
+                checkbox(allSel ? true : shownSel ? "mixed" : false, () => {
+                  shown.forEach((d) => (allSel ? w.decSel.delete(d.path) : w.decSel.add(d.path)));
+                  paint();
+                }, "Select all shown"),
+                el("span", { text: `FILE · ${shown.length} shown · highest risk first` }),
+                el("span", { text: "RISK IF INDEXED" }),
+                el("span", { text: "DECISION" }),
+              ),
+              selIds.length
+                ? el(
+                    "div",
+                    { class: "selbar" },
+                    el("span", { class: "what", text: `${plural(selIds.length, "file")} selected` }),
+                    lnk("Clear", () => (w.decSel.clear(), paint())),
+                    el("span", { class: "spacer" }),
+                    btn({ class: "btn sm", onclick: bulk("out") }, "Keep out"),
+                    btn({ class: "btn sm amber", onclick: bulk("redact") }, "Redact & index"),
+                    btn({ class: "btn sm dark", onclick: bulk("in") }, "Index"),
+                    selIds.some((id) => w.decisions[id]) ? lnk("Reset", bulk(null)) : null,
+                  )
+                : null,
+              el(
+                "div",
+                { class: "dec-list", "data-scroll-keep": "dec" },
+                !shown.length ? empty("No files match this filter.", "lg") : null,
+                shown.map((d) => decisionRow(d, band, ACT, RES, setDec)),
+              ),
+            ),
+          ),
+          el("div", { class: "card-note", text: "Every decision is yours — one file or a selection — and is logged per file. An agent can never decide. Redact & index swaps each match for a typed placeholder before chunking; the value never reaches the index. An acceptance keeps a salted fingerprint of the match, never the value." }),
+        ),
+      );
+    }
+    parts.push(leftOutCard(P));
+    return el("div", { class: "stack" }, parts);
+  }
+
+  function decisionRow(d, band, ACT, RES, setDec) {
+    const v = w.decisions[d.path];
+    const b = band(d.risk);
+    const sel = w.decSel.has(d.path);
+    const cred = d.class === "credential";
+    return el(
+      "div",
+      { class: "dec-grid" },
+      checkbox(sel, () => (sel ? w.decSel.delete(d.path) : w.decSel.add(d.path), paint())),
+      el(
+        "div",
+        { class: "col gap4" },
+        el("div", { class: "row" }, pathSpan(rel(d.path), "p", d.path), d.likely ? pill(d.likely, d.tone || "grey", { dot: false }) : null),
+        el("span", { class: "why" }, el("b", { text: d.kind || classWord(d.class) }), ` · ${d.why || d.rule || ""}`),
+        d.evidence || (d.matches || [])[0] ? el("span", { class: "evidence", text: d.evidence || maskedOf(d.matches[0]) }) : null,
+      ),
+      el("div", { class: "col gap4 risk" }, el("div", { class: "row base nowrap gap6" }, el("span", { class: `risk-pct ${b}`, text: `${d.risk}%` }), el("span", { class: "t-mono-sm", text: b })), bar(Math.max(3, d.risk), `h4 ${b === "high" ? "red" : b === "medium" ? "amber" : "green"}`)),
+      el(
+        "div",
+        { class: "col gap4 acts" },
+        v
+          ? el("div", { class: "row" }, pill(RES[v][0], RES[v][1], { dot: false }), lnk("Undo", () => setDec([d.path], null)))
+          : [
+              el(
+                "div",
+                { class: "row gap6 nowrap" },
+                btn({ class: "btn sm", onclick: () => setDec([d.path], "out") }, "Keep out"),
+                btn({ class: "btn sm amber", disabled: cred ? true : null, onclick: () => setDec([d.path], "redact") }, "Redact & index"),
+                btn({ class: "btn sm dark", disabled: cred ? true : null, onclick: () => setDec([d.path], "in") }, "Index"),
+              ),
+              el("span", { class: "muted t-xs", text: `Suggested · ${ACT[d.suggest || "out"]}` }),
+            ],
+      ),
+    );
+  }
+
+  function leftOutCard(P) {
+    const groups = [
+      ["excluded", "Ignored by .gitignore and the rules", "What each repository already asks tools to skip, and what is outside the roots"],
+      ["policy", "Build output, lockfiles and oversize files", "Generated, or over the size cap, so searching it only adds noise"],
+      ["unindexable", "No text to read", "Binary, empty, or a format with no text layer"],
+      ["credential", "Credential files", "Keys, tokens and .env files — never offered for indexing"],
+    ]
+      .map(([cls, label, desc]) => ({ cls, label, desc, count: P.notIndexed[cls] || (cls === "credential" ? P.credential : 0), paths: P.paths[cls] || [] }))
+      .filter((g) => g.count);
+    return el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Left out automatically" }), meta("no action needed")),
+      !groups.length ? empty(w.sources.every((s) => s.type !== "folder") ? "Nothing to leave out. Single files and URLs are read as they are." : "Nothing was left out.") : null,
+      groups.map((g) => {
+        const open = !!w.open[g.cls];
+        return el(
+          "div",
+          { class: "line-row" },
+          btn(
+            { class: "group-row", "aria-expanded": String(open), onclick: () => ((w.open[g.cls] = !open), paint()) },
+            icon(I.chevRight, 13, { w: 2 }),
+            el("span", { class: "col" }, el("span", { class: "t-m", text: g.label }), el("span", { class: "muted t-xs", text: g.desc })),
+            el("span", { class: "mono t-m ink2", text: n(g.count) }),
+          ),
+          open
+            ? el(
+                "div",
+                { class: "group-paths" },
+                g.paths.length ? g.paths.slice(0, 50).map((p) => pathSpan(rel(p), "", p)) : el("span", { text: "The list is written when the run ends; the count is the scan's." }),
+                g.count > g.paths.length && g.paths.length ? el("span", { text: `…and ${n(g.count - g.paths.length)} more` }) : null,
+              )
+            : null,
+        );
+      }),
+    );
+  }
+
+  /** A path under the source it came from, the way a person reads it. */
+  function rel(path) {
+    const roots = w.sources.map((s) => s.path).sort((a, b) => b.length - a.length);
+    for (const r of roots) if (path.startsWith(r)) return path.slice(r.length).replace(/^[\\/]/, "") || baseName(path);
+    return tilde(path);
+  }
+
+  // ---- step 4: index
+  function step4() {
+    const R = run();
+    if (!R.length) return preRun();
+    const live = R.find((x) => LIVE_RUN.has(x.status));
+    if (live) return runningCard(live, R);
+    return doneCard(R);
+  }
+
+  function preRun() {
+    const P = plan();
+    const files = P.embed + P.accepted;
+    const urls = w.sources.filter((s) => s.type === "url").length;
+    const lanes = (data.accel?.lanes || []).filter((l) => (l.status?.state || "") !== "unavailable");
+    const fastest = lanes.filter((l) => l.enabled).sort((a, b) => (b.share || 0) - (a.share || 0))[0];
+    const model = (data.privacy?.downloads || [])[0];
+    const machine = data.runs?.limits?.machine;
+    return el(
+      "div",
+      { class: "stack" },
+      el(
+        "div",
+        { class: "auto-fit m150" },
+        kpi("Files to index", n(files), P.accepted ? `includes ${P.accepted} you accepted` : urls ? `plus ${plural(urls, "URL")} fetched at the start` : "after review"),
+        kpi("Text", bytes(P.embedBytes), P.unchanged ? `${n(P.unchanged)} unchanged, skipped by hash` : "read where it sits"),
+        kpi("Estimate", P.eta != null ? spellTook(P.eta) : "—", P.eta != null ? "from this machine's last measured rate" : "measured once the run starts"),
+      ),
+      model && !model.cached
+        ? el(
+            "div",
+            { class: "notice amber" },
+            icon(I.download, 17, { w: 1.8 }),
+            el("div", { class: "body" }, el("span", { class: "ttl", text: `One download first: the embedding model, ${bytes(model.bytes)}` }), el("span", { class: "sub", text: `From ${model.source}, once, cached in the model cache. It is the only thing semlith fetches on its own. Starting the run counts as your OK.` })),
+          )
+        : null,
+      el(
+        "div",
+        { class: "card pad" },
+        el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "Run it on" }), meta(machine ? `${machine.logical_cores} cores · ${(machine.total_memory_mb / 1024).toFixed(0)} GiB` : "")),
+        el(
+          "div",
+          { class: "auto-fit m180" },
+          lanes.length
+            ? lanes.map((l) =>
+                btn(
+                  {
+                    class: `pick-card${l.enabled ? " on" : ""}`,
+                    "aria-pressed": String(!!l.enabled),
+                    "data-tip": l.enabled ? "On · applies to every run on this machine" : "Off · applies to every run on this machine",
+                    onclick: () => laneToggle(l),
+                  },
+                  el("div", { class: "row nowrap" }, el("span", { class: "cb", "aria-checked": String(!!l.enabled) }), el("span", { class: "t", text: l.label || l.lane }), fastest && fastest.lane === l.lane && l.lane !== "cpu" ? el("span", { class: "rec", text: "fastest here" }) : null, l.experimental ? el("span", { class: "exp", text: "experimental" }) : null),
+                  el("span", { class: "m12", text: l.device || l.variant || "" }),
+                  el("span", { class: "d", text: l.download_bytes && !l.installed ? `needs a ${bytes(l.download_bytes)} download first` : l.lane === "cpu" ? "always available" : l.enabled ? laneWord(l.status) : "off" }),
+                ),
+              )
+            : el("div", { class: "muted t-sm", text: "Reading the lanes…" }),
+        ),
+        el("span", { class: "muted t-xs", text: "Lanes are this machine's, set the same way in Settings › Performance. The run uses every lane that is on." }),
+      ),
+      el(
+        "div",
+        { class: "auto-fit m240 gap8" },
+        toggleRow(w.watchAfter, "Keep watching after the run", "Saved files are re-indexed within a second.", (v) => ((w.watchAfter = v), paint())),
+        toggleRow(w.record, "Record what agents retrieve", "A local ledger of queries and what they were sent. Never leaves the machine.", (v) => ((w.record = v), paint())),
+      ),
+    );
+  }
+
+  async function laneToggle(l) {
+    const on = !l.enabled;
+    if (on && l.download_bytes && !l.installed) {
+      const ok = await ask({ title: `Turn ${l.label || l.lane} on?`, body: `It downloads the ${l.label || l.lane} pack first, ${bytes(l.download_bytes)}, once, into this machine's model cache.`, ok: "Download and turn on" });
+      if (!ok) return;
+    }
+    await act(() => post("/api/accel", { lane: l.lane, action: on ? "on" : "off" }));
+    await load("accel", true);
+    paint();
+  }
+
+  async function startRun() {
+    if (w.busy) return;
+    w.busy = true;
+    paintFoot();
+    try {
+      const runs = scanRuns();
+      const stores = [...new Set(runs.map((r) => r.store).concat(w.created && w.split !== "split" ? [w.created] : []))];
+      // The decisions, applied as the person's, per file, before the run.
+      const P = plan();
+      const by = {};
+      for (const d of P.items) {
+        const v = w.decisions[d.path];
+        if (!v) continue;
+        (by[`${d.store}\n${v}`] = by[`${d.store}\n${v}`] || []).push(d.path);
+      }
+      for (const [key, files] of Object.entries(by)) {
+        const [st, decision] = key.split("\n");
+        await post("/api/refused/decide", { store: st, files, decision });
+      }
+      for (const st of stores) {
+        await post("/api/store/settings", { store: st, watch: w.watchAfter, record: w.record, kind: w.kind }).catch(() => {});
+      }
+      const started = [];
+      for (const r of runs.filter((x) => x.status === "review")) {
+        await post("/api/index/control", { store: r.store, run: r.id, action: "start" });
+        started.push(r.id);
+      }
+      for (const s of w.sources.filter((x) => x.type === "url")) {
+        const out = await post("/api/add", { url: s.path, store: w.created });
+        for (const r of out.runs || []) started.push(r.run);
+      }
+      // A split run spent the named store on nothing: it is removed rather
+      // than left empty beside the stores it was split into.
+      if (w.split === "split" && w.created && !w.existing && !(w.scan.stores || []).includes(w.created)) {
+        await post("/api/store/delete", { store: w.created }).catch(() => {});
+      }
+      w.started = started.length ? started : runs.map((r) => r.id);
+      await loadMany(["runs", "stores"], true);
+    } catch (e) {
+      toast(e.message, true);
+    }
+    w.busy = false;
+    paint();
+  }
+
+  function runningCard(r, all) {
+    const p = runPct(r);
+    const paused = r.status === "paused" || r.status === "pausing";
+    const stagesNow = runStages(r);
+    const log = el("div", { class: "log", "data-scroll-keep": "wzlog" });
+    followLog(r, log);
+    return el(
+      "div",
+      { class: "card" },
+      el(
+        "div",
+        { class: "card-b" },
+        el(
+          "div",
+          { class: "row" },
+          el("span", { class: "mono t-b", text: r.store }),
+          pill(paused ? "paused" : r.status === "queued" ? `queued${r.position ? ` · ${r.position} in line` : ""}` : "indexing", paused || r.status === "queued" ? "amber" : "green", { pulse: !paused }),
+          all.length > 1 ? meta(`${all.filter((x) => !LIVE_RUN.has(x.status)).length} of ${all.length} done`) : null,
+          el("span", { class: "spacer" }),
+          btn({ class: "btn", onclick: () => runControl(r, paused ? "resume" : "pause") }, paused ? "Resume" : "Pause"),
+          btn({ class: "btn danger-soft", onclick: () => stopRun(r) }, "Stop…"),
+        ),
+        el(
+          "div",
+          { class: "row nowrap gap12" },
+          (() => {
+            const b = bar(p, "h8 accent grow");
+            b.setAttribute("data-tip", `Index run · ${Math.floor(p)}%`);
+            b.setAttribute("data-tip-rows", runRows(r));
+            return b;
+          })(),
+          el("span", { class: "mono t-b", text: `${Math.floor(p)}%` }),
+        ),
+        el("div", { class: "row gap6" }, stagesNow.map(([label, st]) => el("span", { class: `stage-chip ${st}` }, el("span", { class: `dot ${st === "done" ? "green" : st === "cur" ? "blue pulse" : "line"}` }), label))),
+        r.phase ? el("div", { class: "muted t-sm", text: r.phase }) : null,
+      ),
+      runStatsRow(r),
+      log,
+      el("div", { class: "lives" }, el("span", { class: "dot green" }), "The run lives in the daemon. Leave this page, close the tab — it keeps going and the header shows its progress."),
+    );
+  }
+
+  function doneCard(R) {
+    const failed = R.filter((r) => r.status === "failed" || r.status === "stopped");
+    const name = w.created || R[0].store;
+    const s = store(name);
+    // The store's own totals once it reports them: a run counts only what it
+    // embedded, not images it read or files it found unchanged.
+    const files = Math.max(s?.files || 0, R.reduce((a, r) => a + (r.indexed || 0), 0));
+    const chunks = Math.max(s?.chunks || 0, R.reduce((a, r) => a + (r.chunks || 0), 0));
+    const tryInput = el("input", {
+      value: w.tryQ,
+      placeholder: "e.g. where does the watcher re-index a file",
+      "data-keep": "wz-try",
+      "aria-label": "Try a search",
+      oninput: (e) => (w.tryQ = e.target.value),
+      onkeydown: (e) => e.key === "Enter" && trySearch(),
+    });
+    return el(
+      "div",
+      { class: "stack" },
+      failed.length
+        ? el("div", { class: "notice red" }, el("div", { class: "body" }, el("span", { class: "ttl", text: `${failed.length} run${failed.length === 1 ? "" : "s"} did not finish` }), el("span", { class: "sub", text: failed.map((r) => `${r.store}: ${r.status}`).join(" · ") })))
+        : el(
+            "div",
+            { class: "done-banner" },
+            el("span", { class: "ic" }, icon(I.check, 17, { w: 2.6 })),
+            el("div", { class: "col gap2 grow" }, el("span", { class: "t", text: `${name} is ready` }), el("span", { class: "l", text: `${plural(files, "file")} indexed · ${n(chunks)} chunks${s && s.disk ? ` · ${bytes(s.disk.total)}` : ""}${w.watchAfter ? " · watching for changes" : ""}` })),
+          ),
+      el(
+        "div",
+        { class: "card" },
+        el(
+          "div",
+          { class: "card-b line-row" },
+          el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "Try it — ask what an agent would ask" }), meta("vector + keyword + graph")),
+          el("div", { class: "row nowrap" }, el("div", { class: "box h38 focus grow" }, icon(I.searchSm, 15, { w: 1.8 }), tryInput), btn({ class: "btn md dark", onclick: trySearch }, "Search")),
+        ),
+        w.tried ? tryResults() : null,
+      ),
+    );
+  }
+
+  async function trySearch() {
+    const q = w.tryQ.trim();
+    if (!q) return;
+    try {
+      const out = await api(`/api/search?${new URLSearchParams({ query: q, store: w.created || "", k: "3" })}`);
+      w.tried = out;
+    } catch (e) {
+      w.tried = { error: e.message };
+    }
+    paint();
+  }
+
+  function tryResults() {
+    const t = w.tried;
+    if (t.error) return errorBox(t.error);
+    const hits = (t.hits || t.results || []).slice(0, 3);
+    return el(
+      "div",
+      { class: "col" },
+      !hits.length ? empty("Nothing matched. Try other words — or the store is still settling.") : null,
+      hits.map((h) =>
+        el(
+          "div",
+          { class: "try-row" },
+          el("div", { class: "col gap2" }, el("span", { class: "mono t-m t-sm" }, `${rel(h.path)}:${h.start_line}-${h.end_line} `, el("span", { class: "muted", text: h.symbol ? `${h.kind || ""} ${h.symbol}`.trim() : "" })), el("span", { class: "txt-dim", text: (h.text || h.line || "").split("\n")[0] })),
+          el("div", { class: "row gap4" }, listBadges(h.lists || [])),
+        ),
+      ),
+      el("div", { class: "card-foot" }, `${hits.length} of ${n(t.total || hits.length)} shown${t.tokens ? ` · ${n(t.tokens)} tokens` : ""} · an agent gets the same answer over MCP`),
+    );
+  }
+
+  // ---- step 5: connect
+  function step5() {
+    const clients = clientRows();
+    const found = clients.filter((c) => c.found);
+    if (!w.clientSel.size && !w.clientSelTouched) found.filter((c) => !c.registered).forEach((c) => w.clientSel.add(c.name));
+    const sel = clients.filter((c) => w.clientSel.has(c.name));
+    const done = w.reg === "done";
+    return el(
+      "div",
+      { class: "stack" },
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Clients on this machine" }), meta(`${found.length} of ${clients.length} found · ${sel.length} selected`)),
+        el(
+          "div",
+          { class: "auto-fill m230" },
+          clients.map((c) => {
+            const on = w.clientSel.has(c.name);
+            const registered = c.registered || (done && on && (w.regResult?.ok || []).includes(c.name));
+            return btn(
+              {
+                class: `client-pick${on ? " on" : ""}`,
+                disabled: !c.found || done || c.registered ? true : null,
+                onclick: () => {
+                  w.clientSelTouched = true;
+                  on ? w.clientSel.delete(c.name) : w.clientSel.add(c.name);
+                  paint();
+                },
+              },
+              el("span", { class: "cb", "aria-checked": String(on || c.registered) }),
+              el("span", { class: "col grow min0" }, el("span", { class: "nm", text: c.name }), el("span", { class: "muted t-xs anywhere", text: c.found ? c.how : "not found on this machine" })),
+              registered ? pill("registered", "green", { dot: false }) : c.found ? el("span", { class: "t-mono-sm", text: "found" }) : el("span", { class: "t-mono-sm", text: "—" }),
+            );
+          }),
+        ),
+      ),
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "What semlith will write" }), meta("each file backed up beside itself first")),
+        sel.length
+          ? el(
+              "div",
+              { class: "tw" },
+              el(
+                "table",
+                { "aria-label": "What semlith will write" },
+                el("thead", {}, el("tr", {}, el("th", { text: "Client" }), el("th", { text: "How" }), el("th", { text: "Result" }))),
+                el(
+                  "tbody",
+                  {},
+                  sel.map((c) => {
+                    const okNow = (w.regResult?.ok || []).includes(c.name);
+                    const bad = (w.regResult?.failed || []).find((f) => f.client === c.name);
+                    return el(
+                      "tr",
+                      {},
+                      el("td", { class: "t-m nowrap", text: c.name }),
+                      el("td", { class: "ms anywhere", text: c.write }),
+                      el("td", { class: "nowrap" }, bad ? pill(bad.error || "failed", "red", { dot: false }) : okNow ? pill("registered · backup saved", "green", { dot: false }) : w.reg === "busy" ? pill("writing…", "blue", { dot: false }) : pill("will add semlith", "grey", { dot: false })),
+                    );
+                  }),
+                ),
+              ),
+            )
+          : empty("Pick at least one client above, or skip — the Agents page does this any time."),
+        el("div", { class: "card-foot sans" }, lnk(w.manual ? "Hide the manual setup" : "Set a client up by hand instead", () => ((w.manual = !w.manual), paint())), el("span", { class: "spacer" }), el("span", { class: "t-mono-sm", text: data.agents?.endpoint?.url || "" })),
+        w.manual ? codeBlock(mcpJson(), { cls: "flat", word: "Config copied" }) : null,
+      ),
+    );
+  }
+
+  async function register() {
+    const names = [...w.clientSel];
+    if (!names.length) return;
+    w.reg = "busy";
+    paint();
+    try {
+      const out = await post("/api/agents/register", { clients: names, action: "register", confirm: true });
+      const results = out.results || [];
+      w.regResult = {
+        ok: results.filter((r) => r.ok).map((r) => r.client),
+        failed: results.filter((r) => !r.ok),
+      };
+      w.reg = "done";
+      toast(`Registered ${plural(w.regResult.ok.length, "client")}`);
+      load("agents", true).then(paint);
+    } catch (e) {
+      w.reg = "idle";
+      toast(e.message, true);
+    }
+    paint();
+  }
+
+  // ---- summary rail and footer
+  let railNode = null;
+  function summaryRail() {
+    railNode = el("div", { class: "wz-rail" });
+    paintRail();
+    return railNode;
+  }
+
+  function paintRail() {
+    if (!railNode) return;
+    const P = plan();
+    const R = run();
+    const live = R.find((x) => LIVE_RUN.has(x.status));
+    const step = w.step;
+    const nm = w.name.trim();
+    const rowsList = [
+      ["NAME", nm || "not named yet", !!w.created, !nm, true],
+      ["HOLDS", { code: "Code", docs: "Docs & notes", both: "Code and docs" }[w.kind], !!w.created],
+      ["SOURCES", sourcesLine(), w.sources.length > 0 && step > 2, !w.sources.length, true],
+      ["REVIEW", step < 3 || w.scan.state !== "done" ? "after the scan" : P.undecided ? `${P.undecided} undecided — they stay out` : `${P.accepted ? `${P.accepted} accepted · ` : ""}all decided`, step > 3, step < 3],
+      [
+        "INDEX",
+        R.length ? (live ? `${Math.floor(runPct(live))}% · ${live.status}` : `${n(R.reduce((a, r) => a + (r.indexed || 0), 0))} files · ready`) : step >= 4 ? `${n(P.embed + P.accepted)} files${P.eta != null ? ` · ${spellTook(P.eta)}` : ""}` : "not started",
+        R.length && !live,
+        !R.length && step < 4,
+      ],
+    ];
+    if (w.onboarding) rowsList.push(["AGENTS", w.reg === "done" ? `${(w.regResult?.ok || []).length} connected` : "not yet", w.reg === "done", w.reg !== "done"]);
+    const tips = {
+      1: "A store is one index with one model. Make separate stores for things you'd search separately — a client's code and your own notes, say.",
+      2: "Drop a parent folder and semlith looks for the repositories inside it. Nothing is copied or moved: files are read where they sit.",
+      3: "Credential files — keys, tokens, .env — are never offered, even with your OK. What you see here is only the grey zone.",
+      4: "The run lives in the daemon, not this page. Close the tab or let the laptop sleep — it picks up where it was.",
+      5: "Each config file is backed up beside itself before it is written, and a file that doesn't parse is left untouched.",
+    };
+    fill(
+      railNode,
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "card-h" }, el("span", { class: "card-t", text: "Your store" })),
+        rowsList.map(([k, v, ok, dim, mono]) => el("div", { class: "sum-row" }, el("span", { class: "k", text: k }), el("span", { class: `v${dim ? " dim" : ""}${mono ? "" : " sans"}`, text: v }), ok ? icon(I.check, 13, { w: 2.6 }) : el("span"))),
+      ),
+      el("div", { class: "blue-box" }, el("span", { class: "eyebrow", text: "Good to know" }), el("span", { class: "txt", text: tips[w.step] })),
+    );
+  }
+
+  let nextFn = null;
+  async function next() {
+    if (nextFn) await nextFn();
+  }
+
+  function paintFoot() {
+    const step = w.step;
+    const R = run();
+    const live = R.find((x) => LIVE_RUN.has(x.status));
+    const ns = nameState();
+    let label = "Continue";
+    let on = true;
+    let hint = "";
+    let sec = null;
+    nextFn = null;
+    if (step === 1) {
+      label = w.created ? (w.created === ns.nm ? "Continue" : "Rename and continue") : "Create store";
+      on = ns.ok && !w.busy;
+      hint = ns.ok ? `Creates an empty store at ~/.semlith/stores/${ns.nm}` : "Pick a name to continue";
+      nextFn = createOrRename;
+    } else if (step === 2) {
+      const k = w.sources.length;
+      label = `Scan ${k || ""} ${k === 1 ? "source" : "sources"}`.replace("  ", " ");
+      on = k > 0;
+      hint = k ? "Scanning reads names and hashes only — nothing is embedded yet" : "Add at least one folder, file or URL";
+      nextFn = async () => {
+        w.scan = { state: "idle", runs: [], error: "" };
+        w.decisions = {};
+        setStep(3);
+      };
+    } else if (step === 3) {
+      const P = plan();
+      label = "Continue to index";
+      on = w.scan.state === "done";
+      hint = w.scan.state !== "done" ? "Scanning…" : P.undecided ? `${P.undecided} undecided — they stay out, and you can decide later on the store's Review tab` : "Decisions can be changed later on the store's Review tab";
+      nextFn = async () => setStep(4);
+    } else if (step === 4) {
+      if (!R.length) {
+        const P = plan();
+        label = w.busy ? "Starting…" : "Start indexing";
+        on = !w.busy;
+        hint = `${plural(P.embed + P.accepted, "file")}${P.eta != null ? ` · about ${spellTook(P.eta)}` : ""}`;
+        nextFn = startRun;
+      } else if (live) {
+        if (w.onboarding) {
+          label = "Next: connect agents";
+          nextFn = async () => setStep(5);
+          hint = "Indexing carries on in the background";
+        } else {
+          label = "Run in background";
+          nextFn = async () => {
+            const name = w.created || live.store;
+            state.wz = null;
+            go("store", name, "runs");
+          };
+          hint = "Watch it from the store's Runs tab or the header";
+        }
+      } else {
+        if (w.onboarding) {
+          label = "Next: connect agents";
+          nextFn = async () => setStep(5);
+        } else {
+          label = "Open store";
+          nextFn = async () => {
+            const name = w.created || R[0].store;
+            state.wz = null;
+            go("store", name);
+          };
+        }
+        hint = "Ready — agents can search it now";
+      }
+    } else if (step === 5) {
+      const done = w.reg === "done";
+      const finish = async () => {
+        state.wz = null;
+        await load("stores", true);
+        go("home");
+      };
+      if (done) {
+        label = "Go to Home";
+        nextFn = finish;
+        hint = `${plural((w.regResult?.ok || []).length, "client")} registered — restart them to pick semlith up`;
+      } else {
+        sec = ["Skip for now", finish];
+        const k = w.clientSel.size;
+        label = w.reg === "busy" ? "Registering…" : `Register ${k} ${k === 1 ? "client" : "clients"}`;
+        on = k > 0 && w.reg !== "busy";
+        hint = "Nothing is written until you press Register";
+        nextFn = register;
+      }
+    }
+    const backOn = step > 1 && !(step === 4 && live) && !(step === 2 && w.existing);
+    fill(
+      foot,
+      el(
+        "div",
+        { class: "wz-foot-in" },
+        btn({ class: "btn md", disabled: backOn ? null : true, hidden: step === 1 ? true : null, onclick: () => backOn && setStep(step - 1) }, icon(I.back, 14, { w: 1.8 }), "Back"),
+        el("span", { class: "hint hide-sm", text: hint }),
+        sec ? btn({ class: "btn md", onclick: sec[1] }, sec[0]) : null,
+        btn({ class: "btn md primary", disabled: on ? null : true, onclick: next }, label, icon(I.arrow, 14, { w: 2 })),
+      ),
+    );
+    paintRail();
+  }
+
+  async function createOrRename() {
+    const ns = nameState();
+    if (!ns.ok || w.busy) return;
+    w.busy = true;
+    paintFoot();
+    try {
+      if (!w.created) {
+        await post("/api/store/create", { name: ns.nm, kind: w.kind });
+        toast(`Created ${ns.nm} — empty until you add sources`);
+      } else if (w.created !== ns.nm) {
+        await post("/api/store/settings", { store: w.created, rename: ns.nm, kind: w.kind });
+        toast(`Renamed to ${ns.nm}`);
+      } else {
+        await post("/api/store/settings", { store: w.created, kind: w.kind }).catch(() => {});
+      }
+      w.created = ns.nm;
+      await load("stores", true);
+      w.busy = false;
+      setStep(2);
+    } catch (e) {
+      w.busy = false;
+      toast(e.message, true);
+      paintFoot();
+    }
+  }
+
+  // Live: the runs the wizard started or scanned move with the poll.
+  const offRuns = onRunsChange(() => {
+    if (!host.isConnected) return offRuns();
+    const scans = scanRuns();
+    if (w.scan.state === "scanning" && scans.length && scans.every((r) => r.status !== "running" && r.status !== "queued")) {
+      // A failure shows at once; a success waits for the paced card to
+      // reach its end (paceScan), unless the pace is already over.
+      if (scans.some((r) => r.status === "failed")) {
+        w.scan.state = "error";
+        w.scan.error = "The scan failed. Its log is on the store's Runs tab.";
+      } else {
+        w.scan.realDone = true;
+        if (!w.scan.began || Date.now() - w.scan.began >= (w.scan.pace || 0)) w.scan.state = "done";
+      }
+    }
+    // When the started runs end, the store's own totals are read once more,
+    // so the done card counts what the store holds now.
+    const started = run();
+    const ended = started.length && started.every((r) => !LIVE_RUN.has(r.status));
+    if (ended && !w.endedRead) {
+      w.endedRead = true;
+      load("stores", true).then(() => w.step === 4 && paint());
+    }
+    if (w.step === 3 || w.step === 4) paint();
+    else paintRail();
+  });
+
+  paint();
+  return host;
+}
+
+/* Poll a run's log while its card is on screen, from its own cursor. */
+function followLog(r, logNode) {
+  const key = `${r.store}:${r.id}`;
+  const seen = (followLog.cursors[key] = followLog.cursors[key] || { after: r.log_from ?? null, lines: [] });
+  const draw = () => {
+    fill(
+      logNode,
+      seen.lines.slice(-120).map((ev) => {
+        const [a, b, c, tone] = logParts(ev);
+        return el("div", { class: "ln" }, el("span", { class: "a", text: a }), el("span", { class: `b ${tone}`, text: b }), el("span", { class: "c", text: c }));
+      }),
+    );
+    logNode.scrollTop = logNode.scrollHeight;
+  };
+  draw();
+  const tick = async () => {
+    if (!logNode.isConnected) return;
+    try {
+      const out = await api(`/api/index/log?${new URLSearchParams({ store: r.store, run: String(r.id), ...(seen.after != null ? { after: String(seen.after) } : {}) })}`);
+      if (out.lines && out.lines.length) {
+        seen.lines.push(...out.lines);
+        if (seen.lines.length > 400) seen.lines.splice(0, seen.lines.length - 400);
+        seen.after = out.cursor;
+        draw();
+      }
+    } catch (_) {
+      /* the next tick tries again */
+    }
+    const live = (data.runs?.runs || []).find((x) => x.id === r.id);
+    if (live && LIVE_RUN.has(live.status)) setTimeout(tick, 1000);
+  };
+  // After the caller has put the box on the page: called while the card is
+  // still being built, the box is not connected yet, and a first tick run now
+  // would stop at once and the log would stay empty for the whole run.
+  setTimeout(tick, 0);
+}
+followLog.cursors = {};
+
+function logParts(ev) {
+  const when = ev.at ? clock(ev.at) : "";
+  if (ev.event === "file") {
+    const outcome = ev.outcome || "read";
+    const tone = /refus|skip|fail/.test(outcome) ? "bad" : /embed|index/.test(outcome) ? "ok" : /unchanged|queued/.test(outcome) ? "" : "info";
+    return [`${n(ev.scanned)}/${n(ev.total)}`, outcome, ev.why ? `${ev.path} — ${ev.why}` : ev.path, tone];
+  }
+  const text = {
+    submitted: ev.ahead ? `waiting — ${plural(ev.ahead, "run")} ahead of this one` : "submitted",
+    queued: ev.ahead ? `waiting for ${ev.store}'s writer — ${plural(ev.ahead, "job")} ahead` : "waiting for the store's writer",
+    started: "walking the tree and hashing what it finds",
+    slice: `${n(ev.remaining)} paths left; giving the watcher a turn`,
+    paused: "held between files — the writer is still this run's",
+    resumed: "carrying on",
+    error: ev.error || "failed",
+    done: ev.dequeued ? "removed from the queue before it started; nothing was indexed" : ev.stopped ? "stopped — everything this run embedded was undone" : `${n(ev.indexed)} indexed, ${n(ev.unchanged)} unchanged, ${n(ev.skipped)} skipped, ${n(ev.removed)} removed, ${n(ev.chunks)} chunks`,
+  }[ev.event];
+  return [when, ev.event || "", text || ev.text || "", ev.event === "error" ? "bad" : ev.event === "done" ? "ok" : "info"];
+}
+
+function runStages(r) {
+  const finished = r.status === "done";
+  const total = r.total || 0;
+  const read = total && r.scanned >= total;
+  const embedding = (r.chunks || 0) > 0;
+  const list = [
+    ["Walk", total > 0 || finished],
+    ["Read & hash", read || finished],
+    ["Scan", read || finished],
+    ["Parse & chunk", read || finished],
+    ["Embed", finished],
+    ["Write graph", finished],
+  ];
+  let curSet = false;
+  return list.map(([label, done]) => {
+    if (done) return [label, "done"];
+    if (!curSet && (label !== "Embed" || embedding || read)) {
+      curSet = true;
+      return [label, "cur"];
+    }
+    return [label, ""];
+  });
+}
+
+function runRows(r) {
+  return rows([
+    ["files", r.total ? `${n(r.scanned)} / ${n(r.total)}` : ""],
+    ["chunks", n(r.chunks || 0)],
+    ["rate", r.rate != null ? `${perSecond(r.rate)} chunks/s` : ""],
+    ["time left", r.status === "running" ? spellLeft(runLeftMs(r)) : ""],
+  ]);
+}
+
+function runStatsRow(r) {
+  const paused = r.status === "paused" || r.status === "pausing";
+  const lanes = Object.entries(r.lane_rates || {})
+    .filter(([, v]) => v > 0)
+    .map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`)
+    .join(" · ");
   return el(
     "div",
-    { class: "notice bad" },
-    el("div", {
-      class: "what",
-      // The consequence first, because it is what changes how the page under
-      // this is read: these results are short by a store.
-      text: `${failed.length} store${many ? "s" : ""} could not be read, so ${
-        many ? "they are" : "it is"
-      } not in these results.`,
-    }),
+    { class: "run-stats" },
+    [
+      ["FILES READ", r.total ? `${n(r.scanned)} / ${n(r.total)}` : "counting…", "Files read and hashed; embedding follows, counted in chunks"],
+      ["CHUNKS", n(r.chunks || 0)],
+      ["RATE", paused ? "paused" : r.rate != null ? `${perSecond(r.rate)} chunks/s` : "—", lanes],
+      ["TIME LEFT", paused ? "—" : r.status === "running" ? spellLeft(runLeftMs(r)) : r.status],
+    ].map(([k, v, t]) => el("div", { "data-tip": t || null }, el("span", { class: "eyebrow sm wide", text: k }), el("span", { class: "v", text: v }))),
+  );
+}
+
+const LANE_NAMES = { cpu: "CPU", ane: "Neural Engine", gpu: "GPU", cuda: "CUDA", trt: "TensorRT for RTX", openvino: "OpenVINO", llama: "llama.cpp", worker: "Worker" };
+const laneName = (k) => LANE_NAMES[k] || k;
+
+async function runControl(r, action) {
+  // Pressing Pause says "pausing" at once: the request is on its way, and a
+  // poll that lands meanwhile must not be the first to speak.
+  if (action === "pause") {
+    PAUSING.set(`${r.store}:${r.id}`, Date.now() + 5000);
+    const now = (data.runs?.runs || []).find((x) => x.id === r.id && x.store === r.store);
+    if (now && now.status === "running") {
+      now.status = "pausing";
+      repaint();
+    }
+  }
+  const out = await act(() => post("/api/index/control", { store: r.store, run: r.id, action }), action === "pause" ? "Pausing at the next batch" : action === "resume" ? "Resumed" : null);
+  // The route's own word first ("pausing", not yet "paused"), then the runs.
+  const mine = out && out.state && (data.runs?.runs || []).find((x) => x.id === r.id && x.store === r.store);
+  if (mine) {
+    mine.status = out.state;
+    repaint();
+  }
+  if (action !== "pause") PAUSING.delete(`${r.store}:${r.id}`);
+  await load("runs", true);
+  for (const fn of [...runsListeners]) fn();
+  paintChrome();
+}
+
+async function stopRun(r) {
+  const fresh = !(r.files_before || r.chunks_before);
+  const del = el("input", { type: "checkbox", id: "stop-delete" });
+  if (fresh) del.checked = true;
+  const ok = await ask({
+    title: `Stop ${r.store}'s index run?`,
+    body: "What it has embedded so far is undone, so the store is left exactly as it was before the run. The files on disk are untouched.",
+    extra: fresh ? el("label", { class: "modal opt", for: "stop-delete" }, del, el("span", { text: "Also delete the store — it held nothing before this run" })) : null,
+    ok: "Stop and undo",
+    cancel: "Keep running",
+    danger: true,
+  });
+  if (!ok) return;
+  await act(() => post("/api/index/control", { store: r.store, run: r.id, action: r.status === "queued" ? "dequeue" : "stop", delete: fresh && del.checked }), "Stopping — undoing what it embedded");
+  await loadMany(["runs", "stores"], true);
+  for (const fn of [...runsListeners]) fn();
+  paintChrome();
+}
+
+
+function classWord(cls) {
+  return { content: "Secret-shaped value", policy: "Policy", credential: "Credential file", unindexable: "No text", excluded: "Excluded", dummy: "Test dummy" }[cls] || cls || "";
+}
+
+function maskedOf(match) {
+  if (!match) return "";
+  return match.masked || match.mask || match.preview || match.line || "";
+}
+
+/* What a file would cost if indexed, as a percentage. The daemon sends `risk`
+ * from its own scan (0.35.0); before that the scan's confidence stands in. */
+function riskOf(item) {
+  if (typeof item.risk === "number") return Math.round(item.risk);
+  if (item.class === "credential") return 99;
+  if (typeof item.confidence === "number") return item.confidence;
+  return item.class === "policy" ? 8 : 40;
+}
+
+/** The fusion lists that found a hit, as the design's small badges. */
+function listBadges(lists) {
+  const tone = { vector: "blue", keyword: "amber", graph: "green", definition: "outline" };
+  return (lists || []).map((l) => el("span", { class: `badge ${tone[l] || ""}`, text: l }));
+}
+
+/** The MCP stanza a client written by hand carries. */
+function mcpJson() {
+  const url = data.agents?.endpoint?.url || `${location.protocol}//${location.host}/mcp`;
+  const env = data.agents?.key_env || "SEMLITH_AGENT_KEY";
+  return `{\n  "mcpServers": {\n    "semlith": {\n      "type": "http",\n      "url": "${url}",\n      "headers": { "Authorization": "Bearer \${${env}}" }\n    }\n  }\n}`;
+}
+
+/** Every documented client with what this machine says about it. */
+// The command's name and verb, without the arguments that carry paths or JSON.
+function cmdHead(text) {
+  const words = [];
+  for (const w of String(text).split(/\s+/)) {
+    if (words.length === 3 || /[{"'\/]/.test(w)) break;
+    words.push(w);
+  }
+  return words.join(" ");
+}
+
+function clientRows() {
+  const reports = data.agents?.doctor || [];
+  return (data.agents?.clients || []).map((c) => {
+    const r = reports.find((x) => x.name === c.name) || {};
+    const register = (c.stanzas || []).find((s) => s.register);
+    const file = (c.stanzas || []).find((s) => s.path);
+    const found = !!(r.present || (r.files || []).some((f) => f.exists));
+    return {
+      name: c.name,
+      group: c.group,
+      found,
+      registered: !!r.registered,
+      report: r,
+      client: c,
+      how: `${c.group} · ${register ? cmdHead(register.text) : file ? file.path : "by hand"}`,
+      write: register ? register.text.replace(/\s+/g, " ") : file ? file.path : "set up by hand",
+    };
+  });
+}
+
+// ---------------------------------------------------------------- store state
+
+/** A store's state in the words and tone of the design's pill. */
+function storeState(s) {
+  if (s.missing) return { state: "missing", tone: "red", tip: `Its directory is gone: ${s.dir}` };
+  if (s.unreadable) return { state: "unreadable", tone: "red", tip: "Its database could not be read" };
+  if (s.unopened) return { state: "not open", tone: "grey", tip: s.unopened };
+  const r = activeRun(s.name);
+  if (r) {
+    const p = Math.floor(runPct(r));
+    if (r.status === "review") return { state: "waiting for review", tone: "amber" };
+    if (r.status === "queued") return { state: "queued", tone: "blue" };
+    if (r.status === "paused" || r.status === "pausing") return { state: `paused ${p}%`, tone: "amber" };
+    return { state: `${r.kind === "compact" ? "compacting" : "indexing"} ${p}%`, tone: "blue", pulse: true };
+  }
+  const review = reviewCount(s.name);
+  // Before "not indexed": once a deleted root's files are pruned the store
+  // has none, and a missing folder is what the reader can act on.
+  if ((s.roots || []).some((r2) => !r2.present)) return { state: "root missing", tone: "red" };
+  if (!s.files && !(s.roots || []).length) return { state: "empty", tone: "grey" };
+  if (!s.files) return { state: "not indexed", tone: "grey" };
+  if (review) return { state: `${review} to review`, tone: "amber" };
+  if (s.watching === false && s.watch !== false && s.stopped_because) return { state: "not watching", tone: "amber", tip: s.stopped_because };
+  return { state: "fresh", tone: "green" };
+}
+
+function statePill(s) {
+  const st = storeState(s);
+  return pill(st.state, st.tone, { pulse: st.pulse, tip: st.tip });
+}
+
+function reviewCount(name) {
+  return ((data.refused?.stores || []).find((x) => x.store === name) || {}).review || 0;
+}
+
+function kindOf(s) {
+  return { code: "code", docs: "docs", both: "code + docs", mixed: "code + docs" }[s.kind || "both"] || "code + docs";
+}
+
+// The Stores page's per-store saving, never without its coverage and tier.
+// Nothing to read again when every folder a store reads from is gone.
+function rootsGone(s) {
+  const roots = s.roots || [];
+  return roots.length > 0 && roots.every((r) => r.present === false);
+}
+
+function savedLine(s) {
+  if (!s.savings || !s.savings.total) return "nothing asked yet";
+  return `${short(s.savings.net_tokens)} fewer · coverage ${s.savings.coverage}% · ${s.savings.tier}`;
+}
+
+// Where a store reads from, on one line: the first root, shortened, and how
+// many more. Every root in full is in rootsAll for the tooltip.
+function rootsLine(s) {
+  const roots = (s.roots || []).map((r) => r.path);
+  if (!roots.length) return "no sources yet";
+  return `${shortPath(roots[0], 48)}${roots.length > 1 ? ` + ${roots.length - 1} more` : ""}`;
+}
+
+function rootsAll(s) {
+  return (s.roots || []).map((r) => tilde(r.path)).join("\n") || null;
+}
+
+function diskOf(s) {
+  return s.disk ? s.disk.total : 0;
+}
+
+function reclaimable(s) {
+  return s.disk && s.disk.reclaimable > 0 && (s.disk.dead_percent || 0) >= 5 ? s.disk.reclaimable : 0;
+}
+
+// ---------------------------------------------------------------- store actions
+
+async function reindexStore(name, files) {
+  const s = store(name);
+  if (!s) return;
+  const paths = files && files.length ? files : (s.roots || []).map((r) => r.path);
+  if (!paths.length) return openWizard({ store: name });
+  const out = await act(() => post("/api/index", { store: name, path: files ? undefined : paths, files: files || undefined }), files ? `Queued ${plural(files.length, "file")} to re-index in ${name}` : `Re-indexing ${name} — unchanged files are skipped by hash`);
+  if (out) await loadMany(["runs", "stores"], true), paintChrome();
+}
+
+async function compactStores(names) {
+  const list = names.filter(Boolean);
+  if (!list.length) return;
+  const free = list.reduce((a, nm) => a + reclaimable(store(nm) || {}), 0);
+  const ok = await ask({
+    title: list.length === 1 ? `Compact ${list[0]}?` : `Compact ${list.length} stores?`,
+    body: `Rewrites the vectors without the deleted chunks and vacuums the database${free ? `, giving back about ${bytes(free)}` : ""}. Searches keep working while it runs; nothing that answers today changes.`,
+    ok: "Compact",
+  });
+  if (!ok) return;
+  for (const nm of list) await act(() => post("/api/store/compact", { store: nm }));
+  toast(list.length === 1 ? `Compacting ${list[0]}` : `Compacting ${list.length} stores`);
+  await load("runs", true);
+  paintChrome();
+}
+
+async function forgetStore(name) {
+  const s = store(name);
+  const ok = await ask({
+    title: `Forget ${name}?`,
+    body: `Its index, vectors and ledger rows are deleted. The ${s && s.files ? plural(s.files, "file") : "files"} it read stay exactly where they are.`,
+    ok: "Forget store",
+    cancel: "Keep it",
+    danger: true,
+  });
+  if (!ok) return false;
+  const out = await act(() => post("/api/store/delete", { store: name }), `Forgot ${name}`);
+  if (!out) return false;
+  await load("stores", true);
+  return true;
+}
+
+function searchStore(name) {
+  state.pending.searchStore = name;
+  go("search");
+}
+
+function storeMenu(s) {
+  return () => [
+    { label: "Open", onclick: () => go("store", s.name) },
+    { label: "Add sources", onclick: () => openWizard({ store: s.name }) },
+    { label: "Search it", onclick: () => searchStore(s.name) },
+    { label: "Re-index", disabled: !!activeRun(s.name) || rootsGone(s), onclick: () => reindexStore(s.name) },
+    reclaimable(s) ? { label: "Compact", hint: bytes(reclaimable(s)), onclick: () => compactStores([s.name]) } : null,
+    { label: "Forget…", tone: "red", onclick: () => forgetStore(s.name) },
+  ];
+}
+
+// ---------------------------------------------------------------------- home
+
+VIEWS.home = {
+  needs: () => ["stores", "runs", "refused", "ledger", "agents"],
+  live: ["stores", "runs", "refused", "ledger", "agents"],
+  render() {
+    const stores = liveStores();
+    const all = data.stores?.stores || [];
+    const ledger = data.ledger || {};
+    const agents = data.agents || {};
+    const files = stores.reduce((a, s) => a + (s.files || 0), 0);
+    const chunks = stores.reduce((a, s) => a + (s.chunks || 0), 0);
+    const disk = stores.reduce((a, s) => a + diskOf(s), 0);
+    const reviewing = stores.filter((s) => reviewCount(s.name));
+    const running = (data.runs?.runs || []).filter((r) => LIVE_RUN.has(r.status));
+    const registered = registeredClients();
+    const found = (agents.doctor || []).filter((c) => c.present || (c.files || []).some((f) => f.exists));
+    const prefs = readPrefs();
+
+    const items = [
+      ["Create a store", "Name it, add sources, review, index", stores.length > 0, () => openWizard({})],
+      ["Connect an agent", "Register the clients found here", registered.length > 0, () => go("agents", "add")],
+      ["Run a first search", "See what an agent will be sent", (ledger.queries || 0) > 0 || state.recents.length > 0, () => go("search")],
+      ["Check what leaves the machine", "One minute on the Privacy page", !!prefs.privacySeen, () => go("privacy")],
+    ];
+    const nDone = items.filter((i) => i[2]).length;
+    const checklist =
+      !prefs.checklistDismissed && nDone < 4
+        ? el(
+            "div",
+            { class: "card" },
+            el(
+              "div",
+              { class: "card-h" },
+              el("span", { class: "card-t", text: "Getting started" }),
+              meta(`${nDone} of 4 done`),
+              (() => {
+                const b = bar(nDone * 25, "h5 green w120");
+                b.setAttribute("data-tip", `${nDone} of 4 done`);
+                b.setAttribute("data-tip-rows", items.map((i) => `${i[0]}::${i[2] ? "done" : "to do"}`).join("||"));
+                return b;
+              })(),
+              el("span", { class: "spacer" }),
+              lnk("Dismiss", () => (savePrefs({ checklistDismissed: true }), repaint()), "muted"),
+            ),
+            el(
+              "div",
+              { class: "check4" },
+              items.map(([t, d, done, fn], i) =>
+                btn(
+                  { onclick: fn },
+                  el("span", { class: `cdot${done ? " done" : i === items.findIndex((x) => !x[2]) ? " next" : ""}` }, done ? icon(I.check, 10, { w: 3.2 }) : null),
+                  el("span", { class: "col gap2" }, el("span", { class: `ctitle${done ? " done" : ""}`, text: t }), el("span", { class: "muted t-xs pretty", text: d })),
+                ),
+              ),
+            ),
+          )
+        : null;
+
+    const lastQuery = (ledger.rows || [])[0];
+    const kpis = el(
+      "div",
+      { class: "q4" },
+      kpi("Stores", String(stores.length), running.length ? `${plural(running.length, "run")} going now` : reviewing.length ? `${plural(reviewing.length, "store")} ${reviewing.length === 1 ? "needs" : "need"} a review` : stores.length ? "all fresh and watched" : "none yet", { onclick: () => go("stores") }),
+      kpi("Files indexed", n(files), `${n(chunks)} chunks`, { onclick: () => go("stores") }),
+      kpi("Agents connected", String(connectedCount()), connectedCount() ? (lastQuery ? `${lastQuery.client} asked ${ago(lastQuery.at)}` : "waiting for a first query") : registered.length ? `${plural(registered.length, "client")} registered · none talking now` : `${plural(found.length, "client")} found on this machine`, { onclick: () => go("agents") }),
+      kpi("Fewer tokens", ledger.ratio ? `${ledger.ratio.toFixed(1)}×` : "—", ledger.ratio ? `than reading those files whole · coverage ${ledger.coverage}% · ${ledger.tier}` : "counted once an agent asks something", { onclick: () => go("ledger") }),
+    );
+
+    const storesCard = el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Stores" }), lnk("+ New store", () => openWizard({})), el("span", { class: "vrule" }), lnk("All stores →", () => go("stores"))),
+      el(
+        "div",
+        { class: "gl-scroll" },
+        el(
+          "div",
+          { class: "minw560" },
+          el("div", { class: "gl-head gl-home-stores" }, el("span", { text: "STORE" }), el("span", { text: "STATE" }), el("span", { class: "right", text: "FILES" }), el("span", { text: "SAVED" }), el("span", { class: "right", text: "WRITTEN" })),
+          all.length
+            ? all.slice(0, 8).map((s) =>
+                btn(
+                  { class: "gl-row gl-home-stores", onclick: () => go("store", s.name) },
+                  el("span", { class: "cellname" }, el("span", { class: "a", text: s.name }), el("span", { class: "b ell-start", "data-tip": rootsAll(s) }, el("bdi", { text: rootsLine(s) }))),
+                  statePill(s),
+                  el("span", { class: "num", text: s.files ? n(s.files) : "—" }),
+                  el("span", { class: "txt-dim", text: savedLine(s) }),
+                  el("span", { class: "num-dim", text: s.last_write ? ago(s.last_write) : "never" }),
+                ),
+              )
+            : empty("No store yet."),
+        ),
+      ),
+      el("div", { class: "card-foot", text: `${plural(all.length, "store")} · ${n(files)} files · ${n(chunks)} chunks${disk ? ` · ${bytes(disk)} on disk` : ""}` }),
+    );
+
+    const rowsList = (ledger.rows || []).slice(0, 6);
+    const activity = el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "What agents asked" }), lnk("Open ledger →", () => go("ledger"))),
+      !rowsList.length
+        ? el(
+            "div",
+            { class: "card-b" },
+            el("span", { class: "muted t-sm", text: recordingOn() ? "No agent has asked anything yet. Once one does, every query lands here with what it was sent." : "Recording is paused, so nothing new is listed here. Resume it on the Ledger page." }),
+            el("div", { class: "row" }, el("span", { class: "muted t-sm", text: "Try it from Claude Code:" }), el("span", { class: "quote", text: "“use semlith to find where the watcher re-indexes a file”" })),
+          )
+        : el(
+            "div",
+            { class: "gl-scroll" },
+            el(
+              "div",
+              { class: "minw480" },
+              rowsList.map((r) =>
+                el(
+                  "div",
+                  { class: "gl-row dense gl-activity" },
+                  el("span", { class: "t-mono-sm", text: clock(r.at), "data-tip": r.when }),
+                  el("span", { class: "t-mono ink2 ell", text: r.client }),
+                  el("span", { class: "mono ell t-sm", text: r.query, "data-tip": r.query, "data-tip-full": "" }),
+                  el("span", { class: "num-dim", text: plural(r.hits, "hit") }),
+                ),
+              ),
+            ),
+          ),
+    );
+
+    const attn = attentionItems();
+    const attention = el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Needs attention" }), meta(attn.length ? `${attn.length} open` : "")),
+      !attn.length ? el("div", { class: "all-clear" }, el("span", { class: "check-ok" }, icon(I.check, 11, { w: 3 })), "All clear. Every store is fresh and every agent can reach it.") : null,
+      attn.map((a) =>
+        el(
+          "div",
+          { class: "attn-row" },
+          dot(a.tone),
+          el("span", { class: "col" }, el("span", { class: "t", text: a.title }), el("span", { class: "s", text: a.sub, "data-tip": a.sub })),
+          btn({ class: "btn sm t125", onclick: a.onclick }, a.label),
+        ),
+      ),
+    );
+
+    const conns = agents.connections || [];
+    const agentsCard = el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Agents" }), conns.length || registered.length ? lnk("Manage →", () => go("agents")) : null),
+      !conns.length && !registered.length
+        ? el(
+            "div",
+            { class: "card-b" },
+            el("span", { class: "muted t-sm", text: found.length ? `Nothing is registered yet. ${found.slice(0, 3).map((c) => c.name).join(", ")}${found.length > 3 ? " and others" : ""} ${found.length === 1 ? "was" : "were"} found on this machine.` : "Nothing is registered yet, and no known client was found on this machine." }),
+            btn({ class: "btn sm dark", onclick: () => go("agents", "add") }, "Connect them"),
+          )
+        : [
+            ...conns.map((c) => el("div", { class: "agent-row" }, dot("green"), el("span", { class: "t-m t-sm", text: c.name }), el("span", { class: "t-mono-sm nowrap", text: `${plural(c.queries, "query", "queries")} · ${c.seen ? ago(c.seen) : "no query yet"}` }))),
+            ...registered
+              .filter((r) => !conns.some((c) => sameClient(c.name, r.name)))
+              .slice(0, 4)
+              .map((r) => el("div", { class: "agent-row" }, dot("grey"), el("span", { class: "t-m t-sm", text: r.name }), el("span", { class: "t-mono-sm nowrap", text: "registered · not talking now" }))),
+          ],
+    );
+
+    const events = stores
+      .flatMap((s) => (s.events || []).map((e) => ({ ...e, store: s.name })))
+      .sort((a, b) => b.at - a.at)
+      .slice(0, 6);
+    const watcher = el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Watcher" }), el("span", { class: "live-word" }, el("span", { class: "dot green slow" }), "live")),
+      el(
+        "div",
+        { class: "feed" },
+        events.length ? events.map((e) => el("div", { class: "f" }, el("span", { class: "t", text: clock(e.at), "data-tip": clockFull(e.at) }), el("span", { class: "m", text: `${e.store} · ${e.text}`, "data-tip": `${e.store} · ${e.text}` }))) : el("div", { class: "f" }, el("span", { class: "t", text: "now" }), el("span", { class: "m", text: `${plural(stores.filter((s) => s.watching).length, "store")} watched · nothing has changed since the daemon started` })),
+      ),
+    );
+
+    return el(
+      "div",
+      { class: "page" },
+      el(
+        "div",
+        { class: "head" },
+        el("div", { class: "titles" }, el("div", { class: "h1", text: "Home" }), el("div", { class: "lead", text: ledger.queries ? "Everything indexed on this machine, and what agents did with it. Nothing leaves it." : "Your index at a glance. It fills in as agents start asking." })),
+        el("span", { class: "t-mono-sm", text: `updated ${ago(Math.floor((loadedAt.stores || Date.now()) / 1000))} · ${location.host}` }),
+      ),
+      checklist,
+      kpis,
+      el("div", { class: "split s-175-1" }, el("div", { class: "stack" }, storesCard, activity), el("div", { class: "stack" }, attention, agentsCard, watcher)),
+    );
+  },
+};
+
+function sameClient(a, b) {
+  const norm = (x) => String(x || "").toLowerCase().replace(/[^a-z]/g, "");
+  return norm(a) === norm(b) || norm(a).includes(norm(b)) || norm(b).includes(norm(a));
+}
+
+/** What on this machine wants a person, each pointing at where it is handled. */
+function attentionItems() {
+  const out = [];
+  const stores = liveStores();
+  for (const s of stores) {
+    const r = reviewCount(s.name);
+    if (r) out.push({ tone: "amber", title: `${plural(r, "file")} in ${s.name} ${r === 1 ? "waits" : "wait"} for you`, sub: "Held back by the credential scan until you decide", label: "Review", onclick: () => go("store", s.name, "review") });
+  }
+  for (const s of data.stores?.stores || []) {
+    if (s.missing) out.push({ tone: "red", title: `${s.name}'s directory is gone`, sub: s.dir, label: "Details", onclick: () => go("store", s.name, "settings") });
+    else if (s.unreadable) out.push({ tone: "red", title: `${s.name} could not be read`, sub: "Its database did not open; other stores are fine", label: "Details", onclick: () => go("store", s.name, "settings") });
+    else if ((s.roots || []).some((r) => !r.present)) out.push({ tone: "red", title: `A source of ${s.name} is missing`, sub: (s.roots || []).filter((r) => !r.present).map((r) => tilde(r.path)).join(", "), label: "Re-point", onclick: () => go("store", s.name, "settings") });
+  }
+  if (data.ledger && data.ledger.intact === false) out.push({ tone: "red", title: "Ledger chain does not verify", sub: "Some rows were edited or removed after they were written", label: "Inspect", onclick: () => go("ledger") });
+  const reclaim = stores.filter((s) => reclaimable(s) > 1024 * 1024);
+  if (reclaim.length) out.push({ tone: "blue", title: `${bytes(reclaim.reduce((a, s) => a + reclaimable(s), 0))} reclaimable in ${plural(reclaim.length, "store")}`, sub: reclaim.map((s) => s.name).join(", "), label: "Compact", onclick: () => compactStores(reclaim.map((s) => s.name)) });
+  if (data.agents && !registeredClients().length) out.push({ tone: "amber", title: "No agent is connected yet", sub: "Register the clients found on this machine in one step", label: "Connect", onclick: () => go("agents", "add") });
+  const broken = (data.agents?.doctor || []).filter((c) => c.registered && (c.repair || c.why || (c.disabled_in || []).length));
+  if (broken.length) out.push({ tone: "grey", title: `${broken[0].name}${broken.length > 1 ? ` and ${broken.length - 1} more` : ""} cannot reach semlith`, sub: broken[0].why || broken[0].repair || "registered but switched off in some folders", label: "Details", onclick: () => go("agents", "health") });
+  const finished = (data.runs?.runs || []).filter((r) => r.status === "done" && r.finished_at && Date.now() / 1000 - r.finished_at < 3600 && r.kind !== "catch-up" && !state.dismissed.has(r.id));
+  for (const r of finished.slice(0, 2))
+    out.push({ tone: "green", title: `${r.store} finished ${r.kind === "compact" ? "compacting" : "indexing"}`, sub: r.kind === "compact" ? "the space is back" : `${plural(r.indexed || r.total || 0, "file")} searchable now`, label: r.kind === "compact" ? "Open" : "Search it", onclick: () => (state.dismissed.add(r.id), r.kind === "compact" ? go("store", r.store) : searchStore(r.store)) });
+  return out;
+}
+
+function readPrefs() {
+  try {
+    return JSON.parse(localStorage.getItem("semlith-prefs") || "{}");
+  } catch (_) {
+    return {};
+  }
+}
+
+function savePrefs(patch) {
+  try {
+    localStorage.setItem("semlith-prefs", JSON.stringify({ ...readPrefs(), ...patch }));
+  } catch (_) {
+    /* private window */
+  }
+}
+
+// -------------------------------------------------------------------- stores
+
+const storesUi = { filter: "", kind: "all" };
+
+VIEWS.stores = {
+  needs: (route) => (route.parts[0] === "inside" ? ["stores", "coverage", "corpus", "ledger"] : ["stores", "runs", "refused"]),
+  live: ["stores", "runs", "refused"],
+  render(route) {
+    const tab = route.parts[0] === "inside" ? "inside" : "list";
+    const all = data.stores?.stores || [];
+    return el(
+      "div",
+      { class: "page" },
+      el(
+        "div",
+        { class: "head" },
+        el("div", { class: "titles" }, el("div", { class: "row nowrap gap10" }, el("div", { class: "h1", text: "Stores" }), el("span", { class: "count-chip", text: plural(all.length, "store") })), el("div", { class: "lead", text: "Each store is one index on this machine — its sources, its model, its own writer." })),
+        el("div", { class: "row" }, btn({ class: "btn", onclick: adoptFlow }, icon(I.folder, 14), "Adopt existing .semlith"), btn({ class: "btn primary", onclick: () => openWizard({}) }, icon(I.plus, 14, { w: 2.2 }), "New store")),
+      ),
+      tabs(
+        [
+          ["list", "All stores"],
+          ["inside", "Inside the index"],
+        ],
+        tab,
+        (t) => go("stores", t === "list" ? undefined : t),
+      ),
+      tab === "list" ? storesList() : insideIndex(),
+    );
+  },
+};
+
+function storesList() {
+  const all = data.stores?.stores || [];
+  const f = storesUi.filter.toLowerCase();
+  const rowsAll = all.filter((s) => (storesUi.kind === "all" || (s.kind || "both") === storesUi.kind) && (!f || s.name.includes(f) || (rootsAll(s) || "").toLowerCase().includes(f)));
+  const view = GRID_VIEWS.get("stores") || { page: 1, per: 10, sort: "name", dir: "asc" };
+  GRID_VIEWS.set("stores", view);
+  const SORT = {
+    name: (s) => s.name,
+    state: (s) => storeState(s).state,
+    files: (s) => s.files || 0,
+    chunks: (s) => s.chunks || 0,
+    disk: (s) => diskOf(s),
+    last: (s) => -(s.last_write || 0),
+  };
+  const sorted = [...rowsAll].sort((a, b) => {
+    const x = SORT[view.sort](a);
+    const y = SORT[view.sort](b);
+    const sign = view.dir === "desc" ? -1 : 1;
+    return (typeof x === "number" ? x - y : String(x).localeCompare(String(y))) * sign;
+  });
+  const pages = Math.max(1, Math.ceil(sorted.length / view.per));
+  view.page = Math.min(view.page, pages);
+  const shown = sorted.slice((view.page - 1) * view.per, view.page * view.per);
+  const files = all.reduce((a, s) => a + (s.files || 0), 0);
+  const chunks = all.reduce((a, s) => a + (s.chunks || 0), 0);
+  const reclaimStores = liveStores().filter((s) => reclaimable(s));
+  const changed = () => repaint();
+  const filterInput = el("input", {
+    value: storesUi.filter,
+    placeholder: "Filter by name or path",
+    "aria-label": "Filter stores",
+    "data-keep": "stores-filter",
+    oninput: (e) => {
+      storesUi.filter = e.target.value;
+      view.page = 1;
+      repaint();
+    },
+  });
+  return el(
+    "div",
+    { class: "stack" },
     el(
       "div",
-      { class: "rows tight" },
-      failed.map((store) =>
+      { class: "row" },
+      el("div", { class: "box w240 full-sm" }, icon(I.searchSm, 14, { w: 1.8 }), filterInput),
+      seg(
+        [
+          ["all", "All"],
+          ["code", "Code"],
+          ["docs", "Docs"],
+          ["both", "Both"],
+        ],
+        storesUi.kind,
+        (k) => ((storesUi.kind = k), (view.page = 1), repaint()),
+        { label: "Kind" },
+      ),
+      el("span", { class: "spacer" }),
+      el("span", { class: "t-mono-sm", text: `${n(files)} files · ${n(chunks)} chunks` }),
+    ),
+    el(
+      "div",
+      { class: "card stbl" },
+      el(
+        "div",
+        { class: "gl-head gl-stores" },
+        sortHead("STORE", "name", view, changed),
+        sortHead("STATE", "state", view, changed),
+        sortHead("FILES", "files", view, changed, "c-files right"),
+        sortHead("CHUNKS", "chunks", view, changed, "c-chunks right"),
+        sortHead("ON DISK", "disk", view, changed, "c-disk right"),
+        el("span", { class: "c-saved", text: "SAVED" }),
+        sortHead("WRITTEN", "last", view, changed, "c-written right"),
+        el("span"),
+      ),
+      !shown.length ? el("div", { class: "empty lg" }, "No store matches. ", lnk("Clear the filter", () => ((storesUi.filter = ""), (storesUi.kind = "all"), repaint()))) : null,
+      shown.map((s) =>
         el(
-          "details",
-          { class: "unreadable" },
+          "div",
+          {
+            class: "gl-row click gl-stores",
+            role: "link",
+            tabindex: "0",
+            onclick: () => go("store", s.name),
+            onkeydown: (e) => (e.key === "Enter" ? go("store", s.name) : null),
+          },
+          el("span", { class: "cellname" }, el("span", { class: "a" }, s.name, " ", el("span", { class: "k", text: kindOf(s) })), el("span", { class: "b ell-start", "data-tip": rootsAll(s) }, el("bdi", { text: rootsLine(s) }))),
+          statePill(s),
+          el("span", { class: "num c-files", text: s.files ? n(s.files) : "—" }),
+          el("span", { class: "num c-chunks", text: s.chunks ? n(s.chunks) : "—" }),
           el(
-            "summary",
-            {},
-            el("span", { class: "name", text: store.store }),
-            el("span", { class: "meta one-line", "data-tip": store.path, text: store.path }),
+            "span",
+            { class: "st-disk c-disk", "data-tip": s.disk ? "On disk" : null, "data-tip-rows": s.disk ? rows([["database", bytes(s.disk.database)], ["vectors", bytes(s.disk.vectors)], ["exact copy", bytes(s.disk.exact)], ["dead", `${(s.disk.dead_percent || 0).toFixed(1)}%`]]) : null },
+            el("span", { class: "mono t-sm", text: s.disk ? bytes(s.disk.total) : "—" }),
+            reclaimable(s) ? el("span", { class: "reclaim", text: `${bytes(reclaimable(s))} reclaimable` }) : null,
           ),
-          el("p", { class: "subtitle", text: store.remedy }),
-          // The whole chain, behind the disclosure. It is the evidence, not
-          // the message: `database disk image is malformed: Error code 11: …`
-          // is what a reader pastes into an issue, not what tells them what
-          // happened.
-          el("pre", { class: "code", text: store.error }),
+          el("span", { class: "txt-dim c-saved", text: savedLine(s) }),
+          el("span", { class: "num-dim c-written", text: s.last_write ? ago(s.last_write) : "never" }),
+          (() => {
+            const m = moreButton(storeMenu(s), `Actions for ${s.name}`);
+            m.addEventListener("keydown", (e) => e.stopPropagation());
+            return m;
+          })(),
+        ),
+      ),
+      el(
+        "div",
+        { class: "card-foot" },
+        el("span", { class: "grow", text: `${sorted.length ? `${(view.page - 1) * view.per + 1}–${Math.min(sorted.length, view.page * view.per)}` : "0"} of ${plural(sorted.length, "store")} · ${liveStores().every((s) => s.watching) ? "every one watched" : `${liveStores().filter((s) => s.watching).length} watched`} · one writer each` }),
+        reclaimStores.length ? btn({ class: "btn xs", onclick: () => compactStores(reclaimStores.map((s) => s.name)) }, `Compact ${reclaimStores.length} · reclaim ${bytes(reclaimStores.reduce((a, s) => a + reclaimable(s), 0))}`) : null,
+        pager(view, pages, changed),
+      ),
+    ),
+  );
+}
+
+// ------------------------------------------------------------ inside the index
+
+const PALETTE = ["#F0A43C", "#4C7088", "#3E9A6E", "#2F4F68", "#B07A2A", "#8A9DAB"];
+
+function insideIndex() {
+  const corpus = (data.corpus?.stores || []).filter((c) => !c.error);
+  const sum = (k) => corpus.reduce((a, c) => a + (c[k] || 0), 0);
+  const files = sum("files");
+  const lines = sum("lines");
+  const words = sum("words");
+  const chars = sum("characters");
+  const langs = {};
+  for (const c of corpus) for (const l of c.languages || []) langs[l.language] = (langs[l.language] || 0) + l.lines;
+  const langList = Object.entries(langs).sort((a, b) => b[1] - a[1]);
+  const top = langList.slice(0, 8);
+  const pages = Math.round(words / 500);
+  const minutes = words / 250;
+  const kinds = {};
+  for (const c of corpus) for (const k of c.kinds || []) {
+    const cur = (kinds[k.name] = kinds[k.name] || { count: 0, units: 0, unit: k.unit });
+    cur.count += k.count;
+    cur.units += k.units;
+  }
+  const longest = corpus.map((c) => c.longest_file).filter(Boolean).sort((a, b) => b.lines - a.lines)[0];
+  const first = Math.min(...corpus.map((c) => c.first_indexed || Infinity));
+  const last = Math.max(...corpus.map((c) => c.last_indexed || 0));
+  const symbols = sum("symbols");
+  const tiers = {};
+  for (const c of corpus) for (const t of c.tiers || []) tiers[t.name] = (tiers[t.name] || 0) + t.count;
+  const edgesAll = Object.values(tiers).reduce((a, b) => a + b, 0);
+  const settled = (tiers.extracted || 0) + (tiers.resolved || 0);
+  const unresolved = {};
+  for (const c of corpus) for (const u of c.unresolved_names || []) unresolved[u.name] = (unresolved[u.name] || 0) + u.count;
+  const dups = {};
+  for (const c of corpus) for (const u of c.ambiguous_worst || []) dups[u.name] = (dups[u.name] || 0) + u.count;
+  const months = {};
+  for (const c of corpus) for (const m of c.months || []) months[m.month] = (months[m.month] || 0) + m.chunks;
+  const runsDone = (data.runs?.history || []).length;
+  const median = Math.max(0, ...corpus.map((c) => c.median_query_ms || 0));
+  const ledger = data.ledger || {};
+  const comment = sum("comment_lines");
+  const blank = sum("blank_lines");
+  const ago12 = [];
+  const now = new Date();
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    ago12.push(d.toISOString().slice(0, 7));
+  }
+  const maxMonth = Math.max(1, ...ago12.map((m) => months[m] || 0));
+  const fmtDay = (unix) => (isFinite(unix) && unix ? new Date(unix * 1000).toLocaleDateString() : "—");
+  const errs = (data.corpus?.stores || []).filter((c) => c.error);
+  return el(
+    "div",
+    { class: "stack" },
+    el("div", { class: "muted t-sm", text: `Measured from the stores themselves on every read, not estimated — ${plural(corpus.length, "store")}, ${n(files)} files.` }),
+    errs.length ? el("div", { class: "notice red" }, el("span", { class: "sub", text: `${errs.map((e) => e.store).join(", ")} could not be measured: ${errs[0].error}` })) : null,
+    el(
+      "div",
+      { class: "q4" },
+      kpi("Lines of code", n(lines), "counted, comments and blanks separated out"),
+      kpi("Words indexed", n(words), "code, prose, slides, sheets and notebooks"),
+      kpi("If it were printed", `${n(pages)} pp`, median ? `a stack of A4 you can search in ${(median / 1000).toFixed(1)} s` : "at 500 words a page"),
+      kpi("Reading time", minutes > 1440 ? `${n(minutes / 1440)} days` : `${n(minutes / 60)} hours`, "non-stop at 250 words a minute"),
+    ),
+    el(
+      "div",
+      { class: "split s-14-1-1 stretch" },
+      el(
+        "div",
+        { class: "card pad span2" },
+        el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "Language mix, by line" }), meta(`${n(lines)} lines · ${plural(langList.length, "language")}`)),
+        el(
+          "div",
+          { class: "segbar" },
+          langList.map(([name, v], i) => {
+            const seg2 = el("i", { "data-tip": i < 8 ? name : "a smaller language", "data-tip-color": PALETTE[i % PALETTE.length], "data-tip-rows": rows([["lines", n(v)], ["share", pct(v, lines)]]) });
+            seg2.style.flex = `${Math.max(0.3, (v / lines) * 100)} 0 0`;
+            seg2.style.background = PALETTE[i % PALETTE.length];
+            return seg2;
+          }),
+        ),
+        el(
+          "div",
+          { class: "col gap6" },
+          top.map(([name, v], i) => {
+            const c = PALETTE[i % PALETTE.length];
+            const sw = el("span", { class: "dot sq" });
+            sw.style.background = c;
+            const b = bar((v / (top[0][1] || 1)) * 100);
+            b.firstChild.style.background = c;
+            b.setAttribute("data-tip", name);
+            b.setAttribute("data-tip-color", c);
+            b.setAttribute("data-tip-rows", rows([["lines", n(v)], ["share of all lines", pct(v, lines)], ["rank", `${i + 1} of ${langList.length}`]]));
+            return el("div", { class: "lang-row" }, sw, el("span", { text: name }), b, el("span", { class: "right", text: n(v) }), el("span", { class: "pct", text: pct(v, lines) }));
+          }),
+        ),
+        el("div", { class: "grow" }),
+        el("div", { class: "muted t-xs", text: `${n(corpus.reduce((a, c) => Math.max(a, c.languages_with_edges || 0), 0))} of these languages carry graph edges as well as search.` }),
+      ),
+      factCard("What is in the prose", Object.entries(kinds).slice(0, 5).map(([k, v]) => [k, `${plural(v.count, "file")}${v.unit && v.units ? ` · ${n(v.units)} ${v.unit}` : ""}`])),
+      factCard("Shape of the code", [
+        ["Average line", lines ? `${Math.round(chars / lines)} chars` : "—"],
+        ["Comment lines", pct(comment, lines)],
+        ["Blank lines", pct(blank, lines)],
+        ["Deepest path", `${Math.max(0, ...corpus.map((c) => c.deepest_path || 0))} folders`],
+        ["Longest file", longest ? `${n(longest.lines)} lines` : "—"],
+      ]),
+      factCard("Time in the corpus", [
+        ["First read", fmtDay(first)],
+        ["Newest write", last ? ago(last) : "—"],
+        ["Median retrieval", median ? `${n(median)} ms` : "no retrieval yet"],
+        ["Runs remembered", String(runsDone)],
+        ["Stores", String(corpus.length)],
+      ]),
+      factCard("What the graph holds", [
+        ["Symbols", n(symbols)],
+        ["Settled edges", pct(settled, edgesAll)],
+        ["Unresolved calls", n(tiers.unresolved || sum("unresolved"))],
+        ["Names defined twice or more", n(sum("ambiguous_names"))],
+        ["Edges", n(sum("edges"))],
+      ]),
+    ),
+    el(
+      "div",
+      { class: "split s-1-14 stretch" },
+      el(
+        "div",
+        { class: "card pad" },
+        el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "Chunks added per month" }), el("span", { class: "t-mono-sm", text: "when semlith read it" })),
+        el(
+          "div",
+          { class: "months" },
+          ago12.map((m) => {
+            const v = months[m] || 0;
+            const bar2 = el("i", { class: v ? "" : "zero" });
+            bar2.style.height = v ? `${Math.max(3, (v / maxMonth) * 100)}%` : "2px";
+            return el("div", { "data-tip": monthName(m), "data-tip-rows": rows([["chunks added", n(v)]]) }, bar2);
+          }),
+        ),
+        el("div", { class: "month-labels" }, ago12.map((m, i) => el("span", { text: i % 3 === 0 || i === 11 ? monthName(m).slice(0, 3) : "" }))),
+      ),
+      el(
+        "div",
+        { class: "card pad" },
+        el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "Graph health" }), el("span", { class: "t-mono-sm", text: "call edges, every open store" })),
+        el(
+          "div",
+          { class: "segbar" },
+          [
+            ["extracted", "var(--blue-ink)", "read straight from the syntax tree"],
+            ["resolved", "var(--green)", "the name matched exactly one definition"],
+            ["ambiguous", "var(--accent)", "the name has several definitions"],
+            ["unresolved", "var(--line)", "no definition in any open store"],
+          ].map(([k, c, means]) => {
+            const s2 = el("i", { "data-tip": k, "data-tip-color": c, "data-tip-rows": rows([["edges", n(tiers[k] || 0)], ["share", pct(tiers[k] || 0, edgesAll)], ["means", means]]) });
+            s2.style.flex = `${Math.max(0.2, ((tiers[k] || 0) / Math.max(1, edgesAll)) * 100)} 0 0`;
+            s2.style.background = c;
+            return s2;
+          }),
+        ),
+        el(
+          "div",
+          { class: "legend" },
+          [
+            ["extracted", "var(--blue-ink)"],
+            ["resolved", "var(--green)"],
+            ["ambiguous", "var(--accent)"],
+            ["unresolved", "var(--line)"],
+          ].map(([k, c]) => {
+            const sw = el("span", { class: "dot sq" });
+            sw.style.background = c;
+            return el("span", {}, sw, `${k} ${n(tiers[k] || 0)}`);
+          }),
+        ),
+        el(
+          "div",
+          { class: "auto-fit m170 tb-line" },
+          el("div", { class: "col gap6" }, el("span", { class: "eyebrow sm", text: `UNRESOLVED · ${pct(tiers.unresolved || 0, edgesAll)}` }), el("div", { class: "row gap4" }, Object.entries(unresolved).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k]) => el("span", { class: "tag", text: k }))), el("span", { class: "muted t-xs", text: "Calls into code no open store holds. Hidden from views." })),
+          el("div", { class: "col gap4" }, el("span", { class: "eyebrow sm", text: `SEVERAL DEFINITIONS · ${n(sum("ambiguous_names"))}` }), Object.entries(dups).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => el("div", { class: "fact-row" }, el("span", { class: "mono ink2", text: k }), el("span", { class: "mono muted", text: n(v) })))),
+        ),
+      ),
+    ),
+    el(
+      "div",
+      { class: "auto-fit m240" },
+      blurb(`${n(chars)} characters`, "Every keystroke in the corpus, kept on this machine and nowhere else."),
+      blurb(median ? `${(median / 1000).toFixed(1)} s median` : "no retrieval yet", "The middle of every retrieval this machine has recorded — by meaning, not just words."),
+      blurb(ledger.ratio ? `${ledger.ratio.toFixed(1)}× fewer tokens` : "no savings yet", ledger.ratio ? `What agents read versus reading those files whole · coverage ${ledger.coverage}% · ${ledger.tier}` : "Counted once an agent asks something."),
+    ),
+  );
+}
+
+function factCard(title, pairs) {
+  return el("div", { class: "card pad" }, el("div", { class: "card-t", text: title }), pairs.map(([k, v]) => el("div", { class: "fact-row" }, el("span", { class: "k", text: k }), el("span", { class: "v", text: v }))));
+}
+
+function blurb(v, t) {
+  return el("div", { class: "blurb" }, el("span", { class: "v", text: v }), el("span", { class: "t", text: t }));
+}
+
+function monthName(ym) {
+  const [y, m] = ym.split("-").map(Number);
+  return `${["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][m - 1]} ${y}`;
+}
+
+// --------------------------------------------------------------- store detail
+
+const sdUi = { glob: "", type: "all", lang: "all", view: "list", decQ: "", decOut: "all", decBy: "all", histOpen: {}, rename: {} };
+
+VIEWS.store = {
+  needs: () => ["stores", "runs", "refused", "decisions", "detail", "ledger"],
+  live: ["stores", "runs", "refused", "ledger"],
+  // The Runs and Settings tabs draw synchronously, so a live update patches
+  // them in place: the run card's buttons and a half-typed name survive it.
+  morph: (route) => ["runs", "settings"].includes(route.parts[1]),
+  render(route, holder) {
+    const name = route.parts[0];
+    const tab = route.parts[1] || "overview";
+    const s = store(name);
+    if (!s) {
+      return el("div", { class: "page" }, btn({ class: "back lnk", onclick: () => go("stores") }, icon(I.back, 13, { w: 1.8 }), "All stores"), el("div", { class: "card" }, empty(`There is no store called ${name} on this machine${(data.stores?.stores || []).length ? "" : " yet"}. It may have been renamed or forgotten.`, "lg")));
+    }
+    const r = activeRun(name);
+    const review = reviewCount(name);
+    const st = storeState(s);
+    const isEmpty = !s.files && !r && !s.missing;
+    const page = el(
+      "div",
+      { class: "page tight" },
+      btn({ class: "back lnk", onclick: () => go("stores") }, icon(I.back, 13, { w: 1.8 }), "All stores"),
+      el(
+        "div",
+        { class: "row gap12" },
+        el("span", { class: "icon-tile s38" }, icon(I.layers, 18, { w: 1.6 })),
+        el("div", { class: "col gap2 grow" }, el("div", { class: "row nowrap gap10" }, el("span", { class: "sd-name", text: s.name }), statePill(s)), el("span", { class: "row gap6 min0 t-mono-sm" }, el("span", { class: "ell-start min0", "data-tip": rootsAll(s) }, el("bdi", { text: rootsLine(s) })), el("span", { class: "nowrap", text: `· ${kindOf(s)}` }))),
+        el(
+          "div",
+          { class: "row" },
+          btn({ class: "btn md", onclick: () => searchStore(name) }, icon(I.searchSm, 16, { w: 1.9 }), "Search it"),
+          btn({ class: "btn md", disabled: r || isEmpty || s.missing || rootsGone(s) ? true : null, "data-tip": rootsGone(s) ? "Every folder this store reads from is gone — re-point it on Settings" : null, onclick: () => reindexStore(name) }, "Re-index"),
+          btn({ class: "btn md dark", onclick: () => openWizard({ store: name }) }, icon(I.plus, 15, { w: 2.2 }), "Add sources"),
+        ),
+      ),
+      tabs(
+        [
+          ["overview", "Overview"],
+          ["files", "Files"],
+          ["review", "Review", review || "", "amber"],
+          ["runs", "Runs", r ? "1" : "", "blue"],
+          ["settings", "Settings"],
+        ],
+        tab,
+        (t) => go("store", name, t === "overview" ? undefined : t),
+      ),
+    );
+    if (isEmpty && tab === "overview") {
+      const draft = (s.roots || []).length > 0;
+      page.append(
+        el(
+          "div",
+          { class: "drop-hint" },
+          el("span", { class: "icon-tile" }, icon(I.upload, 19, { w: 1.7 })),
+          el("div", { class: "col gap2", }, el("span", { class: "t-b", text: draft ? "Sources added, not indexed yet" : "This store is empty" }), el("span", { class: "muted t-sm", text: draft ? `${plural(s.roots.length, "source")} waiting. Indexing runs in the background.` : "Add folders, files or a URL. Semlith scans them and asks before anything sensitive goes in." })),
+          el("span", { class: "spacer" }),
+          btn({ class: "btn md primary", onclick: () => (draft ? reindexStore(name) : openWizard({ store: name })) }, draft ? "Index now" : "Add sources"),
+        ),
+      );
+    }
+    const body = { overview: sdOverview, files: sdFiles, review: sdReview, runs: sdRuns, settings: sdSettings }[tab] || sdOverview;
+    page.append(body(s, holder));
+    return page;
+  },
+};
+
+function sdOverview(s) {
+  const asks = (data.ledger?.rows || []).filter((r) => r.store === s.name).slice(0, 6);
+  const readers = Object.entries(detailOf(s).readers_count || {}).sort((a, b) => b[1] - a[1]);
+  const langsC = Object.entries(detailOf(s).languages_count || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  const v = s.savings;
+  return el(
+    "div",
+    { class: "stack" },
+    el(
+      "div",
+      { class: "q4" },
+      kpi("Files", n(s.files || 0), s.files ? `read by ${plural(s.readers || readers.length, "reader")} · ${n(s.lines || 0)} lines` : "nothing yet"),
+      kpi("Chunks", n(s.chunks || 0), s.chunks ? "searchable on this machine" : "nothing indexed yet"),
+      kpi("On disk", s.disk ? bytes(s.disk.total) : "—", reclaimable(s) ? `${bytes(reclaimable(s))} reclaimable` : "nothing to reclaim"),
+      kpi("Saved for agents", v && v.total ? `${short(v.net_tokens)} tokens` : "—", v && v.total ? `coverage ${v.coverage}% · ${v.tier}` : "counted once an agent asks"),
+    ),
+    el(
+      "div",
+      { class: "split s-14-1 stretch" },
+      el(
+        "div",
+        { class: "card flexcol" },
+        el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Sources" }), lnk("+ Add", () => openWizard({ store: s.name }))),
+        (s.roots || []).length
+          ? s.roots.map((r) => {
+              const watching = r.present && s.watching && s.watch !== false;
+              return el(
+                "div",
+                { class: "root-row" },
+                el("span", { class: "icon-tile s28" }, icon(I.folder, 14, { w: 1.6 })),
+                el("span", { class: "col" }, pathSpan(tilde(r.path), "mono t-sm", r.path), el("span", { class: "muted t-xs", text: !r.present ? "this folder is not there any more" : s.last_write ? `last change ${ago(s.last_write)}` : "not indexed yet" })),
+                pill(!r.present ? "missing" : watching ? "watching" : s.files ? "not watching" : "waiting", !r.present ? "red" : watching ? "green" : "grey"),
+              );
+            })
+          : el("div", { class: "root-row" }, el("span", { class: "icon-tile s28" }, icon(I.folder, 14, { w: 1.6 })), el("span", { class: "muted t-sm", text: "no sources yet" }), el("span")),
+        el("div", { class: "grow" }),
+        el("div", { class: "card-foot", text: shortPath(`${s.dir}/store.db`, 64), "data-tip": `${s.dir}/store.db` }),
+      ),
+      el(
+        "div",
+        { class: "card pad" },
+        el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "Read as" }), el("span", { class: "t-mono-sm", text: "which reader parsed each file" })),
+        readers.length
+          ? readers.slice(0, 5).map(([k, c]) => {
+              const b = bar((c / Math.max(1, s.files)) * 100);
+              b.setAttribute("data-tip", `Read as ${k}`);
+              b.setAttribute("data-tip-rows", rows([["share of files", pct(c, s.files)], ["files", n(c)]]));
+              return el("div", { class: "reader-row" }, el("span", { text: k }), b, el("span", { class: "right muted", text: pct(c, s.files) }));
+            })
+          : el("div", { class: "muted t-sm", text: s.files ? `${plural(s.readers || 0, "reader")} · ${plural(s.formats || 0, "format")}` : "Nothing read yet." }),
+        el("div", { class: "rule-line" }),
+        el("div", { class: "row gap6" }, langsC.map(([k, c]) => el("span", { class: "tag lg" }, k, el("span", { class: "muted", text: pct(c, s.files) })))),
+      ),
+    ),
+    el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "What agents asked this store" }), v && v.total ? meta(`${short(v.net_tokens)} saved · ${v.coverage}% · ${v.tier}`) : null, lnk("Ledger →", () => go("ledger"))),
+      !asks.length ? empty(`Nothing yet. Every query an agent runs against ${s.name} will be listed here with what it was sent.`) : null,
+      asks.length
+        ? el(
+            "div",
+            { class: "gl-scroll" },
+            el(
+              "div",
+              { class: "minw480" },
+              asks.map((a) => el("div", { class: "gl-row dense gl-asks" }, el("span", { class: "muted", text: clock(a.at), "data-tip": a.when }), el("span", { class: "ink2 ell", text: a.client }), el("span", { class: "ell t-sm", text: a.query, "data-tip": a.query, "data-tip-full": "" }), el("span", { class: "muted right", text: plural(a.hits, "hit") }))),
+            ),
+          )
+        : null,
+    ),
+  );
+}
+
+const FILE_TYPES = [
+  ["all", "All"],
+  ["tree-sitter", "code"],
+  ["text", "text"],
+  ["pdf", "pdf"],
+  ["office", "office"],
+  ["image", "image"],
+];
+
+function sdFiles(s, holder) {
+  const host = el("div", { class: "stack" });
+  const globInput = el("input", {
+    class: "mono",
+    value: sdUi.glob,
+    placeholder: "path or glob, e.g. src/**",
+    "aria-label": "Path or glob",
+    "data-keep": "sd-glob",
+    oninput: (e) => {
+      sdUi.glob = e.target.value;
+      clearTimeout(sdFiles.t);
+      sdFiles.t = setTimeout(reload, 220);
+    },
+  });
+  const langs = Object.keys(detailOf(s).languages_count || {}).sort();
+  const langSel = dropdown({ label: "Language", value: sdUi.lang || "all", options: [["all", "All languages"], ...langs.map((l) => [l, l])], onChange: (v) => ((sdUi.lang = v), reload()) });
+  const listHost = el("div", {});
+  const chipsHost = el("div", { class: "row gap6" });
+  const segHost = el("div", {});
+  const toolbar = el("div", { class: "row" }, el("div", { class: "box w240 full-sm" }, icon(I.searchSm, 14, { w: 1.8 }), globInput), chipsHost, langSel, el("span", { class: "spacer" }), segHost);
+  // Repainted on every reload, so the pressed chip and the view are what the
+  // list shows. The tree reads folders, not filters, so it hides them. The
+  // glob field stays put, so typing in it never loses focus.
+  function paintBar() {
+    const tree = sdUi.view === "tree";
+    langSel.hidden = tree;
+    chipsHost.hidden = tree;
+    fill(chipsHost, FILE_TYPES.map(([v, label]) => btn({ class: "chip sm", "aria-pressed": String(sdUi.type === v), onclick: () => ((sdUi.type = v), reload()) }, label)));
+    fill(
+      segHost,
+      seg(
+        [
+          ["list", "List"],
+          ["tree", "Tree"],
+        ],
+        sdUi.view,
+        (v) => ((sdUi.view = v), reload()),
+      ),
+    );
+  }
+  host.append(toolbar, listHost);
+  const view = GRID_VIEWS.get(`files:${s.name}`) || { page: 1, per: 25, sort: "path", dir: "asc", sel: new Set(), all: false };
+  GRID_VIEWS.set(`files:${s.name}`, view);
+  let rowsNow = [];
+  let total = 0;
+  const g = grid({
+    key: `files:${s.name}`,
+    server: true,
+    per: 25,
+    select: true,
+    id: (r) => r.path,
+    caption: `Files in ${s.name}`,
+    empty: "No file matches.",
+    loadingText: "Reading the file list…",
+    onClear: () => {
+      sdUi.glob = "";
+      sdUi.type = "all";
+      sdUi.lang = "all";
+      globInput.value = "";
+      reload();
+    },
+    foot: "Forget drops a file's chunks; the file on disk is untouched",
+    onQuery: () => reload(true),
+    columns: [
+      { key: "path", label: "Path", cls: "m", sort: (r) => r.path, render: (r) => pathSpan(relTo(s, r.path), "", r.path) },
+      { key: "reader", label: "Read as", sort: (r) => r.reader, render: (r) => el("span", { class: "tag", text: readAs(r) }) },
+      { key: "lang", label: "Language", cls: "ms", sort: (r) => r.lang, render: (r) => r.lang || "—" },
+      { key: "lines", label: "Lines", cls: "m r", sort: (r) => r.lines, render: (r) => n(r.lines) },
+      { key: "chunks", label: "Chunks", cls: "m r", sort: (r) => r.chunks, render: (r) => n(r.chunks) },
+      { key: "indexed", label: "Indexed", cls: "ms nowrap", firstDir: "desc", sort: (r) => r.indexed_at, render: (r) => ago(r.indexed_at) },
+      { key: "x", label: "", cls: "r", render: (r) => lnk("Forget", () => forgetFiles(s, [r.path]), "amber") },
+    ],
+    actions: (sel, clear, how) => {
+      // "All matching" is every file the filters match, read again in full.
+      const paths = async () => (how.all ? ((await api(`/api/files?${filesParams(0, how.total)}`)).files || []).map((f) => f.path) : sel);
+      return [
+        btn({
+          class: "btn xs",
+          onclick: async () => {
+            const list = await paths();
+            copy(list.slice(0, 2000).join("\n"), `Copied ${plural(Math.min(list.length, 2000), "path")}${list.length > 2000 ? " (first 2,000)" : ""}`);
+            clear();
+          },
+        }, "Copy paths"),
+        btn({ class: "btn xs", disabled: activeRun(s.name) ? true : null, onclick: async () => (reindexStore(s.name, await paths()), clear()) }, "Re-index"),
+        btn({ class: "btn xs danger", onclick: async () => (await forgetFiles(s, await paths())) && clear() }, "Forget"),
+      ];
+    },
+  });
+
+  function filesParams(offset, limit) {
+    const params = new URLSearchParams({ store: s.name, limit: String(limit), offset: String(offset), sort: view.sort || "path", dir: view.dir || "asc" });
+    const glob = sdUi.glob.trim();
+    if (glob) params.append("path", glob.includes("*") ? glob : `**${glob}**`);
+    if (sdUi.lang !== "all") params.append("lang", sdUi.lang);
+    if (sdUi.type === "tree-sitter") for (const l of codeLangs()) params.append("lang", l);
+    else if (sdUi.type !== "all") for (const ext of READER_EXTS[sdUi.type] || []) params.append("ext", ext);
+    return params;
+  }
+
+  async function reload(fromGrid) {
+    if (!fromGrid) {
+      // New filters, new result set: a selection of the old one goes.
+      view.page = 1;
+      view.sel.clear();
+      view.all = false;
+    }
+    paintBar();
+    if (sdUi.view === "tree") {
+      fill(listHost, filesTree(s));
+      return;
+    }
+    fill(listHost, el("div", { class: "card" }, g.node));
+    g.loading();
+    const mine = (sdFiles.gen = (sdFiles.gen || 0) + 1);
+    try {
+      const out = await api(`/api/files?${filesParams((view.page - 1) * view.per, view.per)}`);
+      if (mine !== sdFiles.gen) return;
+      rowsNow = out.files || [];
+      total = out.total || 0;
+      g.update(rowsNow, total);
+    } catch (e) {
+      fill(listHost, el("div", { class: "card" }, errorBox(e.message)));
+    }
+  }
+  holder.onData = (keys) => keys.includes("stores") && sdUi.view === "list" && reload(true);
+  reload(true);
+  return host;
+}
+
+/** Languages the graph reads with tree-sitter, prose formats aside. */
+function codeLangs() {
+  return (data.about?.graph_languages || []).filter((l) => !["markdown", "json", "yaml", "toml", "html", "css"].includes(l));
+}
+
+/** What parsed a file, as the design names it: code goes through tree-sitter. */
+function readAs(r) {
+  return r.reader === "text" && codeLangs().includes(r.lang) ? "tree-sitter" : r.reader;
+}
+
+/** Extensions per reader, for the type chips, from the readers' own lists. */
+const READER_EXTS = {
+  pdf: ["pdf"],
+  office: ["docx", "xlsx", "pptx", "odt", "ods", "odp", "rtf", "epub", "eml", "mbox"],
+  image: ["png", "jpg", "jpeg", "gif", "webp"],
+  text: ["md", "txt", "rst", "csv", "json", "yaml", "yml", "toml", "html", "xml", "ipynb"],
+};
+
+function relTo(s, path) {
+  for (const r of (s.roots || []).map((x) => x.path).sort((a, b) => b.length - a.length)) if (path.startsWith(r)) return path.slice(r.length).replace(/^[\\/]/, "");
+  return tilde(path);
+}
+
+async function forgetFiles(s, paths) {
+  const ok = await ask({
+    title: paths.length === 1 ? `Forget ${baseName(paths[0])}?` : `Forget ${paths.length} files?`,
+    body: "Their chunks, vectors and graph edges leave the store. The files on disk are untouched, and a watched file comes back the next time it changes.",
+    ok: "Forget",
+    danger: true,
+  });
+  if (!ok) return false;
+  const out = await act(() => post("/api/forget", { store: s.name, paths }), `Forgot ${plural(paths.length, "file")} — chunks dropped, files on disk untouched`);
+  if (out) await load("stores", true), repaint();
+  return !!out;
+}
+
+function filesTree(s) {
+  const box = el("div", { class: "card", "data-scroll-keep": "tree" });
+  const params = (dir) => {
+    const p = new URLSearchParams({ tree: "1", format: "json", sort: "name", store: s.name });
+    if (dir) p.set("dir", dir);
+    return `/api/files?${p}`;
+  };
+  function folder(where, dirPath, name, metaText, level, preload) {
+    const kids = el("div", { hidden: true });
+    let loaded = false;
+    const head = btn({ class: "tree-row t-m", "aria-expanded": "false" }, el("span", { class: "c", text: "▸" }), el("span", { class: "grow", text: name }), el("span", { class: "m", text: metaText || "" }));
+    head.style.paddingLeft = `${14 + level * 20}px`;
+    async function open(want) {
+      const on = want === undefined ? kids.hidden : want;
+      head.setAttribute("aria-expanded", String(on));
+      head.firstChild.textContent = on ? "▾" : "▸";
+      kids.hidden = !on;
+      if (!on || loaded) return;
+      loaded = true;
+      fill(kids, el("div", { class: "empty", text: "Reading…" }));
+      try {
+        const out = await api(params(dirPath));
+        const mine = (out.roots || []).find((r) => r.root === where.root) || (out.roots || [])[0];
+        children(kids, where, dirPath, mine, level + 1);
+      } catch (e) {
+        loaded = false;
+        fill(kids, errorBox(e.message));
+      }
+    }
+    head.addEventListener("click", () => open());
+    if (preload) {
+      loaded = true;
+      children(kids, where, dirPath, preload, level + 1);
+      kids.hidden = false;
+      head.setAttribute("aria-expanded", "true");
+      head.firstChild.textContent = "▾";
+    }
+    return el("div", {}, head, kids);
+  }
+  function children(node, where, dirPath, entry, level) {
+    const under = (nm) => (dirPath ? `${dirPath}/${nm}` : nm);
+    const items = [];
+    for (const d of entry?.dirs || []) items.push(folder(where, under(d.name), d.name, plural(d.files, "file"), level));
+    for (const f of entry?.files || []) {
+      const row = el("div", { class: "tree-row", title: `${where.root}/${under(f.name)}` }, el("span", { class: "c" }), el("span", { class: "grow", text: f.name }), el("span", { class: "m", text: f.lines ? `${n(f.lines)} lines · ${plural(f.symbols || 0, "symbol")}` : plural(f.chunks || 0, "chunk") }));
+      row.style.paddingLeft = `${14 + level * 20}px`;
+      items.push(row);
+    }
+    for (const o of entry?.not_indexed || []) {
+      const row = el("div", { class: "tree-row muted" }, el("span", { class: "c" }), el("span", { class: "grow", text: o.name }), el("span", { class: "m", text: `not indexed — ${o.why}` }));
+      row.style.paddingLeft = `${14 + level * 20}px`;
+      items.push(row);
+    }
+    if (entry?.more) items.push(el("div", { class: "empty", text: `+ ${n(entry.more)} more in this folder` }));
+    if (!items.length) items.push(el("div", { class: "empty", text: "Empty." }));
+    fill(node, items);
+  }
+  (async () => {
+    fill(box, el("div", { class: "empty", text: "Reading…" }));
+    try {
+      const out = await api(params(""));
+      const roots = out.roots || [];
+      fill(box, roots.length ? roots.map((r) => folder({ root: r.root }, "", tilde(r.root), null, 0, r)) : empty("Nothing indexed yet."));
+    } catch (e) {
+      fill(box, errorBox(e.message));
+    }
+  })();
+  return box;
+}
+
+function decisionsOf(name) {
+  const entry = (data.refused?.stores || []).find((x) => x.store === name) || {};
+  const made = (data.decisions?.stores || []).find((x) => x.store === name);
+  return made ? { ...entry, decisions: made.rows || [] } : entry;
+}
+
+// Reader and language counts cost a pass over each store's files, so the
+// store page reads them on its own instead of every stores poll.
+function detailOf(s) {
+  return (data.detail?.stores || []).find((x) => x.name === s.name) || s;
+}
+
+const OUTCOME_TONE = { accepted: "blue", "never indexed": "red", "redacted · indexed": "amber", "read as image": "green", "kept out": "grey", skipped: "grey" };
+
+function sdReview(s, holder) {
+  const entry = decisionsOf(s.name);
+  const rowsAll = entry.rows || [];
+  const pending = rowsAll.filter((r) => r.reviewable && !r.accepted && !r.kept_out).map((r) => ({ ...r, risk: riskOf(r) })).sort((a, b) => b.risk - a.risk);
+  const band = (r) => (r >= 70 ? "high" : r >= 30 ? "medium" : "low");
+  const decide = async (files, decision) => {
+    const out = await act(() => post("/api/refused/decide", { store: s.name, files, decision }), { in: `Accepted — ${plural(files.length, "file")} indexed on the next pass`, redact: `Redacted — ${plural(files.length, "file")} indexed without the values`, out: `Kept out — ${files.length === 1 ? "it stays" : "they stay"} refused`, reset: `Undone — ${plural(files.length, "file")} back to waiting for you` }[decision]);
+    if (out) await loadMany(["refused", "decisions", "stores", "runs"], true), repaint();
+  };
+  const sel = (sdReview.sel[s.name] = sdReview.sel[s.name] || new Set());
+  // The same panel the wizard's review uses: filter by risk, take every
+  // suggestion at once, and a list that scrolls inside its card rather than
+  // stretching the page by hundreds of rows.
+  const risk = sdReview.risk[s.name] || "any";
+  const shown = pending.filter((d) => risk === "any" || band(d.risk) === risk);
+  const cnt = (b) => pending.filter((d) => b === "any" || band(d.risk) === b).length;
+  const SUGGEST = { out: "Keep it out", redact: "Redact & index", in: "Index it" };
+  const applySuggestions = async () => {
+    const by = {};
+    for (const d of shown) (by[d.suggest || "out"] = by[d.suggest || "out"] || []).push(d.path);
+    for (const [decision, files] of Object.entries(by)) {
+      const out = await act(() => post("/api/refused/decide", { store: s.name, files, decision }), null);
+      if (!out) break;
+    }
+    toast(`Applied suggestions to ${plural(shown.length, "file")} — undo any one below`);
+    sel.clear();
+    await loadMany(["refused", "decisions", "stores", "runs"], true);
+    repaint();
+  };
+  const pendingCard = pending.length
+    ? el(
+        "div",
+        { class: "card accent-edge" },
+        el("div", { class: "card-h amber" }, el("span", { class: "card-t grow amber-ink", text: "Waiting for your decision" }), el("span", { class: "card-meta amber-ink", text: `${plural(pending.length, "file")} · refused until you decide` })),
+        el(
+          "div",
+          { class: "filterbar" },
+          seg(
+            [
+              ["any", "Any risk", cnt("any")],
+              ["high", "High", cnt("high")],
+              ["medium", "Medium", cnt("medium")],
+              ["low", "Low", cnt("low")],
+            ],
+            risk,
+            (v) => ((sdReview.risk[s.name] = v), sel.clear(), repaint()),
+          ),
+          el("span", { class: "spacer" }),
+          shown.length ? btn({ class: "btn sm", onclick: applySuggestions, "data-tip": "Each file takes the decision suggested beside it; every one is logged and can be undone" }, `Apply suggestions to ${n(shown.length)}`) : null,
+        ),
+        el(
+          "div",
+          { class: "gl-scroll" },
+          el(
+            "div",
+            { class: "minw780" },
+            el(
+              "div",
+              { class: "dec-grid head" },
+              checkbox(shown.length && shown.every((d) => sel.has(d.path)) ? true : shown.some((d) => sel.has(d.path)) ? "mixed" : false, (on) => (shown.forEach((d) => (on ? sel.add(d.path) : sel.delete(d.path))), repaint()), "Select all shown"),
+              el("span", { text: `FILE · ${n(shown.length)} shown · highest risk first` }),
+              el("span", { text: "RISK IF INDEXED" }),
+              el("span", { text: "DECISION" }),
+            ),
+            sel.size
+              ? el(
+                  "div",
+                  { class: "selbar" },
+                  el("span", { class: "what", text: `${plural(sel.size, "file")} selected` }),
+                  lnk("Clear", () => (sel.clear(), repaint())),
+                  el("span", { class: "spacer" }),
+                  btn({ class: "btn sm", onclick: () => decide([...sel.values()], "out").then(() => sel.clear()) }, "Keep out"),
+                  btn({ class: "btn sm amber", onclick: () => decide([...sel.values()], "redact").then(() => sel.clear()) }, "Redact & index"),
+                  btn({ class: "btn sm dark", onclick: () => decide([...sel.values()], "in").then(() => sel.clear()) }, "Index"),
+                )
+              : null,
+            el(
+              "div",
+              { class: "dec-list", "data-scroll-keep": `sd-dec-${s.name}` },
+              !shown.length ? empty("No file at this risk.", "lg") : null,
+              shown.map((d) => {
+                const b = band(d.risk);
+                const on = sel.has(d.path);
+                return el(
+                  "div",
+                  { class: "dec-grid" },
+                  checkbox(on, () => (on ? sel.delete(d.path) : sel.add(d.path), repaint())),
+                  el(
+                    "div",
+                    { class: "col gap4 min0" },
+                    el("div", { class: "row min0" }, pathSpan(relTo(s, d.path), "p", d.path), d.likely ? pill(d.likely, d.tone || "amber", { dot: false }) : null),
+                    el("span", { class: "why" }, el("b", { text: d.kind || classWord(d.class) }), ` · ${d.why || d.rule}`),
+                    d.evidence || (d.matches || [])[0] ? el("span", { class: "evidence", text: d.evidence || maskedOf(d.matches[0]) }) : null,
+                  ),
+                  el("div", { class: "col gap4 risk" }, el("div", { class: "row base nowrap gap6" }, el("span", { class: `risk-pct ${b}`, text: `${d.risk}%` }), el("span", { class: "t-mono-sm", text: b })), bar(Math.max(3, d.risk), `h4 ${b === "high" ? "red" : b === "medium" ? "amber" : "green"}`)),
+                  el(
+                    "div",
+                    { class: "col gap4 acts" },
+                    el(
+                      "div",
+                      { class: "row gap6 nowrap" },
+                      btn({ class: "btn sm", onclick: () => decide([d.path], "out") }, "Keep out"),
+                      btn({ class: "btn sm amber", disabled: d.class === "credential" ? true : null, onclick: () => decide([d.path], "redact") }, "Redact & index"),
+                      btn({ class: "btn sm dark", disabled: d.class === "credential" ? true : null, onclick: () => decide([d.path], "in") }, "Index"),
+                    ),
+                    el("span", { class: "muted t-xs", text: `Suggested · ${SUGGEST[d.suggest || "out"]}` }),
+                  ),
+                );
+              }),
+            ),
+          ),
+        ),
+      )
+    : el("div", { class: "notice green" }, icon(I.check, 14, { w: 2.6 }), "Nothing waits for you. New files that look sensitive will show up here before they are indexed.");
+
+  const decisions = (entry.decisions || rowsAll.filter((r) => !(r.reviewable && !r.accepted && !r.kept_out)).map(decisionFromRow)).map((d, i) => ({ ...d, i, id: `${i}:${d.path}` }));
+  const q = sdUi.decQ.toLowerCase();
+  const filtered = decisions.filter((d) => (sdUi.decOut === "all" || d.outcome === sdUi.decOut) && (sdUi.decBy === "all" || (sdUi.decBy === "you" ? d.can_undo : !d.can_undo)) && (!q || `${d.path} ${d.why}`.toLowerCase().includes(q)));
+  const g = grid({
+    key: `dec:${s.name}`,
+    caption: `Decisions for ${s.name}`,
+    rows: filtered,
+    select: true,
+    canSelect: (d) => d.can_undo,
+    id: (d) => d.path,
+    empty: "No decision matches.",
+    onClear: () => ((sdUi.decQ = ""), (sdUi.decOut = "all"), (sdUi.decBy = "all"), repaint()),
+    columns: [
+      { key: "path", label: "Path", cls: "m cap-path", sort: (d) => d.path.toLowerCase(), render: (d) => pathSpan(relTo(s, d.path), "", d.path) },
+      { key: "outcome", label: "Outcome", sort: (d) => d.outcome, render: (d) => pill(d.outcome, OUTCOME_TONE[d.outcome] || "grey", { dot: false }) },
+      { key: "why", label: "Why", cls: "dim c-why", sort: (d) => (d.why || "").toLowerCase(), render: (d) => d.why || "" },
+      { key: "by", label: "By", cls: "ms nowrap", sort: (d) => d.by, render: (d) => (d.at && d.by === "you" ? `you · ${ago(d.at)}` : d.by) },
+      { key: "x", label: "", cls: "r", render: (d) => (d.can_undo ? lnk("Undo", () => decide([d.path], "reset")) : null) },
+    ],
+    actions: (selIds, clear) => [btn({ class: "btn xs", onclick: () => (decide(selIds, "reset"), clear()) }, "Undo selected")],
+  });
+  const qInput = el("input", {
+    value: sdUi.decQ,
+    placeholder: "Filter by path or reason",
+    "data-keep": "dec-q",
+    "aria-label": "Filter decisions",
+    oninput: (e) => {
+      sdUi.decQ = e.target.value;
+      repaint();
+    },
+  });
+  return el(
+    "div",
+    { class: "stack" },
+    pendingCard,
+    el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Decisions" }), meta("yours and the rules' · undo any of yours")),
+      el(
+        "div",
+        { class: "filterbar" },
+        el("div", { class: "box h28 w220 full-sm" }, icon(I.searchSm, 13, { w: 1.8 }), qInput),
+        dropdown({
+          label: "Outcome",
+          value: sdUi.decOut,
+          options: ["all", "never indexed", "skipped", "read as image", "accepted", "redacted · indexed", "kept out"].map((o) => [o, o === "all" ? "All outcomes" : o]),
+          onChange: (v) => ((sdUi.decOut = v), repaint()),
+        }),
+        seg(
+          [
+            ["all", "All"],
+            ["you", "Yours"],
+            ["rule", "Rules"],
+          ],
+          sdUi.decBy,
+          (v) => ((sdUi.decBy = v), repaint()),
+        ),
+      ),
+      g.node,
+    ),
+  );
+}
+sdReview.sel = {};
+sdReview.risk = {};
+
+/** A refusal row as a Decisions-table row, for a daemon that sends no table. */
+function decisionFromRow(r) {
+  const outcome = r.accepted ? (r.accepted === "redacted" ? "redacted · indexed" : r.accepted === "refused" || r.accepted === "kept" ? "kept out" : "accepted") : r.class === "credential" ? "never indexed" : r.class === "dummy" ? "accepted" : r.class === "unindexable" && /image/.test(r.rule) ? "read as image" : "skipped";
+  const mine = !!r.accepted;
+  return { path: r.path, outcome, why: r.rule, by: mine ? "you" : "rules", at: r.last_seen, can_undo: mine };
+}
+
+function sdRuns(s, holder) {
+  const live = runsOf(s.name).filter((r) => LIVE_RUN.has(r.status));
+  // A finished run this daemon still holds says more than its history line
+  // (what it indexed, how long it took), so it is read over the line when the
+  // two are the same run. Run ids restart with the daemon, hence the time.
+  const doneHere = runsOf(s.name).filter((r) => !LIVE_RUN.has(r.status));
+  const same = (h, r) => h.id === r.id && Math.abs((h.finished || 0) - (r.finished_at || 0)) < 5;
+  const hist = [
+    ...(data.runs?.history || []).filter((h) => h.store === s.name).map((h) => {
+      const r = doneHere.find((x) => same(h, x));
+      return r ? { ...h, ...r, log: (h.log || []).length ? h.log : r.log } : h;
+    }),
+    ...doneHere.filter((r) => !(data.runs?.history || []).some((h) => h.store === s.name && same(h, r))),
+  ].sort((a, b) => (b.finished || b.finished_at || 0) - (a.finished || a.finished_at || 0));
+  const host = el("div", { class: "stack" });
+  for (const r of live) {
+    const paused = r.status === "paused" || r.status === "pausing";
+    const p = runPct(r);
+    const b = bar(p, "h8 accent grow");
+    b.setAttribute("data-tip", `Indexing · ${Math.floor(p)}%`);
+    b.setAttribute("data-tip-rows", runRows(r));
+    const log = el("div", { class: "log rounded", "data-scroll-keep": `log-${r.id}`, "data-morph-keep": `log-${r.id}` });
+    followLog(r, log);
+    host.append(
+      el(
+        "div",
+        { class: "card blue-edge pad" },
+        el(
+          "div",
+          { class: "row" },
+          el("span", { class: "card-t", text: r.status === "queued" ? "Waiting to start" : r.status === "review" ? "Held for review" : "Running now" }),
+          pill(r.status === "pausing" ? "pausing" : paused ? "paused" : r.status === "review" ? "waiting for review" : r.status === "queued" ? `queued${r.position ? ` · ${r.position} in line` : ""}` : r.kind === "compact" ? "compacting" : r.kind === "catch-up" ? "catching up" : "indexing", paused || r.status === "review" || r.status === "queued" ? "amber" : "green", { pulse: r.status === "running" }),
+          el("span", { class: "spacer" }),
+          // Every control is drawn and hidden when it does not apply, so the
+          // card keeps its shape across states and a live patch never moves
+          // the button someone just pressed.
+          btn({ class: "btn sm primary", hidden: r.status === "review" ? null : true, onclick: () => go("store", s.name, "review") }, "Review and start"),
+          btn({ class: "btn sm", hidden: r.status === "review" ? null : true, onclick: () => runControl(r, "start") }, "Start indexing"),
+          btn({ class: "btn sm", hidden: ["running", "paused", "pausing"].includes(r.status) ? null : true, "data-keep": `run-ctl-${r.id}`, onclick: () => runControl(r, paused ? "resume" : "pause") }, paused ? "Resume" : "Pause"),
+          btn({ class: "btn sm danger-soft", "data-keep": `run-stop-${r.id}`, onclick: () => stopRun(r) }, r.status === "queued" ? "Take out of the queue" : "Stop…"),
+        ),
+        el("div", { class: "row nowrap gap12" }, b, el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
+        el("div", { class: "t-mono-sm", text: [r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "", `${n(r.chunks || 0)} chunks`, r.rate != null ? `${perSecond(r.rate)} chunks/s` : "", Object.entries(r.lane_rates || {}).filter(([, v]) => v > 0).map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`).join(" · "), r.status === "running" ? spellLeft(runLeftMs(r)) : ""].filter(Boolean).join(" · ") }),
+        el("div", { class: "muted t-sm", text: r.phase || "", hidden: r.phase ? null : true }),
+        log,
+      ),
+    );
+  }
+  host.append(
+    el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "History" }), meta("runs live in the daemon, not the page · kept across restarts")),
+      !hist.length ? empty("No finished run yet.") : null,
+      hist.length
+        ? el(
+            "div",
+            { class: "gl-scroll" },
+            el(
+              "div",
+              { class: "minw520" },
+              hist.slice(0, 30).map((h, i) => {
+                const key = `${s.name}:${h.id}:${h.started || h.started_at}`;
+                const open = sdUi.histOpen[key] ?? i === 0;
+                const result = h.result || h.status;
+                const finished = h.finished || h.finished_at;
+                const kind = h.kind_label || runKindLabel(h);
+                return el(
+                  "div",
+                  { class: "line-row" },
+                  btn(
+                    { class: "hist-row", "aria-expanded": String(open), onclick: () => ((sdUi.histOpen[key] = !open), repaint()) },
+                    el("span", { class: `caret${open ? " open" : ""}` }, icon(I.chevRight, 13, { w: 2 })),
+                    el("span", { class: "t-mono-sm", text: finished ? dayClock(finished) : "—" }),
+                    el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: kind }), el("span", { class: "t-mono-sm ell", text: runLine(h) })),
+                    pill(result, result === "done" ? "green" : result === "stopped" ? "amber" : result === "failed" ? "red" : "grey", { dot: false }),
+                  ),
+                  open
+                    ? el(
+                        "div",
+                        { class: "hist-open" },
+                        h.stages ? el("span", { class: "t-mono-sm", text: stagesText(h.stages) }) : null,
+                        (h.log || []).length ? el("div", { class: "log rounded" }, h.log.slice(-40).map((ev) => {
+                          const [a, b, c, tone] = typeof ev === "string" ? ["", "", ev, ""] : ev.event ? logParts(ev) : [ev.at ? clock(ev.at) : "", ev.level || "", ev.text || "", ev.level === "error" ? "bad" : ev.level === "warn" ? "warn" : "info"];
+                          return el("div", { class: "ln" }, el("span", { class: "a", text: a }), el("span", { class: `b ${tone}`, text: b }), el("span", { class: "c", text: c }));
+                        })) : el("span", { class: "muted t-xs", text: "No log was kept for this run." }),
+                      )
+                    : null,
+                );
+              }),
+            ),
+          )
+        : null,
+    ),
+  );
+  return host;
+}
+
+function runKindLabel(h) {
+  if (h.kind === "compact") return "Compact";
+  if (h.kind === "catch-up") return "Watcher catch-up";
+  if (h.files && h.files.length) return `Re-index ${plural(h.files.length, "file")}`;
+  return h.files_before || h.chunks_before ? "Index" : "First index";
+}
+
+function runLine(h) {
+  if (h.kind === "compact" && h.summary?.compact) {
+    const c = h.summary.compact;
+    const total = (f) => (f ? f.database + f.exact + f.vectors : 0);
+    return `${bytes(total(c.before))} → ${bytes(total(c.after))}`;
+  }
+  const ms = h.elapsed_ms ? h.elapsed_ms - (h.queued_ms || 0) : h.started && h.finished ? (h.finished - h.started) * 1000 : 0;
+  // History keeps whole seconds; a run inside one second says so rather than
+  // claiming a time it did not measure.
+  const took = ms ? ` · took ${spellTook(ms)}` : h.finished || h.finished_at ? " · took under a second" : "";
+  const indexed = h.indexed ?? h.files_indexed ?? (typeof h.files === "number" ? h.files : 0);
+  return `${n(indexed)} indexed · ${n(h.chunks || 0)} chunks${took}`;
+}
+
+function stagesText(st) {
+  const secs = (ms) => `${((ms || 0) / 1000).toFixed(1)} s`;
+  const lanes = Object.keys(st.embed_wait_ms || {})
+    .sort()
+    .map((lane) => `embed (${laneName(lane)}) ${secs(st.embed_wait_ms[lane])}`);
+  return `stages over ${secs(st.wall_ms)}: walk ${secs(st.walk_ms)} · read+hash ${secs(st.read_ms)} · scan ${secs(st.extract_ms)} · parse+chunk ${secs(st.parse_ms)} · tokenize ${secs(st.tokenize_ms)}${lanes.length ? ` · ${lanes.join(" · ")}` : ""} · write ${secs(st.write_ms)}`;
+}
+
+function sdSettings(s) {
+  const draft = sdUi.rename[s.name] ?? s.name;
+  const valid = NAME_RE.test(draft) && draft !== s.name && !(data.stores?.stores || []).some((x) => x.name === draft);
+  const renameInput = el("input", {
+    class: "inp mono grow",
+    value: draft,
+    spellcheck: "false",
+    "aria-label": "Store name",
+    "data-keep": "sd-rename",
+    oninput: (e) => {
+      const v = e.target.value.toLowerCase().replace(/\s+/g, "-");
+      if (v !== e.target.value) e.target.value = v;
+      sdUi.rename[s.name] = v;
+      saveBtn.disabled = !(NAME_RE.test(v) && v !== s.name && !(data.stores?.stores || []).some((x) => x.name === v));
+    },
+    onkeydown: (e) => e.key === "Enter" && !saveBtn.disabled && rename(),
+  });
+  const rename = async () => {
+    const to = sdUi.rename[s.name];
+    const out = await act(() => post("/api/store/settings", { store: s.name, rename: to }), `Renamed to ${to}`);
+    if (out) {
+      delete sdUi.rename[s.name];
+      await loadMany(["stores", "runs", "refused"], true);
+      go("store", to, "settings");
+    }
+  };
+  const saveBtn = btn({ class: "btn dark", disabled: valid ? null : true, onclick: rename }, "Rename");
+  const setting = async (patch, word) => {
+    const out = await act(() => post("/api/store/settings", { store: s.name, ...patch }), word);
+    if (out) await load("stores", true), repaint();
+  };
+  const lean = s.lean || { code: "code", docs: "docs" }[s.kind] || "either";
+  const reclaim = reclaimable(s);
+  const missing = (s.roots || []).filter((r) => !r.present);
+  const outside = s.trusted === false;
+  return el(
+    "div",
+    { class: "auto-fit m340 align-start" },
+    el(
+      "div",
+      { class: "card pad16" },
+      el("span", { class: "card-t", text: "General" }),
+      el("div", { class: "field-l" }, el("span", { class: "eyebrow", text: "Name" }), el("div", { class: "row nowrap" }, renameInput, saveBtn), el("span", { class: "muted t-xs", text: "Agents pick stores by name; a rename shows up on their next call." })),
+      el(
+        "div",
+        { class: "field-l" },
+        el("span", { class: "eyebrow", text: "Search leans to" }),
+        seg(
+          [
+            ["code", "Code"],
+            ["docs", "Docs"],
+            ["either", "Neither"],
+          ],
+          lean,
+          (v) => setting({ lean: v }, `Search in ${s.name} now leans to ${v === "either" ? "neither" : v}`),
+        ),
+      ),
+      el(
+        "div",
+        { class: "col gap4 tb-line" },
+        toggleRow(s.watch !== false, "Watch for changes", s.watching === false && s.watch !== false && s.stopped_because ? `Stopped: ${s.stopped_because}` : "Re-index a file the moment it is saved.", (v) => setting({ watch: v }, `Watch for changes — ${v ? "on" : "off"}`), { plain: true }),
+        toggleRow(s.record !== false, "Record retrievals", recordingOn() ? "Keep this store's queries in the local ledger." : "Recording is paused for the whole machine on the Ledger page.", (v) => setting({ record: v }, `Record retrievals — ${v ? "on" : "off"}`), { plain: true }),
+        toggleRow(s.gitignore !== false, "Respect .gitignore", "Skip what each repository already ignores, on every run and on the watcher.", (v) => setting({ gitignore: v }, `Respect .gitignore — ${v ? "on" : "off"}`), { plain: true }),
+      ),
+    ),
+    el(
+      "div",
+      { class: "stack" },
+      el(
+        "div",
+        { class: "card pad" },
+        el("span", { class: "card-t", text: "Maintenance" }),
+        el("div", { class: "maint-row" }, el("span", { class: "col grow" }, el("span", { class: "t", text: "Compact" }), el("span", { class: "s", text: reclaim ? `${bytes(reclaim)} of deleted chunks can be reclaimed. Searches keep working while it runs.` : `Nothing to reclaim. The daemon compacts on its own past ${data.runs?.compaction?.threshold_percent ?? 25}%.` })), btn({ class: "btn", disabled: reclaim ? null : true, onclick: () => compactStores([s.name]) }, "Compact now")),
+        el("div", { class: "maint-row" }, el("span", { class: "col grow" }, el("span", { class: "t", text: "Re-index everything" }), el("span", { class: "s", text: "Reads every source again. Unchanged files are skipped by hash." })), btn({ class: "btn", disabled: activeRun(s.name) || !(s.roots || []).length || rootsGone(s) ? true : null, onclick: () => reindexStore(s.name) }, "Re-index")),
+      ),
+      missing.length || outside
+        ? el(
+            "div",
+            { class: "card pad" },
+            el("span", { class: "card-t", text: "Where it reads from" }),
+            missing.map((r) =>
+              el(
+                "div",
+                { class: "maint-row" },
+                el("span", { class: "col grow" }, el("span", { class: "t", text: `${tilde(r.path)} is not there` }), el("span", { class: "s", text: "If the folder moved, point the store at its new place. Nothing is re-embedded." })),
+                btn({ class: "btn", onclick: () => repoint(s, r.path) }, "Re-point…"),
+              ),
+            ),
+            outside
+              ? el(
+                  "div",
+                  { class: "maint-row" },
+                  el("span", { class: "col grow" }, el("span", { class: "t", text: "Outside the store home, not trusted" }), el("span", { class: "s", text: "This daemon opened it because it was asked to. Trust it so `semlith mcp` opens it too." })),
+                  btn({ class: "btn", onclick: () => act(() => post("/api/trust", { path: s.dir }), "Trusted").then(() => load("stores", true)).then(repaint) }, "Trust"),
+                )
+              : null,
+          )
+        : null,
+      el(
+        "div",
+        { class: "card pad red-edge" },
+        el("div", { class: "maint-row" }, el("span", { class: "col grow" }, el("span", { class: "t-b red", text: "Forget this store" }), el("span", { class: "s", text: "Deletes the index and its ledger rows. The files it read stay exactly where they are." })), btn({ class: "btn danger", onclick: async () => (await forgetStore(s.name)) && go("stores") }, "Forget…")),
+      ),
+    ),
+  );
+}
+
+async function repoint(s, from) {
+  const to = await pickFolder({ title: `Where did ${baseName(from)} go?`, ok: "Use this folder", hint: `${s.name} will read from the folder you pick. Its vectors stay as they are.` });
+  if (!to) return;
+  const out = await act(() => post("/api/root", { store: s.name, root: to, from }), (o) => o.message || "Re-pointed");
+  if (out) await load("stores", true), repaint();
+}
+
+// -------------------------------------------------------------------- search
+
+/* Four modes over one index. Ranked is the fused search an agent's
+ * `semlith_search` runs, Brief is exactly what `semlith_brief` hands back, Exact
+ * is every matching line (`exact: true`), and Pattern is a tree-sitter query
+ * over one language's files (`semlith_pattern`). */
+const sr = {
+  query: "",
+  mode: "ranked",
+  store: "",
+  prefer: "either",
+  k: 8,
+  budget: 1500,
+  lang: "",
+  path: "",
+  patternLang: "",
+  result: null,
+  error: "",
+  busy: false,
+  sel: null,
+  whole: false,
+  detail: null,
+  scopeOpen: false,
+};
+
+try {
+  sr.recentSeed = JSON.parse(sessionStorage.getItem("semlith-recents") || "[]");
+  state.recents = sr.recentSeed;
+} catch (_) {
+  /* private window */
+}
+
+const BUDGETS = [500, 1000, 1500, 3000, 6000];
+
+VIEWS.search = {
+  fill: true,
+  needs: () => ["stores", "languages"],
+  live: [],
+  render(route, holder) {
+    if (state.pending.searchStore !== undefined) {
+      sr.store = state.pending.searchStore;
+      delete state.pending.searchStore;
+    }
+    if (state.pending.searchQuery) {
+      sr.query = state.pending.searchQuery;
+      delete state.pending.searchQuery;
+      setTimeout(() => runSearch(), 0);
+    }
+    if (sr.store && !store(sr.store)) sr.store = "";
+    const root = el("div", { class: "col fillpage grow min0" });
+    root.style.height = "100%";
+    const bar = el("div", { class: "sr-bar" });
+    const body = el("div", { class: "col grow min0" });
+    root.append(bar, body);
+    const input = el("input", {
+      value: sr.query,
+      placeholder: sr.mode === "pattern" ? "(call_expression function: (identifier) @f)" : sr.mode === "exact" ? "An identifier, an error string or a regular expression" : "Ask in words, or paste an identifier",
+      "aria-label": "Search query",
+      "data-keep": "sr-q",
+      class: sr.mode === "pattern" ? "mono" : null,
+      oninput: (e) => {
+        sr.query = e.target.value;
+        clearBtn.hidden = !sr.query;
+      },
+      onkeydown: (e) => {
+        if (e.key === "Enter") runSearch();
+        if (e.key === "Escape") {
+          sr.query = "";
+          sr.result = null;
+          input.value = "";
+          paintBody();
+        }
+      },
+    });
+    const clearBtn = btn({ class: "x-btn", hidden: !sr.query, "aria-label": "Clear", onclick: () => ((sr.query = ""), (sr.result = null), (input.value = ""), (clearBtn.hidden = true), paintBody(), input.focus()) }, icon(I.x, 12, { w: 2.2 }));
+    const scopeBtn = btn(
+      { class: "scope-btn", "aria-haspopup": "menu", "aria-expanded": "false", onclick: () => menu.open(scopeBtn, scopeItems(), { width: 230 }) },
+      el("span", { class: "muted hide-sm", text: "in" }),
+      el("span", { class: "v", text: sr.store || "all stores" }),
+      icon(I.chevDown, 12, { w: 2 }),
+    );
+    const scopeItems = () => [
+      { label: "All stores", hint: plural(liveStores().length, "store"), checked: !sr.store, onclick: () => ((sr.store = ""), repaint(), sr.query && runSearch()) },
+      ...liveStores().map((s) => ({ label: s.name, hint: s.files ? `${n(s.files)} files` : "empty", checked: sr.store === s.name, onclick: () => ((sr.store = s.name), (sr.prefer = s.lean || sr.prefer), repaint(), sr.query && runSearch()) })),
+    ];
+    setTimeout(() => input.focus(), 0);
+    const langs = (data.languages?.languages || []).map((l) => l.name);
+    const langChip = sr.lang
+      ? el("span", { class: "filter-chip" }, `language ${sr.lang}`, btn({ "aria-label": "Remove language", onclick: () => ((sr.lang = ""), repaint(), sr.query && runSearch()) }, icon(I.x, 10, { w: 2.4 })))
+      : (() => {
+          const b = btn({ class: "chip dashed", "aria-haspopup": "menu", onclick: () => menu.open(b, langs.map((l) => ({ label: l, onclick: () => ((sr.lang = l), repaint(), sr.query && runSearch()) })), { width: 200, alignLeft: true }) }, "+ language");
+          return b;
+        })();
+    const pathInput = el("input", {
+      value: sr.path,
+      placeholder: "src/** or *.md",
+      "aria-label": "Path filter",
+      "data-keep": "sr-path",
+      onkeydown: (e) => {
+        if (e.key === "Enter") {
+          sr.path = e.target.value.trim();
+          sr.query && runSearch();
+          repaint();
+        }
+        if (e.key === "Escape") ((sr.path = ""), (sr.pathOpen = false), repaint());
+      },
+    });
+    const pathChip = sr.path || sr.pathOpen
+      ? el("span", { class: "filter-chip" }, "path", pathInput, btn({ "aria-label": "Remove path filter", onclick: () => ((sr.path = ""), (sr.pathOpen = false), repaint(), sr.query && runSearch()) }, icon(I.x, 10, { w: 2.4 })))
+      : btn({ class: "chip dashed", onclick: () => ((sr.pathOpen = true), repaint(), setTimeout(() => shell.main.querySelector('[data-keep="sr-path"]')?.focus(), 0)) }, "+ path");
+    const patternLang = dropdown({ label: "Pattern language", value: sr.patternLang || "", options: [["", "language…"], ...(data.about?.graph_languages || langs).map((l) => [l, l])], onChange: (v) => (sr.patternLang = v) });
+    // Beside the field where there is room; on a narrow page at the start of
+    // the row below, as a row that wraps put it over that row.
+    const narrow = ((shell.main && shell.main.clientWidth) || 1200) < 760;
+    const modeSeg = seg(
+          [
+            ["ranked", "Ranked", null, "Spans ranked by meaning, words and the graph"],
+            ["brief", "Brief", null, "What an agent's semlith_brief call returns"],
+            ["exact", "Exact", null, "Every matching line, like grep -E"],
+            ["pattern", "Pattern", null, "A tree-sitter query over one language, like semlith_pattern"],
+          ],
+          sr.mode,
+          (m) => {
+            sr.mode = m;
+            sr.result = null;
+            sr.sel = null;
+            repaint();
+            if (sr.query && m !== "pattern") runSearch();
+          },
+          { cls: "lg", label: "Mode" },
+        );
+    fill(
+      bar,
+      el(
+        "div",
+        { class: "row top" },
+        el("div", { class: "sr-field" }, icon(I.searchSm, 16, { w: 1.8 }), input, clearBtn, el("span", { class: "vrule hide-sm" }), scopeBtn, btn({ class: "btn dark tight-sm", onclick: runSearch }, "Search")),
+        narrow ? null : modeSeg,
+      ),
+      el(
+        "div",
+        { class: "row" },
+        narrow ? modeSeg : null,
+        sr.mode === "pattern"
+          ? [patternLang, el("span", { class: "muted t-xs", text: "Captures every node the query matches in that language's indexed files." })]
+          : [
+              el(
+                "div",
+                { class: "dial" },
+                el("span", { class: "eyebrow", text: "LEAN TO" }),
+                [
+                  ["code", "code"],
+                  ["docs", "docs"],
+                  ["either", "either"],
+                ].map(([v, label]) => btn({ "aria-pressed": String(sr.prefer === v), onclick: () => ((sr.prefer = v), repaint(), sr.query && runSearch()) }, label)),
+              ),
+              sr.mode === "ranked"
+                ? el(
+                    "div",
+                    { class: "dial" },
+                    el("span", { class: "eyebrow", text: "RESULTS" }),
+                    String(sr.k),
+                    btn({ class: "pm", "aria-label": "Fewer results", onclick: () => ((sr.k = Math.max(1, sr.k - 1)), repaint()) }, "−"),
+                    btn({ class: "pm", "aria-label": "More results", onclick: () => ((sr.k = Math.min(50, sr.k + 1)), repaint()) }, "+"),
+                  )
+                : null,
+              sr.mode !== "exact"
+                ? btn({ class: "dial", "data-tip": "What one answer may cost an agent", onclick: () => ((sr.budget = BUDGETS[(BUDGETS.indexOf(sr.budget) + 1) % BUDGETS.length]), repaint(), sr.query && runSearch()) }, el("span", { class: "eyebrow", text: "BUDGET" }), `${n(sr.budget)} tok`)
+                : null,
+            ],
+        langChip,
+        pathChip,
+        el("span", { class: "spacer" }),
+        sr.result && !sr.result.error ? el("span", { class: "row gap6 nowrap t-mono-sm" }, el("span", { class: "dot blue" }), resultMeta()) : null,
+      ),
+    );
+    function paintBody() {
+      fill(body, searchBody());
+    }
+    holder.paintBody = paintBody;
+    searchView.paintBody = paintBody;
+    paintBody();
+    return root;
+  },
+};
+
+const searchView = {};
+
+function resultMeta() {
+  const r = sr.result;
+  if (!r) return "";
+  const where = sr.store || "all stores";
+  if (sr.mode === "brief") return `one call · ${n((r.micros || 0) / 1000)} ms · ${where}`;
+  if (sr.mode === "exact" || sr.mode === "pattern") return `${plural((r.matches || []).length, "line")} in ${plural(r.files || 0, "file")}${r.truncated ? " · more beyond" : ""}`;
+  return `${String(r.shape_label || "").replace(/-shaped$/, "")}-shaped · ${weightWord(r.weighting)} · ${plural((r.hits || []).length, "hit")} · ${n((r.micros || 0) / 1000)} ms`;
+}
+
+function weightWord(w) {
+  if (!w) return "vector and keyword weighted equally";
+  if (typeof w === "string") return w;
+  return w.keyword > w.vector ? "keyword weighted ×2" : "vector and keyword weighted equally";
+}
+
+async function runSearch() {
+  const q = sr.query.trim();
+  if (!q) return;
+  sr.busy = true;
+  sr.error = "";
+  sr.sel = null;
+  sr.whole = false;
+  sr.detail = null;
+  state.recents = [q, ...state.recents.filter((x) => x !== q)].slice(0, 6);
+  try {
+    sessionStorage.setItem("semlith-recents", JSON.stringify(state.recents));
+  } catch (_) {
+    /* private window */
+  }
+  searchView.paintBody && searchView.paintBody();
+  const p = new URLSearchParams();
+  if (sr.store) p.append("store", sr.store);
+  if (sr.lang) p.append("lang", sr.lang);
+  if (sr.path) p.append("path", sr.path);
+  try {
+    if (sr.mode === "brief") {
+      p.set("question", q);
+      p.set("budget", String(sr.budget));
+      if (sr.prefer !== "either") p.set("prefer", sr.prefer);
+      sr.result = await api(`/api/brief?${p}`);
+    } else if (sr.mode === "exact") {
+      p.set("query", q);
+      p.set("exact", "1");
+      sr.result = await api(`/api/search?${p}`);
+    } else if (sr.mode === "pattern") {
+      if (!sr.patternLang) throw new Error("Pick the language the pattern is written for.");
+      p.set("query", q);
+      p.set("lang", sr.patternLang);
+      sr.result = await api(`/api/pattern?${p}`);
+      if (sr.result.error) throw new Error(sr.result.error);
+    } else {
+      p.set("query", q);
+      p.set("k", String(sr.k));
+      p.set("format", "locate");
+      p.set("max_tokens", String(sr.budget));
+      if (sr.prefer !== "either") p.set("prefer", sr.prefer);
+      sr.result = await api(`/api/search?${p}`);
+      // An identifier is answered by its definition first; every line that
+      // names it is one press away, in Exact.
+      if (sr.result.shape_label === "identifier" && !(sr.result.hits || []).length) {
+        sr.mode = "exact";
+        return runSearch();
+      }
+      const first = (sr.result.hits || [])[0];
+      if (first) openHit(first);
+    }
+  } catch (e) {
+    sr.result = { error: e.message };
+  }
+  sr.busy = false;
+  if (current.view === VIEWS.search) repaint();
+}
+
+function searchBody() {
+  if (sr.busy) return el("div", { class: "sr-body" }, el("div", { class: "row gap10 muted" }, el("span", { class: "spinner" }), "Searching…"));
+  if (sr.result && sr.result.error) return el("div", { class: "sr-body" }, el("div", { class: "card" }, errorBox(sr.result.error)));
+  if (!sr.result) return searchEmpty();
+  if (sr.mode === "brief") return briefView(sr.result);
+  if (sr.mode === "exact" || sr.mode === "pattern") return linesView(sr.result);
+  return rankedView(sr.result);
+}
+
+function searchEmpty() {
+  const recentQueries = (data.ledger?.rows || []).filter((r) => r.client !== "portal").map((r) => r.query);
+  const ident = recentQueries.find((q) => /^[A-Za-z_][\w:]*$/.test(q) && q.length > 3);
+  const examples = [
+    ["QUESTION", "how does the daemon answer a request", "Ranked by meaning and words together", "ranked"],
+    ["IDENTIFIER", ident || "main", "The definition first; every line in Exact", "ranked"],
+    ["HOW-TO", "how do I add a new store", "Leans to the docs that explain it", "ranked"],
+    ["BEHAVIOUR", "what keeps the index fresh when a file is saved", "Code and the design doc side by side", "brief"],
+  ];
+  return el(
+    "div",
+    { class: "sr-body" },
+    el(
+      "div",
+      { class: "split s-15-1 max1200" },
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "card-h" }, el("span", { class: "card-t", text: "Try one" })),
+        el("div", { class: "auto-fit m240 gap0" }, examples.map(([kind, q, why, mode]) => btn({ class: "example", onclick: () => ((sr.query = q), (sr.mode = mode), repaint(), runSearch()) }, el("span", { class: "eyebrow sm", text: kind }), el("span", { class: "q", text: q }), el("span", { class: "w", text: why })))),
+      ),
+      el(
+        "div",
+        { class: "stack" },
+        el(
+          "div",
+          { class: "card" },
+          el("div", { class: "card-h" }, el("span", { class: "card-t", text: "Recent" })),
+          state.recents.length ? state.recents.map((q) => btn({ class: "recent-row", onclick: () => ((sr.query = q), repaint(), runSearch()) }, icon(I.clock, 13, { w: 1.8 }), el("span", { class: "grow ell", text: q }), el("span", { class: "t-mono-sm", text: "this session" }))) : empty("Nothing searched in this tab yet."),
+        ),
+        el(
+          "div",
+          { class: "blue-box" },
+          el("span", { class: "eyebrow", text: "FOUR MODES, ONE INDEX" }),
+          [
+            ["Ranked", "meaning and exact words fused, with graph neighbours mixed in"],
+            ["Brief", "the best span in full plus a line per other hit — an agent's answer"],
+            ["Exact", "every line that matches, for identifiers and error strings"],
+            ["Pattern", "a tree-sitter query, for a shape of code rather than a word"],
+          ].map(([k, v]) => el("div", { class: "txt" }, el("b", { text: k }), ` — ${v}`)),
         ),
       ),
     ),
   );
 }
 
-/** The last two segments of a path: enough to recognise, short enough to read. */
-function shortPath(path) {
-  const parts = String(path).split("/").filter(Boolean);
-  return parts.slice(-2).join("/") || path;
+function rankedView(r) {
+  const hits = r.hits || [];
+  if (!hits.length)
+    return el(
+      "div",
+      { class: "sr-body" },
+      el("div", { class: "card" }, empty(r.selected === 0 ? "The filters select no file. Loosen the language or path." : "Nothing matched. Try other words, a wider scope, or Exact for a literal string.", "lg")),
+    );
+  const groups = [];
+  for (const [i, h] of hits.entries()) {
+    const key = `${h.store || ""}\n${h.path}`;
+    let g = groups.find((x) => x.key === key);
+    if (!g) groups.push((g = { key, path: h.path, store: h.store, spans: [] }));
+    g.spans.push({ ...h, i });
+  }
+  const tokens = r.tokens || 0;
+  const pctUsed = Math.min(100, (tokens / sr.budget) * 100);
+  const used = bar(pctUsed, `h5 grow ${pctUsed > 90 ? "accent" : "green"}`);
+  used.classList.add("minw60");
+  used.setAttribute("data-tip", "Token budget");
+  used.setAttribute("data-tip-rows", rows([["sent", `${n(tokens)} tokens`], ["budget", n(sr.budget)], ["headroom", n(Math.max(0, sr.budget - tokens))], ["shown", r.truncated ? `${r.truncated.shown} of ${r.truncated.total}` : `${hits.length} of ${hits.length}`]]));
+  return el(
+    "div",
+    { class: "sr-split" },
+    el(
+      "div",
+      { class: "sr-left" },
+      el(
+        "div",
+        { class: "sr-list", "data-scroll-keep": "sr-list" },
+        unreadable(r.failed),
+        (r.pending || []).length ? el("div", { class: "notice amber" }, el("span", { class: "sub", text: `Still embedding: ${r.pending.map((p) => `${p.store} ${Math.round(p.share * 100)}% not yet ranked by meaning`).join(", ")}. Keyword and graph already cover it.` })) : null,
+        groups.map((g) =>
+          el(
+            "div",
+            { class: "card hit-group" },
+            el("div", { class: "hit-head" }, pathSpan(hitPath(g), "p", g.path), el("span", { class: "t-mono-sm grow", text: g.store || "" }), el("span", { class: "t-mono-sm nowrap", text: g.spans.length > 1 ? `${g.spans.length} spans` : `${g.spans[0].start_line}-${g.spans[0].end_line}` })),
+            g.spans.map((h) =>
+              btn(
+                { class: `hit${sr.sel === h.i ? " on" : ""}`, onclick: () => openHit(h) },
+                el(
+                  "div",
+                  { class: "row gap6" },
+                  el("span", { class: "rg", text: `${h.start_line}-${h.end_line}` }),
+                  el("span", { class: "sym", text: h.symbol ? `${h.symbol_kind ? `${h.symbol_kind} ` : ""}${h.symbol}` : "" }),
+                  el("span", { class: "spacer" }),
+                  listBadges(h.lists),
+                  h.provenance ? el("span", { class: "badge outline", "data-tip": `Reached through ${provenanceWord(h.provenance)}, not by its text`, text: provenanceShort(h.provenance) }) : null,
+                  h.fresh === false ? el("span", { class: "dot amber", "data-tip": "changed since it was indexed — read it before quoting it" }) : el("span", { class: "dot green", "data-tip": "unchanged since it was indexed" }),
+                ),
+                el("div", { class: "snip", text: h.line || h.text || "" }),
+              ),
+            ),
+          ),
+        ),
+      ),
+      el("div", { class: "sr-foot" }, el("span", { class: "nowrap", text: `${r.truncated ? `${r.truncated.shown} of ${r.truncated.total}` : `${hits.length} of ${hits.length}`} shown · ${n(tokens)} tokens` }), used, el("span", { class: "nowrap", text: `${Math.round(pctUsed)}% of ${n(sr.budget)} budget` })),
+    ),
+    el("div", { class: "sr-detail", "data-scroll-keep": "sr-detail" }, detailPanel()),
+  );
 }
 
-/** True when the viewer has asked for less movement. */
-function stillness() {
-  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+function provenanceWord(p) {
+  if (typeof p === "string") return p;
+  return p.via ? `a ${p.confidence || ""} graph edge from ${p.via}`.replace("  ", " ") : "the graph";
+}
+function provenanceShort(p) {
+  if (typeof p === "string") return p;
+  return p.confidence || "graph";
 }
 
-/* A force-directed canvas of labelled boxes.
- *
- * Positions are kept in 0..1 and multiplied by the canvas size on every frame,
- * so a resize moves the graph rather than rebuilding it, and the constants
- * below mean the same thing at any window width. They are the design bundle's:
- * repulsion 5200 over distance squared, a spring at rest 138px, damping 0.86,
- * and a weak pull to the centre.
- *
- * ponytail: O(n²) repulsion over every pair each frame. The node budget is 180,
- * so that is ~16k pairs — fine at 60fps. Past a few hundred this wants a
- * quadtree, not a faster loop.
- */
-function graphCanvas(options) {
-  const { onPick, onHover } = options || {};
-  const canvas = el("canvas", { class: "graph-canvas" });
-  const wrap = el("div", { class: "graph-stage" }, canvas);
-  let nodes = [];
-  let edges = [];
-  /* Every symbol the scope holds, which is not the same as the number drawn:
-   * a force layout is readable at dozens of nodes and a hairball at hundreds,
-   * so the view is capped. Saying only what is drawn let the summary read as a
-   * statement about the whole graph, and then scoping to a symbol could report
-   * more edges than "the whole graph" had. */
-  let total = 0;
-  let drawn = [];
-  let selected = null;
-  let near = new Set();
-  let hovered = null;
-  let dragging = null;
-  let down = null;
-  let frame = null;
-  let running = true;
-  let settled = false;
-  /* Whether this canvas has ever been in the document. See `tick`. */
-  let attached = false;
-  /* How much of the force is still applied. The layout cools, but never to
-   * nothing: it bottoms out at `ALPHA_FLOOR`, so the springs keep holding the
-   * shape while the drift below moves it. Anything that changes the layout —
-   * a drag, a new scope, an edge-kind filter — re-heats it. */
-  let alpha = 1;
-  /* Springs are shared out by how many edges a node carries. A hub with forty
-   * edges feels forty pulls where a leaf feels one, and at this node count that
-   * is what turns the simulation into a two-frame bounce: every node overshoots
-   * its rest position, and the next step overshoots back. Dividing by the
-   * square root of the degree is what keeps a dense neighbourhood stable. */
-  let load = [];
+function hitPath(h) {
+  const s = h.store && store(h.store);
+  return s ? relTo(s, h.path) : tilde(h.path);
+}
 
-  function size() {
-    const ratio = window.devicePixelRatio || 1;
-    const box = wrap.getBoundingClientRect();
-    const w = Math.max(box.width, 240);
-    const h = Math.max(box.height, 240);
-    canvas.width = Math.round(w * ratio);
-    canvas.height = Math.round(h * ratio);
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    return { w, h, ctx };
+function unreadable(failed) {
+  if (!failed || !failed.length) return null;
+  return el("div", { class: "notice red" }, el("div", { class: "body" }, el("span", { class: "ttl", text: `${plural(failed.length, "store")} could not be read, so ${failed.length > 1 ? "they are" : "it is"} not in these results` }), el("span", { class: "sub", text: failed.map((f) => `${f.store}: ${f.remedy || f.error}`).join(" · ") })));
+}
+
+async function openHit(h) {
+  sr.sel = h.i;
+  sr.whole = false;
+  sr.detail = { hit: h, span: null, hops: null };
+  if (current.view === VIEWS.search) searchView.paintBody();
+  const p = new URLSearchParams({ target: `${h.path}:${h.start_line}-${h.end_line}` });
+  if (h.store) p.append("store", h.store);
+  try {
+    const out = await api(`/api/read?${p}`);
+    if (sr.detail && sr.detail.hit === h) sr.detail.span = out.span;
+  } catch (e) {
+    if (sr.detail && sr.detail.hit === h) sr.detail.error = e.message;
   }
-
-  /* The furthest a node may move in one step, in fractions of the canvas.
-   * Without it a single large force sends a node across the frame and the
-   * spring drags it back, which is the bounce this cap exists to stop. */
-  const MAX_STEP = 0.012;
-
-  /* The layout never freezes. Cooling to a standstill was what stopped the
-   * two-frame bounce, but a still picture is not what this view is for, so the
-   * heat bottoms out here and every node carries a slow wander on top of it.
-   *
-   * The wander is a sine of the clock and the node's own phase, not a random
-   * nudge: a random walk accumulates, drags nodes off their springs and is
-   * indistinguishable from the jitter this replaced. A smooth curve at this
-   * amplitude settles at under a pixel a frame, which reads as a drift. */
-  const ALPHA_FLOOR = 0;
-  const DRIFT = 0.00003;
-
-  /* The box a node's centre may sit in, in fractions of the canvas.
-   *
-   * It used to be a flat 6% margin, which is a margin for a dot and not for a
-   * label: a box 200px wide on a 570px canvas has 100px of itself outside the
-   * frame at 0.94, so the Impact card sliced its outermost names in half. The
-   * margin is half the node's own measured width, so every label lands inside
-   * whatever canvas it is drawn on. Capped at 0.45 for the case where one
-   * label is wider than the canvas, which has nowhere to be put.
-   */
-  function pen(node, w, h) {
-    return {
-      mx: Math.min(0.45, ((node.w || 80) / 2 + 4) / w),
-      my: Math.min(0.45, ((node.h || 28) / 2 + 4) / h),
-    };
+  if (h.symbol) {
+    const q = new URLSearchParams({ name: h.symbol, k: "6" });
+    if (h.store) q.append("store", h.store);
+    try {
+      const ev = await api(`/api/symbol?${q}`);
+      if (sr.detail && sr.detail.hit === h) sr.detail.hops = ev;
+    } catch (_) {
+      if (sr.detail && sr.detail.hit === h) sr.detail.hops = { callers: [], callees: [] };
+    }
   }
+  if (current.view === VIEWS.search) searchView.paintBody();
+}
 
-  function step(w, h) {
-    const clock = performance.now() * 0.00028;
-    for (let i = 0; i < nodes.length; i++) {
-      const a = nodes[i];
-      for (let j = i + 1; j < nodes.length; j++) {
-        const b = nodes[j];
-        let dx = (b.x - a.x) * w;
-        let dy = (b.y - a.y) * h;
+async function readWhole() {
+  const d = sr.detail;
+  if (!d || !d.hit.symbol) return;
+  if (sr.whole) {
+    sr.whole = false;
+    d.whole = null;
+    return searchView.paintBody();
+  }
+  const p = new URLSearchParams({ target: d.hit.symbol });
+  if (d.hit.store) p.append("store", d.hit.store);
+  try {
+    const out = await api(`/api/read?${p}`);
+    if (out.span) {
+      d.whole = out.span;
+      sr.whole = true;
+    } else if ((out.definitions || []).length) {
+      const def = out.definitions.find((x) => x.path === d.hit.path) || out.definitions[0];
+      const again = await api(`/api/read?${new URLSearchParams({ target: `${def.path}:${def.start_line}-${def.end_line}`, ...(d.hit.store ? { store: d.hit.store } : {}) })}`);
+      d.whole = again.span;
+      sr.whole = !!again.span;
+    }
+  } catch (e) {
+    toast(e.message, true);
+  }
+  searchView.paintBody();
+}
+
+function detailPanel() {
+  const d = sr.detail;
+  if (!d) return empty("Pick a result to read it here.");
+  const h = d.hit;
+  const span = sr.whole && d.whole ? d.whole : d.span;
+  const ref = `${hitPath(h)}:${span ? span.start_line : h.start_line}-${span ? span.end_line : h.end_line}`;
+  const fresh = span ? span.fresh !== false : h.fresh !== false;
+  const lines = span ? span.text.split("\n").map((t, i) => el("div", { class: "l" }, el("span", { class: "n", text: String(span.start_line + i) }), el("span", { text: t }))) : null;
+  const hops = d.hops ? [...(d.hops.callers || []).map((c) => ["CALLED BY", c]), ...(d.hops.callees || []).map((c) => ["CALLS", c])].slice(0, 8) : null;
+  return el(
+    "div",
+    { class: "stack gap10" },
+    el(
+      "div",
+      { class: "card" },
+      el(
+        "div",
+        { class: "card-b line-row gap8" },
+        el("div", { class: "row nowrap" }, pathSpan(hitPath(h), "mono t-b t-sm", h.path), el("span", { class: "t-mono-sm grow", text: span ? `${span.start_line}-${span.end_line}` : `${h.start_line}-${h.end_line}` }), pill(fresh ? (span && span.from_disk ? "read from disk" : "fresh") : "stale", fresh ? "green" : "amber")),
+        el("div", { class: "title-strip", text: h.symbol ? `${h.symbol_kind || ""} ${h.symbol}`.trim() : h.line || h.path }),
+      ),
+      d.error ? errorBox(d.error) : lines ? el("div", { class: "lines scroll" }, lines) : el("div", { class: "empty" }, "Reading…"),
+      el(
+        "div",
+        { class: "card-foot sans" },
+        h.symbol ? btn({ class: "btn sm dark t125", onclick: readWhole }, sr.whole ? "Show the span only" : "Read whole symbol") : null,
+        btn({ class: "btn sm t125", onclick: () => copy(ref, `Copied ${ref}`) }, "Copy path:lines"),
+        el("span", { class: "spacer" }),
+        h.symbol ? lnk("Open in graph →", () => ((state.pending.graph = { store: h.store, name: h.symbol }), go("graph"))) : null,
+      ),
+    ),
+    h.symbol
+      ? el(
+          "div",
+          { class: "card" },
+          el("div", { class: "card-h tight" }, el("span", { class: "card-t sm", text: "One hop around" }), el("span", { class: "mono t-m t-sm grow", text: h.symbol }), el("span", { class: "t-mono-sm", text: "what an agent's brief would add" })),
+          !hops ? el("div", { class: "empty" }, "Reading…") : !hops.length ? empty("No call edges in or out of this symbol.") : null,
+          (hops || []).map(([dir, c]) =>
+            btn(
+              { class: "hop-row", onclick: () => c.confidence !== "ambiguous" && jumpTo(c, h.store) },
+              el("span", { class: "dir", text: dir }),
+              el("span", { class: "row nowrap gap8 min0" }, el("span", { class: "mono t-m t-sm", text: c.name }), el("span", { class: "t-mono-sm ell", text: c.confidence === "ambiguous" ? `${c.definitions} definitions` : `${tilde(c.path)}:${c.start_line}` })),
+              confBadge(c.confidence),
+            ),
+          ),
+        )
+      : null,
+  );
+}
+
+function jumpTo(c, storeName) {
+  sr.query = c.name;
+  sr.mode = "ranked";
+  if (storeName) sr.store = storeName;
+  repaint();
+  runSearch();
+}
+
+function confBadge(c) {
+  const tone = c === "resolved" || c === "extracted" ? "blue" : c === "ambiguous" ? "amber" : "";
+  return el("span", { class: `badge ${tone}`, text: c || "" });
+}
+
+function briefView(out) {
+  const b = out.brief || {};
+  const spans = b.spans || [];
+  const top = spans[0];
+  const rest = spans.slice(1);
+  const agentText = out.text || briefText(b);
+  return el(
+    "div",
+    { class: "sr-body tight" },
+    el(
+      "div",
+      { class: "stack gap10 max980" },
+      el("div", { class: "notice plain" }, el("span", { class: "eyebrow sm wide blue-ink", text: "BRIEF" }), "This is exactly what semlith_brief hands an agent: the best span in full, then one line per other hit, inside the budget."),
+      unreadable(out.failed),
+      !top ? el("div", { class: "card" }, empty("Nothing matched inside the budget.", "lg")) : null,
+      top
+        ? el(
+            "div",
+            { class: "card" },
+            el("div", { class: "card-h tight" }, pathSpan(hitPath(top), "mono t-b t-sm min0", top.path), el("span", { class: "t-mono-sm", text: `${top.start_line}-${top.end_line}` }), el("span", { class: "t-mono-sm grow", text: top.store || "" }), listBadges(top.lists), el("span", { class: `dot ${top.fresh === false ? "amber" : "green"}` })),
+            top.text ? el("div", { class: "lines wrap" }, top.text.split("\n").map((t, i) => el("div", { class: "l" }, el("span", { class: "n", text: String(top.start_line + i) }), el("span", { text: t })))) : empty("The budget left no room for the text; the locator is still sent."),
+          )
+        : null,
+      rest.length
+        ? el(
+            "div",
+            { class: "card" },
+            rest.map((s) => el("div", { class: "brief-row" }, pathSpan(`${hitPath(s)}:${s.start_line}-${s.end_line}`, "mono t-sm ink2 min0", `${s.path}:${s.start_line}-${s.end_line}`), el("span", { class: "mono t-m t-sm grow", text: s.symbol || "" }), el("span", { class: "t-mono-sm muted i", text: s.text ? "with text" : "top span only" }), listBadges(s.lists))),
+          )
+        : null,
+      (b.symbols || []).length
+        ? el(
+            "div",
+            { class: "card" },
+            el("div", { class: "card-h tight" }, el("span", { class: "card-t sm", text: "Edges the brief carries" })),
+            b.symbols.slice(0, 6).map((sym) => el("div", { class: "brief-row" }, el("span", { class: "mono t-m t-sm grow", text: sym.name }), el("span", { class: "t-mono-sm", text: `${plural((sym.callers || []).length, "caller")} · ${plural((sym.callees || []).length, "callee")}` }))),
+          )
+        : null,
+      el(
+        "div",
+        { class: "card pad row" },
+        el("span", { class: "t-mono-sm" }, "tokens ", el("span", { class: "ink", text: `${n(b.tokens || 0)} of ${n(b.budget || sr.budget)}` })),
+        el("span", { class: "t-mono-sm" }, "spans ", el("span", { class: "ink", text: String(spans.length) })),
+        el("span", { class: "t-mono-sm" }, "dropped ", el("span", { class: "ink", text: cutWord(b.cut) })),
+        el("span", { class: "spacer" }),
+        lnk("Copy as the agent sees it", () => copy(agentText, "Brief copied as plain text")),
+      ),
+    ),
+  );
+}
+
+function cutWord(cut) {
+  if (!cut) return "nothing";
+  const parts = [];
+  if (cut.spans) parts.push(plural(cut.spans, "span"));
+  if (cut.span_text) parts.push(`${plural(cut.span_text, "span")}' text`);
+  if (cut.symbols) parts.push(plural(cut.symbols, "symbol"));
+  if (cut.edges) parts.push(plural(cut.edges, "edge"));
+  return parts.length ? parts.join(", ") : "nothing";
+}
+
+/** Only for a daemon that does not send the agent's own text. */
+function briefText(b) {
+  return (b.spans || []).map((s) => `${s.path}:${s.start_line}-${s.end_line}${s.symbol ? ` ${s.symbol}` : ""}${s.text ? `\n${s.text}` : ""}`).join("\n\n");
+}
+
+function linesView(r) {
+  const matches = r.matches || [];
+  if (!matches.length) return el("div", { class: "sr-body" }, el("div", { class: "card" }, empty(sr.mode === "pattern" ? "The pattern matched nothing in that language's files." : "No indexed line matches.", "lg")));
+  const groups = [];
+  for (const [i, m] of matches.entries()) {
+    const key = `${m.store || ""}\n${m.path}`;
+    let g = groups.find((x) => x.key === key);
+    if (!g) groups.push((g = { key, path: m.path, store: m.store, spans: [] }));
+    g.spans.push({ ...m, i });
+  }
+  return el(
+    "div",
+    { class: "sr-split" },
+    el(
+      "div",
+      { class: "sr-left" },
+      el(
+        "div",
+        { class: "sr-list", "data-scroll-keep": "sr-list" },
+        groups.map((g) =>
+          el(
+            "div",
+            { class: "card hit-group" },
+            el("div", { class: "hit-head" }, pathSpan(hitPath(g), "p", g.path), el("span", { class: "t-mono-sm grow", text: g.store || "" }), el("span", { class: "t-mono-sm", text: plural(g.spans.length, "line") })),
+            g.spans.map((m) =>
+              btn(
+                { class: `hit${sr.sel === m.i ? " on" : ""}`, onclick: () => openHit({ ...m, path: m.path, start_line: m.start_line, end_line: m.end_line || m.start_line, store: m.store, symbol: null, line: m.text }) },
+                el("div", { class: "row gap6" }, el("span", { class: "rg", text: m.end_line && m.end_line !== m.start_line ? `${m.start_line}-${m.end_line}` : String(m.start_line) }), m.capture ? el("span", { class: "badge green", text: `@${m.capture}` }) : null),
+                el("div", { class: "snip", text: (m.text || "").split("\n")[0] }),
+              ),
+            ),
+          ),
+        ),
+        r.truncated ? el("div", { class: "muted t-sm", text: "More lines match than are listed. Narrow the scope or the path to see the rest." }) : null,
+      ),
+      el("div", { class: "sr-foot" }, el("span", { text: `${plural(matches.length, "line")} in ${plural(r.files || groups.length, "file")} · ${sr.mode === "pattern" ? `tree-sitter · ${sr.patternLang}` : "exact lines, as grep -E"}` })),
+    ),
+    el("div", { class: "sr-detail", "data-scroll-keep": "sr-detail" }, detailPanel()),
+  );
+}
+
+// --------------------------------------------------------------------- graph
+
+/* One store at a time, picked in the toolbar: the graph of every store at once
+ * is a hairball on a small corpus and wedged the daemon on the 879k one. */
+const gr = { store: "", sel: "", find: "", off: {}, dir: "in", unres: false, mapOpen: true, data: null, sym: null, map: null, br: { sym: "", hops: 3, verified: true, q: "", hop: "all", edge: "all", out: null }, pt: { from: "", to: "", verified: true, strict: false, out: null, showInferred: false } };
+
+let graphDragging = false;
+
+// The store the Graph page shows: the one picked, or the first with a graph.
+let graphMapFor = "";
+let graphPeekFor = "";
+function graphStore() {
+  const stores = liveStores().filter((s) => s.files);
+  if (gr.store && store(gr.store)) return gr.store;
+  return (stores.find((s) => s.files && (s.coverage || []).length) || stores[0] || {}).name || "";
+}
+
+VIEWS.graph = {
+  fill: true,
+  // Blast radius opens on the store's hubs, so they load with the page.
+  needs: (route) => (route.parts[0] === "blast" ? ["stores", "graphmap", "graphpeek"] : ["stores"]),
+  live: [],
+  render(route) {
+    const tab = route.parts[0] || "explore";
+    const stores = liveStores().filter((s) => s.files);
+    if (state.pending.graph) {
+      const p = state.pending.graph;
+      delete state.pending.graph;
+      if (p.store && store(p.store)) gr.store = p.store;
+      gr.sel = p.name || "";
+      gr.data = null;
+      gr.sym = null;
+    }
+    if (!gr.store || !store(gr.store)) gr.store = graphStore();
+    if (data.graphmap && graphMapFor === gr.store && !(gr.map && gr.map.store === gr.store)) gr.map = { ...data.graphmap, store: gr.store };
+    const root = el("div", { class: "col fillpage grow min0" });
+    root.style.height = "100%";
+    const picker = btn(
+      { class: "btn", "aria-haspopup": "menu", "data-tip": "The graph shows one store at a time", onclick: () => menu.open(picker, stores.map((s) => ({ label: s.name, hint: `${n(s.files)} files`, checked: gr.store === s.name, onclick: () => ((gr.store = s.name), (gr.sel = ""), (gr.data = null), (gr.sym = null), (gr.map = null), (gr.br.out = null), (gr.pt.out = null), repaint()) })), { width: 220 }) },
+      el("span", { class: "muted", text: "in" }),
+      el("span", { class: "mono t-m", text: gr.store || "no store" }),
+      icon(I.chevDown, 12, { w: 2 }),
+    );
+    root.append(
+      el(
+        "div",
+        { class: "gr-head" },
+        el("div", { class: "row base gap12" }, el("div", { class: "h1", text: "Graph" }), el("div", { class: "muted t-sm grow", text: "Who calls what, re-extracted on the same pass that re-embeds a file. Every edge says how sure it is." })),
+        tabs(
+          [
+            ["explore", "Explore"],
+            ["blast", "Blast radius"],
+            ["path", "Path & evidence"],
+          ],
+          tab,
+          (t) => go("graph", t === "explore" ? undefined : t),
+          { cls: "bare" },
+        ),
+      ),
+    );
+    if (!stores.length) {
+      root.append(el("div", { class: "gr-pad" }, el("div", { class: "card" }, empty("No store has anything indexed yet, so there is no graph to draw.", "lg"))));
+      return root;
+    }
+    root.append(tab === "blast" ? blastTab(picker) : tab === "path" ? pathTab(picker) : exploreTab(picker));
+    return root;
+  },
+};
+
+const EDGE_INK = { solid: "#4C7088", inferred: "#A9B8C4", ambiguous: "#B07A2A", other: "#D5DDE3" };
+
+function edgeStyle(e, darkMuted) {
+  if (e.confidence === "ambiguous") return { color: EDGE_INK.ambiguous, dash: "4 3", w: 1 };
+  if (e.confidence === "inferred") return { color: darkMuted ? "#5A6B78" : EDGE_INK.inferred, dash: "2 2", w: 1 };
+  if (e.kind && e.kind !== "calls") return { color: isDark() ? "#3E4E5B" : EDGE_INK.other, dash: "0", w: 1 };
+  return { color: isDark() ? "#86AEC7" : EDGE_INK.solid, dash: "0", w: 1.4 };
+}
+
+/** A quick force layout in 0..100 space, so the live canvas starts settled. */
+function layout(nodes, edges, centre) {
+  const pos = nodes.map((nd, i) => {
+    const a = i * 2.39996 + 0.4;
+    const r = 0.25 + ((i * 37) % 100) / 140;
+    return { x: 50 + Math.cos(a) * r * 40, y: 50 + Math.sin(a) * r * 40, vx: 0, vy: 0 };
+  });
+  if (centre !== undefined && pos[centre]) Object.assign(pos[centre], { x: 50, y: 50 });
+  for (let it = 0; it < 220; it++) {
+    for (let i = 0; i < pos.length; i++)
+      for (let j = i + 1; j < pos.length; j++) {
+        const dx = pos[j].x - pos[i].x;
+        const dy = (pos[j].y - pos[i].y) * 1.6;
+        const d2 = Math.max(4, dx * dx + dy * dy);
+        const f = 60 / d2;
+        pos[i].vx -= dx * f;
+        pos[i].vy -= dy * f;
+        pos[j].vx += dx * f;
+        pos[j].vy += dy * f;
+      }
+    for (const e of edges) {
+      const a = pos[e.from];
+      const b = pos[e.to];
+      if (!a || !b) continue;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const f = (d - 18) * 0.02;
+      a.vx += (dx / d) * f;
+      a.vy += (dy / d) * f;
+      b.vx -= (dx / d) * f;
+      b.vy -= (dy / d) * f;
+    }
+    for (const [i, p] of pos.entries()) {
+      p.vx += (50 - p.x) * 0.01;
+      p.vy += (50 - p.y) * 0.01;
+      if (i === centre) {
+        p.vx = 0;
+        p.vy = 0;
+        continue;
+      }
+      p.x = Math.max(6, Math.min(94, p.x + p.vx * 0.5));
+      p.y = Math.max(7, Math.min(93, p.y + p.vy * 0.5));
+      p.vx *= 0.6;
+      p.vy *= 0.6;
+    }
+  }
+  return pos;
+}
+
+/* The live canvas: DOM labels over an SVG of lines, with hover dimming the
+ * edges that do not touch it. Positions go through the CSSOM.
+ *
+ * The motion is the force layout the portal had before 0.35.0, kept on
+ * purpose: every node pushes every other away, an edge pulls its two ends to
+ * a resting length, the layout cools from hot to still, and a slow sine drift
+ * keeps it alive. Dragging a node re-heats it, so its neighbours follow and
+ * the rest makes room. Positions are percentages of the host; the forces are
+ * worked in pixels, which is the unit their constants were tuned in. */
+const G_MAX_STEP = 1.2; // % of the host a node may move in one frame
+const G_DRIFT = 0.003; // % per frame, the wander's push
+const G_REST = 138; // px, the length an edge relaxes to
+
+function makeLive(host) {
+  const g = { nodes: {}, raf: 0, drag: null, hover: null, tick: 0, alpha: 1, settle: 0 };
+  const still = stillness();
+  const pt = (e) => {
+    const r = host.getBoundingClientRect();
+    return [((e.clientX - r.left) / r.width) * 100, ((e.clientY - r.top) / r.height) * 100];
+  };
+  const nodeOf = (t) => {
+    const ne = t && t.closest ? t.closest("[data-gn]") : null;
+    return ne && host.contains(ne) ? g.nodes[ne.getAttribute("data-gn")] || null : null;
+  };
+  const down = (e) => {
+    if (e.button !== 0) return;
+    const nd = nodeOf(e.target);
+    if (!nd) return;
+    const p = pt(e);
+    g.drag = { nd, dx: nd.x - p[0], dy: nd.y - p[1], sx: e.clientX, sy: e.clientY, moved: false };
+    g.alpha = Math.max(g.alpha, 0.35);
+    graphDragging = true;
+    nd.el.style.cursor = "grabbing";
+    e.preventDefault();
+  };
+  const move = (e) => {
+    const d = g.drag;
+    if (!d) return;
+    if (Math.abs(e.clientX - d.sx) + Math.abs(e.clientY - d.sy) > 3) d.moved = true;
+    const p = pt(e);
+    d.nd.x = Math.max(3, Math.min(97, p[0] + d.dx));
+    d.nd.y = Math.max(4, Math.min(96, p[1] + d.dy));
+    d.nd.vx = 0;
+    d.nd.vy = 0;
+    g.alpha = Math.max(g.alpha, 0.2);
+  };
+  const up = () => {
+    const d = g.drag;
+    if (!d) return;
+    g.suppress = d.moved;
+    if (d.nd.el) d.nd.el.style.cursor = "grab";
+    g.drag = null;
+    graphDragging = false;
+    setTimeout(() => (g.suppress = false), 0);
+  };
+  const clickCap = (e) => {
+    if (g.suppress) {
+      e.stopPropagation();
+      e.preventDefault();
+      g.suppress = false;
+    }
+  };
+  host.addEventListener("pointerdown", down);
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  host.addEventListener("click", clickCap, true);
+  host.addEventListener("pointerover", (e) => (g.hover = nodeOf(e.target)));
+  host.addEventListener("pointerleave", () => (g.hover = null));
+  const stop = () => {
+    cancelAnimationFrame(g.raf);
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+  };
+  // Fit: every node back to its laid-out place, and the heat back in so the
+  // layout settles from there in view.
+  g.reset = () => {
+    for (const nd of Object.values(g.nodes)) {
+      nd.x = nd.ox;
+      nd.y = nd.oy;
+      nd.vx = 0;
+      nd.vy = 0;
+    }
+    g.alpha = 0.6;
+  };
+  // One frame of the simulation. `arr` are the nodes, `links` the edges.
+  const step = (arr, links, W, H, t, dn) => {
+    const a0 = g.alpha;
+    for (let i = 0; i < arr.length; i++) {
+      const a = arr[i];
+      for (let j = i + 1; j < arr.length; j++) {
+        const b = arr[j];
+        let dx = ((b.x - a.x) * W) / 100;
+        let dy = ((b.y - a.y) * H) / 100;
         let d2 = dx * dx + dy * dy;
         if (d2 < 1) {
-          // Exactly coincident nodes have no direction to separate along.
+          // Coincident nodes have no direction to separate along.
           d2 = 1;
           dx = 0.6;
           dy = 0.4;
         }
         const d = Math.sqrt(d2);
-        const force = (5200 / d2) * alpha;
-        a.vx -= ((dx / d) * force) / w;
-        a.vy -= ((dy / d) * force) / h;
-        b.vx += ((dx / d) * force) / w;
-        b.vy += ((dy / d) * force) / h;
+        const f = (5200 / d2) * a0;
+        a.vx -= ((dx / d) * f * 100) / W;
+        a.vy -= ((dy / d) * f * 100) / H;
+        b.vx += ((dx / d) * f * 100) / W;
+        b.vy += ((dy / d) * f * 100) / H;
       }
     }
-    for (const edge of drawn) {
-      const a = nodes[edge.from];
-      const b = nodes[edge.to];
-      if (!a || !b) continue;
-      const dx = (b.x - a.x) * w;
-      const dy = (b.y - a.y) * h;
+    for (const [a, b] of links) {
+      const dx = ((b.x - a.x) * W) / 100;
+      const dy = ((b.y - a.y) * H) / 100;
       const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-      const pull = (d - 138) * 0.0025 * alpha;
+      const pull = (d - G_REST) * 0.0025 * a0 * 0.02;
       // Shared out by degree at each end, so a hub is not dragged about by
-      // every edge it happens to carry.
-      const ax = Math.sqrt(load[edge.from] || 1);
-      const bx = Math.sqrt(load[edge.to] || 1);
-      a.vx += ((((dx / d) * pull * d) / w) * 0.02) / ax;
-      a.vy += ((((dy / d) * pull * d) / h) * 0.02) / ax;
-      b.vx -= ((((dx / d) * pull * d) / w) * 0.02) / bx;
-      b.vy -= ((((dy / d) * pull * d) / h) * 0.02) / bx;
+      // every edge it carries.
+      const ka = pull / Math.sqrt(a.deg || 1);
+      const kb = pull / Math.sqrt(b.deg || 1);
+      a.vx += (dx * ka * 100) / W;
+      a.vy += (dy * ka * 100) / H;
+      b.vx -= (dx * kb * 100) / W;
+      b.vy -= (dy * kb * 100) / H;
     }
-    let moved = 0;
-    for (const node of nodes) {
-      node.vx += (0.5 - node.x) * 0.006 * alpha;
-      node.vy += (0.5 - node.y) * 0.008 * alpha;
-      node.vx += Math.cos(clock + node.phase) * DRIFT;
-      node.vy += Math.sin(clock * 0.9 + node.phase * 1.7) * DRIFT;
-      if (node === dragging) {
-        node.vx = 0;
-        node.vy = 0;
-        continue;
-      }
-      node.vx *= 0.86;
-      node.vy *= 0.86;
-      // One step can only take a node so far. A force large enough to throw it
-      // across the frame is a force the spring will undo next step, which is
-      // the two-frame bounce rather than a layout.
-      node.vx = Math.max(-MAX_STEP, Math.min(MAX_STEP, node.vx));
-      node.vy = Math.max(-MAX_STEP, Math.min(MAX_STEP, node.vy));
-      moved += Math.abs(node.vx) + Math.abs(node.vy);
-      // Kept inside the frame: a node that drifts off-canvas is a node nobody
-      // can click, and a label half outside it is a name nobody can read.
-      const bound = pen(node, w, h);
-      node.x = Math.min(1 - bound.mx, Math.max(bound.mx, node.x + node.vx));
-      node.y = Math.min(1 - bound.my, Math.max(bound.my, node.y + node.vy));
+    const drift = still ? 0 : G_DRIFT;
+    const clock = t * 0.28;
+    for (const nd of arr) {
+      nd.vx += (50 - nd.x) * 0.006 * a0;
+      nd.vy += (50 - nd.y) * 0.008 * a0;
+      nd.vx += Math.cos(clock + nd.ph) * drift;
+      nd.vy += Math.sin(clock * 0.9 + nd.ph * 1.7) * drift;
     }
-    alpha = Math.max(ALPHA_FLOOR, alpha * 0.985);
-    return moved;
-  }
-
-  /** Put the heat back in, for anything that changes the layout. */
-  function reheat(to) {
-    alpha = Math.max(alpha, to === undefined ? 0.35 : to);
-  }
-
-  /* Push overlapping labels apart, after the springs have had their say.
-   *
-   * The force layout solves for edge length and node repulsion and knows
-   * nothing about how wide a label is, so in the default view
-   * `the_queue_admits_in_subm…` sat on top of `a_dequeued_run_is_answere…` and
-   * one label was worn down to `…as`. This works on the boxes the last paint
-   * measured, which is the only place their real width exists.
-   *
-   * ponytail: O(n²) over every pair, four passes. The node budget is 180, so
-   * that is 130k comparisons once per layout change; a grid would be the
-   * upgrade if the budget ever rises. */
-  function separate() {
-    const box = wrap.getBoundingClientRect();
-    const w = Math.max(box.width, 240);
-    const h = Math.max(box.height, 240);
-    for (let pass = 0; pass < 4; pass++) {
-      for (let i = 0; i < nodes.length; i++) {
-        for (let j = i + 1; j < nodes.length; j++) {
-          const a = nodes[i];
-          const b = nodes[j];
-          // Before the first paint there are no measurements, and a guess
-          // here would push the layout around for no reason.
-          if (!a.w || !b.w) return;
-          const dx = (b.x - a.x) * w;
-          const dy = (b.y - a.y) * h;
-          const wantX = (a.w + b.w) / 2 + 8;
-          const wantY = (a.h + b.h) / 2 + 6;
-          const overX = wantX - Math.abs(dx);
-          const overY = wantY - Math.abs(dy);
-          // Boxes only collide when they overlap on both axes.
-          if (overX <= 0 || overY <= 0) continue;
-          // Along whichever axis needs the smaller move, so a label is nudged
-          // aside rather than thrown across the canvas.
-          const pa = pen(a, w, h);
-          const pb = pen(b, w, h);
-          if (overX / w < overY / h) {
-            const push = ((dx >= 0 ? 1 : -1) * overX) / w / 2;
-            a.x = Math.min(1 - pa.mx, Math.max(pa.mx, a.x - push));
-            b.x = Math.min(1 - pb.mx, Math.max(pb.mx, b.x + push));
+    // Labels are boxes, not points: two that overlap are nudged apart along
+    // whichever axis needs the smaller move.
+    for (let i = 0; i < arr.length; i++)
+      for (let j = i + 1; j < arr.length; j++) {
+        const a = arr[i];
+        const b = arr[j];
+        const dx = ((b.x - a.x) * W) / 100;
+        const dy = ((b.y - a.y) * H) / 100;
+        const mx = (a.w + b.w) / 2 + 6 - Math.abs(dx);
+        const my = (a.h + b.h) / 2 + 5 - Math.abs(dy);
+        if (mx > 0 && my > 0) {
+          if (mx < my) {
+            const f = (mx * 0.04 * (dx < 0 ? -1 : 1) * 100) / W;
+            a.vx -= f;
+            b.vx += f;
           } else {
-            const push = ((dy >= 0 ? 1 : -1) * overY) / h / 2;
-            a.y = Math.min(1 - pa.my, Math.max(pa.my, a.y - push));
-            b.y = Math.min(1 - pb.my, Math.max(pb.my, b.y + push));
+            const f = (my * 0.04 * (dy < 0 ? -1 : 1) * 100) / H;
+            a.vy -= f;
+            b.vy += f;
           }
         }
       }
+    for (const nd of arr) {
+      if (nd === dn) {
+        nd.vx = 0;
+        nd.vy = 0;
+        continue;
+      }
+      nd.vx = Math.max(-G_MAX_STEP, Math.min(G_MAX_STEP, nd.vx * 0.86));
+      nd.vy = Math.max(-G_MAX_STEP, Math.min(G_MAX_STEP, nd.vy * 0.86));
+      // Kept inside the frame by half its own size, so no label is cut.
+      const mx = Math.min(45, (((nd.w || 80) / 2 + 4) / W) * 100);
+      const my = Math.min(45, (((nd.h || 28) / 2 + 4) / H) * 100);
+      nd.x = Math.max(mx, Math.min(100 - mx, nd.x + nd.vx));
+      nd.y = Math.max(my, Math.min(100 - my, nd.y + nd.vy));
+    }
+    g.alpha = Math.max(0, g.alpha * 0.985);
+  };
+  const frame = (now) => {
+    if (!host.isConnected) return stop();
+    g.raf = requestAnimationFrame(frame);
+    if (document.visibilityState === "hidden") return;
+    const W = host.clientWidth || 1;
+    const H = host.clientHeight || 1;
+    const t = now / 1000;
+    const remeasure = g.tick++ % 30 === 0;
+    const arr = [];
+    const seen = {};
+    host.querySelectorAll("[data-gn]").forEach((ne) => {
+      const id = ne.getAttribute("data-gn");
+      const ox = parseFloat(ne.getAttribute("data-gx"));
+      const oy = parseFloat(ne.getAttribute("data-gy"));
+      let nd = g.nodes[id];
+      if (!nd) {
+        // A node that appears starts where the layout put it, and the
+        // simulation warms up to settle the new shape.
+        nd = g.nodes[id] = { x: ox, y: oy, vx: 0, vy: 0, ox, oy, ph: Math.random() * 6.283, hv: 0, deg: 0 };
+        g.settle = 1;
+        g.alpha = 1;
+      }
+      if (nd.el !== ne || remeasure) {
+        nd.w = ne.offsetWidth;
+        nd.h = ne.offsetHeight;
+      }
+      nd.el = ne;
+      seen[id] = nd;
+      arr.push(nd);
+    });
+    const links = [];
+    host.querySelectorAll("[data-ge]").forEach((le) => {
+      const k = (le.getAttribute("data-ge") || "").split("|");
+      const a = seen[k[0]];
+      const b = seen[k[1]];
+      if (a && b) links.push([a, b, le]);
+    });
+    const dn = g.drag ? g.drag.nd : null;
+    for (const nd of arr) nd.deg = 0;
+    for (const [a, b] of links) {
+      a.deg++;
+      b.deg++;
+    }
+    // A new shape is settled before it is shown moving, as the old layout
+    // was: two hundred quiet steps, then the drift from there.
+    if (g.settle && arr.every((nd) => nd.w)) {
+      for (let i = 0; i < 220; i++) step(arr, links, W, H, t, dn);
+      g.settle = 0;
+    }
+    step(arr, links, W, H, t, dn);
+    for (const nd of arr) {
+      nd.hv += ((g.hover === nd || nd === dn ? 1 : 0) - nd.hv) * 0.2;
+      if (nd.hv < 0.003) nd.hv = 0;
+      const s = nd.el.style;
+      s.left = `${nd.x.toFixed(3)}%`;
+      s.top = `${nd.y.toFixed(3)}%`;
+      s.transform = `translate(-50%,-50%) scale(${(1 + 0.08 * nd.hv).toFixed(3)})`;
+      s.boxShadow = nd.hv ? `0 4px 14px rgba(20,28,36,${(0.2 * nd.hv).toFixed(3)})` : "";
+    }
+    const hv = g.hover || dn;
+    const off = -(t * 14) % 1000;
+    for (const [a, b, le] of links) {
+      le.setAttribute("x1", a.x.toFixed(3));
+      le.setAttribute("y1", a.y.toFixed(3));
+      le.setAttribute("x2", b.x.toFixed(3));
+      le.setAttribute("y2", b.y.toFixed(3));
+      le.style.strokeDashoffset = still ? "0" : off.toFixed(2);
+      le.style.opacity = hv ? (a === hv || b === hv ? "1" : "0.18") : "1";
+    }
+  };
+  g.raf = requestAnimationFrame(frame);
+  return g;
+}
+
+/** Draw nodes and edges into a live host. `nodes` are `{ id, label, x, y, cls, tip, rows, color, onclick }`. */
+function drawLive(host, nodes, edges) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 100 100");
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("class", "edges");
+  for (const e of edges) {
+    const a = nodes.find((x) => x.id === e.a);
+    const b = nodes.find((x) => x.id === e.b);
+    if (!a || !b) continue;
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("data-ge", `${e.a}|${e.b}`);
+    line.setAttribute("x1", a.x);
+    line.setAttribute("y1", a.y);
+    line.setAttribute("x2", b.x);
+    line.setAttribute("y2", b.y);
+    line.setAttribute("stroke", e.color);
+    line.setAttribute("stroke-width", String(e.w || 1.2));
+    line.setAttribute("stroke-dasharray", e.dash || "0");
+    line.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.append(line);
+  }
+  fill(
+    host,
+    svg,
+    nodes.map((nd) => {
+      const node = (nd.onclick ? btn : (p, ...k) => el("span", p, ...k))(
+        {
+          class: `g-node${nd.cls ? ` ${nd.cls}` : ""}`,
+          "data-gn": nd.id,
+          "data-gx": String(nd.x),
+          "data-gy": String(nd.y),
+          "data-tip": nd.label,
+          "data-tip-rows": nd.rows || null,
+          "data-tip-color": nd.color || null,
+          onclick: nd.onclick || null,
+        },
+        nd.label,
+      );
+      node.style.left = `${nd.x}%`;
+      node.style.top = `${nd.y}%`;
+      return node;
+    }),
+  );
+  if (!host._live) host._live = makeLive(host);
+  return host._live;
+}
+
+// Several /api/graph answers as one drawing: nodes by name, edges re-pointed.
+function mergeGraphs(parts) {
+  if (parts.length === 1) return parts[0];
+  const nodes = [];
+  const at = new Map();
+  const edges = [];
+  const seen = new Set();
+  let total = 0;
+  for (const g of parts) {
+    total = Math.max(total, g.total || 0);
+    const local = (g.nodes || []).map((nd) => {
+      if (!at.has(nd.name)) at.set(nd.name, nodes.push(nd) - 1);
+      return at.get(nd.name);
+    });
+    for (const e of g.edges || []) {
+      const from = local[e.from];
+      const to = local[e.to];
+      const key = `${from}>${to}>${e.kind}`;
+      if (from === undefined || to === undefined || seen.has(key)) continue;
+      seen.add(key);
+      edges.push({ ...e, from, to });
     }
   }
+  return { nodes, edges, total, shown: nodes.length };
+}
 
-  /** A rounded rectangle, the shape every symbol is drawn as. */
-  function box(ctx, x, y, w, h, r) {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + h, r);
-    ctx.arcTo(x + w, y + h, x, y + h, r);
-    ctx.arcTo(x, y + h, x, y, r);
-    ctx.arcTo(x, y, x + w, y, r);
-    ctx.closePath();
+function exploreTab(picker) {
+  const wrap = el("div", { class: "gr-explore grow min0" });
+  const map = el("div", { class: "g-map" });
+  const live = el("div", { class: "g-live" });
+  const side = el("div", { class: "g-side" });
+  const foot = el("div", { class: "g-foot" });
+  const findInput = el("input", {
+    class: "mono",
+    value: gr.find,
+    placeholder: "Jump to a symbol",
+    "aria-label": "Jump to a symbol",
+    "data-keep": "gr-find",
+    "aria-describedby": "gr-find-hint",
+    oninput: (e) => (gr.find = e.target.value),
+    onkeydown: (e) => {
+      if (e.key !== "Enter") return;
+      jump();
+    },
+  });
+  // Several names, comma-separated: each one's definition, and the graph
+  // around all of them, centred on the first.
+  function jump() {
+    const names = gr.find.split(",").map((x) => x.trim()).filter(Boolean).slice(0, 8);
+    if (!names.length) return;
+    gr.names = names;
+    gr.sel = names[0];
+    gr.data = null;
+    gr.sym = null;
+    gr.defs = null;
+    loadExplore();
+  }
+  let liveCtl = null;
+  map.append(
+    el(
+      "div",
+      { class: "g-bar" },
+      el(
+        "div",
+        { class: "box w260 full-sm" },
+        icon(I.searchSm, 14, { w: 1.8 }),
+        findInput,
+        el("span", { class: "sr-only", id: "gr-find-hint", text: "Press Enter or Go to jump. Separate several names with commas." }),
+        btn({ class: "x-btn", "aria-label": "Go", "data-tip": "Jump · Enter does the same", onclick: jump }, icon(I.arrow, 12, { w: 2 })),
+      ),
+      el(
+        "div",
+        { class: "seg panel" },
+        [
+          ["calls", "calls"],
+          ["imports", "imports"],
+          ["inferred", "inferred"],
+          ["ambiguous", "ambiguous"],
+        ].map(([k, label]) => btn({ "aria-pressed": String(!gr.off[k]), onclick: () => ((gr.off[k] = !gr.off[k]), paint()) }, label)),
+      ),
+      el("span", { class: "spacer" }),
+      picker,
+      btn({ class: "btn", onclick: () => liveCtl && liveCtl.reset() }, "Fit"),
+    ),
+    live,
+    foot,
+  );
+  wrap.append(map, side);
+
+  async function loadExplore() {
+    fill(foot, el("span", { class: "muted", text: "Reading the graph…" }));
+    const names = gr.names && gr.names.length > 1 && gr.names.includes(gr.sel) ? gr.names : gr.sel ? [gr.sel] : [null];
+    try {
+      const parts = await Promise.all(
+        names.map((nm) => {
+          const p = new URLSearchParams({ store: gr.store, limit: names.length > 1 ? "24" : "63" });
+          if (nm) p.set("name", nm);
+          return api(`/api/graph?${p}`);
+        }),
+      );
+      gr.data = mergeGraphs(parts);
+      if (names.length > 1) {
+        api(`/api/symbol?${new URLSearchParams({ names: names.join(","), store: gr.store })}`)
+          .then((out) => ((gr.defs = out.table || []), paintSide()))
+          .catch(() => {});
+      } else gr.defs = null;
+      if (!gr.sel && gr.data.nodes && gr.data.nodes.length) {
+        const deg = {};
+        for (const e of gr.data.edges) {
+          deg[e.from] = (deg[e.from] || 0) + 1;
+          deg[e.to] = (deg[e.to] || 0) + 1;
+        }
+        const hub = Object.entries(deg).sort((a, b) => b[1] - a[1])[0];
+        gr.sel = hub ? gr.data.nodes[hub[0]].name : gr.data.nodes[0].name;
+      }
+    } catch (e) {
+      gr.data = { error: e.message, nodes: [], edges: [] };
+    }
+    paint();
+    loadSymbol();
+  }
+
+  async function loadSymbol() {
+    if (!gr.sel) return;
+    const p = new URLSearchParams({ name: gr.sel, store: gr.store, k: "40" });
+    try {
+      gr.sym = await api(`/api/symbol?${p}`);
+      if (gr.unres) {
+        const nb = await api(`/api/neighbors?${new URLSearchParams({ name: gr.sel, store: gr.store, all: "1" })}`);
+        gr.sym.unresolved = nb.unresolved || [];
+      }
+    } catch (e) {
+      gr.sym = { error: e.message };
+    }
+    paintSide();
+  }
+
+  async function loadMap() {
+    if (gr.map && gr.map.store === gr.store) return;
+    try {
+      const out = await api(`/api/map?${new URLSearchParams({ store: gr.store, shown: "12" })}`);
+      gr.map = { ...out, store: gr.store };
+    } catch (e) {
+      gr.map = { error: e.message, store: gr.store, communities: [] };
+    }
+    paintSide();
   }
 
   function paint() {
-    const { w, h, ctx } = size();
-    const ink = graphInk();
-    ctx.clearRect(0, 0, w, h);
-
-    // Measured first: an edge stops at the box it points into, which means
-    // every box's size has to be known before the first edge is drawn.
-    ctx.font = '500 11px "IBM Plex Mono", ui-monospace, monospace';
-    for (const node of nodes) {
-      const ease = stillness() ? (node === hovered ? 1 : 0) : node.hover || 0;
-      node.hover = ease;
-      const text = ctx.measureText(node.label).width;
-      node.w = (text + 22) * (1 + 0.05 * ease);
-      node.h = 28 * (1 + 0.05 * ease);
-    }
-
-    for (const edge of drawn) {
-      const a = nodes[edge.from];
-      const b = nodes[edge.to];
-      if (!a || !b) continue;
-      const ax = a.x * w;
-      const ay = a.y * h;
-      const bx = b.x * w;
-      const by = b.y * h;
-      const hot = edge.from === selected || edge.to === selected;
-      const angle = Math.atan2(by - ay, bx - ax);
-      // To the edge of the box rather than to its centre, so the arrowhead
-      // lands where the reader sees the symbol begin.
-      const inset = Math.min(b.w / 2 + 6, Math.abs(b.h / 2 / Math.sin(angle) || b.w));
-      const ex = bx - Math.cos(angle) * Math.min(inset, b.w / 2 + 6);
-      const ey = by - Math.sin(angle) * (b.h / 2 + 3);
-      ctx.save();
-      ctx.strokeStyle = hot ? ink.hot : ink.edge;
-      ctx.fillStyle = hot ? ink.hot : ink.edge;
-      ctx.lineWidth = hot ? 1.7 : 1.1;
-      // Drawn with the same four values the rail shows. An edge the source
-      // settled is solid; one matched by bare name is dotted; one that could
-      // mean several different definitions is dashed and drawn in the warning
-      // tone, because it is not a claim about this code at all.
-      const settled = edge.confidence === "extracted" || edge.confidence === "resolved";
-      if (edge.confidence === "ambiguous") {
-        ctx.strokeStyle = hot ? ink.hot : ink.warn;
-        ctx.fillStyle = hot ? ink.hot : ink.warn;
-        ctx.setLineDash([6, 4]);
-      } else {
-        ctx.setLineDash(settled ? [] : [2, 3]);
-      }
-      ctx.beginPath();
-      ctx.moveTo(ax, ay);
-      ctx.lineTo(ex, ey);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.beginPath();
-      ctx.moveTo(ex, ey);
-      ctx.lineTo(ex - Math.cos(angle - 0.4) * 7, ey - Math.sin(angle - 0.4) * 7);
-      ctx.lineTo(ex - Math.cos(angle + 0.4) * 7, ey - Math.sin(angle + 0.4) * 7);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-    }
-
-    nodes.forEach((node, i) => {
-      const on = i === selected;
-      const beside = near.has(i);
-      const x = node.x * w - node.w / 2;
-      const y = node.y * h - node.h / 2;
-      box(ctx, x, y, node.w, node.h, 8);
-      ctx.fillStyle = on ? ink.sel : beside ? ink.nearFill : ink.node;
-      ctx.save();
-      if (node.hover) {
-        ctx.shadowColor = ink.nearLine;
-        ctx.shadowBlur = 14 * node.hover;
-      }
-      ctx.fill();
-      ctx.restore();
-      ctx.lineWidth = (on ? 1.6 : 1) + 0.8 * node.hover;
-      ctx.strokeStyle = on ? ink.selLine : beside ? ink.nearLine : ink.nodeLine;
-      ctx.stroke();
-      ctx.fillStyle = on ? ink.selText : beside ? ink.nearText : ink.text;
-      ctx.fillText(node.label, x + 11, y + node.h / 2 + 4);
-    });
-  }
-
-  function tick() {
-    // A view that has been navigated away from is not worth animating. The
-    // canvas is built before it is inserted, so the first frames legitimately
-    // run detached — only a canvas that *was* in the page and is not any more
-    // has been thrown away.
-    if (wrap.isConnected) attached = true;
-    else if (attached) {
-      frame = null;
-      running = false;
-      observer.disconnect();
+    const d = gr.data;
+    if (!d) return;
+    if (d.error) {
+      fill(live, errorBox(d.error));
       return;
     }
-    const box = wrap.getBoundingClientRect();
-    if (running || dragging) step(Math.max(box.width, 240), Math.max(box.height, 240));
-    // Hover is eased rather than switched, so a fast pointer sweep across a
-    // crowded graph does not strobe.
-    for (const node of nodes) {
-      node.hover = (node.hover || 0) + ((node === hovered ? 1 : 0) - (node.hover || 0)) * 0.16;
-      if (node.hover < 0.002) node.hover = 0;
-    }
-    paint();
-    frame = requestAnimationFrame(tick);
-  }
-
-  function at(event) {
-    const box = canvas.getBoundingClientRect();
-    return { x: event.clientX - box.left, y: event.clientY - box.top, w: box.width, h: box.height };
-  }
-
-  function hit(point) {
-    for (let i = nodes.length - 1; i >= 0; i--) {
-      const node = nodes[i];
-      const cx = node.x * point.w;
-      const cy = node.y * point.h;
-      if (
-        Math.abs(point.x - cx) < (node.w || 80) / 2 &&
-        Math.abs(point.y - cy) < (node.h || 28) / 2
-      ) {
-        return i;
-      }
-    }
-    return null;
-  }
-
-  function selectAt(index) {
-    selected = index;
-    near = new Set();
-    for (const edge of drawn) {
-      if (edge.from === index) near.add(edge.to);
-      if (edge.to === index) near.add(edge.from);
-    }
-  }
-
-  canvas.addEventListener("pointerdown", (event) => {
-    const index = hit(at(event));
-    if (index === null) return;
-    canvas.setPointerCapture(event.pointerId);
-    dragging = nodes[index];
-    reheat();
-    down = { x: event.clientX, y: event.clientY, index };
-    canvas.classList.add("dragging");
-    event.preventDefault();
-  });
-
-  canvas.addEventListener("pointermove", (event) => {
-    const point = at(event);
-    if (dragging) {
-      const bound = pen(dragging, point.w, point.h);
-      dragging.x = Math.min(1 - bound.mx, Math.max(bound.mx, point.x / point.w));
-      dragging.y = Math.min(1 - bound.my, Math.max(bound.my, point.y / point.h));
-      if (!frame) paint();
-      return;
-    }
-    const index = hit(point);
-    const node = index === null ? null : nodes[index];
-    canvas.classList.toggle("over-node", Boolean(node));
-    if (node !== hovered) {
-      hovered = node;
-      if (!frame) paint();
-    }
-    if (onHover) onHover(node, event.clientX, event.clientY);
-  });
-
-  const release = (event) => {
-    if (down) {
-      // A drag that went nowhere is a click. Four pixels is the slack a
-      // pointer has on the way down.
-      const moved = Math.abs(event.clientX - down.x) + Math.abs(event.clientY - down.y);
-      if (moved < 4) {
-        selectAt(down.index);
-        if (onPick) onPick(nodes[down.index]);
-      }
-    }
-    dragging = null;
-    down = null;
-    canvas.classList.remove("dragging");
-    if (!frame) paint();
-  };
-  canvas.addEventListener("pointerup", release);
-  canvas.addEventListener("pointercancel", release);
-  canvas.addEventListener("pointerleave", () => {
-    hovered = null;
-    dragging = null;
-    down = null;
-    canvas.classList.remove("dragging", "over-node");
-    if (onHover) onHover(null);
-    if (!frame) paint();
-  });
-
-  // A canvas has no layout of its own to react to a resize with, and the
-  // stylesheet cannot repaint it.
-  const observer = new ResizeObserver(() => {
-    if (!frame) paint();
-  });
-  observer.observe(wrap);
-
-  return {
-    node: wrap,
-    draw(data, kinds) {
-      nodes = (data.nodes || []).map((row, i) => {
-        const angle = (i / Math.max((data.nodes || []).length, 1)) * Math.PI * 2;
-        return {
-          ...row,
-          // Truncated for the canvas only. Test names run past sixty
-          // characters, and a box that wide covers its neighbours and pushes
-          // the layout off the frame; the whole name is in the hover card and
-          // in the rail the moment the node is picked.
-          label: row.name.length > 26 ? `${row.name.slice(0, 25)}…` : row.name,
-          x: 0.5 + Math.cos(angle) * 0.28,
-          y: 0.5 + Math.sin(angle) * 0.28,
-          vx: 0,
-          vy: 0,
-          // Where this node is in its own wander, so forty nodes drift apart
-          // rather than sliding as one block.
-          phase: Math.random() * Math.PI * 2,
-          hover: 0,
-          callers: 0,
-          callees: 0,
-        };
-      });
-      edges = data.edges || [];
-      total = data.total || 0;
-      selected = null;
-      near = new Set();
-      hovered = null;
-      this.filter(kinds);
-      // Settled before the first painted frame, rather than exploding outward
-      // while the reader watches.
-      alpha = 1;
-      const box = wrap.getBoundingClientRect();
-      for (let i = 0; i < 220; i++) {
-        step(Math.max(box.width, 240), Math.max(box.height, 240));
-      }
-      settled = true;
-      // Once for the measurements, then the labels are pushed off each other
-      // using them, then again to draw the result.
-      paint();
-      separate();
-      paint();
-    },
-    /** Draw only the edge kinds asked for. Returns how many are drawn.
-     *
-     * An empty set means no kind is selected, which means no edges — not
-     * every edge. The old "no filter selected means no filter" fallback was
-     * indistinguishable from all six chips on, and the summary line asserted
-     * a number that did not describe what was drawn. */
-    filter(kinds) {
-      drawn = kinds ? edges.filter((e) => kinds.has(e.kind)) : edges;
-      // Counted over what is drawn rather than over what was fetched: a hover
-      // card that says "3 in" beside one line on the canvas is describing a
-      // graph the reader cannot see, and the reader believes the card.
-      load = nodes.map(() => 1);
-      for (const node of nodes) {
-        node.callers = 0;
-        node.callees = 0;
-      }
-      for (const edge of drawn) {
-        if (nodes[edge.from]) nodes[edge.from].callees += 1;
-        if (nodes[edge.to]) nodes[edge.to].callers += 1;
-        if (load[edge.from] !== undefined) load[edge.from] += 1;
-        if (load[edge.to] !== undefined) load[edge.to] += 1;
-      }
-      if (selected !== null) selectAt(selected);
-      // Fewer edges is a different layout, so the springs get another go at it.
-      reheat(0.25);
-      if (settled) paint();
-      return drawn.length;
-    },
-    /** Select a node by name, as though it had been clicked. */
-    pick(name) {
-      const index = nodes.findIndex((node) => node.name === name);
-      if (index < 0) return false;
-      selectAt(index);
-      paint();
-      if (onPick) onPick(nodes[index]);
+    // Every chip off means no edges at all, not the kinds no chip names.
+    const allOff = gr.off.calls && gr.off.imports && gr.off.inferred && gr.off.ambiguous;
+    const keep = d.edges.filter((e) => {
+      if (allOff) return false;
+      if (e.confidence === "inferred" && gr.off.inferred) return false;
+      if (e.confidence === "ambiguous" && gr.off.ambiguous) return false;
+      if (e.kind === "calls" && gr.off.calls && e.confidence !== "inferred" && e.confidence !== "ambiguous") return false;
+      if (e.kind === "imports" && gr.off.imports) return false;
       return true;
-    },
-    counts: () => ({ nodes: nodes.length, edges: drawn.length, total }),
-
-    /** The symbol worth landing on: the one with the most edges that were
-     * actually found rather than guessed.
-     *
-     * The unscoped view used to open on whatever had the most edges of any
-     * kind, which in a Rust codebase is `new` — every type has one, and its
-     * neighbourhood is hundreds of inferred edges to unrelated code. A hub of
-     * extracted and resolved edges is a hub of the corpus rather than a hub of
-     * one very common word. */
-    best() {
-      const score = new Map();
-      for (const edge of drawn) {
-        if (edge.confidence !== "extracted" && edge.confidence !== "resolved") continue;
-        for (const end of [edge.from, edge.to]) {
-          score.set(end, (score.get(end) || 0) + 1);
-        }
-      }
-      let pick = null;
-      let most = 0;
-      for (const [index, count] of score) {
-        if (count <= most || !nodes[index]) continue;
-        most = count;
-        pick = nodes[index].name;
-      }
-      return pick;
-    },
-
-    /** Spread the layout back out to fill the frame. */
-    fit() {
-      if (!nodes.length) return;
-      const xs = nodes.map((node) => node.x);
-      const ys = nodes.map((node) => node.y);
-      const spread = (values, low, high) => {
-        const min = Math.min(...values);
-        const max = Math.max(...values);
-        const span = max - min;
-        // Everything in one spot: nothing to spread, and dividing by the span
-        // would be dividing by zero.
-        if (span < 0.001) return () => (low + high) / 2;
-        return (value) => low + ((value - min) / span) * (high - low);
-      };
-      const toX = spread(xs, 0.08, 0.92);
-      const toY = spread(ys, 0.1, 0.9);
-      for (const node of nodes) {
-        node.x = toX(node.x);
-        node.y = toY(node.y);
-        node.vx = 0;
-        node.vy = 0;
-      }
-      separate();
-      paint();
-    },
-    running: () => running,
-    toggle() {
-      running = !running;
-      if (running) reheat(0.2);
-      return running;
-    },
-    start() {
-      // Under reduced motion the graph is solved once and then still: there is
-      // no loop to pause, and nothing moves unless the reader moves it.
-      if (stillness()) {
-        running = false;
-        paint();
-        return;
-      }
-      if (!frame) tick();
-    },
-    stop() {
-      running = false;
-      if (frame) cancelAnimationFrame(frame);
-      frame = null;
-      observer.disconnect();
-    },
-    repaint: paint,
-  };
-}
-
-// Every kind `graph::KINDS` stores. A kind missing here is fetched from
-// /api/graph and thrown away before painting, which is what `contains` and
-// `aliases` were until 0.17.2 - the rail counted them and the canvas did not
-// draw them. `tests/portal.rs` asserts this list against the Rust one.
-const EDGE_KINDS = ["defines", "calls", "imports", "references", "contains", "aliases"];
-
-async function graphView() {
-  await refreshStores();
-
-  const kinds = new Set(EDGE_KINDS);
-  const chosen = new Set();
-  const meta = el("span", { class: "graph-count" });
-  const rail = el("div", { class: "graph-rail" });
-  /* The selected symbol's two actions, in a footer of the side column that
-   * does not scroll with it. Inside the rail they were sticky against a
-   * padding the rail stopped having when the column became the scroller, so
-   * they sat pinned just below the visible edge, cut in half. */
-  const actions = el("div", { class: "rail-actions", hidden: true });
-  const unreadable = el("div", { class: "unreadable-slot" });
-
-  const canvas = graphCanvas({
-    onPick: (node) => select(node),
-    onHover: (node, x, y) => {
-      if (!node) return tip.hide("graph");
-      tip.atPoint(
-        x,
-        y,
-        tipCard(node.name, "blue", [
-          ["kind", node.kind],
-          ["file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`],
-          ["store", node.store || (state.stores[0] && state.stores[0].name) || "—"],
-          ["calls", `${node.callers} in · ${node.callees} out`],
-        ]),
-        "graph",
-      );
-    },
-  });
-
-  const pause = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: "Pause",
-    onclick: (e) => {
-      const on = canvas.toggle();
-      e.currentTarget.textContent = on ? "Pause" : "Resume";
-    },
-  });
-
-  /* Beside Pause, which used to be the only control the canvas had: a reader
-   * who dragged a node off the edge had no way back short of reloading. */
-  const fit = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: "Fit",
-    onclick: () => canvas.fit(),
-  });
-  const reset = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: "Reset",
-    onclick: () => load({}),
-  });
-
-  /* The label has to come from what the canvas is actually doing, not from a
-   * second reading of the media query: under reduced motion `start` never
-   * begins a loop, and a button reading "Pause" beside a still picture is a
-   * lie about which of the two is in charge. */
-  function paintPause() {
-    pause.textContent = canvas.running() ? "Pause" : "Settled";
-  }
-
-  function counts() {
-    const { nodes, edges, total } = canvas.counts();
-    // What is drawn, out of what the scope holds. The cap is the reason the
-    // two differ, and a summary that mentioned only the first read as a count
-    // of the whole graph.
-    const shown = total && total > nodes ? `${n(nodes)} of ${n(total)} symbols` : `${n(nodes)} symbols`;
-    meta.textContent = `${shown} · ${n(edges)} edges`;
-  }
-
-  function blank(message) {
-    actions.hidden = true;
-    return fill(
-      rail,
-      el("div", { class: "graph-selected" }, el("div", { class: "rail-hint", text: message })),
-    );
-  }
-
-  function ends(title, list, absent, extra) {
-    return el(
-      "div",
-      { class: "rail-group" },
-      el("h3", { text: title }),
-      list.length
-        ? el(
-            "ul",
-            { class: "rail-list" },
-            list.map((end) => endRow(end)),
-          )
-        : el("div", { class: "rail-hint", text: absent }),
-      extra || null,
-    );
-  }
-
-  /* One neighbour. An ambiguous row stands for several definitions and must
-   * not name one of them: a reader who follows it would open one of four files
-   * the call could have meant. It says how many instead, and opens on ask. */
-  function endRow(end) {
-    if (end.confidence === "ambiguous") {
-      const li = el("li", { class: "ambiguous-row" });
-      let open = false;
-      const toggle = el("button", {
-        class: "link-button",
-        type: "button",
-        text: `${end.name} · ${end.definitions} definitions`,
-        "aria-expanded": "false",
-        onclick: async () => {
-          open = !open;
-          toggle.setAttribute("aria-expanded", String(open));
-          if (!open) return fill(nested);
-          fill(nested, skeletonRows(2));
-          let all;
-          try {
-            all = await api(
-              scoped(`/api/neighbors?name=${encodeURIComponent(state.graphSelected)}&all=1`),
-            );
-          } catch (e) {
-            return fill(nested, error(e.message));
-          }
-          const each = all.callees.filter((c) => c.name === end.name);
-          fill(
-            nested,
-            el(
-              "ul",
-              { class: "rail-list nested" },
-              each.map((one) =>
-                el(
-                  "li",
-                  {},
-                  el("a", {
-                    href: `#graph?name=${encodeURIComponent(one.name)}`,
-                    text: `${shortPath(one.path)}:${one.start_line}`,
-                    onclick: (e) => {
-                      e.preventDefault();
-                      focus(one.name);
-                    },
-                  }),
-                ),
-              ),
-            ),
-          );
-        },
-      });
-      const nested = el("div", { class: "nested-wrap" });
-      return fill(li, toggle, confidenceBadge(end.confidence), el("span", { class: "via", text: end.kind }), nested);
-    }
-    return el(
-      "li",
-      {},
-      el("a", {
-        href: `#graph?name=${encodeURIComponent(end.name)}`,
-        text: end.name,
-        title: end.name,
-        onclick: (e) => {
-          e.preventDefault();
-          focus(end.name);
-        },
-      }),
-      confidenceBadge(end.confidence),
-      el("span", { class: "via", text: end.kind }),
-    );
-  }
-
-  /* What the four values mean, once, under the rail. A badge whose meaning a
-   * reader has to guess is a badge that gets read as decoration. */
-  function confidenceLegend() {
-    return el(
-      "div",
-      { class: "conf-legend" },
-      Object.entries(CONFIDENCE).map(([value, [label, why]]) =>
-        el(
-          "span",
-          { class: "legend-chip" },
-          el("span", { class: `conf ${value}`, text: label }),
-          el("span", { class: "why", text: why }),
-        ),
-      ),
-    );
-  }
-
-  async function select(node) {
-    actions.hidden = true;
-    fill(rail, skeletonRows(6));
-    let data;
-    try {
-      data = await api(scoped(`/api/neighbors?name=${encodeURIComponent(node.name)}`));
-    } catch (e) {
-      return fill(rail, error(e.message));
-    }
-    state.graphSelected = node.name;
-    const edge = (e) => ({
-      name: e.name,
-      kind: e.kind,
-      confidence: e.confidence,
-      definitions: e.definitions,
-      path: e.path,
-      start_line: e.start_line,
     });
-
+    const selIdx = d.nodes.findIndex((nd) => nd.name === gr.sel);
+    const pos = layout(d.nodes, keep, selIdx >= 0 ? selIdx : undefined);
+    const deg = {};
+    for (const e of keep) {
+      deg[e.from] = (deg[e.from] || 0) + 1;
+      deg[e.to] = (deg[e.to] || 0) + 1;
+    }
+    const near = new Set(keep.filter((e) => e.from === selIdx || e.to === selIdx).flatMap((e) => [e.from, e.to]));
+    // As many labels as the canvas has room for: sixty-three in a phone's
+    // width were a pile. The selected symbol, its neighbours, then the best
+    // connected, up to a count that grows with the width.
+    const width = live.clientWidth || 900;
+    const room = width < 520 ? 14 : width < 760 ? 24 : width < 1000 ? 40 : d.nodes.length;
+    const shown = new Set(
+      d.nodes
+        .map((_, i) => i)
+        .sort((a, b) => (b === selIdx) - (a === selIdx) || near.has(b) - near.has(a) || (deg[b] || 0) - (deg[a] || 0))
+        .slice(0, room),
+    );
+    const nodes = d.nodes.map((nd, i) => ({
+      id: String(i),
+      label: nd.name,
+      x: +pos[i].x.toFixed(2),
+      y: +pos[i].y.toFixed(2),
+      cls: i === selIdx ? "sel" : near.has(i) ? "near" : "",
+      color: i === selIdx ? "var(--accent)" : "var(--blue)",
+      rows: rows([["kind", nd.kind], ["file", `${tilde(nd.path)}:${nd.start_line}-${nd.end_line}`], ["edges drawn", String(deg[i] || 0)], ["store", gr.store], i === selIdx ? ["state", "selected"] : ["click", "select · drag to move"]]),
+      onclick: () => {
+        gr.sel = nd.name;
+        gr.sym = null;
+        paint();
+        loadSymbol();
+      },
+    }));
+    const edges = keep.filter((e) => shown.has(e.from) && shown.has(e.to)).map((e) => ({ a: String(e.from), b: String(e.to), ...edgeStyle(e, isDark()) }));
+    liveCtl = drawLive(live, nodes.filter((_, i) => shown.has(i)), edges);
     fill(
-      rail,
+      foot,
       el(
         "div",
-        { class: "graph-selected" },
-        el("span", { class: "eyebrow", text: "Selected symbol" }),
-        el("h2", { class: "sym", text: node.name, title: node.name }),
-        el("div", {
-          class: "loc",
-          "data-tip": node.path,
-          text: `${shortPath(node.path)}:${node.start_line}-${node.end_line}`,
-        }),
+        { class: "g-legend" },
+        el("span", {}, el("i"), "extracted · resolved"),
+        el("span", {}, el("i", { class: "dot" }), "inferred"),
+        el("span", {}, el("i", { class: "dash" }), "ambiguous"),
+      ),
+      el("span", { class: "spacer" }),
+      el("span", { class: "muted", text: `${n(Math.min(shown.size, d.shown || d.nodes.length))} of ${n(d.total)} symbols · ${n(edges.length)} edges · drag or click a node` }),
+    );
+  }
+
+  function paintSide() {
+    const s = gr.sym;
+    const def = s && s.symbols && s.symbols[0];
+    // Called by means calls: a reference or an alias is not a caller.
+    const callers = ((s && s.callers) || []).filter((c) => !c.kind || c.kind === "calls");
+    const callees = (s && s.callees) || [];
+    const list = gr.dir === "in" ? callers : callees;
+    const unresolvedList = (s && s.unresolved) || [];
+    const comms = (gr.map && gr.map.store === gr.store && gr.map.communities) || [];
+    fill(
+      side,
+      el(
+        "div",
+        { class: "g-side-scroll" },
         el(
           "div",
-          { class: "chips" },
-          el("span", { class: "chip static blue", text: node.kind }),
-          node.store ? el("span", { class: "chip static", text: node.store }) : null,
-          el("span", {
-            class: "chip static",
-            text: `${Math.max(node.end_line - node.start_line + 1, 1)} lines`,
+          { class: "g-sel" },
+          el("span", { class: "eyebrow sm wide", text: "SELECTED" }),
+          el("span", { class: "nm", text: gr.sel || "nothing yet" }),
+          def ? pathSpan(`${tilde(def.path)}:${def.start_line}-${def.end_line}`, "t-mono-sm", `${def.path}:${def.start_line}-${def.end_line}`) : el("span", { class: "t-mono-sm", text: s && s.error ? s.error : s ? "no definition in this store" : "reading…" }),
+          gr.defs && gr.defs.length > 1
+            ? el(
+                "div",
+                { class: "g-defs" },
+                el("span", { class: "eyebrow sm", text: `${gr.defs.length} definitions` }),
+                gr.defs.map((d) =>
+                  btn({ class: `g-def${d.name === gr.sel ? " on" : ""}`, onclick: () => ((gr.sel = d.name), (gr.sym = null), paint(), loadSymbol()) }, el("span", { class: "t-mono t-m", text: d.name }), pathSpan(`${tilde(d.path)}:${d.start_line}`, "t-mono-sm muted", `${d.path}:${d.start_line}`)),
+                ),
+              )
+            : null,
+          def ? el("div", { class: "row gap6" }, el("span", { class: "chipo blue", text: def.kind }), el("span", { class: "chipo", text: plural(def.end_line - def.start_line + 1, "line") }), el("span", { class: "chipo", text: gr.store }), (s.symbols || []).length > 1 ? el("span", { class: "chipo", text: `${s.symbols.length} definitions` }) : null) : null,
+          el(
+            "div",
+            { class: "two" },
+            btn({ class: "btn sm primary t125", disabled: gr.sel ? null : true, onclick: () => ((gr.br.sym = gr.sel), (gr.br.out = null), go("graph", "blast"), runReach()) }, "Blast radius"),
+            btn({ class: "btn sm t125", disabled: gr.sel ? null : true, onclick: () => ((gr.pt.from = gr.sel), (gr.pt.to = ""), (gr.pt.out = null), go("graph", "path")) }, "Path from here"),
+          ),
+        ),
+        tabs(
+          [
+            ["in", `Called by · ${callers.length}`],
+            ["out", `Calls · ${callees.length}`],
+          ],
+          gr.dir,
+          (v) => ((gr.dir = v), paintSide()),
+          { cls: "small in-card" },
+        ),
+        el(
+          "div",
+          { class: "col gap4 pad8" },
+          !s ? el("div", { class: "empty" }, "Reading…") : !list.length ? empty(gr.dir === "in" ? "Nothing in this store calls it." : "It calls nothing this store defines.") : null,
+          list.map((c) =>
+            btn(
+              {
+                class: "edge-row",
+                onclick: () => {
+                  if (c.confidence === "ambiguous") return toast(`${c.name} has ${c.definitions} definitions — open the file to tell which`);
+                  gr.sel = c.name;
+                  gr.data = null;
+                  gr.sym = null;
+                  loadExplore();
+                },
+              },
+              el("span", { class: "col" }, el("span", { class: "n", text: c.name }), c.confidence === "ambiguous" ? el("span", { class: "w", text: `${c.definitions} definitions ▸` }) : pathSpan(`${tilde(c.path)}:${c.start_line}`, "w", `${c.path}:${c.start_line}`)),
+              confBadge(c.confidence),
+            ),
+          ),
+          gr.unres ? unresolvedList.map((u) => el("div", { class: "edge-row" }, el("span", { class: "col" }, el("span", { class: "n", text: u.name }), el("span", { class: "w", text: "no definition in any open store" })), confBadge("unresolved"))) : null,
+          toggle(gr.unres, gr.unres ? "Hide unresolved" : "Show unresolved", (v) => ((gr.unres = v), loadSymbol()), { cls: "boxed sm" }),
+        ),
+        el(
+          "div",
+          { class: "subsys-wrap" },
+          btn(
+            { class: "group-row", "aria-expanded": String(gr.mapOpen), onclick: () => ((gr.mapOpen = !gr.mapOpen), gr.mapOpen && loadMap(), paintSide()) },
+            el("span", { class: `caret${gr.mapOpen ? " open" : ""}` }, icon(I.chevRight, 13, { w: 2 })),
+            el("span", { class: "t-b t-sm", text: "Subsystems" }),
+            el("span", { class: "t-mono-sm", text: gr.map && gr.map.store === gr.store && !gr.map.error ? `${gr.map.shown || comms.length} of ${n(gr.map.total || comms.length)}` : "" }),
+          ),
+          gr.mapOpen
+            ? el(
+                "div",
+                { class: "col gap6 pad-subsys" },
+                !gr.map || gr.map.store !== gr.store ? el("div", { class: "empty" }, "Reading…") : gr.map.error ? errorBox(gr.map.error) : null,
+                comms.map((m) =>
+                  btn(
+                    { class: "subsys", onclick: () => ((gr.sel = (m.hubs[0] || {}).name || m.label), (gr.data = null), (gr.sym = null), loadExplore()) },
+                    el("span", { class: "row base nowrap" }, el("span", { class: "mono t-m t-sm grow", text: m.label }), el("span", { class: "t-mono-sm", text: plural(m.size, "symbol") })),
+                    el("span", { class: "h", text: `hubs: ${(m.hubs || []).map((h) => h.name).join(" · ")}` }),
+                  ),
+                ),
+                el("span", { class: "t-mono-sm pad2", text: "communities over settled calls and imports edges · no model" }),
+              )
+            : null,
+        ),
+      ),
+    );
+  }
+
+  paintSide();
+  if (gr.data && gr.data.storeName === gr.store) paint();
+  setTimeout(() => {
+    loadExplore();
+    if (gr.mapOpen) loadMap();
+  }, 0);
+  return wrap;
+}
+
+async function runReach() {
+  const b = gr.br;
+  const name = b.sym.trim();
+  if (!name) return;
+  b.busy = true;
+  b.out = null;
+  if (current.view === VIEWS.graph) repaint();
+  try {
+    b.out = await api(`/api/impact?${new URLSearchParams({ name, store: gr.store, depth: String(b.hops), ...(b.verified ? {} : { all_edges: "1" }) })}`);
+  } catch (e) {
+    b.out = { error: e.message };
+  }
+  b.busy = false;
+  if (current.view === VIEWS.graph) repaint();
+}
+
+function blastTab(picker) {
+  const b = gr.br;
+  const symInput = el("input", {
+    class: "mono",
+    value: b.sym,
+    placeholder: "a symbol's exact name, e.g. main",
+    "aria-label": "Symbol",
+    "data-keep": "br-sym",
+    oninput: (e) => (b.sym = e.target.value),
+    onkeydown: (e) => e.key === "Enter" && runReach(),
+  });
+  const imp = b.out && b.out.impact;
+  const parts = [
+    el(
+      "div",
+      { class: "ctrl-card" },
+      el("span", { class: "eyebrow", text: "IF THIS CHANGES" }),
+      el("div", { class: "box focus h34 grow-box" }, symInput),
+      el("div", { class: "dial" }, el("span", { class: "eyebrow", text: "HOPS" }), String(b.hops), btn({ class: "pm", "aria-label": "Fewer hops", onclick: () => ((b.hops = Math.max(1, b.hops - 1)), repaint()) }, "−"), btn({ class: "pm", "aria-label": "More hops", onclick: () => ((b.hops = Math.min(6, b.hops + 1)), repaint()) }, "+")),
+      toggle(b.verified, "Verified edges only", (v) => ((b.verified = v), repaint(), b.out && runReach()), { cls: "boxed h34" }),
+      picker,
+      btn({ class: "btn md primary", onclick: runReach }, "Reach"),
+    ),
+  ];
+  if (b.busy) parts.push(el("div", { class: "row gap10 muted" }, el("span", { class: "spinner" }), "Walking the edges backwards…"));
+  else if (b.out && b.out.error) parts.push(el("div", { class: "card" }, errorBox(b.out.error)));
+  else if (!imp) {
+    let hubs = (gr.map && gr.map.store === gr.store ? gr.map.communities || [] : []).flatMap((c) => c.hubs || []).slice(0, 3);
+    // A store too small for communities still has symbols: the busiest ones
+    // in its overview graph are where to start.
+    if (!hubs.length && data.graphpeek && graphPeekFor === gr.store) {
+      const g = data.graphpeek;
+      const deg = {};
+      for (const e of g.edges || []) {
+        deg[e.from] = (deg[e.from] || 0) + 1;
+        deg[e.to] = (deg[e.to] || 0) + 1;
+      }
+      hubs = (g.nodes || [])
+        .map((nd, i) => ({ name: nd.name, path: nd.path, kind: nd.kind, d: deg[i] || 0 }))
+        .filter((h) => h.name && h.kind !== "module" && h.kind !== "file" && !/[./]/.test(h.name))
+        .sort((a, b) => b.d - a.d)
+        .slice(0, 3);
+    }
+    // Opened straight on this tab, the store's hubs are not read yet: read
+    // them, so the starting points are symbols this store really defines.
+    if (gr.store && !(gr.map && gr.map.store === gr.store)) {
+      const want = gr.store;
+      api(`/api/map?${new URLSearchParams({ store: want, shown: "12" })}`)
+        .then((out) => {
+          gr.map = { ...out, store: want };
+          if (state.route.page === "graph" && state.route.parts[0] === "blast") repaint();
+        })
+        .catch((e) => (gr.map = { error: e.message, store: want, communities: [] }));
+    }
+    parts.push(
+      el(
+        "div",
+        { class: "auto-fit m240" },
+        (hubs.length ? hubs : gr.sel ? [{ name: gr.sel }] : []).map((h) => btn({ class: "kind-card", onclick: () => ((b.sym = h.name), runReach()) }, el("span", { class: "mono t-m", text: h.name }), h.path ? el("span", { class: "d col min0" }, pathSpan(store(gr.store) ? relTo(store(gr.store), h.path) : tilde(h.path), "t-mono-sm", h.path), "A hub here — what depends on it?") : el("span", { class: "d", text: "What depends on it?" }))),
+      ),
+    );
+  } else parts.push(blastResult(imp, b.out.headline));
+  return el("div", { class: "gr-pad" }, parts);
+}
+
+function blastResult(imp, headline) {
+  const b = gr.br;
+  const reached = imp.reached || [];
+  const files = imp.files || [];
+  const inferred = (imp.inferred || 0) + (imp.ambiguous || 0);
+  const hopsMax = Math.max(0, ...reached.map((r) => r.hop));
+  const q = b.q.toLowerCase();
+  const filtered = reached.filter((r) => (b.hop === "all" || (b.hop === "3" ? r.hop >= 3 : String(r.hop) === b.hop)) && (b.edge === "all" || (b.edge === "inferred" ? r.confidence === "inferred" || r.confidence === "ambiguous" : r.confidence === "resolved" || r.confidence === "extracted")) && (!q || `${r.name} ${r.path}`.toLowerCase().includes(q)));
+  const g = grid({
+    key: "blast",
+    caption: "What depends on the symbol",
+    rows: filtered,
+    sort: "hop",
+    per: 10,
+    empty: "Nothing reached matches.",
+    onClear: () => ((b.q = ""), (b.hop = "all"), (b.edge = "all"), repaint()),
+    columns: [
+      { key: "name", label: "Reached", cls: "mm cap180", sort: (r) => r.name, render: (r) => r.name },
+      // Where it reaches the symbol: the call site (at), not where it is defined.
+      { key: "where", label: "Where", cls: "ms cap180", sort: (r) => `${r.path}:${String(r.at ?? r.line).padStart(8, "0")}`, render: (r) => pathSpan(`${tilde(r.path)}:${r.at ?? r.line}`, "", `${r.path}:${r.at ?? r.line} · defined at line ${r.line}`) },
+      { key: "edge", label: "Edge", sort: (r) => r.confidence, render: (r) => el("span", { class: `badge ${r.confidence === "inferred" || r.confidence === "ambiguous" ? "amber" : "blue"}`, text: `${r.kind} · ${r.confidence}` }) },
+      { key: "hop", label: "Hop", cls: "ms r", sort: (r) => r.hop, render: (r) => String(r.hop) },
+    ],
+  });
+  const qInput = el("input", { value: b.q, placeholder: "Filter by name or file", "data-keep": "br-q", "aria-label": "Filter reached", oninput: (e) => ((b.q = e.target.value), repaint()) });
+  // The reverse mini-graph: the symbol in the middle, the nearest callers
+  // around it, each joined to whatever it reached the symbol through.
+  const drawn = [{ name: imp.name, hop: 0 }, ...reached.filter((r) => r.hop <= 2).slice(0, 21)];
+  const ring = drawn.slice(1);
+  const mini = el("div", { class: "g-live mini" });
+  const nodes = drawn.map((r, i) => {
+    const a = (i / Math.max(1, ring.length)) * Math.PI * 2 - Math.PI / 2;
+    const rad = r.hop === 1 ? 0.55 : 0.85;
+    const x = i === 0 ? 50 : Math.max(10, Math.min(90, 50 + Math.cos(a) * rad * 42));
+    const y = i === 0 ? 52 : Math.max(10, Math.min(92, 52 + Math.sin(a) * rad * 40));
+    return { id: r.name + (i ? `#${i}` : ""), label: r.name, x: +x.toFixed(2), y: +y.toFixed(2), cls: i === 0 ? "sel" : r.hop > 1 ? "dim" : "near", color: i === 0 ? "var(--accent)" : "var(--blue)", rows: i === 0 ? rows([["role", "the symbol that changes"], ["reaches", plural(reached.length, "symbol")]]) : rows([["hop", String(r.hop)], ["file", `${tilde(r.path)}:${r.at ?? r.line}`], ["edge", `${r.kind} · ${r.confidence}`]]) };
+  });
+  const idOf = (name) => (nodes.find((nd) => nd.label === name) || {}).id;
+  const edges = nodes.slice(1).map((nd, i) => {
+    const r = ring[i];
+    const to = r.hop === 1 ? nodes[0].id : idOf(r.via) || nodes[0].id;
+    return { a: nd.id, b: to, ...edgeStyle(r, isDark()) };
+  });
+  setTimeout(() => drawLive(mini, nodes, edges), 0);
+  const top = files[0] ? files[0].symbols : 1;
+  return el(
+    "div",
+    { class: "split s-1-1" },
+    el(
+      "div",
+      { class: "stack" },
+      el(
+        "div",
+        { class: "card pad" },
+        el("div", { class: "t-m t-sm pretty big14", text: headline || `${plural(reached.length, "definition")} in ${plural(files.length, "file")} reach ${imp.name} within ${plural(b.hops, "hop")}` }),
+        imp.hidden ? el("div", { class: "muted t-xs", text: `${n(imp.hidden)} more beyond the ${n(reached.length)} listed — narrow the hops to see them all.` }) : null,
+        el("div", { class: "q3 tb-line" }, [["REACHED", n(reached.length + (imp.hidden || 0))], ["FILES", n(files.length)], ["INFERRED", n(inferred)]].map(([k, v]) => el("div", { class: "stat-inline" }, el("span", { class: "eyebrow sm", text: k }), el("span", { class: "v", text: v })))),
+      ),
+      el(
+        "div",
+        { class: "card" },
+        el(
+          "div",
+          { class: "filterbar" },
+          el("div", { class: "box h28 w180 full-sm" }, icon(I.searchSm, 13, { w: 1.8 }), qInput),
+          seg(
+            [
+              ["all", "All hops"],
+              ["1", "1"],
+              ["2", "2"],
+              ["3", "3+"],
+            ],
+            b.hop,
+            (v) => ((b.hop = v), repaint()),
+          ),
+          dropdown({
+            label: "Edge",
+            value: b.edge,
+            options: [
+              ["all", "All edges"],
+              ["resolved", "Resolved"],
+              ["inferred", "Inferred"],
+            ],
+            onChange: (v) => ((b.edge = v), repaint()),
           }),
         ),
-        // The graph read backwards, from the symbol already in hand. The
-        // Impact page takes a name; this is how somebody who is looking at
-        // one gets there without typing it again.
+        g.node,
       ),
-      // "Incoming", because that is what the list holds. Under a heading
-      // reading CALLERS it carried a `defines` edge and a `references` edge,
-      // neither of which is a call — the section is every edge that points at
-      // this symbol and now says so.
-      ends("Incoming", data.callers.map(edge), "Nothing in the graph points at this."),
-      ends(
-        "Outgoing",
-        data.callees.map(edge),
-        "A leaf, as far as the extracted edges go.",
-        // Targets the store holds no definition for. Left out by default,
-        // because a list of names this corpus knows nothing about is noise —
-        // and counted, because "no callees" and "every callee is outside the
-        // index" are different facts.
-        data.hidden
-          ? el("button", {
-              // A chip, not muted text. At 11px in `--muted` this read as a
-              // caption about the list rather than as the control that opens
-              // the rest of it, which is the whole of why it was missed.
-              class: "chip sm",
-              type: "button",
-              text: `Show ${data.hidden} unresolved`,
-              onclick: async (e) => {
-                const button = e.currentTarget;
-                button.textContent = "Loading…";
-                let all;
-                try {
-                  all = await api(scoped(`/api/neighbors?name=${encodeURIComponent(node.name)}&all=1`));
-                } catch (err) {
-                  button.replaceWith(error(err.message));
-                  return;
-                }
-                button.replaceWith(
-                  el(
-                    "ul",
-                    { class: "rail-list nested" },
-                    all.unresolved.map((one) =>
-                      el(
-                        "li",
-                        {},
-                        el("span", { text: one.name }),
-                        el("span", { class: "via", text: one.kind }),
-                      ),
+    ),
+    el(
+      "div",
+      { class: "stack" },
+      el("div", { class: "mini-graph" }, el("span", { class: "label", text: reached.length > ring.length ? `${n(reached.length - ring.length)} beyond the ${ring.length} drawn` : `reverse reachability · ${plural(hopsMax, "hop")}` }), mini),
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "card-h tight" }, el("span", { class: "card-t sm grow", text: "Files to look at" }), lnk("Copy list", () => copy(files.map((f) => f.path).join("\n"), `Copied ${plural(files.length, "path")}`))),
+        files.slice(0, 12).map((f) => {
+          const b2 = bar((f.symbols / top) * 100, "h5 accent");
+          return el("div", { class: "file-bar-row", "data-tip": f.path, "data-tip-rows": rows([["definitions reached", String(f.symbols)], ["nearest hop", String(f.nearest)]]) }, pathSpan(tilde(f.path), "", f.path), b2, el("span", { class: "right muted", text: String(f.symbols) }));
+        }),
+      ),
+    ),
+  );
+}
+
+async function runPath(showInferred) {
+  const p = gr.pt;
+  if (!p.from.trim() || !p.to.trim()) return;
+  p.busy = true;
+  p.showInferred = !!showInferred;
+  if (current.view === VIEWS.graph) repaint();
+  const all = showInferred || (!p.verified && !p.strict);
+  try {
+    p.out = await api(`/api/trace?${new URLSearchParams({ from: p.from.trim(), to: p.to.trim(), store: gr.store, ...(all ? { all_edges: "1" } : {}) })}`);
+  } catch (e) {
+    p.out = { error: e.message };
+  }
+  p.busy = false;
+  if (current.view === VIEWS.graph) repaint();
+}
+
+// What a symbol calls, for the Path tab when only its start is known: "Path
+// from here" opens with the places the walk can go, one press from a trace.
+async function loadLeads() {
+  const p = gr.pt;
+  const name = p.from.trim();
+  const key = `${gr.store}|${name}`;
+  if (!name || p.leadFor === key) return;
+  p.leadFor = key;
+  p.leads = null;
+  try {
+    const sym = await api(`/api/symbol?${new URLSearchParams({ name, store: gr.store, k: "40" })}`);
+    if (p.leadFor !== key) return;
+    p.leads = { callees: sym.callees || [], error: sym.error || null };
+  } catch (e) {
+    if (p.leadFor === key) p.leads = { callees: [], error: e.message };
+  }
+  if (current.view === VIEWS.graph) repaint();
+}
+
+function pathTab(picker) {
+  const p = gr.pt;
+  const from = el("input", { class: "inp mono h34", value: p.from, spellcheck: "false", "aria-label": "From", "data-keep": "pt-from", placeholder: "from", oninput: (e) => (p.from = e.target.value), onkeydown: (e) => e.key === "Enter" && runPath() });
+  const to = el("input", { class: "inp mono h34", value: p.to, spellcheck: "false", "aria-label": "To", "data-keep": "pt-to", placeholder: "to", oninput: (e) => (p.to = e.target.value), onkeydown: (e) => e.key === "Enter" && runPath() });
+  const parts = [
+    el(
+      "div",
+      { class: "ctrl-card" },
+      el("span", { class: "eyebrow", text: "FROM" }),
+      from,
+      btn({ class: "btn icon", "aria-label": "Swap", "data-tip": "Swap", onclick: () => (([p.from, p.to] = [p.to, p.from]), repaint()) }, icon(I.swap, 14, { w: 1.8 })),
+      el("span", { class: "eyebrow", text: "TO" }),
+      to,
+      toggle(p.verified, "Prefer verified", (v) => ((p.verified = v), repaint()), { tip: "List extracted and resolved chains first" }),
+      toggle(p.strict, "Strict", (v) => ((p.strict = v), repaint()), { tip: "Refuse to cross a name with several definitions" }),
+      picker,
+      btn({ class: "btn md primary", onclick: () => runPath() }, "Find the path"),
+    ),
+  ];
+  const t = p.out && p.out.trace;
+  if (!p.busy && !p.out && p.from.trim() && !p.to.trim()) {
+    loadLeads();
+    const L = p.leads;
+    parts.push(
+      el(
+        "div",
+        { class: "card" },
+        el("div", { class: "card-h" }, el("span", { class: "card-t grow" }, "Where ", el("span", { class: "mono", text: p.from.trim() }), " leads"), meta("pick a destination, or type one in To")),
+        !L
+          ? el("div", { class: "row gap10 muted pad" }, el("span", { class: "spinner" }), "Reading what it calls…")
+          : L.error
+            ? errorBox(L.error)
+            : !L.callees.length
+              ? empty(`${p.from.trim()} calls nothing this store defines. Type a destination in To to look for a path the other way round, or swap.`)
+              : el(
+                  "div",
+                  { class: "col gap4 pad8" },
+                  L.callees.map((c) =>
+                    btn(
+                      { class: "edge-row", onclick: () => ((p.to = c.name), runPath()) },
+                      el("span", { class: "col" }, el("span", { class: "n", text: c.name }), c.path ? pathSpan(`${tilde(c.path)}:${c.start_line}`, "w", `${c.path}:${c.start_line}`) : null),
+                      confBadge(c.confidence),
                     ),
                   ),
-                );
-              },
-            })
-          : null,
+                ),
       ),
-      confidenceLegend(),
     );
-    // The two readings of a selected symbol, side by side as the v4 rail has
-    // them: the chunks it lives in, and what reaches it.
-    //
-    // The first of these used to read "Ask the index a question", which is
-    // the top bar's wording for the search box — so the rail and the top bar
-    // gave one destination two names, which is what finding 3.24 is about.
-    // It is the same journey with a name that says what you get.
-    fill(
-      actions,
-      el("button", {
-          class: "button secondary small",
-          type: "button",
-          text: "Chunks it lives in",
-          onclick: () => {
-            state.pendingQuery = node.name;
-            go("search");
-          },
-        }),
-        el("button", {
-          class: "button small",
-          type: "button",
-          text: "Blast radius",
-          onclick: () => {
-            state.impactSymbol = node.name;
-            // The store the symbol was picked in: the same name in another
-            // open store is a different symbol with a different reach.
-            state.impactStore = node.store || (chosen.size === 1 ? [...chosen][0] : "");
-            go("impact");
-          },
-        }),
-    );
-    actions.hidden = false;
   }
-
-  /* The store chips scope the canvas, and until 0.24.0 they did not scope the
-   * rail: a name defined in two open stores listed both stores' callers under
-   * a chip that named one of them. The panel then contradicted the picture
-   * beside it, which is worse than either answer on its own. */
-  function scoped(path) {
-    const query = new URLSearchParams();
-    for (const store of chosen) query.append("store", store);
-    const tail = query.toString();
-    return tail ? `${path}${path.includes("?") ? "&" : "?"}${tail}` : path;
-  }
-
-  async function load(params) {
-    meta.textContent = "loading…";
-    const query = new URLSearchParams(params || {});
-    for (const store of chosen) query.append("store", store);
-    let data;
-    try {
-      data = await api(`/api/graph?${query}`);
-    } catch (e) {
-      meta.textContent = "";
-      actions.hidden = true;
-      return fill(rail, error(e.message));
-    }
-    // Stores that did not answer, over the graph the rest of them drew. This
-    // page was the whole of issue #129: one unreadable store used to make it
-    // draw nothing at all, with a message naming neither the store nor the
-    // fact that the others were fine.
-    fill(unreadable, unreadableNotice(data.failed));
-    if (!data.nodes.length) {
-      meta.textContent = "0 symbols";
-      canvas.draw({ nodes: [], edges: [] }, kinds);
-      return blank(
-        data.total === 0
-          ? "This store has no symbols yet. The graph is built as files are indexed — run Index once, or leave the daemon watching."
-          : "Nothing in this scope. Clear the filters, or pick a store.",
-      );
-    }
-    canvas.draw(data, kinds);
-    counts();
-    /* Nodes with nothing between them is a state, not a drawing. It happens
-     * for a real reason — a language whose parser extracts definitions and no
-     * call edges, or a scope narrow enough that both ends of every edge fell
-     * outside it — and a field of unconnected boxes with no explanation reads
-     * as a broken page. Said rather than drawn silently. */
-    if (!data.edges.length) {
-      return blank(
-        "Nothing in view is connected. Either this scope holds both ends of no " +
-          "edge — widen it, or clear it — or the language here is one semlith " +
-          "parses for definitions but not yet for calls. The Index page's " +
-          "per-language table says which.",
-      );
-    }
-    // A focused view arrives with its centre chosen, so the rail says something
-    // before the first click rather than asking for one.
-    const centre = (params && params.name) || canvas.best();
-    if (centre && canvas.pick(centre)) return;
-    blank("Pick a node to see what calls it and what it calls.");
-  }
-
-  function focus(name) {
-    load({ name, limit: "45" });
-  }
-
-  /* Several names, comma-separated: where each is defined and its first
-   * line, the table `semlith symbol a b c` prints. The graph centres on the
-   * first. */
-  const defsCard = el("div", { class: "card table-card graph-defs", hidden: "" });
-  async function showDefinitions(names) {
-    const params = new URLSearchParams({ names: names.join(",") });
-    for (const store of chosen) params.append("store", store);
-    let data;
-    try {
-      data = await api(`/api/symbol?${params}`);
-    } catch (_) {
-      return;
-    }
-    const rows = data.table || [];
-    defsCard.hidden = false;
-    fill(
-      defsCard,
+  if (p.busy) parts.push(el("div", { class: "row gap10 muted" }, el("span", { class: "spinner" }), "Walking the edges…"));
+  else if (p.out && p.out.error) parts.push(el("div", { class: "card" }, errorBox(p.out.error)));
+  else if (t) {
+    const chain = t.chain;
+    const steps = (chain && chain.steps) || [];
+    const sum = chain ? chain.summary : null;
+    const seamAfter = (i) => steps[i + 1] && (steps[i].to_path !== steps[i + 1].from_path || steps[i].to_line !== steps[i + 1].from_line);
+    const nodesList = steps.length ? [...steps.map((st, i) => ({ name: st.from, where: `${tilde(st.from_path)}:${st.from_line}`, edge: st, seam: i > 0 && seamAfter(i - 1) })), { name: steps[steps.length - 1].to, where: `${tilde(steps[steps.length - 1].to_path)}:${steps[steps.length - 1].to_line}`, edge: null }] : [];
+    parts.push(
       el(
         "div",
-        { class: "table-head" },
-        el("h2", { text: "Definitions" }),
-        el("span", { class: "muted", text: `${rows.length} for ${names.length} name${names.length === 1 ? "" : "s"}` }),
-      ),
-      el(
-        "div",
-        { class: "table-wrap" },
+        { class: "split s-1-1" },
         el(
-          "table",
-          {},
-          el("caption", { class: "sr-only", text: "Every definition of the names asked for" }),
+          "div",
+          { class: "card" },
+          sum && sum.hypothesis ? el("div", { class: "card-note ink2" }, el("b", { text: "A hypothesis, not a finding. " }), "A hop here was matched by name or crosses a seam; read the seams before you rely on it.") : null,
           el(
-            "thead",
-            {},
+            "div",
+            { class: "card-b line-row" },
+            el("span", { class: "eyebrow sm wide", text: "ANSWER" }),
+            el("span", { class: "t-m pretty big14", text: t.answer }),
+            !steps.length && !p.strict && !p.showInferred && !t.all_edges ? lnk("Show the inferred chain", () => runPath(true)) : null,
+          ),
+          steps.length
+            ? el(
+                "div",
+                { class: "chain" },
+                nodesList.map((nd, i) =>
+                  el(
+                    "div",
+                    { class: "col" },
+                    el("div", { class: "node" }, el("span", { class: `cd${nd.edge ? "" : " end"}` }), el("span", { class: "n", text: nd.name }), pathSpan(nd.where, "w")),
+                    nd.edge
+                      ? el(
+                          "div",
+                          { class: `edge ${nd.edge.confidence}` },
+                          el("span", { class: "t-mono-sm", text: nd.edge.kind }),
+                          confBadge(nd.edge.confidence),
+                          nd.edge.definitions > 1 ? el("span", { class: "t-mono-sm amber-ink", text: `${nd.edge.to}: ${nd.edge.definitions} definitions` }) : null,
+                          seamAfter(i) ? el("span", { class: "t-mono-sm amber-ink", text: "seam · the next hop leaves from another definition" }) : null,
+                        )
+                      : null,
+                  ),
+                ),
+              )
+            : null,
+          sum ? el("div", { class: "card-foot", text: `${plural(sum.hops, "hop")} · ${sum.extracted} extracted · ${sum.resolved} resolved · ${sum.inferred} inferred · ${sum.ambiguous} ambiguous${sum.seams ? ` · ${plural(sum.seams, "seam")}` : ""}` }) : null,
+        ),
+        el(
+          "div",
+          { class: "card" },
+          el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Supporting lines" }), btn({ class: "btn sm dark t125", disabled: (t.lines || []).length ? null : true, onclick: () => copy(p.out.evidence || (t.lines || []).map((l) => `${l.at}   ${l.code.trim()}`).join("\n"), "Evidence copied as plain text") }, "Copy as evidence")),
+          !(t.lines || []).length ? empty("No chain, so no lines to quote.") : null,
+          (t.lines || []).map((l) =>
+            el(
+              "div",
+              { class: "support" },
+              el("div", { class: "row nowrap" }, pathSpan(tilde(l.at), "mono t-m t-xs grow", l.at), pill(l.mark, /supporting/.test(l.mark) ? "blue" : "grey", { dot: false })),
+              el("div", { class: "code sm", text: l.code }),
+              el("span", { class: "t-mono-sm", text: l.hop }),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+  return el("div", { class: "gr-pad" }, parts);
+}
+
+// -------------------------------------------------------------------- agents
+
+const ag = { client: "", method: "json", reveal: null };
+
+VIEWS.agents = {
+  needs: () => ["agents", "ledger"],
+  live: ["agents", "ledger"],
+  render(route) {
+    const tab = route.parts[0] || "connected";
+    const a = data.agents || {};
+    const conns = connectedRows(a);
+    const clients = clientRows();
+    const found = clients.filter((c) => c.found);
+    const unreg = found.filter((c) => !c.registered);
+    const open = a.endpoint ? a.endpoint.open !== false : true;
+    const faults = (a.doctor || []).filter((c) => c.fault).length;
+    const body = { connected: agConnected, add: agAdd, tools: agTools, health: agHealth }[tab] || agConnected;
+    return el(
+      "div",
+      { class: "page" },
+      el(
+        "div",
+        { class: "head" },
+        el("div", { class: "titles" }, el("div", { class: "row nowrap gap10" }, el("div", { class: "h1", text: "Agents" }), pill(open ? "answering" : "stopped", open ? "green" : "grey", { pulse: open })), el("div", { class: "lead", text: "One endpoint on this machine for every client. No per-client process, no second copy of the index." })),
+        el("div", { class: "endpoint-box" }, el("span", { class: "eyebrow sm", text: "MCP" }), el("span", { class: "u", text: a.endpoint?.url || "" }), btn({ class: "btn xs soft", onclick: () => copy(a.endpoint?.url || "") }, "Copy")),
+        toggle(open, open ? "Endpoint on" : "Endpoint off", async (v) => {
+          // Closing it cuts every connected agent off, so it asks first.
+          if (!v) {
+            const live = connectedRows(a).filter((c) => !c.waiting).length;
+            const ok = await ask({ title: "Stop answering agents?", body: `${live ? `${plural(live, "connected client")} will get a clear refusal on ${live === 1 ? "its" : "their"} next call` : "Every agent will get a clear refusal"} until you turn the endpoint back on. The stores, the watchers and this page keep running.`, ok: "Stop the endpoint", danger: true });
+            if (!ok) return;
+          }
+          const out = await act(() => post("/api/endpoint", { open: v }), v ? "Endpoint answering again" : "Endpoint closed — agents get a clear refusal");
+          if (out) await load("agents", true), repaint();
+        }, { cls: "boxed h34 strong" }),
+      ),
+      tabs(
+        [
+          ["connected", "Connected", conns.length],
+          ["add", "Add a client", unreg.length],
+          ["tools", "Tools", (a.tools || []).length],
+          ["health", "Health", faults],
+        ],
+        tab,
+        (t) => go("agents", t === "connected" ? undefined : t),
+      ),
+      body(a, clients),
+    );
+  },
+};
+
+// Live connections first, then every registered client that has not called
+// yet, so a client registered a minute ago is on the list, waiting.
+function connectedRows(a) {
+  const conns = a.connections || [];
+  const waiting = registeredClients()
+    .filter((c) => !conns.some((x) => sameClient(x.name, c.name)))
+    .map((c) => ({ name: c.name, waiting: true }));
+  return [...conns, ...waiting];
+}
+
+function agConnected(a) {
+  const conns = connectedRows(a);
+  const rows = data.ledger?.rows || [];
+  const lastOf = (name) => (rows.find((r) => sameClient(r.client, name)) || {}).at;
+  return el(
+    "div",
+    { class: "split s-17-1" },
+    el(
+      "div",
+      { class: "card" },
+      !conns.length
+        ? el(
+            "div",
+            { class: "card-b" },
+            el("div", { class: "row gap12" }, el("div", { class: "col gap2 grow" }, el("span", { class: "t-b", text: "No client is talking to semlith yet" }), el("span", { class: "muted t-sm", text: "Register one and restart it — it shows up here on its first call." })), btn({ class: "btn primary", onclick: () => go("agents", "add") }, "Add a client")),
+          )
+        : el(
+            "div",
+            { class: "tw" },
+            el(
+              "table",
+              { "aria-label": "Connected clients" },
+              el("thead", {}, el("tr", {}, ["Client", "State", "Version", "Transport", "Queries", "Last query"].map((h, i) => el("th", { class: i >= 4 ? "r" : null, text: h })))),
+              el(
+                "tbody",
+                {},
+                conns.map((c) => {
+                  if (c.waiting)
+                    return el(
+                      "tr",
+                      {},
+                      el("td", { class: "t-m", text: c.name }),
+                      el("td", {}, pill("registered", "blue", { dot: false, tip: "Restart it — it shows here as active on its first call" })),
+                      el("td", { class: "ms", text: "—" }),
+                      el("td", { class: "ms", text: "—" }),
+                      el("td", { class: "m r", text: "0" }),
+                      el("td", { class: "ms r", text: "waiting for its first call" }),
+                    );
+                  const active = c.seen && Date.now() / 1000 - c.seen < 600;
+                  const last = lastOf(c.name) || c.seen;
+                  return el(
+                    "tr",
+                    {},
+                    el("td", { class: "t-m" }, c.name, c.sessions > 1 ? el("span", { class: "muted t-xs", text: ` · ${c.sessions} sessions` }) : null),
+                    el("td", {}, pill(active ? "active" : "idle", active ? "green" : "grey", { pulse: active })),
+                    el("td", { class: "ms", text: c.version || "—" }),
+                    el("td", { class: "ms", text: `${c.transport}${a.forwarding && c.transport === "stdio" ? " · proxy" : ""}` }),
+                    el("td", { class: "m r", text: n(c.queries) }),
+                    el("td", { class: "ms r", text: last ? ago(last) : "never" }),
+                  );
+                }),
+              ),
+            ),
+          ),
+    ),
+    el(
+      "div",
+      { class: "stack" },
+      el("div", { class: "card pad" }, el("span", { class: "eyebrow", text: "What the tool list costs" }), el("span", { class: "mono t-b big18", text: `${n(a.tool_list_tokens)} tokens` }), el("span", { class: "muted t-xs", text: `per session, read once before the agent asks anything · ${plural((a.tools || []).length, "tool")} · ${n(a.tool_list_bytes)} bytes · counted ${a.tool_list_tier === "tokenizer" ? "by the model's tokenizer" : `as ${a.tool_list_tier}`}` })),
+      el("div", { class: "card pad" }, el("span", { class: "card-t", text: "After you register a client" }), el("span", { class: "muted t-sm pretty", text: "Restart it. Ask it something about your code — “use semlith to find where X happens”. The call lands in the Ledger with what it was sent." }), lnk("Open the ledger →", () => go("ledger"))),
+    ),
+  );
+}
+
+function agAdd(a, clients) {
+  const found = clients.filter((c) => c.found);
+  const reg = clients.filter((c) => c.registered);
+  const unreg = found.filter((c) => !c.registered);
+  const sel = clients.find((c) => c.name === ag.client) || unreg[0] || found[0] || clients[0];
+  if (!sel) return el("div", { class: "card" }, empty("No client is documented in this build."));
+  ag.client = sel.name;
+  const groups = [
+    ["terminal", "TERMINAL"],
+    ["editor", "EDITORS"],
+    ["desktop", "DESKTOP"],
+  ];
+  const register = async (names, action) => {
+    const out = await act(() => post("/api/agents/register", { clients: names, action, confirm: true }), action === "unregister" ? `Removed semlith from ${names.join(", ")}` : names.length === 1 ? `Registered ${names[0]} — restart it to pick semlith up` : `Registered ${names.length} clients · each config backed up first`);
+    if (out) {
+      if ((out.failed || []).length) toast(out.failed.map((f) => `${f.client}: ${f.error}`).join(" · "), true);
+      await load("agents", true);
+      repaint();
+    }
+  };
+  const registerCmd = (sel.client.stanzas || []).find((s) => s.register);
+  const file = (sel.client.stanzas || []).find((s) => s.path);
+  const stanzaJson = (sel.client.stanzas || []).find((s) => s.format === "json" && !s.register);
+  const cmds = (sel.client.stanzas || []).filter((s) => s.format === "sh" && !s.unregister).map((s) => s.text.replace(/\s+/g, " "));
+  return el(
+    "div",
+    { class: "split s-1-12" },
+    el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Clients" }), meta(`${found.length} found · ${reg.length} registered`)),
+      groups.map(([g, label]) => {
+        const list = clients.filter((c) => c.group === g || (g === "editor" && c.group === "editors"));
+        if (!list.length) return null;
+        return el(
+          "div",
+          { class: "col" },
+          el("div", { class: "group-label", text: label }),
+          list.map((c) =>
+            btn(
+              { class: `client-row${c.name === sel.name ? " on" : ""}`, "aria-current": c.name === sel.name ? "true" : null, onclick: () => ((ag.client = c.name), repaint()) },
+              dot(c.registered ? "green" : c.found ? "amber" : ""),
+              el("span", { class: "grow t-m t-sm", text: c.name }),
+              c.registered ? pill("registered", "green", { dot: false }) : el("span", { class: "t-mono-sm", text: c.found ? "found" : "not found" }),
+            ),
+          ),
+        );
+      }),
+      el("div", { class: "card-foot sans" }, el("span", { class: "muted grow", text: unreg.length ? `${plural(unreg.length, "client")} found but not registered` : "Every client found here is registered" }), btn({ class: "btn sm dark", disabled: unreg.length ? null : true, onclick: () => register(unreg.map((c) => c.name), "register") }, `Register ${unreg.length}`)),
+    ),
+    el(
+      "div",
+      { class: "card" },
+      el(
+        "div",
+        { class: "card-b line-row" },
+        el("div", { class: "row nowrap gap10" }, el("div", { class: "col gap2 grow" }, el("span", { class: "t-b big15", text: sel.name }), el("span", { class: "muted t-sm", text: sel.found ? `${sel.group} · ${registerCmd ? "has its own registration command" : "semlith writes its config file"}` : `${sel.group} · not found on this machine` })), pill(sel.registered ? "registered" : sel.found ? "not registered" : "not found", sel.registered ? "green" : sel.found ? "amber" : "grey", { dot: false })),
+      ),
+      el(
+        "div",
+        { class: "card-b" },
+        sel.found
+          ? el(
+              "div",
+              { class: "one-click" },
+              el("div", { class: "col gap2 grow" }, el("span", { class: "t-m t-sm", text: sel.registered ? `Registered${sel.report.scope ? ` at ${sel.report.scope} scope` : ""} — every project sees it` : registerCmd ? "Semlith runs the client's own command for you" : "Semlith writes the file, after backing it up beside itself" }), el("span", { class: "t-mono-sm anywhere", text: shortPaths(sel.write, 40), "data-tip": sel.write })),
+              btn({ class: `btn ${sel.registered ? "" : "primary"}`, onclick: () => register([sel.name], sel.registered ? "unregister" : "register") }, sel.registered ? "Unregister" : "Register"),
+            )
+          : el("div", { class: "notice plain", text: "Not installed on this machine. Install it and come back — or paste the config below wherever it lives." }),
+        sel.client.note ? clientNote(sel.client.note) : null,
+        tabs(
+          [
+            ["json", "Config file"],
+            ["cli", "Terminal"],
+          ],
+          ag.method,
+          (m) => ((ag.method = m), repaint()),
+          { cls: "small" },
+        ),
+        ag.method === "json"
+          ? [codeBlock(stanzaJson ? stanzaJson.text : mcpJson(), { word: "Config copied" }), el("span", { class: "muted t-xs", text: `Paste into ${file ? file.path : "the client's MCP settings"}.${/SEMLITH_AGENT_KEY|Bearer/.test(stanzaJson ? stanzaJson.text : mcpJson()) ? ` Export ${a.key_env || "SEMLITH_AGENT_KEY"} in the shell that launches it.` : ""}` })]
+          : [
+              cmds.length ? cmds.map((c) => copyField(c, { cls: "auto", btn: "xs" })) : el("span", { class: "muted t-sm", text: "This client has no terminal command; it reads a file." }),
+              el("span", { class: "muted t-xs", text: `The HTTP form needs ${a.key_env || "SEMLITH_AGENT_KEY"} exported; the subprocess form reads the key itself.` }),
+            ],
+      ),
+    ),
+  );
+}
+
+function agTools(a) {
+  const tools = a.tools || [];
+  return el(
+    "div",
+    { class: "card" },
+    el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "What an agent can call" }), meta(`${plural(tools.length, "tool")} · ${n(a.tool_list_bytes)} bytes · ${n(a.tool_list_tokens)} tokens per session, counted ${a.tool_list_tier === "tokenizer" ? "by the model" : `as ${a.tool_list_tier || "an estimate"}`}`)),
+    el(
+      "div",
+      { class: "tw" },
+      el(
+        "table",
+        { "aria-label": "MCP tools" },
+        el("thead", {}, el("tr", {}, el("th", { text: "Tool" }), el("th", { text: "What it answers" }), el("th", { class: "r", text: "Typical answer" }))),
+        el(
+          "tbody",
+          {},
+          tools.map((t) =>
             el(
               "tr",
               {},
-              el("th", { text: "Definition" }),
-              el("th", { text: "Kind" }),
-              el("th", { text: "Where" }),
-              el("th", { text: "First line" }),
+              el("td", { class: "mm nowrap", text: t.name }),
+              el("td", { class: "ink2 t13", text: t.answers || t.about }),
+              el("td", { class: "ms r nowrap", "data-tip": t.typical_source === "ledger" ? "Median of this machine's own answers" : t.typical_source === "estimate" ? "An estimate until this machine has five answers from it" : null }, t.typical_tokens ? `${t.typical_source === "ledger" ? "" : "~"}${n(t.typical_tokens)} tok` : "—"),
             ),
           ),
+        ),
+      ),
+    ),
+  );
+}
+
+const AGENTFILE_TONE = { current: "green", linked: "green", present: "green", installed: "green", stale: "amber", missing: "amber", absent: "grey", paste: "grey" };
+
+function agHealth(a) {
+  const rows = a.doctor || [];
+  const reach = rows.filter((c) => c.registered && !c.fault).length;
+  const fix = rows.filter((c) => c.fault).length;
+  const missing = rows.filter((c) => !c.in_use && !c.present).length;
+  const recheck = async () => {
+    await act(() => load("agents", true), `Checked ${plural(rows.length, "client")}`);
+    repaint();
+  };
+  return el(
+    "div",
+    { class: "stack" },
+    el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Can each client reach semlith?" }), meta(`${reach} can reach it · ${fix} to fix · ${missing} not installed`), btn({ class: "btn xs", onclick: recheck }, "Check again")),
+      el(
+        "div",
+        { class: "tw" },
+        el(
+          "table",
+          { "aria-label": "Can each client reach semlith" },
+          el("thead", {}, el("tr", {}, el("th", { text: "Client" }), el("th", { text: "Semlith" }), el("th", { text: "Skill, hook and rule" }), el("th", { text: "To fix" }))),
           el(
             "tbody",
             {},
-            rows.length
-              ? rows.map((row) =>
-                  el(
-                    "tr",
-                    { class: "defs-row" },
-                    el("td", { class: "sym" }, el("code", { text: row.qualified })),
-                    el("td", { text: row.kind }),
-                    el("td", {
-                      class: "where path",
-                      title: `${row.path}:${row.start_line}-${row.end_line}`,
-                      text: `${shortPath(row.path)}:${row.start_line}`,
-                    }),
-                    el("td", {}, el("code", { class: "one-line", text: row.signature })),
-                  ),
-                )
-              : el("tr", {}, el("td", { colspan: "4", class: "muted", text: "No definition of any of these names." })),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /** Apply whatever is in the scope box. */
-  function applyScope() {
-    const value = scopeInput.value.trim();
-    defsCard.hidden = true;
-    if (value.includes(",")) {
-      const names = value.split(",").map((n) => n.trim()).filter(Boolean).slice(0, 20);
-      showDefinitions(names);
-      return names.length ? load({ name: names[0] }) : load({});
-    }
-    if (!value) return load({});
-    // A path fragment scopes; anything else is read as a symbol to centre on.
-    load(value.includes("/") || value.includes(".") ? { path: value } : { name: value });
-  }
-
-  const scopeInput = el("input", {
-    type: "search",
-    placeholder: "Scope to a path, or find symbols: a, b, c",
-    // Every other control on this page applies on a click, so a text field
-    // that silently waits for Enter reads as broken. It still takes Enter, and
-    // now it also says so and has a button.
-    "aria-describedby": "graph-scope-hint",
-    onkeydown: (e) => {
-      if (e.key !== "Enter") return;
-      applyScope();
-    },
-  });
-  const scopeButton = el("button", {
-    class: "button secondary small in-field",
-    type: "button",
-    text: "Scope",
-    onclick: () => applyScope(),
-  });
-
-  const kindChips = EDGE_KINDS.map((kind) =>
-    el("button", {
-      class: "chip",
-      type: "button",
-      "aria-pressed": "true",
-      text: kind,
-      onclick: (e) => {
-        const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
-        e.currentTarget.setAttribute("aria-pressed", String(on));
-        if (on) kinds.add(kind);
-        else kinds.delete(kind);
-        canvas.filter(kinds);
-        canvas.fit();
-        counts();
-      },
-    }),
-  );
-
-  const storeChips = liveStores().map((store) =>
-    el("button", {
-      class: "chip",
-      type: "button",
-      "aria-pressed": "false",
-      text: store.name,
-      onclick: (e) => {
-        const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
-        e.currentTarget.setAttribute("aria-pressed", String(on));
-        if (on) chosen.add(store.name);
-        else chosen.delete(store.name);
-        load({});
-      },
-    }),
-  );
-
-  const page = el(
-    "div",
-    { class: "graph-page" },
-    unreadable,
-    el(
-      "div",
-      { class: "graph-band" },
-      pageHead(
-        "Graph",
-        "Edges are re-extracted on the same pass that re-embeds a file. Never a stale build artifact.",
-        { actions: [el("div", { class: "filters" }, kindChips), fit, reset, pause] },
-      ),
-      el(
-        "div",
-        { class: "graph-controls" },
-        el(
-          "div",
-          { class: "graph-scope" },
-          icon(ICONS.search, 16),
-          labelled("graph-scope", "Scope the graph", scopeInput),
-          /* `Enter applies it` was a visible sentence inside the field's own
-           * border, which pushed the button off its end. It is still here, and
-           * still the thing `aria-describedby` on the input points at — a
-           * dangling `aria-describedby` is worse than the sentence was. What
-           * changed is that it is read rather than seen: the button beside it
-           * says the same thing to anybody looking at the field. */
-          el("span", {
-            class: "sr-only",
-            id: "graph-scope-hint",
-            text: "Enter applies it",
-          }),
-          scopeButton,
-        ),
-        storeChips.length > 1 ? el("div", { class: "filters" }, storeChips) : null,
-      ),
-      defsCard,
-    ),
-    el(
-      "div",
-      { class: "graph-body" },
-      el(
-        "div",
-        { class: "graph-frame" },
-        canvas.node,
-        el(
-          "div",
-          { class: "graph-legend" },
-          el("span", { class: "key extracted" }, el("i", {}), "extracted"),
-          el("span", { class: "key resolved" }, el("i", {}), "resolved"),
-          el("span", { class: "key inferred" }, el("i", {}), "inferred"),
-          el("span", { class: "key ambiguous" }, el("i", {}), "ambiguous"),
-          el("span", { class: "key selected" }, el("i", {}), "selected"),
-        ),
-        meta,
-      ),
-      el("div", { class: "graph-side" }, el("div", { class: "graph-scroll" }, rail, mapPanel()), actions),
-    ),
-  );
-
-  blank("Pick a node to see what calls it and what it calls.");
-  // The canvas has no size until it is in the document.
-  setTimeout(async () => {
-    canvas.start();
-    paintPause();
-    const pending = state.pendingSymbol;
-    state.pendingSymbol = "";
-    if (pending) return load({ name: pending, limit: "45" });
-    // Land on the busiest symbol's neighbourhood rather than on everything at
-    // once. The whole store drawn at once is honest and unreadable, and a
-    // reader arriving at a knot learns nothing.
-    try {
-      const overview = await api("/api/graph?limit=1");
-      const busiest = (overview.nodes || [])[0];
-      if (busiest) return focus(busiest.name);
-    } catch (_) {
-      /* fall through to the overview */
-    }
-    load({});
-  }, 0);
-  return page;
-}
-
-/** One figure with its label, as the design draws them. */
-/* Ring one card in the accent, for the single figure a page exists to show.
- *
- * A wrapper rather than an argument on `stat`, because emphasis is a property
- * of the page's argument and not of the number: the same statistic is ringed on
- * one page and plain on another. */
-function ringed(node) {
-  node.classList.add("ringed");
-  return node;
-}
-
-function stat(label, value, note) {
-  return el(
-    "div",
-    { class: "stat" },
-    el("span", { class: "eyebrow", text: label }),
-    el("span", { class: "value", text: value }),
-    note ? el("span", { class: "sub", text: note }) : null,
-  );
-}
-
-// --------------------------------------------------------------- ledger
-
-async function ledgerView() {
-  let data;
-  try {
-    data = await api("/api/ledger");
-  } catch (e) {
-    return el("div", { class: "view" }, pageHead("Retrieval ledger"), error(e.message));
-  }
-
-  const on = data.recording;
-  // Live: the ledger's one record call moves this counter, whichever surface
-  // answered the retrieval.
-  watchLive(["ledger"], repaintView);
-  return el(
-    "div",
-    { class: "view" },
-    pageHead(
-      "Retrieval ledger",
-      "Every query an agent ran, recorded locally. The honest token number, a debugging trail, and an audit record that never left the machine.",
-      {
-        pill: on
-          ? pill("recording", "on", {
-              title:
-                "On by default. Rows live in the store beside the chunks and never leave this machine.",
-            })
-          : pill("not recording", null),
-        // The v4 header puts this here, and it is the question the page ends
-        // on: having read what the agents retrieved, the next thing a reader
-        // wants is that turned into a file somebody else can read.
-        actions: [
-          el("button", {
-            class: "button secondary",
-            type: "button",
-            text: "Build a report",
-            onclick: () => go("reports"),
-          }),
-        ],
-      },
-    ),
-    // Directly under the head, where the design puts it. It was second from
-    // the bottom of the page, so a ledger that had recorded nothing said so
-    // after everything it had failed to record.
-    on
-      ? null
-      : el(
-          "div",
-          { class: "notice" },
-          el("div", { class: "what", text: "Recording is off" }),
-          el(
-            "div",
-            {},
-            "The daemon was started with ",
-            mono("--no-ledger"),
-            ". Start it without that flag to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
-          ),
-        ),
-    // Six across, then two wide, then who asked — the order the design puts
-    // them in, and the order they are read in: what was asked, what it cost,
-    // what it saved, and how much of the ledger that figure covers.
-    el(
-      "div",
-      { class: "strip" },
-      stat(
-        "Queries recorded",
-        n(data.queries),
-        `${n(data.clients)} client${data.clients === 1 ? "" : "s"}`,
-      ),
-      stat("Excerpt tokens", n(data.excerpt_tokens), "what agents were actually sent"),
-      stat(
-        "Whole-file tokens",
-        n(data.whole_file_tokens),
-        "what reading those files whole would have cost, counted with the store's tokenizer",
-      ),
-      // A ratio never stands alone. Coverage says how much of the ledger it is
-      // computed over, and the tier says whether the tokens were counted or
-      // estimated — without both, a number like 18.3x is a marketing claim.
-      // Ringed rather than merely present: it is the figure a reader came for,
-      // and the ring is what carries its two qualifiers with it.
-      ringed(
-        stat(
-          "Measured ratio",
-          data.ratio ? `${data.ratio.toFixed(1)}×` : "—",
-          data.ratio ? `coverage ${data.coverage}% · ${data.tier}` : "needs a recorded query",
-        ),
-      ),
-      stat(
-        "Coverage",
-        `${data.coverage || 0}%`,
-        `${n(data.credited || 0)} of ${n(data.queries)} retrievals credited`,
-      ),
-      stat(
-        "Net tokens",
-        n(data.net_tokens || 0),
-        "whole-file less excerpt, over rows that found something",
-      ),
-    ),
-    el(
-      "div",
-      { class: "strip" },
-      /* Read from the route rather than derived as queries less credited.
-       * Since 0.24.0 an uncredited retrieval is one of two different things —
-       * a question semlith could not answer, and a file an agent read whole
-       * without asking — and subtracting one number from another counted them
-       * as the same thing. */
-      /* A share, as the v4 design draws it. `0 of 4` is two numbers a reader
-       * has to divide; the percentage is the thing they were dividing for, and
-       * the count is kept in the caption so the denominator is never lost. */
-      stat(
-        "Zero-hit",
-        `${share(data.zero_hit || 0, data.queries || 0)}`,
-        `${n(data.zero_hit || 0)} of ${n(data.queries)} queries the corpus could not answer — recorded, and credited nothing`,
-      ),
-      /* The figure the savings claim is defended against: what an agent read
-       * whole anyway, on a file this store holds. Measured on a client with the
-       * steering hook, a floor everywhere else — and the caption says which,
-       * because a floor presented as a count is the flattering half of a
-       * number. */
-      stat(
-        "Refunds",
-        `${n(data.refunds || 0)}${data.refunds_measured ? "" : "+"}`,
-        data.refunds_measured
-          ? "files read whole after all, seen by the steering hook — measured"
-          : "a floor: no steering hook reports here, so reads semlith never served are uncounted",
-      ),
-      stat("Tier", data.tier || "modelled", "modelled · measured — measured when the store's own tokenizer counted it"),
-    ),
-    clientBreakdown(data.by_client),
-    /* From here the page is the design's order, which it was not.
-     *
-     * The three command cards were at the foot, under everything, where the
-     * design puts them sixth — directly after the by-client line and before
-     * the tabs. Session replay sat between the session list and the rows
-     * table; the design has it last of the cards, after the rows it annotates,
-     * which is also the only order in which it means anything. And the
-     * recording-off notice was second from the bottom, so a page that was
-     * recording nothing said so after everything it had failed to record; it
-     * is now directly under the page head. */
-    el(
-      "div",
-      { class: "grid three" },
-        el(
-          "div",
-          { class: "card pad dense" },
-          copyField("semlith ledger --last 20"),
-          el("p", {
-            class: "subtitle",
-            text: "Prints the ledger on the command line. The same rows this page shows.",
-          }),
-        ),
-        el(
-          "div",
-          { class: "card pad dense" },
-          copyField("semlith ledger --verify"),
-          el("p", {
-            class: "subtitle",
-            text: "Re-walks the hash chain and names the first row that does not verify.",
-          }),
-          el("p", {
-            class: "subtitle",
-            text: data.intact
-              ? "The chain is intact."
-              : "The chain does not verify. Some rows have been edited or removed.",
-          }),
-        ),
-        el(
-          "div",
-          { class: "card pad dense" },
-          copyField("semlith start --no-ledger"),
-          el("p", {
-            class: "subtitle",
-            text: "Run the daemon without recording, for this session only. SEMLITH_LEDGER=0 does the same for a machine.",
-          }),
-        ),
-    ),
-    /* Two tabs rather than three stacked cards, as the v4 design has it.
-     *
-     * The rows and the replay are two readings of the same ledger, and stacked
-     * they made a long page where the second one was found by scrolling past
-     * the first. A tab says they are alternatives. The sessions table keeps its
-     * own card above them, because it is the summary both tabs are of. */
-    ledgerSessions(data),
-    ledgerTabs(data),
-    says(
-      "Stored in ",
-      mono("~/.semlith/stores/<name>/store.db"),
-      ", table ",
-      mono("retrievals"),
-      ". On by default; ",
-      mono("--no-ledger"),
-      " or ",
-      mono("SEMLITH_LEDGER=0"),
-      " turns it off, and deleting the rows is one ",
-      mono("DELETE"),
-      ".",
-    ),
-  );
-}
-
-/* The one switch on the Privacy page.
- *
- * Off unless turned on, because what it reads belongs to another program.
- * The row says what would be read and from where before anything is, so the
- * answer to "what does this turn on" is on the page rather than in a doc. */
-/* The Privacy page's session replay control.
- *
- * The design draws this as a clickable row rather than as a heading with a
- * button beside it: a 15px square knob, a status line, and the sentence that
- * says what turning it on does, all inside one hit target that changes colour
- * with the state. The button it replaced said `Turn on` and left the reader to
- * infer the state from a paragraph under it.
- *
- * It is not a `checkbox` element because it is not one control in a form; it
- * is the whole row. The ARIA is `switch`, which is what it behaves like, and
- * the keyboard reaches it because it is a `button`.
- */
-function sessionReplayToggle() {
-  const state_ = { enabled: false, from: "", client: "" };
-  const knob = el("span", { class: "knob", "aria-hidden": "true" });
-  const status = el("span", { class: "replay-state" });
-  const row = el(
-    "button",
-    { class: "replay-switch", type: "button", role: "switch", "aria-checked": "false", disabled: true },
-    knob,
-    el(
-      "span",
-      { class: "replay-switch-text" },
-      status,
-      el("span", {
-        class: "replay-switch-note",
-        text: "Session replay reads this machine's agent session logs to confirm what an agent did after a semlith answer. Off by default. Local only. Nothing is uploaded.",
-      }),
-    ),
-  );
-  const failure = el("p", { class: "note" });
-
-  function paint() {
-    row.disabled = false;
-    row.classList.toggle("on", state_.enabled);
-    row.setAttribute("aria-checked", String(state_.enabled));
-    /* The design's two status lines, verbatim. Where the transcripts are read
-     * from is appended when this machine has told us, because `no agent log is
-     * opened` is a claim about a directory and a reader may want to know
-     * which. */
-    status.textContent = state_.enabled
-      ? `On · reading local agent logs${state_.from ? ` under ${state_.from}` : ""}`
-      : "Off · no agent log is opened";
-  }
-
-  row.addEventListener("click", async () => {
-    row.disabled = true;
-    failure.textContent = "";
-    try {
-      const answer = await api("/api/ledger/replay", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ on: !state_.enabled }),
-      });
-      state_.enabled = !!answer.enabled;
-    } catch (e) {
-      failure.textContent = e.message;
-      row.disabled = false;
-      return;
-    }
-    paint();
-  });
-
-  (async () => {
-    try {
-      const data = await api("/api/ledger/replay");
-      state_.enabled = !!data.enabled;
-      state_.from = data.from || "";
-      state_.client = data.client || "";
-    } catch (_) {
-      /* the row still renders, saying it is off */
-    }
-    paint();
-  })();
-
-  return el(
-    "div",
-    { class: "card pad" },
-    el("div", { class: "card-head" }, el("h2", { text: "Session replay" })),
-    row,
-    failure,
-  );
-}
-
-/* The Privacy page's second switch: model, tokens and cost per ledger row.
- *
- * The same row as session replay, for the same reason — what it reads belongs
- * to other programs — and it lists every log it would open on this machine,
- * per client, so the reader knows the whole of what they are allowing before
- * they allow it. */
-function ledgerUsageToggle() {
-  const state_ = { enabled: false, logs: [] };
-  const knob = el("span", { class: "knob", "aria-hidden": "true" });
-  const status = el("span", { class: "replay-state" });
-  const row = el(
-    "button",
-    { class: "replay-switch", type: "button", role: "switch", "aria-checked": "false", disabled: true },
-    knob,
-    el(
-      "span",
-      { class: "replay-switch-text" },
-      status,
-      el("span", {
-        class: "replay-switch-note",
-        text: "Usage from client logs reads each AI client's own session log for the model, tokens and cost of every call it made to semlith. Read-only; only the model and the numbers are kept, never the conversation. Off by default. Local only. Nothing is uploaded.",
-      }),
-    ),
-  );
-  const logs = el("div", { class: "kv-list usage-logs" });
-  const failure = el("p", { class: "note" });
-
-  function paint() {
-    row.disabled = false;
-    row.classList.toggle("on", state_.enabled);
-    row.setAttribute("aria-checked", String(state_.enabled));
-    status.textContent = state_.enabled ? "On · reading the client logs below" : "Off · no client log is opened";
-    fill(
-      logs,
-      state_.logs.map((entry) =>
-        factRow(entry.client, entry.paths.length ? entry.paths.join(" · ") : "keeps no local log semlith can read"),
-      ),
-    );
-  }
-
-  row.addEventListener("click", async () => {
-    row.disabled = true;
-    failure.textContent = "";
-    try {
-      const answer = await api("/api/ledger/usage", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ on: !state_.enabled }),
-      });
-      state_.enabled = !!answer.enabled;
-    } catch (e) {
-      failure.textContent = e.message;
-      row.disabled = false;
-      return;
-    }
-    paint();
-  });
-
-  (async () => {
-    try {
-      const data = await api("/api/ledger/usage");
-      state_.enabled = !!data.enabled;
-      state_.logs = data.logs || [];
-    } catch (_) {
-      /* the row still renders, saying it is off */
-    }
-    paint();
-  })();
-
-  return el(
-    "div",
-    { class: "card pad" },
-    el("div", { class: "card-head" }, el("h2", { text: "Usage from client logs" })),
-    row,
-    logs,
-    failure,
-  );
-}
-
-/* Session replay: what the agent did after each answer.
- *
- * Reads this machine's Claude Code transcripts, and only when the Privacy
- * page's toggle is on. Nothing read here is sent anywhere — the files belong
- * to another program, which is exactly why the toggle exists and why the tab
- * says where it read from. */
-/** The rows and the replay, as two tabs over one ledger. */
-function ledgerTabs(data) {
-  const panel = el("div", { class: "tab-panel" });
-  const views = [
-    ["Retrievals", () => ledgerRows(data)],
-    ["Usage", () => ledgerUsage(data)],
-    ["Session replay", () => sessionReplay(data)],
-  ];
-  const buttons = views.map(([label], i) =>
-    el("button", {
-      class: "tab",
-      type: "button",
-      text: label,
-      "aria-pressed": String(i === 0),
-      onclick: () => show(i),
-    }),
-  );
-
-  function show(index) {
-    buttons.forEach((b, i) => b.setAttribute("aria-pressed", String(i === index)));
-    fill(panel, views[index][1]());
-  }
-
-  show(0);
-  return el("div", { class: "rows tight" }, el("div", { class: "tabs" }, buttons), panel);
-}
-
-function sessionReplay(ledger) {
-  const body = el("div", { class: "replay-body" });
-  // `sess-7f21 · Claude Code · 41 queries` in the design: which transcript, the
-  // client it belongs to, and how much of it this panel is about.
-  const meta = el("span", { class: "replay-meta", text: "reading…" });
-
-  /* The ledger's own row for one question, if it has one.
-   *
-   * The transcript knows what was asked and what the agent did next; it does
-   * not know what the answer cost, because that is semlith's own record. The
-   * design prints both on one line, so they are joined here — on the query
-   * text, over the rows the Retrievals tab already fetched, newest first. No
-   * round trip, and no second reading of the ledger.
-   *
-   * A query asked twice matches the newer row. That is a join on text rather
-   * than on identity: the transcript carries no retrieval id, and minting one
-   * to match against would be a change to the protocol for a subtitle.
-   */
-  const rows = (ledger && ledger.rows) || [];
-  function costOf(query) {
-    if (!query) return "";
-    const row = rows.find((r) => (r.query || "") === query);
-    if (!row) return "";
-    const hits = row.hits === undefined ? null : row.hits;
-    const tokens = row.net_tokens === undefined ? row.tokens : row.net_tokens;
-    const parts = [];
-    if (hits !== null) parts.push(`${hits} hit${hits === 1 ? "" : "s"}`);
-    if (tokens !== undefined && tokens !== null) parts.push(`${n(tokens)} tokens`);
-    return parts.join(" · ");
-  }
-
-  /** `14:22:08` in the reader's own zone, from the transcript's timestamp. */
-  function clockOf(at) {
-    if (!at) return "—";
-    const when = new Date(at);
-    if (Number.isNaN(when.getTime())) return "—";
-    return when.toLocaleTimeString(undefined, { hour12: false });
-  }
-
-  function answerRow(answer) {
-    const cost = costOf(answer.query);
-    return el(
-      "div",
-      { class: "replay-answer" },
-      el("span", { class: "at", text: clockOf(answer.at) }),
-      el(
-        "div",
-        { class: "replay-what" },
-        el(
-          "div",
-          { class: "line one" },
-          // The question, and beside it what it cost. A call whose input this
-          // build does not know how to read has no question, so the tool's own
-          // name stands in — once, not in both slots, which printed
-          // `semlith_stats semlith_stats`.
-          el("span", { class: "q", text: answer.query || answer.tool }),
-          el("span", { class: "muted", text: answer.query ? cost || answer.tool : cost }),
-        ),
-        el("span", { class: `replay-badge ${answer.outcome}`, text: answer.word }),
-      ),
-    );
-  }
-
-  function counts(session) {
-    const shown = [
-      ["read the whole file", session.refund, "refund"],
-      ["grepped anyway", session.miss, "miss"],
-      ["edited", session.sufficed, "sufficed"],
-      ["nothing recorded", session.unknown, "unknown"],
-    ];
-    return el(
-      "span",
-      { class: "replay-counts" },
-      shown.map(([label, count, kind]) =>
-        count ? el("span", { class: `replay-count ${kind}`, text: `${count} ${label}` }) : null,
-      ),
-    );
-  }
-
-  /* The off state, as the design draws it: one dashed strip, the sentence, and
-   * the one button in the prototype that goes to Privacy. The button is here
-   * rather than a line of prose telling the reader to find the page, because
-   * this panel is where somebody discovers the feature exists. */
-  function offPanel() {
-    return el(
-      "div",
-      { class: "replay-off" },
-      el("p", {
-        text: "Session replay is off. Nothing is read from your agent logs until you turn it on.",
-      }),
-      el("button", {
-        class: "button secondary small",
-        type: "button",
-        text: "Open Privacy",
-        onclick: () => go("privacy"),
-      }),
-    );
-  }
-
-  async function load() {
-    let data;
-    try {
-      data = await api("/api/ledger/replay");
-    } catch (e) {
-      meta.textContent = "";
-      fill(body, error(e.message));
-      return;
-    }
-    const client = data.client === "claude-code" ? "Claude Code" : data.client || "an agent";
-    if (!data.enabled) {
-      meta.textContent = `off · ${client}`;
-      fill(body, offPanel());
-      return;
-    }
-    if (!data.sessions.length) {
-      meta.textContent = `on · ${client} · no transcript yet`;
-      fill(
-        body,
-        el("p", {
-          class: "subtitle",
-          text: `On, and no transcript under ${data.from || "this machine"} holds a semlith call yet.`,
-        }),
-      );
-      return;
-    }
-    const answers = data.sessions.reduce((sum, session) => sum + session.answers, 0);
-    const newest = data.sessions[0];
-    meta.textContent = `${newest.id.slice(0, 12)} · ${client} · ${n(answers)} quer${answers === 1 ? "y" : "ies"}`;
-    fill(
-      body,
-      el("p", {
-        class: "note",
-        text: `Read from ${client} transcripts under ${data.from}${data.skipped ? `, ${data.skipped} older transcript${data.skipped === 1 ? "" : "s"} not read` : ""}.`,
-      }),
-      data.sessions.map((session) =>
-        el(
-          "section",
-          { class: "replay-row" },
-          el(
-            "span",
-            { class: "line one" },
-            el("span", { class: "id", text: session.id.slice(0, 12) }),
-            el("span", { class: "muted", text: session.project }),
-            el("span", { class: "spacer" }),
-            el("span", {
-              class: "muted",
-              text: `${session.answers} answer${session.answers === 1 ? "" : "s"}`,
-            }),
-          ),
-          counts(session),
-          // The timeline the design draws. `recent` is capped in the reader, so
-          // a long session says how much of itself is shown rather than
-          // silently ending early.
-          (session.recent || []).map(answerRow),
-          session.answers > (session.recent || []).length
-            ? el("p", {
-                class: "rail-hint",
-                text: `The last ${(session.recent || []).length} of ${session.answers}.`,
-              })
-            : null,
-        ),
-      ),
-    );
-  }
-
-  load();
-  return el(
-    "div",
-    { class: "card pad" },
-    el(
-      "div",
-      { class: "card-head" },
-      el("h2", { text: "Session replay" }),
-      meta,
-    ),
-    el("p", {
-      class: "subtitle",
-      text: "Read from this machine's agent session logs, never sent anywhere. Turn on under Privacy.",
-    }),
-    body,
-  );
-}
-
-/* What a million input tokens cost, per model, for the savings figures.
- * Input pricing, because a retrieval is what an agent reads.
- *
- * From the binary's own models.dev table (`/api/prices`, `semlith prices`),
- * the one the ledger's usage columns are priced by: a default list spanning
- * the vendors, and on the Ledger page every model the ledger has seen. Until
- * it loads, the default model alone. */
-let MODEL_PRICES = [["claude-sonnet-5-5", 2, "claude_sonnet_5_5"]];
-
-/** `[{name, input}]` from the server, as the pickers use it. */
-function modelPrices(list) {
-  if (!list || !list.length) return MODEL_PRICES;
-  return list.map(({ name, input }) => [name, input, name.toLowerCase().replace(/[^a-z0-9]+/g, "_")]);
-}
-
-/** Hand the viewer a file the page built, without a server round trip. */
-function offerDownload(name, text, type) {
-  const blob = new Blob([text], { type: `${type};charset=utf-8` });
-  const url = URL.createObjectURL(blob);
-  const link = el("a", { href: url, download: name });
-  document.body.append(link);
-  link.click();
-  link.remove();
-  // Revoked on the next turn of the loop: revoking synchronously races the
-  // click in some browsers and the file arrives empty.
-  setTimeout(() => URL.revokeObjectURL(url), 0);
-}
-
-/** The rows shown, as Markdown, CSV or JSON — the same rows, three ways. */
-function exportRows(columns, rows, format, name) {
-  const cells = (row) => columns.map(([, read]) => String(read(row) ?? ""));
-  const heads = columns.map(([head]) => head);
-  if (format === "json") {
-    const out = rows.map((row) => {
-      const one = {};
-      columns.forEach(([head, read]) => {
-        one[head] = read(row);
-      });
-      return one;
-    });
-    offerDownload(`${name}.json`, JSON.stringify(out, null, 2), "application/json");
-    return;
-  }
-  if (format === "csv") {
-    const quote = (v) =>
-      v.includes('"') || v.includes(",") || v.includes("\n")
-        ? `"${v.split('"').join('""')}"`
-        : v;
-    const lines = [heads.map(quote).join(","), ...rows.map((row) => cells(row).map(quote).join(","))];
-    offerDownload(`${name}.csv`, `${lines.join("\n")}\n`, "text/csv");
-    return;
-  }
-  const lines = [
-    `| ${heads.join(" | ")} |`,
-    `| ${heads.map(() => "---").join(" | ")} |`,
-    ...rows.map((row) => `| ${cells(row).join(" | ")} |`),
-  ];
-  offerDownload(`${name}.md`, `${lines.join("\n")}\n`, "text/markdown");
-}
-
-/* One row per session: who asked, how much they read, and what that would
- * have cost at a price the reader picks.
- *
- * Never a saved figure without its coverage and its tier — a session counted
- * by the four-character fallback is `modelled` and says so in its own row,
- * because averaging it with a measured one would make two different things
- * into one number. */
-function ledgerSessions(data) {
-  const all = data.sessions || [];
-  let client = "";
-  let tier = "";
-  /* What a session's saving was worth, at the model that session actually
-   * ran on, as its client's own log recorded it. A picker used to price every
-   * session at one model somebody chose, which put a Sonnet price on a
-   * DeepSeek session: a number with nothing behind it. A session whose model
-   * is not known says so. */
-  const unknownModel = data.usage && data.usage.enabled
-    ? "its client keeps no log semlith can read, or it predates the log"
-    : "turn on Usage from client logs on the Privacy page to price it at its own model";
-
-  const table = dataTable({
-    className: "w-sessions",
-    sort: "last",
-    dir: "desc",
-    rows: [],
-    caption: "Every agent session this machine recorded, newest first.",
-    columns: [
-      {
-        key: "last",
-        label: "Last seen",
-        className: "meta",
-        value: (r) => r.last,
-        render: (r) => el("span", { class: "one-line", title: r.when, text: r.when }),
-      },
-      {
-        key: "session",
-        label: "Session",
-        className: "meta",
-        render: (r) =>
-          el("span", {
-            class: "one-line",
-            title: r.session || "recorded before sessions were",
-            text: r.session ? r.session.slice(0, 12) : "—",
-          }),
-      },
-      { key: "client", label: "Agent", className: "meta", render: (r) => r.client },
-      { key: "store", label: "Store", className: "meta narrow-drop", render: (r) => r.store },
-      { key: "retrievals", label: "Reads", className: "num", value: (r) => r.retrievals, render: (r) => n(r.retrievals) },
-      {
-        key: "net_tokens",
-        label: "Net tokens",
-        className: "num",
-        value: (r) => r.net_tokens,
-        render: (r) => n(r.net_tokens),
-      },
-      {
-        key: "model",
-        label: "Model",
-        className: "meta narrow-drop",
-        value: (r) => r.model || "",
-        render: (r) =>
-          r.model
-            ? el("span", { class: "one-line", title: r.model, text: r.model })
-            : el("span", { class: "meta", title: unknownModel, text: "not known" }),
-      },
-      {
-        key: "cost",
-        label: "Saved",
-        className: "num",
-        value: (r) => (r.saved_usd == null ? -1 : r.saved_usd),
-        render: (r) =>
-          r.saved_usd == null
-            ? el("span", { class: "meta", title: unknownModel, text: "—" })
-            : el("span", { title: `${n(r.net_tokens)} net tokens at ${r.model}'s input price`, text: dollars(r.saved_usd) }),
-      },
-      { key: "tier", label: "Tier", className: "meta", render: (r) => r.tier },
-    ],
-  });
-
-  function shown() {
-    return all.filter(
-      (row) => (!client || row.client === client) && (!tier || row.tier === tier),
-    );
-  }
-
-  function repaint() {
-    const rows = shown();
-    table.update(rows, rows.length);
-    count.textContent = `${rows.length} of ${all.length} session${all.length === 1 ? "" : "s"}`;
-  }
-
-  const count = el("span", { class: "muted" });
-
-  const clients = [...new Set(all.map((row) => row.client))].sort();
-  const clientPick = el(
-    "select",
-    {
-      class: "chip",
-      "aria-label": "Filter by client",
-      onchange: (e) => {
-        client = e.currentTarget.value;
-        repaint();
-      },
-    },
-    el("option", { value: "", text: "every client" }),
-    clients.map((one) => el("option", { value: one, text: one })),
-  );
-  const tierPick = el(
-    "select",
-    {
-      class: "chip",
-      "aria-label": "Filter by tier",
-      onchange: (e) => {
-        tier = e.currentTarget.value;
-        repaint();
-      },
-    },
-    el("option", { value: "", text: "every tier" }),
-    el("option", { value: "measured", text: "measured" }),
-    el("option", { value: "modelled", text: "modelled" }),
-  );
-  // The columns the export writes are the columns on screen, read through the
-  // same functions, so a file and the page can never disagree about a row.
-  const columns = () => [
-    ["when", (r) => r.when],
-    ["session", (r) => r.session],
-    ["agent", (r) => r.client],
-    ["store", (r) => r.store],
-    ["reads", (r) => r.retrievals],
-    ["zero_hit", (r) => r.zero_hit],
-    ["net_tokens", (r) => r.net_tokens],
-    ["model", (r) => r.model || ""],
-    ["saved_usd", (r) => (r.saved_usd == null ? "" : r.saved_usd.toFixed(4))],
-    ["tier", (r) => r.tier],
-  ];
-
-  const exports = ["Markdown", "CSV", "JSON"].map((label) =>
-    el("button", {
-      class: "button secondary small",
-      type: "button",
-      text: label,
-      onclick: () =>
-        exportRows(
-          columns(),
-          shown(),
-          label === "Markdown" ? "md" : label.toLowerCase(),
-          "semlith-sessions",
-        ),
-    }),
-  );
-
-  repaint();
-  return el(
-    "div",
-    { class: "card pad" },
-    el("span", { class: "card-title", text: "Sessions" }),
-    el("div", { class: "filters" }, clientPick, tierPick, count, el("span", { class: "spacer" }), exports),
-    all.length
-      ? table.node
-      : empty("No session has recorded a retrieval yet."),
-    el("p", {
-      class: "subtitle",
-      text: "A session is one agent conversation. Net tokens are what reading the answered files whole would have cost less the excerpts actually sent, over the reads that found something; Saved is those tokens at the input price of the model that session ran on, from its client's own log. A session counted by the four-character fallback is modelled, not measured, and says so in its own row.",
-    }),
-  );
-}
-
-/** The ledger's rows: the same ones `semlith ledger --last 200` prints. */
-function ledgerRows(data) {
-  const rows = data.rows || [];
-  const table = dataTable({
-    className: "w-ledger",
-    sort: "at",
-    dir: "desc",
-    rows,
-    caption: "Every retrieval recorded on this machine, newest first.",
-    columns: [
-      {
-        key: "at",
-        label: "When",
-        className: "meta",
-        value: (r) => r.at,
-        // Local time with the offset, as the server rendered it — the same
-        // string the CLI prints. One dataset, one clock: the two surfaces used
-        // to disagree by the UTC offset with neither of them saying so.
-        render: (r) => el("span", { class: "one-line", title: r.when, text: r.when }),
-      },
-      { key: "client", label: "Client", className: "meta", render: (r) => r.client },
-      { key: "store", label: "Store", className: "meta narrow-drop", render: (r) => r.store },
-      {
-        key: "query",
-        label: "Query",
-        className: "path",
-        render: (r) => el("span", { class: "one-line", title: r.query, text: r.query }),
-      },
-      { key: "hits", label: "Hits", className: "num", render: (r) => n(r.hits) },
-      {
-        key: "ms",
-        label: "ms",
-        className: "num narrow-drop",
-        render: (r) => n(r.ms),
-      },
-      // The request that made the call, from the client's own log — only
-      // with usage on, and only once the client has written it.
-      {
-        key: "model",
-        label: "Model",
-        className: "meta narrow-drop",
-        value: (r) => (r.usage && r.usage.model) || "",
-        render: (r) => usageModel(r.usage),
-      },
-      {
-        key: "cost",
-        label: "Cost",
-        className: "num narrow-drop",
-        value: (r) => (r.usage && r.usage.cost_usd) || 0,
-        render: (r) => usageCost(r.usage),
-      },
-    ],
-  });
-  table.update(rows, rows.length);
-  /* The table, and nothing around it.
-   *
-   * It was inside a `card pad` headed `The rows`, under a tab already labelled
-   * `Retrievals` — a title restating its tab, and a card border immediately
-   * inside the panel's own. The table brings its own surface. */
-  return el(
-    "div",
-    { class: "rows tight" },
-    rows.length
-      ? table.node
-      : empty("Nothing recorded yet. A search from any client writes a row here."),
-    data.legacy_rows
-      ? el("p", {
-          class: "subtitle",
-          text: "Some rows here are older than the query id, and were written once per open store — figures that include them may count one search several times. They are left as they are: the chain is never rewritten.",
-        })
-      : null,
-  );
-}
-
-/** Dollars to the precision a single call needs: `$0.0031`, `$1.24`. */
-function dollars(value) {
-  if (value == null) return "—";
-  return `$${value < 1 ? value.toFixed(4) : value.toFixed(2)}`;
-}
-
-/** A row's model, with its tokens and where they came from in the hover. */
-function usageModel(usage) {
-  if (!usage) return el("span", { class: "meta", text: "—" });
-  if (!usage.model) return el("span", { class: "meta one-line", title: usage.source, text: "not recorded" });
-  const tokens = [
-    ["in", usage.input_tokens],
-    ["out", usage.output_tokens],
-    ["cache read", usage.cache_read_tokens],
-    ["cache write", usage.cache_write_tokens],
-  ]
-    .filter(([, count]) => count)
-    .map(([what, count]) => `${n(count)} ${what}`)
-    .join(" · ");
-  return el("span", {
-    class: "one-line",
-    title: `${tokens || "no token figures"}\nfrom ${usage.source}`,
-    text: usage.model,
-  });
-}
-
-function usageCost(usage) {
-  if (!usage || !usage.model) return "—";
-  if (usage.cost_usd == null) return el("span", { class: "meta", title: "this model is not in the price table", text: "no price" });
-  return el("span", {
-    title: usage.cost_source === "client" ? "as the client recorded it" : `priced by ${usage.cost_source}`,
-    text: dollars(usage.cost_usd),
-  });
-}
-
-/* Model, tokens and cost per client and model, from the clients' own logs.
- *
- * Off until the Privacy page's switch is on, and said so here with the way
- * to it. With it on: one row per client and model, the price table's source
- * and date under it, and the button that fetches a fresh table — the one
- * request semlith makes to models.dev, made because somebody pressed it. */
-function ledgerUsage(data) {
-  const usage = data.usage || {};
-  const prices = usage.prices || {};
-  if (!usage.enabled) {
-    return el(
-      "div",
-      { class: "replay-off" },
-      el("p", {
-        text: "Usage from client logs is off. No client log is read until you turn it on.",
-      }),
-      el("button", { class: "button secondary small", type: "button", text: "Open Privacy", onclick: () => go("privacy") }),
-    );
-  }
-  const totals = usage.totals || [];
-  const table = dataTable({
-    className: "w-usage",
-    sort: "cost_usd",
-    dir: "desc",
-    rows: totals,
-    caption: "Calls to semlith by client and model, with the tokens and cost of the requests that made them.",
-    columns: [
-      { key: "client", label: "Client", className: "meta", value: (r) => r.client || "", render: (r) => r.client },
-      { key: "model", label: "Model", className: "path", value: (r) => r.model || "", render: (r) => r.model || "—" },
-      { key: "calls", label: "Calls", className: "num", value: (r) => r.calls || 0, render: (r) => n(r.calls) },
-      { key: "input_tokens", label: "In", className: "num narrow-drop", value: (r) => r.input_tokens || 0, render: (r) => n(r.input_tokens) },
-      { key: "output_tokens", label: "Out", className: "num narrow-drop", value: (r) => r.output_tokens || 0, render: (r) => n(r.output_tokens) },
-      { key: "cache_read_tokens", label: "Cache read", className: "num narrow-drop", value: (r) => r.cache_read_tokens || 0, render: (r) => n(r.cache_read_tokens) },
-      { key: "cache_write_tokens", label: "Cache write", className: "num narrow-drop", value: (r) => r.cache_write_tokens || 0, render: (r) => n(r.cache_write_tokens) },
-      {
-        key: "cost_usd",
-        label: "Cost",
-        className: "num",
-        value: (r) => r.cost_usd || 0,
-        render: (r) => (r.unpriced && r.unpriced === r.calls ? "no price" : dollars(r.cost_usd)),
-      },
-    ],
-  });
-  table.update(totals, totals.length);
-  const note = el(
-    "p",
-    { class: "note" },
-    `Priced by ${prices.source} ${prices.fetched}, ${n(prices.models)} models, ${prices.downloaded ? "downloaded by semlith prices update" : "built into this binary"}. A subscription client is shown at the API price of the same tokens. `,
-    el("a", { href: "#agents", text: "Update prices on the Agents page" }),
-    ".",
-  );
-  // `rows`, not `rows tight`: the note under the table is its own line of
-  // prose and read as stuck to the card with a 2px gap.
-  return el(
-    "div",
-    { class: "rows" },
-    totals.length
-      ? table.node
-      : empty("On, and no call has usage yet. A client writes its log when a reply finishes; the rows fill in on the next visit."),
-    note,
-  );
-}
-
-/* Who the ledger recorded, and how often.
- *
- * The row that says the ledger works. Before 0.15.0 it could only ever read
- * `portal 31`, because the portal's own search box was the only thing that
- * wrote to it; a line with `claude-code` on it is the whole point of the
- * release. */
-function clientBreakdown(byClient) {
-  const entries = Object.entries(byClient || {}).sort((a, b) => b[1] - a[1]);
-  if (!entries.length) return null;
-  return el(
-    "div",
-    { class: "client-breakdown" },
-    // Labelled, because a bare run of names and numbers under eight stat cards
-    // reads as a caption for the cards rather than as its own fact. The line
-    // after it is the fact: these are the client's own names, from the MCP
-    // handshake, not a guess made here.
-    el("span", { class: "eyebrow sm", text: "by client" }),
-    entries.map(([client, count], i) =>
-      el(
-        "span",
-        { class: "client" },
-        i ? el("span", { class: "sep", text: "·" }) : null,
-        el("span", { class: "who", text: client }),
-        el("span", { class: "count", text: n(count) }),
-      ),
-    ),
-    el("span", {
-      class: "client-note",
-      text: "— MCP, HTTP and CLI, under the client's own name",
-    }),
-  );
-}
-
-/** The stores that are actually there, for anywhere one can be chosen.
- *
- * A registry entry whose directory is missing is still a row on the Stores
- * page — the user has to be able to see it to delete it — but it is not a
- * store anything can be indexed into, searched or drawn. It used to be offered
- * as "add to alpha" in the Index dropdown and as a chip on Search and Graph,
- * which is the same mechanism that put one store's files into another. */
-function liveStores() {
-  return state.stores.filter((store) => {
-    if (store.missing || store.unopened) return false;
-    // A store whose every registered root has gone is a store nothing can
-    // sensibly be indexed into: the corpus it is about is not on the machine.
-    // A store with no roots recorded at all is a different thing — a `--store`
-    // directory the registry never saw — and is offered as it always was.
-    const roots = store.roots || [];
-    return !roots.length || roots.some((root) => root.present);
-  });
-}
-
-/** Read the store list into `state`, so every view agrees on how many exist.
- *
- * Numbered, like the runs reads. A delete moves the stores counter and the
- * events counter together, so the sidebar and the Stores page each ask at
- * once — and an answer from before the delete arriving after one from after
- * it left the deleted store counted until the next change, which a delete
- * never follows with. */
-let storesAsked = 0;
-let storesRead = 0;
-
-async function refreshStores() {
-  const mine = ++storesAsked;
-  try {
-    const data = await api("/api/stores");
-    if (mine < storesRead) return state.stores;
-    storesRead = mine;
-    state.stores = data.stores || [];
-    // Kept on the state rather than drawn here, because this runs before every
-    // view and the view decides where a notice belongs on its own page.
-    state.failed = data.failed || [];
-    paintStoreCount();
-  } catch (_) {
-    // A failed refresh must not empty the list: `state.stores.length` decides
-    // whether the app or the first-run screen is shown, and a dropped request
-    // is not the same as having no stores.
-  }
-  return state.stores;
-}
-
-// ---------------------------------------------------------------- stores
-
-/* "Agents connected", on the Stores page.
- *
- * The same list the Agents page draws, read from the same route, because two
- * readings of "which agents are talking to this daemon" is how one page says
- * two and the other says none. */
-function agentsCard() {
-  const card = el("div", { class: "card pad dense" });
-  const body = el("div", { class: "rows" });
-  fill(
-    card,
-    el("span", { class: "card-title", text: "Agents connected" }),
-    body,
-    el("span", { class: "spacer" }),
-    // A link rather than a button box: in the design this is a line of text
-    // at the foot of the card, and as a ghost button stretched by the flex
-    // column it read as a centred banner across the bottom of the card.
-    el("button", {
-      class: "link-button",
-      type: "button",
-      text: "Copy config for another client",
-      onclick: () => go("agents"),
-    }),
-  );
-  fill(body, skeletonRows(3));
-
-  api("/api/agents")
-    .then((data) => {
-      noteAgents(data);
-  // Live: a client connecting, and every tool call it makes, moves the clients
-  // counter, so the table fills in as agents talk rather than on a reload.
-  watchLive(["clients"], repaintView);
-      const live = data.connections || [];
-      if (!live.length) {
-        fill(
-          body,
-          el("div", {
-            class: "rail-hint",
-            text: "No client is talking to this daemon right now.",
-          }),
-        );
-        return;
-      }
-      fill(
-        body,
-        live.map((client) =>
-          el(
-            "div",
-            { class: "kv" },
-            el("span", {
-              text: client.sessions > 1 ? `${client.name} · ${n(client.sessions)} sessions` : client.name,
-            }),
-            el("span", { class: "spacer" }),
-            el("span", {
-              class: "meta",
-              text: `${client.transport} · ${n(client.queries)} quer${
-                client.queries === 1 ? "y" : "ies"
-              }`,
-            }),
-          ),
-        ),
-      );
-    })
-    .catch((e) => fill(body, error(e.message)));
-
-  return card;
-}
-
-/* A question that has to be answered before anything else happens.
- *
- * A native `<dialog>` rather than a div: the focus trap, the Escape key, the
- * inert background and the backdrop are the platform's, and every one of them
- * is a thing a hand-rolled overlay gets wrong. `run` returns a promise; while
- * it is pending the dialog says so, and an error is shown inside it rather
- * than behind it. */
-/* A confirm dialog. `lead` stays under the title and `tail` above the
- * buttons; only `extra` between them scrolls, so a long list of findings
- * never takes the file it is about, or the choice, off the screen. */
-function ask({ title, body, extra, lead, tail, confirm, tone, run, wide }) {
-  const dialog = el("dialog", { class: wide ? "modal wide" : "modal" });
-  const problem = el("div", { class: "note" });
-  const go = el("button", {
-    class: tone === "bad" ? "button danger" : "button",
-    type: "button",
-    text: confirm,
-    onclick: async () => {
-      go.disabled = true;
-      const was = go.textContent;
-      go.textContent = "Working…";
-      problem.className = "note";
-      problem.textContent = "";
-      try {
-        await run();
-        dialog.close();
-      } catch (e) {
-        problem.className = "note bad";
-        problem.textContent = e.message;
-        go.disabled = false;
-        go.textContent = was;
-      }
-    },
-  });
-  fill(
-    dialog,
-    el("div", { class: "modal-head" }, el("h2", { class: "card-title", text: title }), el("p", { class: "subtitle", text: body }), lead || null),
-    extra ? el("div", { class: "modal-body" }, extra) : null,
-    el("div", { class: "modal-foot" }, tail || null, problem),
-    el(
-      "div",
-      { class: "actions" },
-      el("span", { class: "spacer" }),
-      el("button", {
-        class: "button secondary",
-        type: "button",
-        text: "Cancel",
-        onclick: () => dialog.close(),
-      }),
-      go,
-    ),
-  );
-  // Removed on close, however it was closed — the button, Escape, or the
-  // backdrop — so the page never accumulates dialogs nobody can see.
-  dialog.addEventListener("close", () => dialog.remove());
-  dialog.addEventListener("click", (e) => {
-    if (e.target === dialog) dialog.close();
-  });
-  document.body.append(dialog);
-  dialog.showModal();
-  return dialog;
-}
-
-/** Ask before deleting a store.
- *
- * A store is minutes of embedding, so the question says what goes and what
- * does not, and the button that answers it is the red one. */
-function confirmDelete(name) {
-  ask({
-    title: `Delete ${name}?`,
-    body: "Its vectors, chunks, graph and ledger are deleted, and the registry stops listing it. The files it indexed are untouched.",
-    confirm: `Delete ${name}`,
-    tone: "bad",
-    run: async () => {
-      const done = await post("/api/store/delete", { store: name });
-      await refreshStores();
-      // After the re-render, not before: the render replaces the element the
-      // message would have been written into.
-      await render();
-      note(done.message);
-    },
-  });
-}
-
-/** Ask before compacting a store, naming what it will give back.
- *
- * Waits for the compaction rather than pointing at a run card: the figures on
- * the row are what the person is looking at, and they should move when the
- * dialog closes. */
-function confirmCompact(s) {
-  const d = s.disk || {};
-  const what = d.reclaimable
-    ? `About ${bytes(d.reclaimable)} of its ${bytes(d.total)} can be given back: the full-precision vectors of chunks that no longer exist, symbol history past the retention, and the database's free pages.`
-    : `There is little to give back: none of its ${bytes(d.total || 0)} is measurably dead.`;
-  const old = d.compacts_vectors === false
-    ? " This store was written before full-precision vectors existed, so only its database is compacted; re-indexing it would compact its vectors too."
-    : "";
-  ask({
-    title: `Compact ${s.name}?`,
-    body: `${what}${old} Nothing is re-embedded, and search answers stay the same.`,
-    confirm: `Compact ${s.name}`,
-    run: async () => {
-      const done = await post("/api/store/compact", { store: s.name, wait: true });
-      await refreshStores();
-      await render();
-      const c = done.compact || {};
-      const total = (f) => (f ? f.database + f.exact + f.vectors : 0);
-      note(
-        done.stopped
-          ? `${s.name}: the compaction was stopped before anything was swapped in; nothing changed.`
-          : `${s.name}: ${bytes(total(c.before))} → ${bytes(total(c.after))} on disk.${(c.notes || []).map((x) => ` ${x}.`).join("")}`,
-      );
-    },
-  });
-}
-
-/** A line under the page head, for something that just happened to the page. */
-function note(text, bad) {
-  const holder = document.querySelector(".view > .note.page-note");
-  if (!holder) return;
-  holder.className = bad ? "note page-note bad" : "note page-note";
-  holder.textContent = text;
-}
-
-/* The stores ticked for a bulk delete, by name. Outside the view, because the
- * view is redrawn whenever a store's counters move, and a selection that
- * vanished under a watcher's re-embed would be one nobody could trust. */
-const storesPicked = new Set();
-
-async function storesView() {
-  const stores = await refreshStores();
-  // A store deleted elsewhere is no longer selectable.
-  for (const name of storesPicked) {
-    if (!stores.some((s) => s.name === name)) storesPicked.delete(name);
-  }
-  /* Live. A store the CLI just made, a watcher re-embed, a run's own note —
-   * each moves a counter the shared poll is watching, and this page redraws
-   * from the route it already reads rather than from a timer of its own.
-   * Deliberately not on `runs`: that counter moves on every file of every run,
-   * and a table that rebuilt forty times a second would be unreadable. */
-  watchLive(["stores", "events"], repaintView);
-
-  const rootNote = el("div", { class: "note" });
-  /* A root the registry lists and the disk no longer has. The picker is the
-   * same one the page already uses, and re-pointing is a registry edit: no
-   * re-embedding, nothing rewritten. */
-  const rootPicker = folderPicker({
-    choose: "Point the store here",
-    onError: (message) => {
-      rootNote.className = "note bad";
-      rootNote.textContent = message;
-    },
-    onChoose: async (path) => {
-      rootNote.className = "note";
-      rootNote.textContent = "Re-pointing…";
-      try {
-        const done = await post("/api/root", { store: rootPicker.store, root: path });
-        rootNote.textContent = done.message;
-        await refreshStores();
-      } catch (e) {
-        rootNote.className = "note bad";
-        rootNote.textContent = e.message;
-      }
-    },
-  });
-
-  function repoint(store, missing) {
-    rootPicker.store = store;
-    rootNote.className = "note";
-    rootNote.textContent = `Choose where ${missing.split("/").pop() || missing} lives now.`;
-    rootPicker.open("");
-  }
-
-  const adoptNote = el("div", { class: "note" });
-  const picker = folderPicker({
-    choose: "Adopt this directory",
-    onError: (message) => {
-      adoptNote.className = "note bad";
-      adoptNote.textContent = message;
-    },
-    onChoose: async (path) => {
-      adoptNote.className = "note";
-      adoptNote.textContent = "Adopting…";
-      try {
-        const done = await post("/api/adopt", { path });
-        adoptNote.textContent =
-          done.message || `${path} is registered. It joins on the next daemon start.`;
-        await refreshStores();
-      } catch (e) {
-        adoptNote.className = "note bad";
-        adoptNote.textContent = e.message;
-        // Back where it failed, rather than closed. A failed adopt used to
-        // drop the reader onto the Stores page, and reopening the picker
-        // started again at the home directory with every step of navigation
-        // lost.
-        picker.open(path);
-      }
-    },
-  });
-
-  const head = pageHead("Stores", "Everything indexed on this machine. Nothing leaves it.", {
-    actions: [
-      el(
-        "button",
-        { class: "button secondary", type: "button", onclick: () => picker.open("") },
-        icon(ICONS.folder),
-        "Adopt existing .semlith",
-      ),
-      el(
-        "button",
-        { class: "button", type: "button", onclick: () => go("index") },
-        icon(ICONS.plus),
-        "Index a folder",
-      ),
-    ],
-  });
-
-  if (!stores.length) {
-    return el(
-      "div",
-      { class: "view" },
-      head,
-      picker.node,
-      adoptNote,
-      empty("No store is open. Index a folder and it appears here."),
-    );
-  }
-
-  const totals = stores.reduce(
-    (sum, s) => ({
-      files: sum.files + s.files,
-      chunks: sum.chunks + s.chunks,
-      bytes: sum.bytes + s.bytes,
-      disk: sum.disk + (s.disk ? s.disk.total : 0),
-      reclaimable: sum.reclaimable + (s.disk ? s.disk.reclaimable : 0),
-      lines: sum.lines + (s.lines || 0),
-      watching: sum.watching + (s.watching ? 1 : 0),
-      formats: Math.max(sum.formats, s.formats || 0),
-      readers: Math.max(sum.readers, s.readers || 0),
-    }),
-    { files: 0, chunks: 0, bytes: 0, disk: 0, reclaimable: 0, lines: 0, watching: 0, formats: 0, readers: 0 },
-  );
-  const dim = stores.find((s) => s.dim)?.dim;
-
-  /* The row the v4 design puts at the foot of the stores card.
-   *
-   * It is the question the table raises and does not answer: a row says a
-   * store holds 4 180 chunks, and this is where the reader goes to find out
-   * what is in them. Inside the card rather than under it, because the design
-   * draws it as the card's last row and a button floating below the border
-   * reads as belonging to the next block. */
-  const insideLink = el(
-    "button",
-    { class: "table-follow", type: "button", onclick: () => go("corpus") },
-    el("span", { text: "See what is actually inside the index" }),
-    icon(ICONS.arrowRight, 15),
-  );
-
-  // The Files page's bulk bar, for stores: one confirm that names each one.
-  const bulkBar = el("div", { class: "bulk", hidden: true });
-  function paintBulk() {
-    bulkBar.hidden = storesPicked.size === 0;
-    if (!storesPicked.size) return;
-    const names = [...storesPicked].sort();
-    const many = `${n(names.length)} store${names.length === 1 ? "" : "s"}`;
-    fill(
-      bulkBar,
-      el("span", { class: "meta", text: `${many} selected` }),
-      el("span", { class: "spacer" }),
-      el("button", {
-        class: "button secondary small",
-        type: "button",
-        text: "Clear",
-        onclick: () => {
-          storesPicked.clear();
-          for (const box of table.node.querySelectorAll("input.pick")) box.checked = false;
-          paintBulk();
-        },
-      }),
-      el("button", {
-        class: "button danger small",
-        type: "button",
-        text: `Delete ${many}`,
-        onclick: () =>
-          ask({
-            title: `Delete ${many}?`,
-            body: `${names.join(", ")}: their vectors, chunks, graph and ledger are deleted, and the registry stops listing them. The files they indexed are untouched.`,
-            confirm: `Delete ${many}`,
-            tone: "bad",
-            run: async () => {
-              const done = await post("/api/store/delete", { stores: names });
-              for (const name of done.deleted || []) storesPicked.delete(name);
-              await refreshStores();
-              await render();
-              note(done.message, (done.failed || []).length > 0);
-            },
-          }),
-      }),
-    );
-  }
-
-  const table = dataTable({
-    className: "w-stores",
-    remember: "stores",
-    caption: "Every store on this machine: where it is, what it holds, and when it was last written to.",
-    sort: "name",
-    rows: stores,
-    columns: [
-      {
-        key: "pick",
-        label: "",
-        className: "pick",
-        sortable: false,
-        head: () => {
-          const all = el("input", {
-            type: "checkbox",
-            class: "pick all",
-            "aria-label": "Select every store on this page",
-            onchange: () => {
-              for (const box of table.node.querySelectorAll("tbody input.pick")) {
-                if (box.checked !== all.checked) box.click();
-              }
-            },
-          });
-          return all;
-        },
-        render: (s) => {
-          const box = el("input", {
-            type: "checkbox",
-            class: "pick",
-            "aria-label": `Select ${s.name}`,
-            onchange: () => {
-              if (box.checked) storesPicked.add(s.name);
-              else storesPicked.delete(s.name);
-              paintBulk();
-            },
-          });
-          box.checked = storesPicked.has(s.name);
-          return box;
-        },
-      },
-      {
-        key: "name",
-        label: "Store",
-        value: (s) => s.name,
-        render: (s) =>
-          el(
-            "div",
-            { class: "rows tight" },
-            lineCell(s.name, "name"),
-            pathCell(s.dir, "meta"),
-            // A registry entry whose directory is not there. Its own badge,
-            // naming the path that is absent, rather than a word in the "last
-            // write" column where it is not a last write.
-            s.missing
-              ? el(
-                  "div",
-                  { class: "chips" },
-                  pill("missing", "bad", { title: `nothing at ${s.dir}` }),
-                  el("span", {
-                    class: "meta",
-                    text: `nothing at ${s.dir} — delete the entry, or put the store back`,
-                  }),
-                )
-              : null,
-            // A store whose corpus has gone. It opens, it answers, and what it
-            // answers about is not on disk any more — which is a different
-            // fault from a registry entry with no store, and was said nowhere
-            // but inside the ROOTS column that a phone drops.
-            !s.missing && (s.roots || []).length && !(s.roots || []).some((r) => r.present)
-              ? el(
-                  "div",
-                  { class: "chips" },
-                  pill("root missing", "bad", {
-                    title: (s.roots || []).map((r) => r.path).join(", "),
-                  }),
-                  el("span", {
-                    class: "meta",
-                    text: `nothing at ${(s.roots || []).map((r) => r.path).join(", ")} — re-point it, or delete the store`,
-                  }),
-                )
-              : null,
-            // What the daemon reconciled away when it opened this store: rows
-            // it held for files outside every root it is registered against.
-            s.pruned
-              ? el(
-                  "div",
-                  { class: "chips" },
-                  pill(`${n(s.pruned)} reconciled`, "warn"),
-                  el("span", {
-                    class: "meta",
-                    text: "files it held from outside its roots, dropped when this daemon opened it. The files on disk are untouched.",
-                  }),
-                )
-              : null,
-            // The root on a phone, where the ROOTS column is dropped and
-            // nothing else said what the store indexes. Truncated from the
-            // front like every other path: at 390px a plain span broke a home
-            // directory into eight-character pieces down the cell.
-            pathCell((s.roots || []).map((r) => r.path).join(", ") || "no roots", "meta only-narrow"),
-            // The model per store, which the About page states only once for
-            // the machine. Two stores can have been built with two models and
-            // their vectors are not comparable, so it belongs beside the row.
-            lineCell(`${s.model} · ${s.dim} dims`, "meta"),
-            // Two things worth saying about a store rather than about its
-            // contents: whether this machine has agreed to open it without
-            // being told to, and whether anybody else on the machine can read
-            // what it holds.
-            s.trusted === false
-              ? el(
-                  "div",
-                  { class: "chips" },
-                  pill("not trusted", "warn"),
-                  el("button", {
-                    class: "button secondary small",
-                    type: "button",
-                    text: "Trust this store",
-                    onclick: async (e) => {
-                      const button = e.currentTarget;
-                      button.disabled = true;
-                      adoptNote.className = "note";
-                      adoptNote.textContent = "Trusting…";
-                      try {
-                        await post("/api/trust", { path: s.dir });
-                        adoptNote.textContent = `${s.dir} is trusted. semlith opens it from its own directory now, without --store.`;
-                        await refreshStores();
-                      } catch (err) {
-                        adoptNote.className = "note bad";
-                        adoptNote.textContent = err.message;
-                        button.disabled = false;
-                      }
-                    },
-                  }),
-                )
-              : null,
-            s.loose_mode
-              ? el(
-                  "div",
-                  { class: "chips" },
-                  pill(`mode ${s.loose_mode}`, "warn"),
-                  el("span", {
-                    class: "meta",
-                    text: "other users on this machine can read what this store indexed; the next open narrows it to 700",
-                  }),
-                )
-              : null,
-          ),
-      },
-      {
-        key: "roots",
-        label: "Roots",
-        className: "meta narrow-drop",
-        sortable: false,
-        render: (s) =>
-          (s.roots || []).length
-            ? s.roots.map((r) =>
-                r.present
-                  ? pathCell(r.path)
-                  : el(
-                      "div",
-                      { class: "gone-row" },
-                      pathCell(r.path, "gone"),
-                      // A root the registry still lists and the disk no longer
-                      // has. Re-pointing it is one click rather than a command
-                      // with two paths in it.
-                      el("button", {
-                        class: "button danger small",
-                        type: "button",
-                        text: "Re-point",
-                        onclick: () => repoint(s.name, r.path),
-                      }),
-                    ),
-              )
-            : "—",
-      },
-      { key: "files", label: "Files", className: "num", value: (s) => s.files, render: (s) => n(s.files) },
-      {
-        key: "chunks",
-        label: "Chunks",
-        className: "num narrow-drop",
-        value: (s) => s.chunks,
-        render: (s) => n(s.chunks),
-      },
-      {
-        /* What the store takes on disk, and under it what Compact would give
-         * back. `bytes` is the source it indexed; this is the store. */
-        key: "disk",
-        label: "Disk",
-        className: "num narrow-drop",
-        value: (s) => (s.disk ? s.disk.total : -1),
-        render: (s) => {
-          if (!s.disk) return el("span", { class: "meta", text: "—" });
-          const d = s.disk;
-          return el(
-            "span",
-            {
-              class: "disk-cell",
-              title: `database ${bytes(d.database)}, full-precision vectors ${bytes(d.exact)}, quantized vectors ${bytes(d.vectors)}`,
-            },
-            bytes(d.total),
-            d.reclaimable
-              ? el("div", { class: "meta", text: `${bytes(d.reclaimable)} reclaimable · ${d.dead_percent}%` })
-              : null,
-          );
-        },
-      },
-      {
-        /* One line per store, and never the number on its own: the tokens, the
-         * share of retrievals they are computed over, and how they were
-         * counted, in one cell. A saved-token figure without its coverage and
-         * its tier is a figure a reader is being asked to take on trust, which
-         * is what made the 0.17.2 README paragraph unshippable. No chart: a
-         * chart of one number is decoration. */
-        key: "saved",
-        label: "Saved",
-        className: "num narrow-drop",
-        value: (s) => (s.savings ? s.savings.net_tokens : -1),
-        render: (s) => {
-          if (!s.savings || !s.savings.total) {
-            return el("span", { class: "meta", text: "—" });
-          }
-          return el(
-            "span",
-            {
-              class: "meta disk-cell",
-              title: `${n(s.savings.net_tokens)} tokens saved over ${n(s.savings.credited)} of ${n(s.savings.total)} retrievals, counted ${s.savings.tier}`,
-            },
-            `${n(s.savings.net_tokens)} · ${s.savings.coverage}% · ${s.savings.tier}`,
-          );
-        },
-      },
-      {
-        key: "last_write",
-        label: "Last write",
-        value: (s) => s.last_write || 0,
-        // Green means a write landed. A store that is watched and has never
-        // been written to is neither good news nor a warning, so it carries a
-        // plain pill with no dot at all.
-        render: (s) => {
-          // Registered, and this daemon does not have it open — another
-          // process is writing it. One vocabulary in this column: every value
-          // here is a last write or the reason there is none to read, and a
-          // store's own state lives in its own badge beside its name.
-          // One vocabulary: either a time, or the em dash that means there is
-          // no time to show. Why there is none — the store is missing, or it
-          // was never written to — lives in its own badge beside the name,
-          // where it is a fact about the store rather than about this column.
-          // Read from the store rather than from this daemon's memory of its
-          // own session, so a store written yesterday no longer says "never".
-          return s.last_write
-            ? pill(when(s.last_write), "good")
-            : el("span", { class: "meta", text: "—" });
-        },
-      },
-      {
-        key: "open",
-        label: "",
-        className: "row-end",
-        sortable: false,
-        // One control rather than a button per action: the destructive one
-        // does not belong a mis-aimed click away from the ordinary one.
-        render: (s) =>
-          rowMenu(() => [
-            // With the store, so the page it opens is about the row the menu
-            // was opened from. Without it, "Open in Files" from any row — even
-            // a dead one — showed every store's files with another store's
-            // rows at the top.
-            {
-              label: "Open in Files",
-              onclick: () => {
-                state.pendingStore = s.name;
-                go("files");
-              },
-            },
-            {
-              label: "Compact…",
-              onclick: () => confirmCompact(s),
-            },
-            {
-              label: "Delete store…",
-              tone: "bad",
-              onclick: () => confirmDelete(s.name),
-            },
-          ]),
-      },
-    ],
-  });
-
-  const feed = stores
-    .flatMap((s) => (s.events || []).map((e) => ({ at: e.at, text: e.text })))
-    .sort((a, b) => b.at - a.at)
-    .slice(0, 40);
-
-  paintBulk();
-  return el(
-    "div",
-    { class: "view" },
-    head,
-    el(
-      "div",
-      { class: "strip" },
-      stat("Stores", n(stores.length), `${totals.watching} being watched`),
-      stat("Files", n(totals.files), `${n(totals.formats)} formats`),
-      stat("Chunks", n(totals.chunks), dim ? `${dim}-dimension vectors` : "embedded and searchable"),
-      // The caption describes this tile's own number, as every other one does.
-      // "11 readers in use" is a fact about format handlers, not about lines.
-      stat(
-        "Lines",
-        n(totals.lines),
-        `across ${n(totals.files)} file${totals.files === 1 ? "" : "s"}, read by ${n(
-          totals.readers,
-        )} reader${totals.readers === 1 ? "" : "s"}`,
-      ),
-      // The stores themselves. This tile used to sum the indexed source bytes
-      // under this label, which is a different number about different files.
-      stat(
-        "On disk",
-        bytes(totals.disk),
-        totals.reclaimable ? `${bytes(totals.reclaimable)} reclaimable by Compact` : "nothing to reclaim",
-      ),
-    ),
-    bulkBar,
-    // Above the table, so what a delete did is said where the reader is
-    // looking; at the foot of the page it was below the fold.
-    el("div", { class: "note page-note", role: "status", "aria-live": "polite" }),
-    el(
-      "div",
-      { class: "scroller" },
-      appended(table.node, insideLink),
-      el(
-        "div",
-        { class: "grid fill" },
-        el(
-          "div",
-          { class: "card pad dense" },
-          el(
-            "div",
-            { class: "head" },
-            el("span", { class: "card-title", text: "Watcher" }),
-            el("span", { class: "meta", text: "live" }),
-          ),
-          feed.length
-            ? el(
-                "div",
-                { class: "feed" },
-                // One line per event, with the whole of it on the tooltip. A
-                // line that wraps is three lines when it names a path, and
-                // forty of those grew the card until it pushed the table it
-                // sits under off the page.
-                feed.map((e) =>
-                  el(
-                    "div",
-                    { class: "row" },
-                    // The whole stamp on the element as well as in it: the
-                    // zone offset is what makes this line to the second, and a
-                    // phone has no room for both the time and the offset.
-                    el("span", {
-                      class: "at",
-                      text: clock(e.at),
-                      title: clock(e.at),
-                    }),
-                    lineCell(e.text, "what"),
-                  ),
-                ),
-              )
-            : empty("Nothing has changed on disk since the daemon started."),
-        ),
-        agentsCard(),
-      ),
-    ),
-    /* The four ways into this page, after the table they act on.
-     *
-     * They stood between the page head and the stat strip, which put four
-     * stacked blocks of picker between a reader and the thing they came for.
-     * The design has the two affordances they cover — `Adopt existing
-     * .semlith` and `Index a folder` — as two buttons in the header row, and
-     * those are still there; these are the panels they open. */
-    picker.node,
-    adoptNote,
-    rootPicker.node,
-    rootNote,
-  );
-}
-
-// ----------------------------------------------------------------- files
-
-/** The most rows `/api/files` returns in one request. The route refuses a
- * larger `limit` rather than clamping it. */
-const FILES_PER_REQUEST = 500;
-
-/** The most files "select all N matches" will gather.
- *
- * The same ceiling the route puts on `offset`: past it there are no more pages
- * to ask for, so the answer is to narrow the filter — said, rather than a
- * button that quietly acts on a prefix of what it named. */
-const FILES_SELECTABLE = 10_000;
-
-async function filesView() {
-  const chosenExt = new Set();
-  const summary = el("span", { class: "pill" });
-  const holder = el("div", {});
-  const unreadable = el("div", { class: "unreadable-slot" });
-  /* Announced rather than only drawn: a Forget made the row disappear and said
-   * nothing anywhere a screen reader would hear it. */
-  const announcer = el("div", { class: "sr-only", role: "status", "aria-live": "polite" });
-  /* Whether the last empty result was empty because a file was forgotten, so
-   * the empty state can say what happened instead of blaming the filter. */
-  let justForgot = false;
-  /* Which store's files to show. There used to be no way anywhere in the
-   * portal to look at one store's files: the Store column did not sort, the
-   * page had no store control, and "Open in Files" on a store row navigated
-   * here and applied no filter at all. */
-  const storeFilter = storePicker(state.pendingStore || "", () => load(true));
-  state.pendingStore = "";
-  const footnote = el("p", {
-    class: "subtitle",
-    text: "Forget drops the file's chunks and vectors. The file on disk is untouched.",
-  });
-
-  const pathInput = el("input", {
-    type: "text",
-    placeholder: "path glob, e.g. src/**",
-    oninput: () => {
-      clearTimeout(load.timer);
-      load.timer = setTimeout(() => load(true), 200);
-    },
-  });
-
-  /** Which request is current, so a slow one cannot overwrite a fast one. */
-  let generation = 0;
-
-  async function forget(path, row, store) {
-    try {
-      // Named, always. The row knows which store holds the file, and a daemon
-      // serving two stores cannot guess — it refuses a write that names none,
-      // which is what the page used to send.
-      await post("/api/forget", { path, store });
-      // The row goes, and the page is reloaded behind it: with the server
-      // paging, the row that moves up into the gap is on the server.
-      row.remove();
-      picked.delete(path);
-      paintBulk();
-      justForgot = true;
-      announcer.textContent = `${path} forgotten. Its chunks and vectors are gone from ${store}; the file on disk is untouched.`;
-      load();
-    } catch (e) {
-      // In the note, not over the table: an error that replaces the rows
-      // takes away the thing the reader was working with. Rethrown so a
-      // dialog waiting on this stays open and shows it too.
-      bulkNote.className = "note bad";
-      bulkNote.textContent = e.message;
-      throw e;
-    }
-  }
-
-  /* The rows ticked for a bulk forget, by path.
-   *
-   * Kept out here rather than in the table, because the table re-renders on
-   * every sort, page and filter and a selection that vanished when you sorted
-   * would be a selection nobody could trust. */
-  const picked = new Map();
-  // Announced as well as drawn: this is where a bulk Forget says what it did,
-  // and a row vanishing is not something a screen reader hears.
-  const bulkNote = el("div", { class: "note", role: "status", "aria-live": "polite" });
-  const bulkBar = el("div", { class: "bulk", hidden: true });
-
-  function paintBulk() {
-    bulkBar.hidden = picked.size === 0;
-    if (!picked.size) return;
-    const many = picked.size;
-    fill(
-      bulkBar,
-      el("span", {
-        class: "meta",
-        text: `${n(many)} file${many === 1 ? "" : "s"} selected`,
-      }),
-      // The header checkbox selects the page, honestly and deliberately. This
-      // is how the whole result set is reached, which before this there was no
-      // way to do at all. Bounded by what one request returns: past that the
-      // answer is to narrow the filter, said rather than a button that quietly
-      // acts on a prefix.
-      matches > many
-        ? matches <= FILES_SELECTABLE
-          ? el("button", {
-              class: "button secondary small",
-              type: "button",
-              text: `Select all ${n(matches)} matches`,
-              onclick: () => selectEveryMatch(),
-            })
-          : el("span", {
-              class: "meta",
-              text: `${n(matches)} files match — narrow the filter to ${n(
-                FILES_SELECTABLE,
-              )} or fewer to select them all`,
-            })
-        : null,
-      el("span", { class: "spacer" }),
-      el("button", {
-        class: "button secondary small",
-        type: "button",
-        text: "Clear",
-        onclick: () => {
-          picked.clear();
-          for (const box of table.node.querySelectorAll("input.pick")) box.checked = false;
-          paintBulk();
-        },
-      }),
-      el("button", {
-        class: "button danger small",
-        type: "button",
-        text: `Forget ${n(many)} file${many === 1 ? "" : "s"}`,
-        onclick: (e) => {
-          const button = e.currentTarget;
-          const stores = [...new Set(picked.values())];
-          ask({
-            title: `Forget ${n(many)} file${many === 1 ? "" : "s"}?`,
-            body: `Their chunks and vectors are dropped from ${stores.join(
-              " and ",
-            )}. The files on disk are untouched, and indexing the folder again brings them back.`,
-            confirm: `Forget ${n(many)} file${many === 1 ? "" : "s"}`,
-            tone: "bad",
-            run: () => forgetPicked(button),
-          });
-        },
-      }),
-    );
-  }
-
-  async function forgetPicked(button) {
-    button.disabled = true;
-    button.textContent = "Forgetting…";
-    bulkNote.className = "note";
-    bulkNote.textContent = "";
-    // One call per store: a write names the store it is for, and a selection
-    // made across two of them is two writes, not an ambiguous one.
-    const byStore = new Map();
-    for (const [path, store] of picked) {
-      if (!byStore.has(store)) byStore.set(store, []);
-      byStore.get(store).push(path);
-    }
-    try {
-      let files = 0;
-      let forgot = 0;
-      let absent = 0;
-      for (const [store, paths] of byStore) {
-        const done = await post("/api/forget", { paths, store });
-        // One path in a store answers in the single-file shape.
-        files += done.files === undefined ? 1 : done.files;
-        forgot += done.forgot || 0;
-        absent += (done.not_indexed || []).length;
-      }
-      picked.clear();
-      justForgot = true;
-      paintBulk();
-      bulkNote.textContent = absent
-        ? `${n(files)} file${files === 1 ? "" : "s"} forgotten, ${n(forgot)} chunk${
-            forgot === 1 ? "" : "s"
-          } removed. ${n(absent)} were not indexed and were left alone.`
-        : `${n(files)} file${files === 1 ? "" : "s"} forgotten, ${n(forgot)} chunk${
-            forgot === 1 ? "" : "s"
-          } removed.`;
-      load();
-    } catch (e) {
-      bulkNote.className = "note bad";
-      bulkNote.textContent = e.message;
-      button.disabled = false;
-      paintBulk();
-      // Rethrown so the dialog that asked stays open and shows it too.
-      throw e;
-    }
-  }
-
-  const table = dataTable({
-    className: "w-files",
-    caption: "Every indexed file, the reader that parsed it, and what it contributed to the store.",
-    server: true,
-    sort: "path",
-    columns: [
-      {
-        key: "pick",
-        label: "",
-        className: "pick",
-        sortable: false,
-        // Selects every row on the page rather than every row in the store: a
-        // filter of ten thousand files behind one tick is a mistake nobody
-        // meant to make.
-        head: () => {
-          const all = el("input", {
-            type: "checkbox",
-            class: "pick all",
-            "aria-label": "Select every file on this page",
-            onchange: () => {
-              for (const box of table.node.querySelectorAll("tbody input.pick")) {
-                if (box.checked !== all.checked) box.click();
-              }
-            },
-          });
-          return all;
-        },
-        render: (f) => {
-          const box = el("input", {
-            type: "checkbox",
-            class: "pick",
-            "aria-label": `Select ${f.path}`,
-            onchange: () => {
-              if (box.checked) picked.set(f.path, f.store);
-              else picked.delete(f.path);
-              paintBulk();
-            },
-          });
-          box.checked = picked.has(f.path);
-          return box;
-        },
-      },
-      {
-        key: "path",
-        label: "Path",
-        className: "path",
-        // One line, under the store's root, with the whole path on the
-        // shared tooltip: the machine's absolute path took the column's width
-        // and truncated to the part every row had in common.
-        render: (f) => {
-          const cell = pathCell(rootRel(f.path, f.store));
-          cell.title = f.path;
-          cell.dataset.tip = f.path;
-          return cell;
-        },
-      },
-      {
-        key: "store",
-        label: "Store",
-        className: "meta narrow-drop",
-        render: (f) => f.store,
-      },
-      {
-        key: "reader",
-        label: "Read as",
-        className: "narrow-drop",
-        render: (f) => el("span", { class: "tag", text: f.reader }),
-      },
-      {
-        key: "lang",
-        label: "Language",
-        className: "meta narrow-drop",
-        render: (f) => f.lang || "—",
-      },
-      {
-        key: "lines",
-        label: "Lines",
-        className: "num",
-        // An image has no lines. Its pixel size goes here rather than a zero,
-        // which would read as a file that failed to parse.
-        render: (f) => (f.reader === "image" ? "—" : n(f.lines)),
-      },
-      { key: "chunks", label: "Chunks", className: "num narrow-drop", render: (f) => n(f.chunks) },
-      {
-        key: "indexed",
-        label: "Indexed",
-        className: "meta",
-        render: (f) => when(f.indexed_at),
-      },
-      {
-        key: "forget",
-        label: "",
-        sortable: false,
-        render: (f) => {
-          const button = el("button", {
-            class: "forget",
-            type: "button",
-            text: "Forget",
-            onclick: () => {
-              const row = button.closest("tr");
-              ask({
-                title: "Forget this file?",
-                body: `${f.path} — its chunks and vectors are dropped from ${f.store}. The file on disk is untouched, and indexing the folder again brings it back.`,
-                confirm: "Forget it",
-                tone: "bad",
-                run: async () => {
-                  button.disabled = true;
-                  button.textContent = "Forgetting…";
-                  await forget(f.path, row, f.store);
-                },
-              });
-            },
-          });
-          return button;
-        },
-      },
-    ],
-    rows: [],
-    total: 0,
-    onChange: () => load(),
-  });
-
-  async function load(reset) {
-    const mine = ++generation;
-    const view = table.query();
-    if (reset) view.page = 1;
-    const params = new URLSearchParams();
-    if (pathInput.value.trim()) params.set("path", pathInput.value.trim());
-    for (const ext of chosenExt) params.append("ext", ext);
-    for (const store of storeFilter.stores()) params.append("store", store);
-    params.set("sort", view.sort || "path");
-    params.set("dir", view.dir);
-    params.set("limit", String(view.perPage));
-    params.set("offset", String((view.page - 1) * view.perPage));
-
-    let data;
-    try {
-      data = await api(`/api/files?${params}`);
-    } catch (e) {
-      if (mine !== generation) return;
-      fill(holder, el("div", { class: "card pad" }, error(e.message)));
-      summary.textContent = "";
-      return;
-    }
-    if (mine !== generation) return;
-    fill(unreadable, unreadableNotice(data.failed));
-
-    summary.textContent = `${n(data.total)} files · ${n(data.formats)} format${
-      data.formats === 1 ? "" : "s"
-    } · ${n(data.stores)} store${data.stores === 1 ? "" : "s"}`;
-
-    if (!data.total) {
-      // Which of the two empty states this is. "The filter, not the corpus" is
-      // right for a filter miss and exactly wrong immediately after a Forget,
-      // where the corpus is precisely why there is nothing.
-      const because = justForgot
-        ? "Nothing left under this filter — the file that matched it has been forgotten."
-        : "Nothing indexed matches that. The filter, not the corpus — clear it and look again.";
-      fill(holder, el("div", { class: "card pad" }, empty(because)));
-      // No rows means no Forget buttons, and a footnote about a button that is
-      // not on the page is a footnote about nothing.
-      footnote.hidden = true;
-      justForgot = false;
-      return;
-    }
-    footnote.hidden = false;
-    justForgot = false;
-    table.update(data.files, data.total);
-    if (!holder.contains(table.node)) fill(holder, table.node);
-    matches = data.total;
-  }
-
-  /** How many files the current filter matches, for "select all N". */
-  let matches = 0;
-
-  /** Tick every file the current filter matches, not just the page.
-   *
-   * Paged, because one request returns at most `FILES_PER_REQUEST` rows. The
-   * header checkbox selects the page, honestly and deliberately; this is how
-   * the whole result set is reached, which before this there was no way to do
-   * at all. */
-  async function selectEveryMatch() {
-    bulkNote.className = "note";
-    bulkNote.textContent = `Selecting ${n(matches)} files…`;
-    for (let offset = 0; offset < matches && offset < FILES_SELECTABLE; offset += FILES_PER_REQUEST) {
-      const params = new URLSearchParams();
-      if (pathInput.value.trim()) params.set("path", pathInput.value.trim());
-      for (const ext of chosenExt) params.append("ext", ext);
-      for (const store of storeFilter.stores()) params.append("store", store);
-      params.set("limit", String(FILES_PER_REQUEST));
-      params.set("offset", String(offset));
-      let data;
-      try {
-        data = await api(`/api/files?${params}`);
-      } catch (e) {
-        bulkNote.className = "note bad";
-        bulkNote.textContent = e.message;
-        return;
-      }
-      for (const file of data.files || []) picked.set(file.path, file.store);
-      if (!(data.files || []).length) break;
-    }
-    bulkNote.textContent = "";
-    for (const box of table.node.querySelectorAll("tbody input.pick")) box.checked = true;
-    paintBulk();
-  }
-
-  // The formats this release added are on the list, so they are one click away
-  // rather than something you have to know to type.
-  const EXTENSIONS = ["rs", "md", "py", "ts", "js", "go", "pdf", "docx", "epub", "png", "jpg"];
-  const extChips = EXTENSIONS.map((ext) =>
-    el("button", {
-      class: "chip",
-      type: "button",
-      "aria-pressed": "false",
-      text: `.${ext}`,
-      onclick: (e) => {
-        const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
-        e.currentTarget.setAttribute("aria-pressed", String(on));
-        if (on) chosenExt.add(ext);
-        else chosenExt.delete(ext);
-        clearTimeout(load.timer);
-        load(true);
-      },
-    }),
-  );
-
-  load();
-
-  const indexedPane = el(
-    "div",
-    { class: "rows files-pane" },
-    el(
-      "div",
-      { class: "files-filters" },
-      el(
-        "div",
-        { class: "filters" },
-        el(
-          "div",
-          { class: "field wide" },
-          icon(ICONS.search, 15),
-          labelled("files-filter", "Filter files by path glob", pathInput),
-        ),
-      ),
-      el("div", { class: "filters" }, el("span", { class: "filter-label", text: "Type" }), extChips),
-      el("div", { class: "filters" }, el("span", { class: "filter-label", text: "Store" }), storeFilter.node),
-    ),
-    bulkBar,
-    bulkNote,
-    holder,
-    footnote,
-  );
-  const treePane = filesTree(storeFilter);
-  const decisionsTab = decisionsPane();
-  const panes = [
-    ["Indexed", indexedPane, null],
-    ["Tree", treePane.node, treePane.load],
-    ["Decisions", decisionsTab.node, decisionsTab.load],
-  ];
-  const panel = el("div", { class: "tab-panel" });
-  const tabButtons = panes.map(([label], i) =>
-    el("button", {
-      class: "tab",
-      type: "button",
-      text: label,
-      "data-tab": label,
-      "aria-pressed": String(i === 0),
-      onclick: () => showPane(i),
-    }),
-  );
-  function showPane(index) {
-    tabButtons.forEach((b, i) => b.setAttribute("aria-pressed", String(i === index)));
-    fill(panel, panes[index][1]);
-    if (panes[index][2]) panes[index][2]();
-  }
-  showPane(state.filesTab === "decisions" ? 2 : state.filesTab === "tree" ? 1 : 0);
-  state.filesTab = "";
-
-  return el(
-    "div",
-    { class: "view" },
-    unreadable,
-    pageHead(
-      "Files",
-      "What is indexed, and which reader parsed it — so “not indexed” and “not discussed” stop looking the same.",
-      { pill: summary },
-    ),
-    el("div", { class: "tabs" }, tabButtons),
-    panel,
-    announcer,
-  );
-}
-
-/* The tree view: an editor's explorer over what each store holds.
- *
- * One level at a time, read when a folder is opened, so a tree of a hundred
- * thousand files costs what the open folders hold. Each store is a root; a
- * folder shows how many files it holds, a file its lines and symbols, and
- * what sits on disk but is not indexed is listed greyed with why. The same
- * facts `semlith_files {tree: true}` gives an agent as text. */
-const FILE_TYPES = [
-  [/\.rs$/, "ft-rust"],
-  [/\.(m?js|cjs|jsx)$/, "ft-js"],
-  [/\.tsx?$/, "ft-ts"],
-  [/\.py$/, "ft-py"],
-  [/\.(md|markdown|txt|rst)$/, "ft-md"],
-  [/\.(json|ya?ml|toml|lock)$/, "ft-data"],
-  [/\.(html?|css|scss|svg)$/, "ft-web"],
-  [/\.(png|jpe?g|gif|webp|ico)$/, "ft-image"],
-];
-const fileType = (name) => (FILE_TYPES.find(([re]) => re.test(name.toLowerCase())) || [null, ""])[1];
-
-function filesTree(storeFilter) {
-  const sort = "name";
-  const list = el("ul", { role: "tree", "aria-label": "Indexed files, by folder" });
-  const box = el("div", { class: "card ftree" }, list);
-
-  const url = (store, dir) => {
-    const params = new URLSearchParams({ tree: "1", format: "json", sort });
-    if (dir) params.set("dir", dir);
-    if (store) params.append("store", store);
-    else for (const name of storeFilter.stores()) params.append("store", name);
-    return `/api/files?${params}`;
-  };
-
-  function row(level, kind, name, meta, extra) {
-    const guides = [el("span", { class: "indent lead" })];
-    for (let i = 1; i < level; i++) guides.push(el("span", { class: "indent" }));
-    const dir = kind === "dir" || kind === "root";
-    return el(
-      "div",
-      {
-        class: `ftree-row ${kind === "root" ? "dir root" : kind}${extra?.cls ? ` ${extra.cls}` : ""}`,
-        role: "treeitem",
-        "aria-level": String(level),
-        "aria-expanded": dir ? "false" : null,
-        tabindex: "-1",
-        title: extra?.title || null,
-      },
-      guides,
-      el("span", { class: "chev" }, dir ? icon(ICONS.chevron, 12) : null),
-      el(
-        "span",
-        { class: `ficon${kind === "file" ? ` ${fileType(name)}` : ""}` },
-        icon(dir ? ICONS.folder : ICONS.file, 15),
-      ),
-      el("span", { class: "fname", text: name }),
-      meta ? el("span", { class: "fmeta", text: meta }) : null,
-    );
-  }
-
-  /* A folder: its row, and its children under it, read the first time it
-   * opens. `where` is the store and root the folder belongs to. */
-  function folder(where, dirPath, name, meta, level, kind, preload) {
-    const head = row(level, kind, name, meta, { title: `${where.root}/${dirPath}`.replace(/\/$/, "") });
-    const kids = el("ul", { role: "group", hidden: "" });
-    const item = el("li", {}, head, kids);
-    let loaded = false;
-    const glyph = head.querySelector(".ficon");
-    async function open(want) {
-      const on = want === undefined ? kids.hidden : want;
-      head.setAttribute("aria-expanded", String(on));
-      kids.hidden = !on;
-      fill(glyph, icon(on ? ICONS.folderOpen : ICONS.folder, 15));
-      if (!on || loaded) return;
-      loaded = true;
-      fill(kids, el("li", { class: "ftree-more", text: "Reading…" }));
-      try {
-        const data = await api(url(where.store, dirPath));
-        const mine = (data.roots || []).find((r) => r.store === where.store && r.root === where.root);
-        children(kids, where, dirPath, mine, level + 1);
-      } catch (e) {
-        loaded = false;
-        fill(kids, el("li", { class: "ftree-more", text: e.message }));
-      }
-    }
-    head.addEventListener("click", () => open());
-    head.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        open();
-      } else if (e.key === "ArrowRight") open(true);
-      else if (e.key === "ArrowLeft") open(false);
-    });
-    if (preload) {
-      loaded = true;
-      children(kids, where, dirPath, preload, level + 1);
-      head.setAttribute("aria-expanded", "true");
-      kids.hidden = false;
-      fill(glyph, icon(ICONS.folderOpen, 15));
-    }
-    return item;
-  }
-
-  function children(ul, where, dirPath, entry, level) {
-    const items = [];
-    const under = (name) => (dirPath ? `${dirPath}/${name}` : name);
-    for (const d of entry?.dirs || []) {
-      items.push(folder(where, under(d.name), d.name, `${n(d.files)} file${d.files === 1 ? "" : "s"}`, level, "dir"));
-    }
-    for (const f of entry?.files || []) {
-      const meta = f.lines ? `${n(f.lines)} lines · ${n(f.symbols)} symbol${f.symbols === 1 ? "" : "s"}` : `${n(f.chunks)} chunks`;
-      items.push(el("li", {}, row(level, "file", f.name, meta, { cls: f.stale ? "stale" : "", title: `${where.root}/${under(f.name)}` })));
-    }
-    for (const o of entry?.not_indexed || []) {
-      items.push(el("li", {}, row(level, "file", o.name, `not indexed — ${o.why}`, { cls: "off", title: `${where.root}/${under(o.name)}` })));
-    }
-    if (entry?.more) items.push(el("li", { class: "ftree-more", text: `+ ${n(entry.more)} more in this folder` }));
-    if (!items.length) items.push(el("li", { class: "ftree-more", text: "Empty." }));
-    fill(ul, items);
-  }
-
-  async function load() {
-    fill(list, el("li", { class: "ftree-more", text: "Reading…" }));
-    let data;
-    try {
-      data = await api(url(null, ""));
-    } catch (e) {
-      fill(list, el("li", { class: "ftree-more", text: e.message }));
-      return;
-    }
-    const roots = data.roots || [];
-    if (!roots.length) {
-      fill(list, el("li", { class: "ftree-more", text: "Nothing indexed yet." }));
-      return;
-    }
-    fill(
-      list,
-      roots.map((r) => {
-        const where = { store: r.store, root: r.root };
-        const leaf = r.root.split("/").filter(Boolean).pop() || r.root;
-        const label = leaf === r.store ? r.store : `${r.store} · ${leaf}`;
-        return folder(where, "", label, null, 1, "root", r);
-      }),
-    );
-  }
-
-  // Folders first, then files, by name, as an editor's explorer orders them.
-  const node = box;
-  return { node, load };
-}
-
-/* Decisions already made about files the scan held back (2.5): files a
- * person accepted, redacted or as-is, files they refused, and files the scan
- * let through because every match is a declared test dummy. Each one can be
- * undone here, one file at a time. New decisions are made on the Index page
- * after a scan; what was not indexed and needs nothing is said there too. */
-const CLASS_LABELS = {
-  content: "secret-shaped value",
-  credential: "credential file",
-  policy: "policy limit",
-  unindexable: "not indexable",
-  excluded: "your exclusions",
-  dummy: "test dummies",
-};
-
-function decisionsPane() {
-  const node = el("div", { class: "rows files-pane decisions" });
-
-  function refuseDummy(store, row) {
-    const reviewed = el("input", { type: "checkbox", id: "reviewed-file" });
-    ask({
-      title: "Refuse this file?",
-      body: "Every match in it is a declared test dummy, so it was indexed. Refusing takes it out of this store until you revoke the decision.",
-      lead: dialogPath(row.path, store),
-      extra: row.matches && row.matches.length ? findingsList(row.matches) : null,
-      tail: el("label", { class: "reviewed", for: "reviewed-file" }, reviewed, el("span", { text: "I have reviewed this file" })),
-      confirm: "Refuse this file",
-      tone: "bad",
-      wide: true,
-      run: async () => {
-        if (!reviewed.checked) throw new Error("Tick “I have reviewed this file” first.");
-        await post("/api/refused/accept", { store, path: row.path, mode: "refused", reviewed: true });
-        await load();
-      },
-    });
-  }
-
-  function revoke(store, row) {
-    ask({
-      title: "Revoke this decision?",
-      body:
-        row.accepted === "refused"
-          ? "The file is indexed again at the next run, as a test-dummy file."
-          : "The file leaves the store and is refused again with today's reasons; the next scan offers it for a decision.",
-      lead: dialogPath(row.path, store),
-      confirm: "Revoke",
-      tone: "bad",
-      wide: true,
-      run: async () => {
-        await post("/api/refused/revoke", { store, path: row.path });
-        await load();
-      },
-    });
-  }
-
-  const decisionLabel = (row) =>
-    row.accepted === "refused"
-      ? "refused by you"
-      : row.accepted === "redacted"
-        ? "accepted, redacted"
-        : row.accepted
-          ? "accepted as-is"
-          : "let through";
-
-  function table(store, rows) {
-    return dataTable({
-      className: "w-decisions",
-      caption: `Decisions about files in ${store}`,
-      rows,
-      columns: [
-        {
-          key: "path",
-          label: "File",
-          value: (r) => rootRel(r.path, store),
-          render: (r) => pathCell(rootRel(r.path, store), "path"),
-        },
-        {
-          key: "decision",
-          label: "Decision",
-          value: decisionLabel,
-          render: (r) => el("span", { class: r.accepted && r.accepted !== "refused" ? "pill good" : "pill", text: decisionLabel(r) }),
-        },
-        { key: "rule", label: "Why it was held back", sortable: false, className: "narrow-drop", render: (r) => lineCell(r.class === "dummy" ? "every match is a declared test dummy" : r.rule) },
-        {
-          key: "confidence",
-          label: "Likely real",
-          className: "num",
-          value: (r) => (r.confidence == null ? -1 : r.confidence),
-          render: (r) => (r.confidence == null ? "—" : `${r.confidence} %`),
-        },
-        {
-          key: "action",
-          label: "",
-          sortable: false,
-          className: "decide-col",
-          render: (r) =>
-            r.accepted
-              ? el("button", { class: "button secondary small", type: "button", text: "Revoke", onclick: () => revoke(store, r) })
-              : el("button", { class: "button secondary small", type: "button", text: "Refuse instead", onclick: () => refuseDummy(store, r) }),
-        },
-      ],
-    }).node;
-  }
-
-  async function load() {
-    fill(node, el("p", { class: "subtitle", text: "Reading…" }));
-    let data;
-    try {
-      data = await api("/api/refused");
-    } catch (e) {
-      fill(node, error(e.message));
-      return;
-    }
-    const blocks = [
-      el("p", {
-        class: "subtitle",
-        text: "Files you accepted or refused, and files let through because every match is a test dummy. Undo any one of them here; new decisions are made on the Index page after a scan.",
-      }),
-    ];
-    for (const store of data.stores || []) {
-      const rows = (store.rows || []).filter((r) => r.accepted || r.class === "dummy");
-      if (!rows.length) continue;
-      blocks.push(el("h2", { class: "section-title", text: store.store }));
-      blocks.push(table(store.store, rows));
-    }
-    if (blocks.length === 1) {
-      blocks.push(el("div", { class: "card pad" }, empty("No decisions yet. When a scan holds a file back, the Index page asks about it.")));
-    }
-    fill(node, ...blocks);
-  }
-  return { node, load };
-}
-
-/* What the scanner matched in one file, for a decision dialog: each value
- * masked, what kind it looked like and where, how likely it is to be real,
- * and the signals behind that number on a line of their own. One font per
- * role, so the list reads as a table and not as a sentence. */
-function findingsList(matches) {
-  const signals = (m) =>
-    (m.signals || []).map((s) => `${s.name} ${s.effect === "up" ? "↑" : "↓"} ${s.detail}`).join(" · ");
-  return el(
-    "ul",
-    { class: "findings" },
-    (matches || []).map((m) =>
-      el(
-        "li",
-        {},
-        el(
-          "div",
-          { class: "finding-head" },
-          el("code", { class: "finding-value", text: m.masked }),
-          el("span", { class: "finding-kind", text: `${m.kind} · line ${m.line}` }),
-          el("span", { class: "spacer" }),
-          el("strong", { class: "finding-conf", text: `${m.confidence} % likely real` }),
-        ),
-        signals(m) ? el("div", { class: "finding-signals", text: signals(m) }) : null,
-      ),
-    ),
-  );
-}
-
-/** The file a dialog is about: its path under the store's root, whole and
- * wrapping, with the machine's absolute path on the tooltip. */
-function dialogPath(path, store) {
-  return el("code", { class: "dialog-path", title: path, text: rootRel(path, store) });
-}
-
-/* One file's decision from the scan panel, with the mode its button chose:
- * the file, what was found in it, and the tick that says it was read. */
-function reviewOne(store, item, mode, done) {
-  const reviewed = el("input", { type: "checkbox", id: "reviewed-inline" });
-  ask({
-    title: mode === "redacted" ? "Accept with redaction?" : "Accept as-is?",
-    body:
-      mode === "redacted"
-        ? "Each detected value is replaced by [REDACTED:…] before anything is stored. Redaction covers only what the scanner detected."
-        : item.class === "content"
-          ? "The file's full text is indexed, values included."
-          : `${item.rule}. Accepting indexes it anyway.`,
-    lead: dialogPath(item.path, store),
-    extra: item.matches && item.matches.length ? findingsList(item.matches) : null,
-    tail: el(
-      "label",
-      { class: "reviewed", for: "reviewed-inline" },
-      reviewed,
-      el("span", { text: "I have reviewed this file" }),
-    ),
-    confirm: "Accept this file",
-    wide: true,
-    run: async () => {
-      if (!reviewed.checked) throw new Error("Tick “I have reviewed this file” first.");
-      await post("/api/refused/accept", { store, path: item.path, mode, reviewed: true });
-      done();
-    },
-  });
-}
-
-// ------------------------------------------------------- read and pattern
-
-/* Which store a question is asked of. One choice rather than a row of
- * independent toggles: "All stores" is a state a reader can name, where three
- * chips half-lit is a filter they have to reconstruct from the lighting. */
-function storePicker(initial, onChange) {
-  let picked = initial || "";
-  const row = el("div", { class: "store-chips" });
-  const paint = () => {
-    for (const chip of row.children) {
-      chip.setAttribute("aria-pressed", String(chip.getAttribute("data-store") === picked));
-    }
-  };
-  const add = (name, label) =>
-    row.append(
-      el("button", {
-        class: "chip",
-        type: "button",
-        "data-store": name,
-        text: label,
-        onclick: () => {
-          picked = name;
-          paint();
-          onChange();
-        },
-      }),
-    );
-  add("", "All stores");
-  for (const store of liveStores()) add(store.name, store.name);
-  paint();
-  return { node: row, stores: () => (picked ? [picked] : []) };
-}
-
-/* Whether the file still looks the way it did when it was indexed — the dot
- * and the word together. The dot alone was a colour with the meaning in a
- * tooltip, which is no meaning at all on a phone or in a screenshot. */
-function freshMark(fresh) {
-  const ok = fresh !== false;
-  return el(
-    "span",
-    {
-      class: "fresh",
-      title: ok ? "indexed from the bytes on disk" : "file changed since it was indexed",
-    },
-    el("span", { class: `fresh-dot ${ok ? "is-fresh" : "is-stale"}` }),
-    el("span", { class: "word", text: ok ? "fresh" : "stale" }),
-  );
-}
-
-/* Code with a line-number gutter, numbered from the span's own first line —
- * the same coordinates `semlith read` and every error message print, so a
- * number read here can be typed back in without arithmetic. */
-function codeGutter(text, startLine) {
-  const from = Number(startLine) || 1;
-  return el(
-    "div",
-    { class: "gutter-code" },
-    String(text == null ? "" : text)
-      .split("\n")
-      .map((line, i) =>
-        el(
-          "div",
-          { class: "code-line" },
-          el("span", { class: "ln", text: String(from + i) }),
-          el("span", { class: "lt", text: line }),
-        ),
-      ),
-  );
-}
-
-/** One span, as `/api/read` returns it. `badges` go in its header, before the
- * freshness mark: the Brief view says which lists found each span there. */
-function spanCard(span, badges) {
-  const named = span.symbol ? `${span.symbol_kind || ""} ${span.symbol}`.trim() : "";
-  return el(
-    "div",
-    { class: "span-card" },
-    el(
-      "div",
-      { class: "span-head" },
-      el("span", { class: "path", text: span.path }),
-      el("span", { class: "lines", text: `${span.start_line}-${span.end_line}` }),
-      span.store ? el("span", { class: "from", text: span.store }) : null,
-      el("span", { class: "spacer" }),
-      badges || null,
-      freshMark(span.fresh),
-    ),
-    named ? el("div", { class: "sig", text: named }) : null,
-    codeGutter(span.text, span.start_line),
-  );
-}
-// ---------------------------------------------------------------- search
-
-/* Which of the ranked lists found a hit. The word rather than an initial: a
- * hit the graph alone reached is a neighbour of a match rather than a match,
- * and `g` said that only to a reader who hovered it. */
-const LIST_LABELS = {
-  definition: "definition — this chunk defines the name that was typed",
-  vector: "vector — the embedding matched",
-  keyword: "full text — the terms matched",
-  graph: "graph — reached from a neighbouring symbol",
-  image: "image — the picture matched the words",
-};
-
-function fusionBadges(lists) {
-  if (!lists || !lists.length) return null;
-  return el(
-    "span",
-    { class: "badges" },
-    lists.map((list) =>
-      el("span", { class: `badge ${list}`, title: LIST_LABELS[list] || list, text: list }),
-    ),
-  );
-}
-
-/* The four confidence values an edge or a graph-found hit can carry, and what
- * each one actually claims. Never rendered without one: a hop with no badge is
- * a hop a reader will assume was verified. */
-const CONFIDENCE = {
-  extracted: ["extracted", "the import names the target"],
-  resolved: ["resolved", "name and module hint agree on one definition"],
-  inferred: ["inferred", "matched by bare name"],
-  ambiguous: ["ambiguous", "several definitions, none chosen"],
-};
-
-function confidenceBadge(value) {
-  if (!value) return null;
-  const [label, why] = CONFIDENCE[value] || [value, ""];
-  return el("span", { class: `conf ${value}`, title: why, text: label });
-}
-
-/* What a graph-reached hit's provenance means, as a sentence rather than as a
- * badge nobody can expand. A reader who does not know what `inferred` claims
- * reads every row as verified. */
-const PROVENANCE_NOTE = {
-  extracted: "Found through the graph: the source names the target, so nothing had to be ranked.",
-  resolved: "Found through the graph: the name and its module hint agree on one definition.",
-  inferred: "Found through the graph by bare name. Corroborate before you rely on it.",
-  ambiguous:
-    "Found through the graph, but several definitions carry this name and none was chosen.",
-};
-
-/* The one line of a chunk worth showing in a locator row: the line with most
- * of the query's words in it, or the first line with anything on it. */
-function bestLine(text, query) {
-  const terms = (query || "")
-    .split(/[^A-Za-z0-9_]+/)
-    .filter((t) => t.length > 2)
-    .map((t) => t.toLowerCase());
-  let best = null;
-  let bestScore = -1;
-  for (const raw of (text || "").split("\n")) {
-    const line = raw.trim();
-    if (!line) continue;
-    const lowered = line.toLowerCase();
-    const score = terms.filter((t) => lowered.includes(t)).length;
-    if (score > bestScore) {
-      bestScore = score;
-      best = line;
-    }
-  }
-  if (!best) return "";
-  // Capped as the tool caps it, rather than left to the stylesheet's ellipsis:
-  // a row is one line of context, and a minified file would otherwise put a
-  // whole line of it into the page for the browser to hide.
-  return best.length > 120 ? `${best.slice(0, 120)}…` : best;
-}
-
-/* What one locator row costs, counted the way `mcp::locate` counts it: the
- * text the row actually renders, at four characters to a token. */
-function rowCost(hit, query) {
-  const named = hit.symbol ? `${hit.symbol_kind || ""} ${hit.symbol}`.trim() : "";
-  const marks = (hit.lists || []).join("+") + (hit.fresh === false ? " stale" : "");
-  const row = `  ${hit.start_line}-${hit.end_line} ${named} ${marks}\n    ${bestLine(
-    hit.text,
-    query,
-  )}\n`;
-  return Math.ceil(row.length / 4);
-}
-
-/** The likeliest symbol name in a hit, for the link into the graph. */
-function symbolIn(hit) {
-  const match = hit.text.match(
-    /(?:fn|function|def|func|class|struct|interface|type)\s+([A-Za-z_][A-Za-z0-9_]*)/,
-  );
-  return match ? match[1] : "";
-}
-
-async function searchView() {
-  await refreshStores();
-
-  const results = el("div", { class: "results locate-list" });
-  const bodyCard = el("div", { class: "span-card" });
-  const aroundName = el("span", { class: "sym" });
-  const footer = el("div", { class: "locate-footer" });
-  const meta = el("span", { class: "search-meta" });
-  /* The shape the ranker read and what it did about it, from the answer's own
-   * fields. Re-deriving the rule here would be a second classifier, and only
-   * one of the two ranked the hits underneath it. */
-  const shapeHint = el("div", { class: "shape-hint", hidden: true });
-
-  /* The second ring, drawn rather than linked. One canvas for the whole visit
-   * to the page: a fresh one per opened hit would be a fresh animation loop
-   * per click. */
-  const ego = graphCanvas({
-    /* The same two handlers the Graph page passes, so the panel behaves like
-     * the page it is a window onto rather than like a picture of it: a node
-     * lifts on hover with a card naming it, and a click selects it and its
-     * neighbours. Without these the hint underneath — "drag a node · click to
-     * select" — described something that did not happen. */
-    onHover: (node, x, y) => {
-      if (!node) return tip.hide("ego");
-      tip.atPoint(
-        x,
-        y,
-        tipCard(
-          node.name,
-          "blue",
-          [
-            node.kind ? ["kind", node.kind] : null,
-            node.path ? ["file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`] : null,
-          ].filter(Boolean),
-        ),
-        "ego",
-      );
-    },
-    onPick: (node) => {
-      aroundName.textContent = node ? node.name : "—";
-    },
-  });
-  const stage = el(
-    "div",
-    { class: "ego-panel", hidden: true },
-    ego.node,
-    el("span", { class: "ego-hint", text: "drag a node · click to select" }),
-  );
-  /* Both hidden until a row is open. The panel is tall enough to be a graph
-   * rather than a thumbnail, which makes it a large empty box on a page nobody
-   * has searched yet — and "Around" with nothing after it is a heading for
-   * something that is not there. */
-  const aroundHead = el(
-    "div",
-    { class: "around-head", hidden: true },
-    el("span", { class: "title" }, "Around ", aroundName),
-    el("span", { class: "meta", text: "graph expansion" }),
-  );
-  const showRing = (on) => {
-    stage.hidden = !on;
-    aroundHead.hidden = !on;
-  };
-
-  // The dials, in the design's order. Each is the same control an agent sets
-  // on the tool, shown here so a person can see what the agent is holding.
-  let k = 8;
-  const kValue = el("span", { class: "dial-value", text: "k = 8" });
-  const bump = (delta) => {
-    const next = Math.min(50, Math.max(1, k + delta));
-    if (next === k) return;
-    k = next;
-    kValue.textContent = `k = ${k}`;
-    run();
-  };
-  const kDial = el(
-    "div",
-    { class: "dial" },
-    kValue,
-    el("button", { class: "step", type: "button", "aria-label": "fewer hits", title: "fewer hits", text: "–", onclick: () => bump(-1) }),
-    el("button", { class: "step", type: "button", "aria-label": "more hits", title: "more hits", text: "+", onclick: () => bump(1) }),
-  );
-
-  /* Which side of the corpus to lean towards. Live from 0.16.0: the query text
-   * says how a question was written, and this says what the asker is after,
-   * which the text cannot. */
-  let prefer = "any";
-  const preferPills = ["code", "docs", "any"].map((name) =>
-    el("button", {
-      class: "seg",
-      type: "button",
-      "aria-pressed": String(name === prefer),
-      text: name,
-      onclick: () => {
-        if (prefer === name) return;
-        prefer = name;
-        for (const pill of preferPills) {
-          pill.setAttribute("aria-pressed", String(pill.textContent === prefer));
-        }
-        run();
-      },
-    }),
-  );
-  const preferDial = el(
-    "div",
-    { class: "dial" },
-    el("span", { class: "dial-label", text: "Prefer" }),
-    el("span", { class: "segs" }, preferPills),
-  );
-
-  /* Two answers to one question, from the same store and the same ranking.
-   *
-   * `results` is the two-stage list this page has always been: locate, then
-   * open a row and read it. `brief` is what an agent gets from one call --
-   * the same spans, the text of the top ones, and the one-hop callers and
-   * callees of the symbols they sit inside, all of it fitted to the budget
-   * dial beside it. Free, because every primitive under it is free.
-   *
-   * A view rather than a second page: it is the same question, and making a
-   * person retype it somewhere else to see the other shape of the answer is
-   * how two pages end up disagreeing about what the store says. */
-  let view = "results";
-  const viewPills = ["results", "brief", "exact"].map((name) =>
-    el("button", {
-      class: "seg",
-      type: "button",
-      "aria-pressed": String(name === view),
-      text: name,
-      onclick: () => {
-        if (view === name) return;
-        view = name;
-        for (const pill of viewPills) {
-          pill.setAttribute("aria-pressed", String(pill.textContent === view));
-        }
-        run();
-      },
-    }),
-  );
-  const viewDial = el(
-    "div",
-    { class: "dial" },
-    el("span", { class: "dial-label", text: "View" }),
-    el("span", { class: "segs" }, viewPills),
-  );
-
-  /* Re-run as the filter is typed, like every other control on this page.
-   *
-   * `change` alone fires on blur, so a reader who typed a glob and looked at
-   * the rows was looking at results from before the glob — with the filter
-   * field showing the new value and nothing saying the two disagreed. */
-  let filterTimer = 0;
-  const rerun = () => {
-    clearTimeout(filterTimer);
-    filterTimer = setTimeout(() => run(), 250);
-  };
-  const langField = el("input", {
-    class: "bare",
-    size: "8",
-    placeholder: "any",
-    oninput: rerun,
-    onchange: () => run(),
-  });
-  const pathField = el("input", {
-    class: "bare",
-    size: "8",
-    placeholder: "any",
-    oninput: rerun,
-    onchange: () => run(),
-  });
-  const langDial = el(
-    "div",
-    { class: "dial" },
-    el("span", { class: "dial-prefix", text: "lang:" }),
-    labelled("search-lang", "Only this language", langField),
-  );
-  const pathDial = el(
-    "div",
-    { class: "dial" },
-    el("span", { class: "dial-prefix", text: "path:" }),
-    labelled("search-path", "Only paths matching this glob", pathField),
-  );
-
-  const budgetField = el("input", {
-    class: "bare",
-    size: "5",
-    value: "1500",
-    inputmode: "numeric",
-    oninput: rerun,
-    onchange: () => run(),
-  });
-  const budgetDial = el(
-    "div",
-    { class: "dial" },
-    el("span", { class: "dial-label", text: "Budget" }),
-    labelled("search-budget", "Budget in tokens", budgetField),
-    el("span", { class: "unit", text: "tok" }),
-  );
-  const budget = () => Math.max(200, Number(String(budgetField.value).replace(/[^0-9]/g, "")) || 1500);
-
-  // Restored rather than reset: the question and the store filter survive a
-  // trip to another page, because coming back to an empty box means typing it
-  // again.
-  const picker = storePicker(state.search.stores[0] || "", () => run());
-  let generation = 0;
-
-  const input = el("input", {
-    type: "search",
-    // The same words as the launcher in the top bar. Two phrasings for one
-    // destination reads as two destinations.
-    placeholder: "Ask the index a question",
-    oninput: () => {
-      // The hint is about the query in the box. An empty box has no shape.
-      if (!input.value.trim()) shapeHint.hidden = true;
-    },
-    onkeydown: (e) => {
-      if (e.key === "Enter") run();
-    },
-  });
-
-  /* The second stage's column, which the Brief view has no use for: a brief
-   * *is* the opened row, so "pick a row, the span opens here" would be an
-   * instruction for something that has already happened. Hidden by a class on
-   * the container rather than by emptying the column, so the locate side takes
-   * the whole width instead of leaving a gap where the panel was. */
-  const bodyCol = el("div", { class: "body-col" }, bodyCard, aroundHead, stage);
-  const twoStage = el(
-    "div",
-    { class: "two-stage" },
-    el("div", { class: "locate-col" }, results, footer),
-    bodyCol,
-  );
-
-  const nothing = () =>
-    empty("Type a phrase or an identifier. Both halves of the search run either way.");
-
-  async function run() {
-    const query = input.value.trim();
-    state.search = { query, stores: picker.stores() };
-    if (!query) {
-      shapeHint.hidden = true;
-      fill(results, nothing());
-      showBody(null, "");
-      fill(footer);
-      meta.textContent = "";
-      return;
-    }
-
-    twoStage.classList.remove("one-stage");
-    if (view === "brief") {
-      twoStage.classList.add("one-stage");
-      return runBrief(query);
-    }
-    if (view === "exact") return runExact(query);
-
-    const mine = ++generation;
-    const params = new URLSearchParams({ query, k: String(k), prefer });
-    for (const store of picker.stores()) params.append("store", store);
-    const lang = langField.value.trim();
-    const path = pathField.value.trim();
-    if (lang) params.append("lang", lang);
-    if (path) params.append("path", path);
-
-    meta.textContent = "searching…";
-    /* The first search after the daemon starts loads the embedding model,
-     * which is five seconds on a cold cache — and until this it was five
-     * seconds of "searching…" that looked like a search that had hung. Only
-     * shown once a search has taken longer than a warm one ever does. */
-    const slow = setTimeout(() => {
-      if (mine === generation) {
-        meta.textContent = "loading the embedding model — the first search after the daemon starts pays for it once";
-      }
-    }, 1200);
-    let data;
-    try {
-      data = await api(`/api/search?${params}`);
-    } catch (e) {
-      clearTimeout(slow);
-      if (mine !== generation) return;
-      fill(results, error(e.message));
-      showBody(null, "");
-      fill(footer);
-      meta.textContent = "";
-      return;
-    }
-    clearTimeout(slow);
-    if (mine !== generation) return;
-
-    if (data.shape_label) {
-      fill(
-        shapeHint,
-        el("span", { class: "dot" }),
-        el("span", { text: `${data.shape_label} · ${data.weighting}` }),
-      );
-      shapeHint.hidden = false;
-    }
-
-    // Hits and how long, which is what the question was. The corpus size is a
-    // fact about the store, and the Stores page is where it is asked.
-    meta.textContent = data.hits.length
-      ? `${data.hits.length} hit${data.hits.length === 1 ? "" : "s"} · ${(data.micros / 1000).toFixed(1)} ms`
-      : "";
-
-    if (!data.hits.length) {
-      showBody(null, "");
-      fill(footer);
-      fill(
-        results,
-        empty(
-          "No chunk in the selected stores matches that. If a store chip is on it is the filter, not the corpus — clear it and ask again.",
-        ),
-      );
-      return;
-    }
-
-    // Grouped by file, in the order the ranking put the files in: eight hits
-    // in one file are one file to open, and the best hit's file is the first
-    // thing read.
-    const groups = [];
-    for (const hit of data.hits) {
-      const found = groups.find((g) => g.path === hit.path && g.store === hit.store);
-      if (found) found.hits.push(hit);
-      else groups.push({ path: hit.path, store: hit.store, hits: [hit] });
-    }
-
-    // Cut to the budget, lowest-ranked first, exactly as the tool does — and
-    // the footer says so. A footer that reported a budget nothing enforced
-    // would be a number for decoration; a list that silently dropped rows
-    // would be worse.
-    const cap = budget();
-    let spent = 0;
-    const shown = [];
-    for (const group of groups) {
-      // What the *rows* cost, not what the chunks behind them cost. A locate
-      // row is one line of a chunk however long the chunk is, which is the
-      // whole point of the format — measuring the chunk here would make the
-      // page cut at a tenth of the budget the tool cuts at, for the same
-      // number in the same box.
-      const cost = group.hits.reduce((total, hit) => total + rowCost(hit, query), 4);
-      // The first group always shows, whatever it costs: a budget that
-      // returned nothing would turn a search into a silent failure.
-      if (shown.length && spent + cost > cap) break;
-      spent += cost;
-      shown.push(group);
-    }
-    const kept = shown.reduce((total, group) => total + group.hits.length, 0);
-
-    fill(
-      results,
-      shown.map((group) => {
-        const spans = group.hits.map((hit) => `${hit.start_line}-${hit.end_line}`);
-        return el(
-          "div",
-          { class: "locate-group" },
-          el(
-            "div",
-            { class: "locate-file" },
-            el("span", { class: "file", "data-tip": group.path, text: shortPath(group.path) }),
-            group.store ? el("span", { class: "from", text: group.store }) : null,
-            el("span", { class: "spacer" }),
-            el("span", {
-              class: "span-summary",
-              text: spans.length > 1 ? `${spans.length} spans · ${spans.join(", ")}` : spans[0],
-            }),
-          ),
-          group.hits.map((hit) => locateRow(hit, query)),
-        );
-      }),
-    );
-    fill(
-      footer,
-      el("span", {
-        text: `${kept} of ${data.hits.length} shown · ${n(spent)} tokens · budget ${n(cap)}`,
-      }),
-      kept < data.hits.length
-        ? el("span", {
-            class: "truncated",
-            text: `truncated: ${kept} of ${data.hits.length}`,
-          })
-        : null,
-    );
-    // The body panel starts on the best hit rather than empty: the first
-    // question anyone has about a result list is what the top one says.
-    const first = results.querySelector(".locate-row");
-    if (first) first.setAttribute("aria-pressed", "true");
-    showBody(shown[0].hits[0], query);
-  }
-
-  /* One locator line: where it is, what it is called, how it was found,
-   * whether the file has moved under it, and one line of it. Both lines sit
-   * inside the one control, so the excerpt is part of the target rather than
-   * a strip of dead pixels under it. */
-  function locateRow(hit, query) {
-    const line = bestLine(hit.text, query);
-    const row = el(
-      "button",
-      {
-        class: "locate-row",
-        type: "button",
-        "aria-pressed": "false",
-        onclick: () => {
-          for (const other of results.querySelectorAll(".locate-row")) {
-            other.setAttribute("aria-pressed", "false");
-          }
-          row.setAttribute("aria-pressed", "true");
-          showBody(hit, query);
-        },
-      },
-      el(
-        "span",
-        { class: "row-top" },
-        el("span", {
-          class: "lines",
-          text: hit.image
-            ? `${hit.image.width}×${hit.image.height} px`
-            : `${hit.start_line}-${hit.end_line}`,
-        }),
-        // A hit with no symbol is prose, said rather than left as a gap the
-        // reader has to interpret. An image is neither, and its badge and its
-        // pixel dimensions have already said so.
-        hit.image
-          ? null
-          : el("span", {
-              class: "sym",
-              text: hit.symbol ? `${hit.symbol_kind || ""} ${hit.symbol}`.trim() : "prose",
-            }),
-        fusionBadges(hit.lists),
-        el("span", { class: "spacer" }),
-        freshMark(hit.fresh),
-        // Only for a hit the graph reached: a vector match has no provenance
-        // to state beyond the badge it already carries.
-        confidenceBadge(hit.provenance),
-      ),
-      line ? el("span", { class: "locate-excerpt", text: line }) : null,
-    );
-    return row;
-  }
-
-  /* The second stage: the span itself, once a row has been chosen.
-   *
-   * What the row already carries is painted at once; the signature, the
-   * symbol's whole span and the neighbourhood arrive from `/api/read` and
-   * `/api/symbol` after it, because none of them is worth a spinner over the
-   * text the reader clicked for.
-   */
-  let openHit = null;
-  let openQuery = "";
-  let wholeSpan = null;
-  let signature = "";
-  let whole = false;
-  /* How many definitions the second read found. `many` is not a failure — it
-   * is the store saying it cannot tell which one this is, and the button says
-   * that rather than pretending there is nothing more to open. */
-  let definitions = 0;
-  let bodyGeneration = 0;
-
-  /* The Brief view: one call, rendered as it comes back.
-   *
-   * Nothing is re-derived here. The labels on each part -- which ranked list
-   * found a span, and that an edge came from the graph -- are the tool's own,
-   * because a page that decided for itself which list found something would be
-   * a second classifier disagreeing with the one that ranked the answer. */
-  /* `semlith_search {exact: true}`: every indexed line matching the query, as
-   * grep -E finds it, grouped by file, each row naming the definition it sits
-   * in. Opening a row reads that definition whole, which is what a grep user
-   * opens the file for. */
-  async function runExact(query) {
-    const mine = ++generation;
-    const params = new URLSearchParams({ query, exact: "1" });
-    for (const store of picker.stores()) params.append("store", store);
-    const lang = langField.value.trim();
-    const path = pathField.value.trim();
-    if (lang) params.append("lang", lang);
-    if (path) params.append("path", path);
-    shapeHint.hidden = true;
-    meta.textContent = "searching…";
-    let data;
-    try {
-      data = await api(`/api/search?${params}`);
-    } catch (e) {
-      if (mine !== generation) return;
-      fill(results, error(e.message));
-      showBody(null, "");
-      fill(footer);
-      meta.textContent = "";
-      return;
-    }
-    if (mine !== generation) return;
-    const matches = data.matches || [];
-    meta.textContent = `${matches.length} line${matches.length === 1 ? "" : "s"} · ${n(data.files || 0)} files searched`;
-    if (!matches.length) {
-      showBody(null, "");
-      fill(footer);
-      fill(results, empty("No indexed line matches that. A query that is not a valid regular expression is searched as literal text."));
-      return;
-    }
-    const groups = [];
-    for (const m of matches) {
-      const found = groups.find((g) => g.path === m.path && g.store === m.store);
-      if (found) found.rows.push(m);
-      else groups.push({ path: m.path, store: m.store, rows: [m] });
-    }
-    fill(
-      results,
-      groups.map((group) =>
-        el(
-          "div",
-          { class: "locate-group" },
-          el(
-            "div",
-            { class: "locate-file" },
-            el("span", { class: "file", "data-tip": group.path, text: shortPath(group.path) }),
-            group.store ? el("span", { class: "from", text: group.store }) : null,
-            el("span", { class: "spacer" }),
-            el("span", { class: "span-summary", text: `${group.rows.length} line${group.rows.length === 1 ? "" : "s"}` }),
-          ),
-          group.rows.map((m) => {
-            const hit = {
-              path: m.path,
-              store: m.store,
-              start_line: m.start_line,
-              end_line: m.end_line,
-              text: m.text,
-              symbol: m.capture || null,
-            };
-            const row = el(
-              "button",
-              {
-                class: "locate-row",
-                type: "button",
-                "aria-pressed": "false",
-                onclick: () => {
-                  for (const other of results.querySelectorAll(".locate-row")) {
-                    other.setAttribute("aria-pressed", "false");
-                  }
-                  row.setAttribute("aria-pressed", "true");
-                  showBody(hit, query);
-                },
-              },
-              el(
-                "span",
-                { class: "row-top" },
-                el("span", { class: "lines", text: String(m.start_line) }),
-                el("span", { class: "sym", text: m.capture || "top level" }),
-              ),
-              el("span", { class: "locate-excerpt", text: m.text }),
-            );
-            return row;
-          }),
-        ),
-      ),
-    );
-    fill(
-      footer,
-      el("span", { text: `${matches.length} lines · ${groups.length} files` }),
-      data.truncated ? el("span", { class: "truncated", text: `truncated at ${matches.length}` }) : null,
-    );
-    const first = results.querySelector(".locate-row");
-    if (first) first.setAttribute("aria-pressed", "true");
-    showBody(groups[0].rows.length ? { ...groups[0].rows[0], symbol: groups[0].rows[0].capture || null } : null, query);
-  }
-
-  async function runBrief(question) {
-    const mine = ++generation;
-    const params = new URLSearchParams({ question, budget: String(budget()), prefer });
-    for (const store of picker.stores()) params.append("store", store);
-    const lang = langField.value.trim();
-    const path = pathField.value.trim();
-    if (lang) params.append("lang", lang);
-    if (path) params.append("path", path);
-
-    showBody(null, "");
-    shapeHint.hidden = true;
-    meta.textContent = "assembling…";
-    const slow = setTimeout(() => {
-      if (mine === generation) {
-        meta.textContent =
-          "loading the embedding model — the first search after the daemon starts pays for it once";
-      }
-    }, 1200);
-    let data;
-    try {
-      data = await api(`/api/brief?${params}`);
-    } catch (e) {
-      clearTimeout(slow);
-      if (mine !== generation) return;
-      fill(results, error(e.message));
-      fill(footer);
-      meta.textContent = "";
-      return;
-    }
-    clearTimeout(slow);
-    if (mine !== generation) return;
-
-    const brief = data.brief || {};
-    const spans = brief.spans || [];
-    meta.textContent = spans.length ? `one call · ${(data.micros / 1000).toFixed(1)} ms` : "";
-    if (!spans.length) {
-      fill(footer);
-      fill(
-        results,
-        empty(
-          "No chunk in the selected stores matches that. If a store chip is on it is the filter, not the corpus — clear it and ask again.",
-        ),
-      );
-      return;
-    }
-
-    /* A span with its text is drawn the way the results view draws a hit:
-     * the same card, path header and numbered lines, so the two views of one
-     * question look like one product. A span the budget left without text is
-     * a compact row that says so, not an empty card. */
-    const rows = [];
-    for (const span of spans) {
-      rows.push(
-        span.text
-          ? spanCard(span, fusionBadges(span.lists))
-          : el(
-              "div",
-              { class: "brief-head brief-row" },
-              el("span", { class: "path", text: `${shortPath(span.path)}:${span.start_line}-${span.end_line}` }),
-              span.symbol ? el("span", { class: "sym", text: span.symbol }) : null,
-              el("span", {
-                class: "brief-dropped",
-                text: span.over_budget ? "text left out for the budget" : "text: top span only",
-              }),
-              el("span", { class: "brief-lists" }, fusionBadges(span.lists)),
-            ),
-      );
-    }
-    for (const symbol of brief.symbols || []) {
-      const edges = [];
-      for (const end of symbol.callers || []) {
-        edges.push(
-          el(
-            "div",
-            { class: "brief-edge" },
-            el("span", { class: "k", text: "called by" }),
-            el("span", { class: "v", text: `${end.name} · ${shortPath(end.path)}:${end.start_line}` }),
-          ),
-        );
-      }
-      for (const end of symbol.callees || []) {
-        edges.push(
-          el(
-            "div",
-            { class: "brief-edge" },
-            el("span", { class: "k", text: "calls" }),
-            el("span", { class: "v", text: `${end.name} · ${shortPath(end.path)}:${end.start_line}` }),
-          ),
-        );
-      }
-      if (symbol.hidden) {
-        edges.push(el("div", { class: "brief-dropped", text: `and ${symbol.hidden} more edges` }));
-      }
-      rows.push(
-        el(
-          "div",
-          { class: "brief-symbol" },
-          el(
-            "div",
-            { class: "brief-head" },
-            el("span", { class: "sym", text: symbol.name }),
-            el("span", { class: "brief-lists" }, el("span", { class: "tag", text: symbol.found_by })),
-          ),
-          ...edges,
-        ),
-      );
-    }
-    fill(results, el("div", { class: "brief-view" }, ...rows));
-
-    /* What it cost and what it dropped, in the tool's own numbers. A budget
-     * nothing reported would be a number for decoration. */
-    const cut = brief.cut || {};
-    const dropped = [];
-    if (cut.spans) dropped.push(`${cut.spans} spans not located`);
-    if (cut.span_text) dropped.push(`${cut.span_text} left without text`);
-    if (cut.symbols) dropped.push(`${cut.symbols} symbols' edges`);
-    const fact = (label, value) =>
-      el("span", { class: "brief-fact" }, el("span", { class: "k", text: label }), el("span", { class: "v", text: value }));
-    fill(
-      footer,
-      el(
-        "div",
-        { class: "brief-summary" },
-        fact("tokens", `${n(brief.tokens)} of ${n(brief.budget)}`),
-        fact("spans", n(spans.length)),
-        fact("counted with", brief.counted_with || "—"),
-        fact("dropped", dropped.length ? dropped.join(", ") : "nothing"),
-      ),
-    );
-  }
-
-  function showBody(hit, query) {
-    openHit = hit;
-    openQuery = query;
-    wholeSpan = null;
-    signature = "";
-    whole = false;
-    definitions = 0;
-    const mine = ++bodyGeneration;
-    paintBody();
-    if (!hit) {
-      ego.draw({ nodes: [], edges: [] }, null);
-      aroundName.textContent = "—";
-      return;
-    }
-
-    const target = hit.symbol || `${hit.path}:${hit.start_line}`;
-    const params = new URLSearchParams({ target });
-    if (hit.store) params.append("store", hit.store);
-    api(`/api/read?${params}`)
-      .then((data) => {
-        if (mine !== bodyGeneration) return;
-        if (!data.span) {
-          definitions = (data.definitions || []).length;
-          if (definitions) paintBody();
-          return;
-        }
-        wholeSpan = data.span;
-        // The signature is the first line of the definition, which is where
-        // every language this indexes puts it.
-        if (hit.symbol) {
-          signature = (data.span.text || "")
-            .split("\n")
-            .map((l) => l.trim())
-            .find((l) => l.length > 0) || "";
-        }
-        paintBody();
-      })
-      .catch(() => {
-        /* The row's own text is already on screen; a failed second read is
-         * not worth replacing it with an error. */
-      });
-
-    drawAround(hit, mine);
-  }
-
-  function paintBody() {
-    const hit = openHit;
-    if (!hit) {
-      fill(
-        bodyCard,
-        empty("Pick a row. The span opens here, with what it is called and how it was found."),
-      );
-      showRing(false);
-      return;
-    }
-    const showing = whole && wholeSpan ? wholeSpan : hit;
-    const lines = `${showing.start_line}-${showing.end_line}`;
-    // Nothing wider to open: a button that redraws the same lines is a button
-    // that makes a reader doubt they clicked it.
-    const wider =
-      wholeSpan &&
-      (wholeSpan.start_line < hit.start_line || wholeSpan.end_line > hit.end_line);
-
-    fill(
-      bodyCard,
-      el(
-        "div",
-        { class: "span-head" },
-        el("span", { class: "path", "data-tip": hit.path, text: shortPath(hit.path) }),
-        el("span", { class: "lines", text: lines }),
-        el("span", { class: "spacer" }),
-        freshMark(hit.fresh),
-        confidenceBadge(hit.provenance),
-      ),
-      hit.provenance && PROVENANCE_NOTE[hit.provenance]
-        ? el("p", { class: "prov-note", text: PROVENANCE_NOTE[hit.provenance] })
-        : null,
-      hit.fresh === false
-        ? el("p", {
-            class: "note",
-            text: "This file has changed since it was indexed. The lines below are what was read then.",
-          })
-        : null,
-      signature ? el("div", { class: "sig", text: signature }) : null,
-      hit.image ? imagePreview(hit.path) : codeGutter(showing.text, showing.start_line),
-      el(
-        "div",
-        { class: "span-foot" },
-        el("button", {
-          class: "button secondary small",
-          type: "button",
-          disabled: !wider,
-          title: wider
-            ? null
-            : definitions
-              ? `${definitions} definitions carry this name, and which one this is was not settled. The Read page lists them.`
-              : "this span is already the whole of it",
-          text: whole
-            ? "Collapse to the matched span"
-            : hit.symbol
-              ? "Read whole symbol"
-              : "Read the whole section",
-          onclick: () => {
-            whole = !whole;
-            paintBody();
-          },
-        }),
-        el("span", {
-          class: "body-meta",
-          "data-tip": hit.path,
-          text: `semlith_read · ${shortPath(hit.path)}:${lines} · second stage`,
-        }),
-        el("span", { class: "spacer" }),
-        el("a", {
-          href: "#graph",
-          class: "quiet",
-          text: "Open in graph",
-          onclick: (e) => {
-            e.preventDefault();
-            state.pendingSymbol = hit.symbol || symbolIn(hit);
-            go("graph");
-          },
-        }),
-      ),
-    );
-  }
-
-  /* The neighbourhood of the open hit, one ring out and then one more, from
-   * the evidence block `/api/symbol` already returns. Drawn here rather than
-   * linked to, because leaving the page to see what calls this loses the span
-   * that raised the question. */
-  async function drawAround(hit, mine) {
-    const name = hit.symbol || symbolIn(hit);
-    aroundName.textContent = name || "—";
-    // A hit in prose sits inside no definition, so there is no ring to draw
-    // and no heading worth showing over an empty canvas.
-    if (!name) {
-      showRing(false);
-      return ego.draw({ nodes: [], edges: [] }, null);
-    }
-    showRing(true);
-    const params = new URLSearchParams({ name });
-    if (hit.store) params.append("store", hit.store);
-    let data;
-    try {
-      data = await api(`/api/symbol?${params}`);
-    } catch (_) {
-      return;
-    }
-    if (mine !== bodyGeneration) return;
-    ego.draw(egoGraph(name, data), null);
-    /* Select the symbol the panel is about, so it arrives drawn in the accent
-     * with its neighbours lifted — the state the Graph page puts a focused node
-     * in. Before this the centre was one grey box among twenty. */
-    ego.pick(name);
-  }
-
-  fill(results, nothing());
-  paintBody();
-  setTimeout(() => {
-    ego.start();
-    if (state.pendingQuery) {
-      input.value = state.pendingQuery;
-      state.pendingQuery = "";
-      run();
-    } else if (state.search.query) {
-      input.value = state.search.query;
-      run();
-    }
-    input.focus();
-  }, 0);
-
-  return el(
-    "div",
-    { class: "search-page" },
-    el(
-      "div",
-      { class: "search-band" },
-      el("h1", { class: "sr-only", text: "Search" }),
-      el(
-        "div",
-        { class: "search-field" },
-        icon(ICONS.search, 18),
-        labelled("search-query", "Search the index", input),
-      ),
-      // Under the box rather than inside it: inside, the count and timing
-      // took the input's width and crowded the question being typed.
-      meta,
-      shapeHint,
-      el(
-        "div",
-        { class: "filters" },
-        picker.node,
-        el("span", { class: "rule" }),
-        kDial,
-        preferDial,
-        viewDial,
-        langDial,
-        pathDial,
-        budgetDial,
-        el("span", { class: "dial-note", text: "what one answer may cost an agent" }),
-      ),
-    ),
-    twoStage,
-  );
-}
-
-/* The evidence block, as a graph the canvas can draw: the symbol at the
- * centre, its callers and callees around it, and the second ring hung off the
- * first-ring name it was reached through — `via` is the whole of what makes
- * it a second ring rather than another neighbour.
- *
- * A caller or callee row is an `EdgeEnd`, which flattens the symbol it
- * reached into itself: the name is on the row, not under a `symbol` key, and
- * `kind` is the edge's kind rather than the symbol's. */
-function egoGraph(name, data) {
-  const centre = (data.symbols || [])[0] || {};
-  const nodes = [
-    {
-      name,
-      kind: centre.kind || "symbol",
-      path: centre.path,
-      start_line: centre.start_line,
-      end_line: centre.end_line,
-    },
-  ];
-  const index = new Map([[name, 0]]);
-  const edges = [];
-  /* `where` is the symbol row an edge resolved to, when there was one. The
-   * hover card says which file a neighbour lives in, which is most of what
-   * anyone wants from it. */
-  const add = (label, kind, where) => {
-    if (!index.has(label)) {
-      index.set(label, nodes.length);
-      nodes.push({
-        name: label,
-        kind,
-        path: where && where.path,
-        start_line: where && where.start_line,
-        end_line: where && where.end_line,
-      });
-    }
-    return index.get(label);
-  };
-  const link = (from, to, kind, confidence) => {
-    if (from !== to) edges.push({ from, to, kind, confidence });
-  };
-  for (const end of data.callers || []) {
-    link(add(end.name, end.kind, end), 0, end.kind, end.confidence);
-  }
-  for (const end of data.callees || []) {
-    link(0, add(end.name, end.kind, end), end.kind, end.confidence);
-  }
-  for (const hop of data.ego || []) {
-    const via = index.get(hop.via);
-    if (via === undefined) continue;
-    const it = add(hop.name, hop.kind);
-    if (hop.direction === "caller") link(it, via, hop.kind, hop.confidence);
-    else link(via, it, hop.kind, hop.confidence);
-  }
-  return { nodes, edges };
-}
-
-// ----------------------------------------------------------------- index
-
-/** What the graph covers, per language, for the stores this machine holds.
- *
- * One table, and the same rows `semlith stats` prints. A single store-wide
- * "66 % of call edges resolve" cannot say whether a language is missing edges
- * because its files never parsed or because its calls go somewhere the store
- * does not hold, and those are different problems with different fixes.
- */
-/* Graph health, the language mix and chunks by month.
- *
- * All three read the rows `/api/stores?coverage=1` returns, which are the
- * rows `semlith stats` prints — so the page and the terminal cannot disagree
- * about what the graph covers. Nothing here recomputes a count at page load.
- */
-/** A span sized as a share of its track, set through the CSSOM.
- *
- * Never a `style` attribute: the portal is served under `style-src 'self'`
- * with no `unsafe-inline`, so a width written into the markup is blocked and
- * the bar silently renders at its default size — which is exactly what the
- * first draft of these three bars did, and what the browser drive caught.
- * Assigning the property is not inline style for CSP's purposes, which is
- * why the tooltip has positioned itself this way since 0.11.0. */
-function sized(property, share, attrs) {
-  const node = el("span", attrs || {});
-  node.style[property] = `${Math.max(0, Math.min(100, share * 100))}%`;
-  return node;
-}
-
-function healthPanel(options) {
-  // `languages: false` for a page that draws the mix itself, by line rather
-  // than by file. Two language cards on one page are two answers to one
-  // question, and the reader cannot tell which is which.
-  const withLanguages = !options || options.languages !== false;
-  // A placeholder rather than an empty element: the read is a scan of every
-  // call edge, so on a large store the three cards are a second or two away,
-  // and a gap where a card will be reads as a page that has finished.
-  const node = el(
-    "div",
-    { class: "health" },
-    // Three cards are coming, so three cards of skeleton: the read is a
-    // scan of every call edge and on a large store it is a second or two.
-    withLanguages ? el("section", { class: "health-card" }, skeletonRows(5)) : null,
-    el("section", { class: "health-card" }, skeletonRows(4)),
-    el("section", { class: "health-card" }, skeletonRows(6)),
-  );
-  let rows = [];
-
-  async function refresh() {
-    try {
-      const data = await api("/api/stores?coverage=1");
-      rows = data.stores || [];
-    } catch {
-      rows = [];
-    }
-    paint();
-  }
-
-  function bar(counts) {
-    const total = counts.reduce((sum, [, n]) => sum + n, 0);
-    if (!total) return el("div", { class: "rail-hint", text: "No call edges yet." });
-    return el(
-      "div",
-      { class: "support-bar", role: "img", "aria-label": counts.map(([k, n]) => `${k} ${n}`).join(", ") },
-      // Each segment carries its own reading. The bar says the proportion at a
-      // glance; the number behind a proportion is the thing a reader asks for
-      // next, and reading it off a 6px band is not something anyone can do.
-      counts.map(([kind, count]) =>
-        count
-          ? sized("width", count / total, {
-              class: `seg ${kind}`,
-              tabindex: "0",
-              "data-tip": `${kind} · ${n(count)} edge${count === 1 ? "" : "s"} · ${share(count, total)} of ${n(total)}`,
-            })
-          : null,
-      ),
-    );
-  }
-
-  function paint() {
-    // The four support classes a coverage row carries. `unresolved` is an
-    // edge whose target this store holds no definition for — the fourth
-    // segment of the bar, and a different thing from an ambiguous one.
-    const counts = { extracted: 0, resolved: 0, ambiguous: 0, unresolved: 0 };
-    const languages = [];
-    let unresolvedNames = 0;
-    let several = 0;
-    const top = [];
-    const months = new Map();
-    for (const store of rows) {
-      for (const row of store.coverage || []) {
-        if (!row.definitions && !row.files) continue;
-        counts.extracted += row.extracted || 0;
-        counts.resolved += row.resolved || 0;
-        counts.ambiguous += row.ambiguous || 0;
-        counts.unresolved += row.unresolved || 0;
-        languages.push({ store: store.name, ...row });
-      }
-      const health = store.health;
-      if (!health) continue;
-      unresolvedNames += health.unresolved_names || 0;
-      several += health.several_definitions || 0;
-      for (const one of health.unresolved_top || []) top.push(one);
-      for (const one of health.months || []) {
-        months.set(one.month, (months.get(one.month) || 0) + one.chunks);
-      }
-    }
-    /* Across the corpus, not per store.
-     *
-     * The coverage rows arrive one per store per language, and drawn straight
-     * they made a list that read `rust · rust · markdown · markdown · rust`,
-     * with the same name three times and no way to tell the rows apart. The
-     * page is about what this machine holds, so the languages are summed the
-     * way the design sums them, and each row names the stores behind it. The
-     * same applies to the unresolved names: one call target reached from two
-     * stores is one name, not two rows. */
-    const merge = (into, key, row, fields) => {
-      const at = into.get(key) || { ...row, stores: new Set() };
-      if (into.has(key)) for (const field of fields) at[field] = (at[field] || 0) + (row[field] || 0);
-      at.stores.add(row.store);
-      into.set(key, at);
-      return at;
-    };
-    const perLanguage = new Map();
-    for (const row of languages) {
-      merge(perLanguage, row.language, row, [
-        "files",
-        "definitions",
-        "extracted",
-        "resolved",
-        "ambiguous",
-        "unresolved",
-        "unparsed",
-      ]);
-    }
-    const merged = [...perLanguage.values()];
-    const perName = new Map();
-    for (const one of top) merge(perName, one.name, { ...one, store: one.store || "" }, ["edges"]);
-    const topNames = [...perName.values()].sort((a, b) => b.edges - a.edges);
-
-    const carrying = merged.filter((row) => row.extracted || row.resolved || row.ambiguous);
-    const byFiles = [...merged].sort((a, b) => b.files - a.files).slice(0, 8);
-    const filesTotal = merged.reduce((sum, row) => sum + row.files, 0) || 1;
-    const monthRows = [...months.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-12);
-    const peak = Math.max(1, ...monthRows.map(([, count]) => count));
-    const monthTotal = monthRows.reduce((sum, [, count]) => sum + count, 0);
-
-    fill(
-      node,
-      !withLanguages ? null : el(
-        "section",
-        { class: "health-card" },
-        el("span", { class: "eyebrow", text: "Language mix" }),
-        byFiles.length
-          ? el(
-              "div",
-              { class: "mix" },
-              byFiles.map((row) =>
-                el(
-                  "div",
-                  {
-                    class: "mix-row",
-                    tabindex: "0",
-                    "data-tip": `${row.language} · ${n(row.files)} file${row.files === 1 ? "" : "s"} · ${share(
-                      row.files,
-                      filesTotal,
-                    )} of ${n(filesTotal)} indexed · ${[...row.stores].sort().join(", ")}`,
-                  },
-                  el("span", { class: "k", text: row.language }),
-                  el("span", { class: "meter" }, sized("width", row.files / filesTotal)),
-                  el("span", { class: "v", text: `${n(row.files)} file${row.files === 1 ? "" : "s"}` }),
-                ),
-              ),
-            )
-          : el("div", { class: "rail-hint", text: "Nothing indexed yet." }),
-      ),
-      el(
-        "section",
-        { class: "health-card" },
-        el("span", { class: "eyebrow", text: "Chunks by month indexed" }),
-        monthRows.length
-          ? el(
-              "div",
-              { class: "months" },
-              monthRows.map(([month, count]) =>
-                el(
-                  "div",
-                  {
-                    class: "month",
-                    tabindex: "0",
-                    // The column's own label is the month abbreviated to fit
-                    // under a 44px bar; the tip is where the whole month, the
-                    // count and its share of the year go.
-                    "data-tip": `${month} · ${n(count)} chunk${count === 1 ? "" : "s"} · ${share(
-                      count,
-                      monthTotal,
-                    )} of the ${n(monthTotal)} in this window · ${share(count, peak)} of the busiest month`,
-                  },
-                  el("span", { class: "col" }, sized("height", count / peak)),
-                  el("span", { class: "m", text: month.slice(2) }),
-                  el("span", { class: "c", text: n(count) }),
-                ),
-              ),
-            )
-          : el("div", { class: "rail-hint", text: "No files indexed yet." }),
-        // Said rather than implied: the store records when it read a file,
-        // not when anybody wrote it.
-        el("p", { class: "note", text: "When semlith read the file, not when it was written." }),
-      ),
-      el(
-        "section",
-        { class: "health-card" },
-        el("span", { class: "eyebrow", text: "Graph health" }),
-        bar([
-          ["extracted", counts.extracted],
-          ["resolved", counts.resolved],
-          ["ambiguous", counts.ambiguous],
-          ["unresolved", counts.unresolved],
-        ]),
-        el(
-          "div",
-          { class: "health-facts" },
-          el("div", { class: "fact" }, el("span", { class: "v", text: n(unresolvedNames) }), el("span", { class: "k", text: "call targets with no definition here" })),
-          el("div", { class: "fact" }, el("span", { class: "v", text: n(several) }), el("span", { class: "k", text: "names with several definitions" })),
-          el("div", { class: "fact" }, el("span", { class: "v", text: `${carrying.length} of ${languages.length}` }), el("span", { class: "k", text: "languages carrying edges" })),
-        ),
-        topNames.length
-          ? el(
-              "div",
-              { class: "mix" },
-              topNames.slice(0, 5).map((one) =>
-                el(
-                  "div",
-                  {
-                    class: "mix-row",
-                    tabindex: "0",
-                    "data-tip": `${one.name} · ${n(one.edges)} call${
-                      one.edges === 1 ? "" : "s"
-                    } reach a name no store here holds a definition for · ${[...one.stores]
-                      .filter(Boolean)
-                      .sort()
-                      .join(", ") || "this store"}`,
-                  },
-                  el("span", { class: "k", text: one.name }),
-                  el("span", { class: "v", text: `${n(one.edges)} edge${one.edges === 1 ? "" : "s"}` }),
-                ),
-              ),
-            )
-          : null,
-      ),
-    );
-  }
-
-  refresh();
-  return { node, paint: refresh };
-}
-
-function coveragePanel() {
-  const node = el("div", { class: "rows" });
-  // Its own fetch, and only this page makes it: the figures are a scan of
-  // every call edge, so the shared poll must not carry them to every page
-  // that happens to want a store count.
-  let rows = [];
-  async function refresh() {
-    try {
-      const data = await api("/api/stores?coverage=1");
-      rows = data.stores || [];
-    } catch {
-      rows = [];
-    }
-    paint();
-  }
-  function paint() {
-    const coverage = [];
-    for (const store of rows) {
-      for (const row of store.coverage || []) {
-        if (!row.definitions && !row.files) continue;
-        coverage.push({ store: store.name, ...row });
-      }
-    }
-    fill(
-      node,
-      coverage.length
-        ? dataTable({
-            className: "w-coverage",
-            caption:
-              "What the graph covers, per language: files indexed, files the parser gave up on, definitions, and call edges by how firmly each one landed.",
-            sort: "files",
-            dir: "desc",
-            rows: coverage,
-            columns: [
-              { key: "store", label: "Store", className: "meta narrow-drop", value: (r) => r.store, render: (r) => r.store },
-              { key: "language", label: "Language", value: (r) => r.language, render: (r) => r.language },
-              { key: "files", label: "Files", className: "num", value: (r) => r.files, render: (r) => String(r.files) },
-              {
-                key: "parser_failed",
-                label: "Unparsed",
-                className: "num",
-                value: (r) => r.parser_failed,
-                render: (r) =>
-                  el("span", {
-                    class: r.parser_failed ? "bad" : "meta",
-                    title: "Files whose parse expired, so the store holds their text and none of their structure.",
-                    text: String(r.parser_failed),
-                  }),
-              },
-              { key: "definitions", label: "Definitions", className: "num", value: (r) => r.definitions, render: (r) => String(r.definitions) },
-              { key: "extracted", label: "Extracted", className: "num", value: (r) => r.extracted, render: (r) => String(r.extracted) },
-              { key: "resolved", label: "Resolved", className: "num", value: (r) => r.resolved, render: (r) => String(r.resolved) },
-              { key: "ambiguous", label: "Ambiguous", className: "num", value: (r) => r.ambiguous, render: (r) => String(r.ambiguous) },
-              {
-                key: "unresolved",
-                label: "Unresolved",
-                className: "num",
-                value: (r) => r.unresolved,
-                title: "Call targets no definition in this store satisfies.",
-                render: (r) => String(r.unresolved),
-              },
-              {
-                key: "settled",
-                label: "Settled",
-                className: "num",
-                value: (r) => r.settled,
-                render: (r) => `${r.settled} %`,
-              },
-            ],
-          }).node
-        : empty("No language holds a definition yet. Index a folder of code and the graph fills in."),
-    );
-  }
-  paint();
-  refresh();
-  return { node, paint: refresh };
-}
-
-/* The Index page.
- *
- * Until 0.20.0 this page *was* the run: it held the streaming response open,
- * and the run existed only as the events travelling down it. Leaving the page
- * threw that away — the work carried on, because the work is the store's, but
- * nothing on screen could ever find it again.
- *
- * The run lives in the daemon now, so this page is a reader. On mount it asks
- * `/api/index/runs` for every store's run and draws one card each; the shared
- * live poll tells it when to ask again; each card pulls its own log lines
- * after its own cursor. Nothing here outlives a poll, so navigating away,
- * refreshing, or closing the tab for the length of a run changes nothing the
- * page shows when it comes back.
- */
-
-/** How long something took: `0.4s`, `42s`, `5m 18s`, `1h 02m`. */
-function spellTook(ms) {
-  if (ms < 100) return "under 0.1s";
-  if (ms < 1000) return `${(ms / 1000).toFixed(1)}s`;
-  const all = Math.round(ms / 1000);
-  if (all < 60) return `${all}s`;
-  if (all < 3600) return `${Math.floor(all / 60)}m ${String(all % 60).padStart(2, "0")}s`;
-  return `${Math.floor(all / 3600)}h ${String(Math.floor(all / 60) % 60).padStart(2, "0")}m`;
-}
-
-/** What is left of an estimate, in the rounded words a guess deserves:
- * `about 3 min left`, `about 40 s left`, `almost done`. */
-function spellLeft(ms) {
-  const seconds = Math.round(ms / 1000);
-  if (seconds < 10) return "almost done";
-  if (seconds < 60) return `about ${Math.round(seconds / 5) * 5} s left`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 90) return `about ${minutes} min left`;
-  return `about ${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min left`;
-}
-
-/** How long a run has taken, as `12:34` or `1:02:03`. */
-/** Chunks a second, to one decimal under ten so a slow lane reads as "2.4"
- * rather than rounding to nothing. */
-function perSecond(value) {
-  return value >= 10 ? n(Math.round(value)) : Number(value).toFixed(1);
-}
-
-function spell(ms) {
-  const all = Math.max(0, Math.round(ms / 1000));
-  const seconds = String(all % 60).padStart(2, "0");
-  const hours = Math.floor(all / 3600);
-  const minutes = String(Math.floor(all / 60) % 60).padStart(2, "0");
-  return hours ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`;
-}
-
-const RUN_TONE = {
-  queued: "warn",
-  review: "warn",
-  running: "good",
-  pausing: "warn",
-  paused: "warn",
-  held: "warn",
-  stopping: "warn",
-  done: "good",
-  stopped: "bad",
-  failed: "bad",
-};
-
-const RUN_WORD = {
-  queued: "queued",
-  // Scanned, and waiting for a person before anything is embedded (2.7).
-  review: "waiting for review",
-  running: "indexing",
-  // Said the moment Pause is pressed: the engine stops at its next batch, and
-  // a button that answers nothing until then reads as a button that failed.
-  pausing: "pausing",
-  paused: "paused",
-  // Admitted once and held again because `runs at once` was lowered. It is
-  // not paused and it has not lost anything, and the pill says both.
-  held: "held — waiting for a slot, keeps its progress",
-  stopping: "stopping",
-  done: "done",
-  stopped: "stopped",
-  failed: "failed",
-};
-
-/** One store's run: its bar, its counts, its log, and its own two controls. */
-function runCard(run, controls) {
-  const bar = el("span", {});
-  const track = el("div", { class: "bar", tabindex: "0" }, bar);
-  const pct = el("span", { class: "pct" });
-  /* The run's reading, a strip of small labelled figures, each its own node,
-   * so a poll moves the words that moved and nothing else — and a field the
-   * daemon adds is one more figure here and one `setText` in `absorb`.
-   *
-   * Each value starts holding an empty text node, so its first words are an
-   * edit of that node rather than a child added under a card being watched.
-   * The label is the figure's `data-label`, drawn by CSS, so the value is the
-   * figure's only text. The rate comes first: it is the first `.filters
-   * .meta` on the card, which is where the drive reads it (8.3). */
-  const counts = el("span", {}, "");
-  const chunksNode = el("span", {}, "");
-  const rate = el("span", {}, "");
-  const lanes = el("span", {}, "");
-  const threads = el("span", {}, "");
-  const pending = el("span", {}, "");
-  const elapsed = el("span", {}, "");
-  const figure = (label, value) => el("span", { class: "meta run-stat", "data-label": label }, value);
-  const rateFig = figure("rate", rate);
-  const filesFig = figure("files", counts);
-  const chunksFig = figure("chunks", chunksNode);
-  const clockFig = figure("time", elapsed);
-  const lanesFig = figure("devices", lanes);
-  const threadsFig = figure("threads", threads);
-  const pendingFig = figure("not yet embedded", pending);
-  // What the run is doing when it is not reading files, under the bar.
-  const phaseNote = el("div", { class: "meta run-phase", hidden: "" }, "");
-  const progressRow = el("div", { class: "run-progress" }, track, pct);
-  const log = el("div", { class: "log", "aria-live": "polite" });
-  // What a refused control said, on the card it was pressed on.
-  const problem = el("div", { class: "note bad" }, "");
-  // What the run's stop did to its store, when it was asked to delete it.
-  const outcome = el("div", { class: "note" }, "");
-  /* The scan phase's plan (2.7), on one line. What a person decides about it
-   * is the page's scan panel above the cards, not this card's.
-   *
-   * Its node is made once and only its words and `hidden` change after, so
-   * no poll rebuilds the line (drive finding 8.3). */
-  const planLine = el("div", { class: "meta run-plan", hidden: "" }, "");
-  /* Where the run's time went, the vector cache's share of it, and how much
-   * of the store search cannot rank by vector yet: two lines, each made once
-   * and only its words and `hidden` changed after. The stages arrive after
-   * the run's first slice and at its end, in the words the daemon's log and
-   * `semlith index --verbose` use. */
-  const stagesLine = el("div", { class: "meta", hidden: "" }, "");
-  const cacheLineNode = el("div", { class: "meta", hidden: "" }, "");
-  // Whether each detail line has anything to say; `paintFold` shows the ones
-  // that do while the details are open.
-  let hasStages = false;
-  let hasCache = false;
-  function paintStages(next) {
-    const st = next.stages;
-    hasStages = !!st;
-    setText(stagesLine, st ? stagesText(st) : "");
-    const hit = next.cache_hit_rate !== null && next.cache_hit_rate !== undefined;
-    hasCache = hit;
-    setText(
-      cacheLineNode,
-      hit
-        ? `vector cache: ${n(next.cache_hits)} of ${n(next.cache_lookups)} chunks were already embedded (${Number(next.cache_hit_rate).toFixed(1)} %)`
-        : "",
-    );
-    // How much of the store search cannot rank by meaning yet. Keyword and
-    // graph results already cover all of it, and the figure says so.
-    const share = next.pending_share;
-    const showing = share !== null && share !== undefined && share > 0;
-    pendingFig.hidden = !showing;
-    setText(pending, showing ? `${Math.max(1, Math.round(share * 100))} %` : "");
-    const tip = showing ? "keyword and graph search already cover all of the store" : "";
-    if (pendingFig.title !== tip) pendingFig.title = tip;
-  }
-  function paintPlan(next) {
-    const plan = next.plan;
-    planLine.hidden = !plan;
-    if (!plan) return;
-    const not = Object.values(plan.not_indexed || {}).reduce((a, b) => a + b, 0);
-    const review = (plan.review || []).length;
-    setText(
-      planLine,
-      next.status === "review"
-        ? `scanned: ${n(plan.embed)} to embed (${bytes(plan.embed_bytes)}) · ${n(plan.unchanged)} unchanged · waiting for Start indexing`
-        : `plan: ${n(plan.embed)} to embed (${bytes(plan.embed_bytes)}) · ${n(plan.unchanged)} unchanged · ${n(not)} not indexed · ${n(review)} needed review`,
-    );
-  }
-
-  /** The last reading, so a control's answer can move the card before the
-   * next poll does. */
-  let last = run;
-  const badge = pill("", "good");
-  // `pill` writes its text as the last child, after the dot.
-  const badgeWord = badge.lastChild;
-  const where = el("span", { class: "meta" });
-
-  const pause = el("button", { class: "button secondary small", type: "button" });
-  const stop = el("button", { class: "button secondary small", type: "button" });
-  const remove = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: "Remove",
-    title: "Dismiss this card. The store is not touched.",
-  });
-  /* A finished card folds to its one line until someone opens it. Four
-   * finished runs used to be four full cards with their whole logs, and the
-   * live one was appended below them, off the bottom of the screen. */
-  const expand = el("button", {
-    class: "button secondary small",
-    type: "button",
-    "aria-expanded": "false",
-  });
-  let open = true;
-
-  /* What the clock says depends on where the run is. Running: the time
-   * left, which the daemon estimates from the bytes still to go and counts
-   * down here between polls; `estimating…` until its rate settles. Queued:
-   * how long it has waited. Finished: how long the work took, from its start
-   * rather than its submission, and when it ended, with any wait named apart.
-   * The person watching a run wants to know when it will be done, and a clock
-   * counting up from the moment they pressed the button answered a different
-   * question. */
-  let shown = 0;
-  let readAt = 0;
-  let ticking = false;
-
-  function paintClock() {
-    const since = Date.now() - readAt;
-    const next = last;
-    let text = "";
-    if (next.status === "queued") {
-      // Under the figure's "waiting" label, the wait alone.
-      text = spellTook(ticking ? shown + since : shown);
-    } else if (next.status === "running") {
-      text = next.eta_ms === null || next.eta_ms === undefined ? "estimating…" : spellLeft(next.eta_ms - since);
-    } else if (next.finished_at && next.started_at) {
-      // The run's own clock, which excludes time held, minus its wait in the
-      // queue: the work, to the millisecond.
-      const queued = next.queued_ms || 0;
-      text = `took ${spellTook(Math.max(0, shown - queued))} · finished ${new Date(next.finished_at * 1000)
-        .toTimeString()
-        .slice(0, 5)}${queued >= 1000 ? ` · queued ${spellTook(queued)}` : ""}`;
-    }
-    setText(elapsed, text);
-    clockFig.hidden = !text;
-    const label = next.status === "queued" ? "waiting" : "time";
-    if (clockFig.dataset.label !== label) clockFig.dataset.label = label;
-  }
-
-  function absorb(next) {
-    last = next;
-    paintPlan(next);
-    shown = next.elapsed_ms || 0;
-    readAt = Date.now();
-    ticking = !!next.ticking;
-    paintClock();
-
-    // Not `share`: that is the helper every bar's tooltip uses to say what
-    // fraction of a whole it is, and a local of the same name would shadow it
-    // inside this function only, which is the kind of bug that survives review.
-    const scanned = next.total ? Math.min(100, (next.scanned / next.total) * 100) : 0;
-    const finished = next.status === "done";
-    // A stopped run undid everything it embedded, so a full bar would say the
-    // opposite of what happened.
-    const width = finished ? 100 : next.status === "stopped" ? 0 : scanned;
-    // A run still in the line has nothing to show on a bar; its card is its
-    // name, its place in the line, its plan and how long it has waited.
-    progressRow.hidden = next.status === "queued";
-    bar.style.width = `${width.toFixed(1)}%`;
-    setText(pct, `${Math.round(width)}%`);
-    // What the bar is a bar of. The card states files and chunks elsewhere;
-    // the bar itself said only a percentage of something unnamed.
-    track.setAttribute(
-      "data-tip",
-      next.status === "stopped"
-        ? "stopped · everything this run embedded was undone"
-        : `${n(next.scanned || 0)} of ${n(next.total || 0)} file${next.total === 1 ? "" : "s"} scanned · ${n(
-            next.chunks || 0,
-          )} chunk${next.chunks === 1 ? "" : "s"} written · ${Math.round(width)}%`,
-    );
-
-    // The pill's own text node, beside its dot. It used to be rebuilt dot and
-    // all on every poll, which replaced two children a second on every card.
-    // A catch-up is the watcher's run rather than somebody's, and says so.
-    setText(
-      badgeWord,
-      next.status === "queued" && next.position
-        ? `queued · ${next.position} in line`
-        : next.kind === "catch-up" && next.status === "running"
-          ? "catching up"
-          : next.kind === "compact" && next.status === "running"
-            ? "compacting"
-            : RUN_WORD[next.status] || next.status,
-    );
-    const tone = `pill ${RUN_TONE[next.status] || "warn"}`;
-    if (badge.className !== tone) badge.className = tone;
-
-    const live = TICKING.has(next.status);
-    // The phase, when the run is doing something other than reading files.
-    // Twenty seconds of a bar not moving is a hang unless the card says what
-    // it is: every two hundred files the run rewrites its shards.
-    // A compaction reads no files: what it is doing, then what it gave back.
-    const compacted = next.kind === "compact" ? next.summary?.compact : null;
-    const disk = (f) => (f ? f.database + f.exact + f.vectors : 0);
-    const compacting = next.kind === "compact";
-    setText(
-      counts,
-      compacting
-        ? compacted
-          ? `${bytes(disk(compacted.before))} → ${bytes(disk(compacted.after))}`
-          : "rewriting"
-        : next.total
-          ? `${n(next.scanned)} / ${n(next.total)}`
-          : RUN_WORD[next.status] || next.status,
-    );
-    const filesLabel = compacting ? "on disk" : "files";
-    if (filesFig.dataset.label !== filesLabel) filesFig.dataset.label = filesLabel;
-    // Before the walk has a total there is nothing to count against, and the
-    // pill already says where the run is.
-    filesFig.hidden = !compacting && !next.total;
-    chunksFig.hidden = compacting || !next.total;
-    setText(chunksNode, compacting || !next.total ? "" : n(next.chunks || 0));
-    const phase = compacting
-      ? compacted
-        ? `${n(compacted.vectors_dropped)} vectors and ${n(compacted.history_dropped)} retired definitions dropped`
-        : "rewriting vectors and vacuuming"
-      : next.phase || "";
-    phaseNote.hidden = !phase;
-    setText(phaseNote, phase);
-    /* The daemon's rolling rate, over the last ten seconds of work, on every
-     * poll while the run is live — "—" until the first batch has given it one.
-     * It used to be chunks over the whole elapsed clock, which counted the
-     * time a run sat queued or paused against it. A finished run keeps its
-     * average, which is the one reading that is still true of it. */
-    const reading = live ? next.rate : next.rate_average;
-    // A run still in the line has read nothing, so it has no rate to show,
-    // and a finished run that never embedded a batch has no average either.
-    // Only a run that is reading has a rate now: paused, held or queued, the
-    // last figure it had is not what it is doing.
-    const reading_now = next.status === "running" || next.status === "stopping";
-    rate.hidden = (live && !reading_now) || (!live && (reading === null || reading === undefined));
-    rateFig.hidden = rate.hidden;
-    setText(rate, `${reading === null || reading === undefined ? "—" : perSecond(reading)} chunks/s`);
-    const average = next.rate_average;
-    const tip = average === null || average === undefined ? "" : `${perSecond(average)} chunks/s on average since the first batch`;
-    if (rate.title !== tip) rate.title = tip;
-    // Which device is doing what. One lane is named too: on a Mac with the
-    // Neural Engine it is the only one, and which one is the question.
-    // A lane that has gone quiet is left out: with the Neural Engine running,
-    // "CPU 0.0/s · GPU 0.0/s" only says what they did while it compiled.
-    const split = Object.entries(next.lane_rates || {})
-      .filter(([, r]) => r > 0)
-      .sort((a, b) => b[1] - a[1]);
-    lanesFig.hidden = !split.length || !reading_now;
-    setText(lanes, split.length ? split.map(([lane, r]) => `${LANE_NAMES[lane] || lane} ${perSecond(r)}/s`).join(" · ") : "");
-    threadsFig.hidden = !next.threads || !live;
-    setText(threads, next.threads ? n(next.threads) : "");
-    paintStages(next);
-    setText(where, (next.paths || []).join(", "));
-    const deleted = next.delete || "";
-    setText(outcome, deleted);
-    const outcomeClass = deleted.startsWith("the store was not deleted") ? "note bad" : "note";
-    if (outcome.className !== outcomeClass) outcome.className = outcomeClass;
-
-    // Pausing reads as held already: the button offers the way back.
-    const held = next.status === "paused" || next.status === "pausing";
-    // In place, so the button somebody just pressed is still the focused one
-    // when it turns from Pause to Resume.
-    setText(pause, held ? "Resume" : "Pause");
-    // Nothing to pause in a run that has not started or is held for a slot.
-    pause.hidden = !live || next.status === "queued" || next.status === "held" || next.status === "review";
-    // A queued run has embedded nothing, so taking it out of the line costs
-    // nothing and is not the same act as stopping one that is going.
-    // "Take out of the queue" rather than "Remove": a finished card's Remove
-    // dismisses the card and touches nothing, and one word for both put two
-    // different acts on one page under one label.
-    setText(stop, next.status === "queued" ? "Take out of the queue" : "Stop");
-    stop.hidden = !live;
-    stop.disabled = next.status === "stopping";
-    // A run that has finished has nothing to pause and nothing to stop. It
-    // used to offer Stop, whose confirm promised to undo everything the run
-    // had embedded; pressing it did nothing visible and left the store
-    // carrying a cancellation that killed the next run against it at 0%.
-    remove.hidden = live;
-
-    // Every card starts folded to its figures, live ones too: the log and
-    // the stages are a press away, and a running card used to be a screen of
-    // scrolling paths. Whatever the reader has chosen since is kept.
-    if (touched === false) {
-      open = false;
-      touched = null;
-    }
-    paintFold();
-  }
-
-  function paintFold() {
-    log.hidden = !open;
-    where.hidden = !open;
-    stagesLine.hidden = !open || !hasStages;
-    cacheLineNode.hidden = !open || !hasCache;
-    setText(expand, open ? "Hide details" : "Details");
-    expand.setAttribute("aria-expanded", String(open));
-  }
-
-  /* `false` until the first reading has decided the default; `null` once the
-   * reader has taken it over. */
-  let touched = false;
-
-  pause.addEventListener("click", () => controls.hold(pause.textContent === "Pause"));
-  stop.addEventListener("click", () => controls.stop(stop.textContent !== "Stop"));
-  remove.addEventListener("click", () => controls.remove());
-  expand.addEventListener("click", () => {
-    open = !open;
-    touched = null;
-    paintFold();
-    // Its lines are wanted now. A folded card's log is not on screen, so it is
-    // not fetched until it is — which is what keeps a page of finished cards
-    // from costing one request each on the first paint.
-    if (open && controls.reveal) controls.reveal();
-  });
-
-  const node = el(
-    "div",
-    { class: "card pad run-card" },
-    // The name, its state and what can be done to it, on one line: the
-    // buttons never wrap under a reading that has grown.
-    el(
-      "div",
-      { class: "head run-head" },
-      el("span", { class: "card-title", text: run.store }),
-      badge,
-      el("span", { class: "spacer" }),
-      el("span", { class: "run-actions" }, expand, pause, stop, remove),
-    ),
-    progressRow,
-    phaseNote,
-    planLine,
-    el(
-      "div",
-      { class: "filters run-stats" },
-      rateFig,
-      filesFig,
-      chunksFig,
-      clockFig,
-      lanesFig,
-      threadsFig,
-      pendingFig,
-    ),
-    problem,
-    outcome,
-    stagesLine,
-    cacheLineNode,
-    where,
-    log,
-  );
-
-  absorb(run);
-  const clock = setInterval(() => {
-    if (!node.isConnected) return clearInterval(clock);
-    if (ticking) paintClock();
-  }, 1000);
-
-  return { node, absorb, log, problem, last: () => last, isOpen: () => open };
-}
-
-/** A run's stages as `Stages::line` writes them: walk, read+hash,
- * extract+scan, parse+chunk, tokenize, the wait on each lane, write, over the
- * wall time they sum to. */
-function stagesText(st) {
-  const secs = (ms) => `${((ms || 0) / 1000).toFixed(1)} s`;
-  const parts = [
-    `walk ${secs(st.walk_ms)}`,
-    `read+hash ${secs(st.read_ms)}`,
-    `extract+scan ${secs(st.extract_ms)}`,
-    `parse+chunk ${secs(st.parse_ms)}`,
-    `tokenize ${secs(st.tokenize_ms)}`,
-    ...Object.keys(st.embed_wait_ms || {})
-      .sort()
-      .map((lane) => `embed wait (${lane}) ${secs(st.embed_wait_ms[lane])}`),
-    `write ${secs(st.write_ms)}`,
-  ];
-  return `stages over ${secs(st.wall_ms)}: ${parts.join(", ")}`;
-}
-
-/** Append one log line, keeping the reader's place if they have scrolled up. */
-function logLine(log, event) {
-  const outcome = event.outcome || null;
-  const key =
-    event.event === "file" ? `${event.scanned}/${event.total}` : event.event || "";
-  const text =
-    event.event === "file"
-      ? event.why
-        ? `${event.path} — ${event.why}`
-        : event.path
-      : logText(event);
-  log.append(
-    el(
-      "div",
-      { class: outcome ? `line ${outcome}` : "line" },
-      key ? el("span", { class: "key", text: key }) : null,
-      outcome ? el("span", { class: "outcome", text: outcome }) : null,
-      el("span", { class: "what", text }),
-    ),
-  );
-  // Only while the reader is already at the end: scrolling back through a long
-  // run should not be yanked away by the next line.
-  const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-  if (atEnd) log.scrollTop = log.scrollHeight;
-  while (log.childElementCount > 500) log.firstElementChild.remove();
-}
-
-/** What a non-file event says on the log. */
-function logText(event) {
-  switch (event.event) {
-    case "submitted":
-      return event.ahead
-        ? `waiting — ${n(event.ahead)} run${event.ahead === 1 ? "" : "s"} ahead of this one`
-        : "submitted";
-    case "queued":
-      return event.ahead
-        ? `waiting for ${event.store}'s writer — ${n(event.ahead)} job${
-            event.ahead === 1 ? "" : "s"
-          } ahead of this one`
-        : `waiting for ${event.store}'s writer; it finishes what the watcher is doing first`;
-    case "started":
-      return "walking the tree and hashing what it finds";
-    case "slice":
-      return `${n(event.remaining)} paths left; the writer is giving the watcher a turn and will carry on`;
-    case "paused":
-      return "held between files — the writer is still this run's";
-    case "resumed":
-      return "carrying on";
-    case "error":
-      return event.error || "failed";
-    case "done":
-      if (event.dequeued) return "removed from the queue before it started; nothing was indexed";
-      if (event.stopped) {
-        return "stopped — everything this run embedded was undone, so the store is as it was before it started";
-      }
-      return `${n(event.indexed)} indexed, ${n(event.unchanged)} unchanged, ${n(
-        event.skipped,
-      )} skipped, ${n(event.removed)} removed, ${n(event.chunks)} chunks · ${spell(
-        event.elapsed_ms || 0,
-      )}`;
-    default:
-      return event.event || "";
-  }
-}
-
-/** One of the three settings, with what the machine derived and why. */
-/** Why a given setting stops where it does, in the machine's own terms. */
-function capped(limit) {
-  return limit.ceiling === limit.derived
-    ? "It is already what this machine derives."
-    : "Past it the machine would be promising work it cannot carry.";
-}
-
-/* The moving free-memory figure, taken out of a limit's reason.
- *
- * The daemon writes how much memory is free now into two of the three
- * reasons, and that figure moves every second. A sentence that changes every
- * second under a field is a sentence nobody can read, and it re-wrapped the
- * card while it was being typed into. The figure is on the card once, in the
- * subtitle, where it updates in place; the reasons keep the rule and lose the
- * reading.
- *
- * ponytail: rewrites the daemon's prose (`derive` in src/system.rs), so a
- * rewording there makes these two patterns miss and the figure comes back in
- * the reason — visibly, and harmlessly. The durable fix is the daemon not
- * writing the figure into the reason, and this goes when it does. */
-function steady(reason) {
-  return String(reason || "")
-    .replace(/^[\d.]+ [GM]iB free (?=minus|is under)/, "free memory ")
-    .replace(/, and (?:none|[\d.]+ [GM]iB) is free beyond the reserve out of the [\d.]+ [GM]iB free now$/, "");
-}
-
-function settingField(key, label, limit, onSave) {
-  /* The limit in force, replaced by `update` on every poll. The field is
-   * built once and patched, never rebuilt: a field rebuilt under the cursor
-   * cannot be typed into. */
-  let current = limit;
-  /* Typed into and not yet saved. A dirty field is the reader's, and the poll
-   * leaves its value alone until `change` hands it to the daemon. */
-  let dirty = false;
-  const input = el("input", {
-    type: "number",
-    min: "1",
-    "aria-label": label,
-  });
-  const why = el("div", { class: "note" });
-
-  /* What the field says under itself.
-   *
-   * None of this is a warning any more. Changing these is the ordinary thing
-   * to do with them — a laptop doing nothing else can index harder than the
-   * default — and the panel used to answer every such change in red, which
-   * reads as "you have broken something" rather than "here is what that
-   * means". The only genuinely constrained case is the ceiling, and the field
-   * will not go past it, so there is nothing left to warn about.
-   */
-  function explain() {
-    const limit = current;
-    const asked = Number(input.value);
-    // Where the value in force came from, on every branch. A saved value above
-    // the derived one takes the second branch every time, so a branch that did
-    // not say "saved" said nothing about it in exactly the case where a user is
-    // trying to work out whether their setting took effect — while the daemon's
-    // own line calls the same value saved.
-    const held = limit.source === "saved" && asked === limit.value ? `${limit.value} saved. ` : "";
-    if (limit.source === "environment") {
-      setText(why, `Set in this daemon's environment, so the page leaves it alone. This machine would derive ${limit.derived} — ${limit.reason}`);
-      return;
-    }
-    if (asked >= limit.ceiling) {
-      // Not red either. It is the top of the range, which is a fact about the
-      // machine rather than a mistake by the person.
-      setText(why, `${held}${limit.ceiling} is as high as this machine goes. ${capped(limit)}`);
-      return;
-    }
-    // The memory ceiling is what is free now less the reserve, so as a number
-    // it moves every second like the free figure it comes from. It is said as
-    // the rule here; the input's `max` still carries the number.
-    const room = key === "index_memory_mb" ? "what is free now, less the reserve," : `the ${limit.ceiling}`;
-    if (asked > limit.derived) {
-      setText(why, `${held}Above the ${limit.derived} this machine would pick on its own, and under ${room} it will allow — ${limit.reason} Yours to set.`);
-      return;
-    }
-    const from =
-      limit.source === "saved"
-        ? `${limit.value} saved, and this machine derives ${limit.derived}`
-        : `${limit.derived}, derived`;
-    setText(
-      why,
-      `${from} — ${limit.reason} Room up to ${key === "index_memory_mb" ? "what is free now, less the reserve" : limit.ceiling}.`,
-    );
-  }
-
-  /** Take the daemon's latest reading, touching only what it moved. */
-  function update(next) {
-    // A reason is a sentence the field's note continues after, so it ends
-    // with a full stop whether or not the daemon's wording did: "would allow
-    // 7 Room up to 8" read as one broken sentence.
-    const reason = steady(next.reason);
-    current = { ...next, reason: /[.!?]$/.test(reason) ? reason : `${reason}.` };
-    // The field will not go above what the machine will accept, and the route
-    // clamps it as well — a `max` on an input is a courtesy, not a control.
-    const max = String(current.ceiling);
-    if (input.max !== max) input.max = max;
-    const fixed = current.source === "environment";
-    if (input.disabled !== fixed) input.disabled = fixed;
-    const value = String(current.value);
-    if (!dirty && document.activeElement !== input && input.value !== value) input.value = value;
-    explain();
-  }
-
-  input.addEventListener("input", () => {
-    dirty = true;
-    explain();
-  });
-  input.addEventListener("change", () => {
-    const asked = Math.min(current.ceiling, Math.max(1, Number(input.value) || 1));
-    input.value = String(asked);
-    dirty = false;
-    explain();
-    onSave(key, asked);
-  });
-  update(limit);
-
-  return {
-    update,
-    node: el(
-      "div",
-      { class: "setting" },
-      el("div", { class: "field" }, el("span", { class: "prefix", text: label }), input),
-      why,
-    ),
-  };
-}
-
-/* The two compaction settings, on the Machine limits card: when the daemon
- * compacts an idle store on its own, and how much symbol history a compaction
- * keeps. Both take 0 (off, and keep everything), which is why they are not
- * `settingField`s, whose floor is 1. Built once and patched, like those.
- *
- * The vector cache's cap sits under them for the same reason — 0 turns the
- * cache off — with the line `semlith stats` prints about the cache below it. */
-function compactionSettings(onSave) {
-  const field = (key, label, max, explain) => {
-    let dirty = false;
-    let current = null;
-    const input = el("input", { type: "number", min: "0", max: String(max), "aria-label": label });
-    const why = el("div", { class: "note" });
-    const say = () => current && setText(why, explain(Number(input.value), current));
-    input.addEventListener("input", () => {
-      dirty = true;
-      say();
-    });
-    input.addEventListener("change", () => {
-      const asked = Math.min(max, Math.max(0, Math.round(Number(input.value) || 0)));
-      input.value = String(asked);
-      dirty = false;
-      onSave(key, asked);
-    });
-    return {
-      input,
-      node: el(
-        "div",
-        { class: "setting" },
-        el("div", { class: "field" }, el("span", { class: "prefix", text: label }), input),
-        why,
-      ),
-      update(value, settings) {
-        current = settings;
-        if (!dirty && document.activeElement !== input && input.value !== String(value)) {
-          input.value = String(value);
-        }
-        say();
-      },
-    };
-  };
-  const threshold = field("compact_threshold_percent", "compact past %", 99, (v, c) =>
-    v === 0
-      ? "Off: stores are compacted only when you ask, with Compact on the Stores page or semlith compact."
-      : `An idle store more than ${v}% reclaimable is compacted by the daemon on its own, checked every ten minutes. ${c.default_threshold_percent} is the default; 0 turns it off.`,
-  );
-  const retention = field("history_retention_days", "history days", 36500, (v, c) =>
-    v === 0
-      ? "Every retired definition is kept, for ever."
-      : `A compaction drops definitions retired more than ${v} day${v === 1 ? "" : "s"} ago, so symbol history answers for the last ${v}. ${c.default_retention_days} is the default; 0 keeps everything.`,
-  );
-  const cache = field("vector_cache_mb", "cache MiB", 65536, (v, c) =>
-    c.from_environment
-      ? "Set by SEMLITH_VECTOR_CACHE_MB in the daemon's environment, so the page cannot change it."
-      : v === 0
-        ? "Off: every chunk is embedded afresh, even one this machine has embedded before."
-        : `Vectors this machine has embedded are kept, up to ${n(v)} MiB, and any store that meets the same chunk again takes its vector instead of embedding it. ${n(c.default_cap_mb)} is the default; 0 turns it off.`,
-  );
-  const held = el("div", { class: "note" });
-  return {
-    // Two blocks, so the card spaces the cache from compaction as it spaces
-    // compaction from the three fields above it.
-    node: [
-      el(
-        "div",
-        null,
-        el("span", { class: "eyebrow", text: "Keeping stores small" }),
-        el("div", { class: "settings" }, threshold.node, retention.node),
-      ),
-      el(
-        "div",
-        null,
-        el("span", { class: "eyebrow", text: "Vector cache" }),
-        el("div", { class: "settings" }, cache.node),
-        held,
-      ),
-    ],
-    update(c, vc) {
-      if (c) {
-        threshold.update(c.threshold_percent, c);
-        retention.update(c.retention_days, c);
-      }
-      if (vc) {
-        cache.input.disabled = !!vc.from_environment;
-        cache.update(vc.cap_mb, vc);
-        setText(held, `vector cache: ${cacheLine(vc)}`);
-      }
-    },
-  };
-}
-
-/** The vector cache as `semlith stats` and `semlith accel status` print it,
- * with the same figures. The command line's `human_bytes` counts in 1024s and
- * calls them MB; this card says MiB, because one card with two units for
- * sizes is what drive finding 3.2 was about. */
-function cacheLine(vc) {
-  const human = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MiB` : b >= 1024 ? `${Math.round(b / 1024)} KiB` : `${b} B`);
-  if (!vc.cap_mb) return "off (vector cache cap is 0)";
-  const rate = vc.lookups > 0 ? `, ${Math.round((vc.hits * 100) / vc.lookups)} % of lookups hit` : "";
-  return `${vc.vectors} vectors, ${human(vc.bytes)} of ${human(vc.cap_mb * 1048576)}${rate}`;
-}
-
-/* The accelerator lanes, on the Machine limits card.
- *
- * One row per lane — the CPU, the Neural Engine, WebGPU, CUDA, TensorRT for
- * RTX, OpenVINO, llama.cpp, and the worker when it is on — each the row-wide
- * switch the Privacy page's replay control already is, with the lane's
- * device, where it stands and its share of the rate. The four lanes built and
- * checked without their hardware carry an `experimental` pill, as `semlith
- * accel status` says `(experimental)`. Built once and patched from
- * `/api/accel`, which the Index page reads with its runs, and read again every
- * second while a lane is downloading its pack, starting, or compiling its
- * models — none of which moves a run, so the live poll would not ask.
- *
- * The daemon refuses what it will not do — the CPU off with no GPU lane able
- * to carry the work, CUDA anywhere but Linux — with a 409 that says why, and
- * that sentence is shown as it came, on this card. */
-const LANE_NAMES = {
-  cpu: "CPU",
-  ane: "Neural Engine",
-  gpu: "GPU",
-  cuda: "CUDA",
-  trt: "TensorRT for RTX",
-  openvino: "OpenVINO",
-  llama: "llama.cpp",
-  worker: "Worker",
-};
-
-/** A size in the binary units the Machine limits card already counts in: its
- * memory field is "MiB per store", and one card with two units for sizes is
- * what finding 3.2 was about. */
-function binarySize(value) {
-  const mib = (Number(value) || 0) / 1048576;
-  return mib >= 1024 ? `${(mib / 1024).toFixed(1)} GiB` : `${mib.toFixed(1)} MiB`;
-}
-
-/** Where a lane stands, in the words `semlith accel status` uses:
- * `compiling 42 %`, `downloading 7 %`, `failed — why`. */
-function laneState(status) {
-  const state = (status && status.state) || "idle";
-  const percent = status && typeof status.percent === "number" ? ` ${status.percent} %` : "";
-  // How long is left, from the daemon's reading of how far the compile or
-  // download has got in the time it has taken; nothing until it has one.
-  const left =
-    status && typeof status.eta_ms === "number"
-      ? ` · ${spellLeft(status.eta_ms)}`
-      : state === "compiling" || state === "downloading"
-        ? " · estimating…"
-        : "";
-  if (state === "compiling") return `compiling${percent}${left} — its models compile for this machine, minutes the first time; runs wait for it`;
-  if (state === "downloading") return `downloading${percent}${left}`;
-  if (status && status.reason) return `${state} — ${status.reason}`;
-  return `${state}${percent}`;
-}
-
-/** The states that end on their own, which the card watches until they do. */
-const LANE_MOVING = new Set(["downloading", "starting", "compiling"]);
-
-function accelSection() {
-  const rows = el("div", { class: "rows accel-lanes" });
-  const fallback = el("p", { class: "note" });
-  const problem = el("div", { class: "note" });
-  const drawn = new Map();
-  let data = null;
-  let asked = 0;
-  let painted = 0;
-  let again = null;
-
-  function say(text, bad) {
-    problem.className = bad ? "note bad" : "note";
-    setText(problem, text);
-  }
-
-  async function change(lane, action) {
-    try {
-      const answer = await post("/api/accel", { lane, action });
-      say(answer.said || "");
-    } catch (e) {
-      say(e.message, true);
-    }
-    await refresh();
-  }
-
-  /** One row-wide switch: the knob, a title with room for a pill after it,
-   * the state under it, and a figure at the far end. */
-  function switchRow(onClick) {
-    const knob = el("span", { class: "knob", "aria-hidden": "true" });
-    const name = document.createTextNode("");
-    const badge = el("span", { class: "pill warn lane-badge", text: "experimental", hidden: "" });
-    const title = el("span", { class: "replay-state" }, name, " ", badge);
-    const where = el("span", { class: "replay-switch-note" });
-    const share = el("span", { class: "meta" });
-    const toggle = el(
-      "button",
-      { class: "replay-switch", type: "button", role: "switch", "aria-checked": "false" },
-      knob,
-      el("span", { class: "replay-switch-text" }, title, where),
-      el("span", { class: "spacer" }),
-      share,
-    );
-    const drawnRow = { name, badge, where, share, toggle, enabled: false };
-    toggle.addEventListener("click", () => onClick(drawnRow));
-    return drawnRow;
-  }
-
-  function paintSwitch(r, on) {
-    r.enabled = on;
-    r.toggle.classList.toggle("on", on);
-    const checked = String(on);
-    if (r.toggle.getAttribute("aria-checked") !== checked) r.toggle.setAttribute("aria-checked", checked);
-  }
-
-  function row(lane) {
-    const drawnRow = switchRow((r) => {
-      const on = !r.enabled;
-      const now = (data?.lanes || []).find((l) => l.lane === lane) || {};
-      const held = (data?.bytes || {})[lane] || 0;
-      const size = (data?.bytes || {})[`${lane}_download`] || now.download_bytes || 0;
-      // `installed` where the lane has a pack; what is on disk where it has not.
-      const missing = typeof now.installed === "boolean" ? !now.installed : size > 0 && held === 0;
-      // A download of that size is somebody's decision, made knowing it.
-      if (on && missing && size > 0) {
-        const label = now.label || LANE_NAMES[lane] || lane;
-        ask({
-          title: `Turn ${label} on?`,
-          body: `It downloads the ${label} pack first, ${binarySize(size)}, once, into this machine's model cache. Its row shows the download; runs use the lane from their next batch after it.${
-            now.experimental ? ` ${label} is experimental: built and checked without its hardware, and not measured on it.` : ""
-          }`,
-          confirm: "Download and turn on",
-          run: () => change(lane, "on"),
-        });
-        return;
-      }
-      change(lane, on ? "on" : "off");
-    });
-    const remove = el("button", { class: "button secondary small", type: "button" });
-    remove.addEventListener("click", () => change(lane, "remove"));
-    /* The GPU lane beside the Neural Engine: off by default, because on a
-     * fanless M1 it added 30 % in bursts and 4 % sustained. Not a lane, so not
-     * a row-wide switch: a pressed-or-not chip in the Neural Engine's action
-     * line, the way the Impact page's `Strict` is a chip in its row. */
-    const beside =
-      lane === "ane"
-        ? el("button", {
-            class: "chip sm",
-            type: "button",
-            "aria-pressed": "false",
-            text: "GPU beside the Neural Engine",
-            title: "Off: while the Neural Engine runs, the GPU lane waits. On: both run.",
-            onclick: () => change("gpu-beside-ane", beside.getAttribute("aria-pressed") === "true" ? "off" : "on"),
-          })
-        : null;
-    const removeRow = el("div", { class: "filters accel-remove" }, beside, remove);
-    drawnRow.remove = remove;
-    drawnRow.beside = beside;
-    drawnRow.removeRow = removeRow;
-    drawnRow.node = el("div", { class: "accel-lane" }, drawnRow.toggle, removeRow);
-    return drawnRow;
-  }
-
-  function paint(next) {
-    data = next;
-    const seen = new Set();
-    for (const lane of next.lanes || []) {
-      seen.add(lane.lane);
-      let r = drawn.get(lane.lane);
-      if (!r) {
-        r = row(lane.lane);
-        drawn.set(lane.lane, r);
-      }
-      paintSwitch(r, !!lane.enabled);
-      const name = lane.label || LANE_NAMES[lane.lane] || lane.lane;
-      // The device is named by the lane's worker when it starts. Before
-      // then it is not "no device": it is not asked yet, or still on its way.
-      const state = lane.status?.state;
-      const device =
-        lane.device ||
-        (state === "unavailable" || state === "failed"
-          ? "no device found"
-          : LANE_MOVING.has(state)
-            ? "starting"
-            : "not started");
-      setText(r.name, `${name} · ${device}${lane.variant ? ` · ${lane.variant}` : ""}`);
-      r.badge.hidden = !lane.experimental;
-      setText(r.where, `${r.enabled ? "" : "off · "}${laneState(lane.status)}`);
-      setText(r.share, `${Math.round(lane.share || 0)} %`);
-      const held = (next.bytes || {})[lane.lane] || 0;
-      r.remove.hidden = !(held > 0 && lane.lane !== "cpu" && lane.lane !== "worker");
-      setText(r.remove, `Remove downloaded files (${binarySize(held)})`);
-      if (r.beside) {
-        // Only where there is a Neural Engine to run beside.
-        r.beside.hidden = lane.status?.state === "unavailable";
-        const pressed = String(!!next.gpu_beside_ane);
-        if (r.beside.getAttribute("aria-pressed") !== pressed) r.beside.setAttribute("aria-pressed", pressed);
-      }
-      r.removeRow.hidden = r.remove.hidden && (!r.beside || r.beside.hidden);
-    }
-    for (const [lane, r] of drawn) {
-      if (seen.has(lane)) continue;
-      r.node.remove();
-      drawn.delete(lane);
-    }
-    arrange(rows, (next.lanes || []).map((lane) => drawn.get(lane.lane).node));
-    setText(fallback, next.cpu_fallback ? "The CPU is carrying the work: no GPU lane can." : "");
-
-    // A download, a start or a compile moves by itself and says how far it
-    // has got, and a lane's share of the work moves with every batch and falls
-    // to 0 when its run pauses or stops, which moves no run. The page asks
-    // again each second until nothing is moving and every share reads 0, and
-    // stops asking once the card has left the page.
-    const moving = (next.lanes || []).some(
-      (lane) => LANE_MOVING.has(lane.status?.state) || (lane.share || 0) > 0,
-    );
-    if (moving && !again) {
-      again = setTimeout(() => {
-        again = null;
-        if (rows.isConnected) refresh();
-      }, 1000);
-    }
-  }
-
-  /** Read the lanes again. Numbered like the runs, so a late answer to an
-   * older question is not painted over a newer one. */
-  async function refresh() {
-    const mine = ++asked;
-    let next;
-    try {
-      next = await api("/api/accel");
-    } catch (_) {
-      return;
-    }
-    if (mine < painted) return;
-    painted = mine;
-    paint(next);
-  }
-
-  return {
-    refresh,
-    node: el(
-      "div",
-      { class: "rows" },
-      el("span", { class: "eyebrow", text: "Accelerators" }),
-      fallback,
-      rows,
-      problem,
-    ),
-  };
-}
-
-/** A path under its store's root, the way the store names it: the
- * machine's absolute path is on the tooltip, not in the column. */
-function rootRel(path, storeName) {
-  // One spelling for both sides: Windows paths arrive with backslashes, a
-  // `\\?\` verbatim prefix or a drive letter in either case, and a root and
-  // a file under it can differ in all three.
-  const plainPath = (p) => String(p).replace(/\\/g, "/").replace(/^\/\/\?\//, "");
-  const key = (p) => (/^[A-Za-z]:\//.test(p) ? p.toLowerCase() : p);
-  const whole = plainPath(path);
-  const store = (state.stores || []).find((s) => s.name === storeName);
-  const roots = (store?.roots || [])
-    .map((root) => root.path && plainPath(root.path))
-    .filter(Boolean)
-    .sort((a, b) => b.length - a.length);
-  for (const root of roots) {
-    const prefix = root.endsWith("/") ? root : `${root}/`;
-    if (key(whole).startsWith(key(prefix))) return whole.slice(prefix.length);
-  }
-  return whole;
-}
-
-/* What a scan found, before anything is embedded (2.7).
- *
- * The runs the Scan button started hold after their scan; this draws every
- * held run as one answer: a summary of what indexing will do, then the files
- * that are a person's to decide, one row each with its own buttons, then one
- * line for what is not indexed and needs nothing. Drawn from the runs the
- * poll already reads, so a reload, a second tab or a scan started elsewhere
- * shows the same panel. Rebuilt only when the set of held runs changes: a
- * poll a second must not redraw buttons under the pointer. */
-const NO_ACTION = new Set(["unindexable", "excluded", "credential"]);
-
-/** A scan's own duration: milliseconds under a second, where most scans
- * land, and seconds to one decimal above it. */
-function spellScan(seconds) {
-  return seconds < 1 ? `${Math.max(1, Math.round(seconds * 1000))} ms` : `${seconds.toFixed(1)} s`;
-}
-
-function scanPanel() {
-  const node = el("div", { class: "card pad scan-panel", hidden: "" });
-  let drawnFor = "";
-  /** Decisions made on this page before the store's list says so. */
-  const decided = new Map();
-
-  async function paint(runs) {
-    const held = (runs || []).filter((run) => run.status === "review" && run.plan);
-    const key = held.map((run) => run.id).join(",");
-    node.hidden = !held.length;
-    if (!held.length) {
-      drawnFor = "";
-      return;
-    }
-    if (key === drawnFor) return;
-    drawnFor = key;
-    // What each store already remembers deciding, and the files with no
-    // action, both from the one list the store keeps.
-    let refused = { stores: [] };
-    try {
-      refused = await api("/api/refused");
-    } catch {
-      // The panel still works from the plans; only the no-action list and a
-      // decision made in another tab are missing.
-    }
-    if (key !== drawnFor) return;
-    const rowsOf = (store) => (refused.stores || []).find((s) => s.store === store)?.rows || [];
-    draw(held, rowsOf);
-  }
-
-  function draw(held, rowsOf) {
-    const total = (key) => held.reduce((sum, run) => sum + (run.plan[key] || 0), 0);
-    const items = held.flatMap((run) =>
-      (run.plan.review || []).map((item) => ({ ...item, store: run.store })),
-    );
-    const noAction = {};
-    for (const run of held) {
-      for (const [cls, count] of Object.entries(run.plan.not_indexed || {})) {
-        if (NO_ACTION.has(cls)) noAction[cls] = (noAction[cls] || 0) + count;
-      }
-    }
-    const eta = held.every((run) => run.plan.eta_ms != null)
-      ? held.reduce((sum, run) => sum + run.plan.eta_ms, 0)
-      : null;
-
-    const stat = (label, value, hint) =>
-      el(
-        "div",
-        { class: "scan-stat" },
-        el("span", { class: "eyebrow", text: label }),
-        el("strong", { text: value }),
-        hint ? el("span", { class: "meta", text: hint }) : null,
-      );
-    const summary = el(
-      "div",
-      { class: "scan-stats" },
-      stat("To embed", n(total("embed")), bytes(held.reduce((sum, run) => sum + (run.plan.embed_bytes || 0), 0))),
-      stat("Unchanged", n(total("unchanged")), "already indexed"),
-      stat("Need a decision", n(items.length), items.length ? "below" : "nothing to decide"),
-      stat("Not indexed", n(Object.values(noAction).reduce((a, b) => a + b, 0)), "no action needed"),
-      stat("Estimate", eta == null ? "—" : spellTook(eta), eta == null ? "measured once it starts" : "to embed"),
-    );
-    const perStore = held.length > 1
-      ? dataTable({
-          className: "w-scan-stores",
-          caption: "What the scan found in each folder",
-          rows: held,
-          columns: [
-            { key: "store", label: "Store", value: (run) => run.store, render: (run) => run.store },
-            { key: "path", label: "Folder", sortable: false, render: (run) => pathCell((run.paths || [])[0] || "") },
-            { key: "embed", label: "To embed", className: "num", value: (run) => run.plan.embed, render: (run) => n(run.plan.embed) },
-            { key: "unchanged", label: "Unchanged", className: "num", value: (run) => run.plan.unchanged, render: (run) => n(run.plan.unchanged) },
-            { key: "review", label: "Decide", className: "num", value: (run) => (run.plan.review || []).length, render: (run) => n((run.plan.review || []).length) },
-          ],
-        }).node
-      : null;
-
-    const decisionOf = (item) => {
-      if (decided.has(`${item.store}\n${item.path}`)) return decided.get(`${item.store}\n${item.path}`);
-      const row = rowsOf(item.store).find((r) => r.path === item.path);
-      return row && row.accepted ? row.accepted : null;
-    };
-    const decisionCell = (item) => {
-      const cell = el("div", { class: "decide" });
-      const paintCell = () => {
-        const now = decisionOf(item);
-        if (now) {
-          fill(
-            cell,
-            el("span", {
-              class: now === "kept" ? "pill" : "pill good",
-              text: now === "kept" ? "stays refused" : now === "redacted" ? "accepted, redacted" : "accepted as-is",
-            }),
-            now === "kept"
-              ? el("button", {
-                  class: "button secondary small",
-                  type: "button",
-                  text: "Change",
-                  onclick: () => {
-                    decided.delete(`${item.store}\n${item.path}`);
-                    paintCell();
-                  },
-                })
-              : null,
-          );
-          return;
-        }
-        const accept = (mode) => () =>
-          reviewOne(item.store, item, mode, () => {
-            decided.set(`${item.store}\n${item.path}`, mode);
-            paintCell();
-          });
-        fill(
-          cell,
-          item.class === "content"
-            ? el("button", { class: "button small", type: "button", text: "Accept redacted", onclick: accept("redacted") })
-            : null,
-          el("button", {
-            class: item.class === "content" ? "button secondary small" : "button small",
-            type: "button",
-            text: item.class === "content" ? "Accept as-is" : "Accept",
-            onclick: accept("as-is"),
-          }),
-          el("button", {
-            class: "button secondary small",
-            type: "button",
-            text: "Keep refused",
-            onclick: () => {
-              decided.set(`${item.store}\n${item.path}`, "kept");
-              paintCell();
-            },
-          }),
-        );
-      };
-      paintCell();
-      return cell;
-    };
-    const decisions = items.length
-      ? dataTable({
-          className: "w-scan-review",
-          caption: "Files the scan held back, each waiting for a decision",
-          rows: items,
-          columns: [
-            {
-              key: "path",
-              label: "File",
-              value: (item) => rootRel(item.path, item.store),
-              render: (item) => pathCell(rootRel(item.path, item.store), "path"),
-            },
-            held.length > 1 ? { key: "store", label: "Store", className: "meta", value: (item) => item.store, render: (item) => item.store } : null,
-            { key: "rule", label: "Why", sortable: false, className: "narrow-drop", render: (item) => lineCell(item.rule) },
-            {
-              key: "confidence",
-              label: "Likely real",
-              className: "num",
-              value: (item) => (item.confidence == null ? -1 : item.confidence),
-              render: (item) => (item.confidence == null ? "—" : `${item.confidence} %`),
-            },
-            { key: "decide", label: "Decision", sortable: false, className: "decide-col", render: decisionCell },
-          ].filter(Boolean),
-        }).node
-      : el("p", { class: "muted", text: "Nothing here needs a decision." });
-
-    const counts = Object.entries(noAction).filter(([, count]) => count);
-    const listed = el("div", { class: "rows tight", hidden: "" });
-    const toggle = el("button", {
-      class: "button secondary small",
-      type: "button",
-      text: "Show files",
-      "aria-expanded": "false",
-      onclick: () => {
-        const open = listed.hidden;
-        listed.hidden = !open;
-        toggle.setAttribute("aria-expanded", String(open));
-        setText(toggle, open ? "Hide files" : "Show files");
-        if (open && !listed.firstChild) {
-          const rows = held.flatMap((run) =>
-            rowsOf(run.store)
-              .filter((row) => NO_ACTION.has(row.class) && !row.accepted)
-              .map((row) => ({ ...row, store: run.store })),
-          );
-          fill(
-            listed,
-            rows.length
-              ? dataTable({
-                  className: "w-scan-skipped",
-                  caption: "Files not indexed that need no decision",
-                  rows,
-                  columns: [
-                    { key: "path", label: "File", value: (row) => rootRel(row.path, row.store), render: (row) => pathCell(rootRel(row.path, row.store)) },
-                    { key: "class", label: "Kind", value: (row) => row.class, render: (row) => el("span", { class: `pill class-${row.class}`, text: CLASS_LABELS[row.class] || row.class }) },
-                    { key: "rule", label: "Why", sortable: false, render: (row) => lineCell(row.rule) },
-                  ],
-                }).node
-              : el("p", { class: "muted", text: "The list is written when the run ends; the counts above are the scan's." }),
-          );
-        }
-      },
-    });
-    const skipped = counts.length
-      ? el(
-          "div",
-          { class: "scan-skipped" },
-          el("span", {
-            class: "meta",
-            text: `${counts.map(([cls, count]) => `${n(count)} ${CLASS_LABELS[cls] || cls}`).join(" · ")} — not indexed, no action needed`,
-          }),
-          toggle,
-        )
-      : null;
-
-    fill(
-      node,
-      el(
-        "div",
-        { class: "card-head" },
-        el("h2", { text: held.length === 1 ? `Scanned ${held[0].store}` : `Scanned ${n(held.length)} folders` }),
-        el("span", { class: "spacer" }),
-        el("span", {
-          class: "mono-chip",
-          text: `scanned in ${spellScan(held.reduce((sum, run) => sum + (run.plan.seconds || 0), 0))} · ready to index`,
-        }),
-      ),
-      summary,
-      perStore,
-      el("h3", { class: "eyebrow", text: items.length ? `Needs your decision · ${n(items.length)}` : "Needs your decision" }),
-      decisions,
-      skipped,
-      listed,
-      el("p", {
-        class: "note",
-        text: "Start indexing embeds the plan. A file left undecided stays refused, and any decision can be undone later on Files ▸ Decisions. Credential files are never offered.",
-      }),
-    );
-  }
-
-  return { node, paint, held: () => (state.runs?.runs || []).filter((run) => run.status === "review") };
-}
-
-async function indexView() {
-  await refreshStores();
-  const first = await refreshRuns();
-
-  // Beside Start indexing, in the button row, rather than on a line of its
-  // own: a line reserved for an answer that is usually not there held a blank
-  // row above the cards, and emptying it pulled every card up a line at the
-  // moment a run finished.
-  const note = el("span", { class: "note index-note" });
-  const cards = el("div", { class: "cards" });
-  const queueList = el("div", { class: "queue" });
-  /** Waiting runs' rows, by run id. */
-  const queued = new Map();
-  const queueCard = el(
-    "div",
-    { class: "card pad", hidden: true },
-    el("span", { class: "eyebrow", text: "Waiting" }),
-    el("p", {
-      class: "subtitle",
-      text: "In the order they will start. Each one begins by itself the moment a run finishes, whether or not this page is open.",
-    }),
-    queueList,
-  );
-  const settingsCard = el("div", { class: "card pad", hidden: true });
-  const urlCard = el("div", { class: "card pad", hidden: true });
-  const urlNote = el("div", { class: "note" });
-  /* One placeholder, whatever has happened. It used to read "link to a page, a
-   * PDF or a file" on the first render and "URL to fetch and index" after a
-   * failed attempt, which reads as the field having changed its mind. */
-  const urlField = el("input", { type: "text", placeholder: "link to a page, a PDF or a file" });
-  /* The URL panel's own target store. The control the fetch actually read was
-   * the "each folder becomes its own store" dropdown in a different control
-   * group above, whose default is not a valid target for a URL — so every URL
-   * was refused with a store-selection error that never said where to pick
-   * one, and the private-address refusal was unreachable from this page. */
-  const urlTarget = el("select", { class: "select" });
-  const clearDone = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: "Remove all finished",
-    hidden: true,
-  });
-  /* Whether the note is holding an answer to a button that time can falsify,
-   * and which: "queued" for "3 runs queued.", which stops being true the
-   * moment nothing is waiting any more, and "scan" for a scan's plan, which
-   * stops being true once nothing is held for Start indexing. "3 runs queued."
-   * used to stay up through the whole run it announced. */
-  let transient = false;
-
-  /* One card per run, kept across repaints so a card's log and its scroll
-   * position survive the run's next poll.
-   *
-   * Keyed by the run's id rather than by its store. A second run against the
-   * same store used to find the first one's card and write its header over it
-   * while the body kept the previous run's log, so the card described two
-   * different runs at once. */
-  const drawn = new Map();
-  /* Where each run's log has been read to. A cursor rather than an offset, so
-   * two tabs reading the same run each see every line exactly once. */
-  const cursors = new Map();
-
-  function complain(message, focus) {
-    note.className = "note bad";
-    note.textContent = message;
-    if (focus) focus.focus();
-  }
-
-  function say(message) {
-    note.className = "note";
-    note.textContent = message;
-  }
-
-  async function control(store, action, run, extra) {
-    // A card's own control answers on its own card, under its buttons. On the
-    // page's note the answer appeared above every card and pushed them all
-    // down a line — the refusal a Pause meets when its run finishes under it.
-    const card = drawn.get(run);
-    const was = card && card.last().status;
-    try {
-      const answer = await post("/api/index/control", { store, action, run, ...(extra || {}) });
-      if (card) {
-        setText(card.problem, "");
-        /* The route answers with the state it was asked for at once —
-         * `pausing`, `running`, `stopping` — and the engine reaches it at its
-         * next batch. The card says so now rather than at the next poll, and
-         * a poll already in flight, asked before the click, is not painted
-         * over it. Only if no poll has moved the card since the click: one
-         * that already reads "paused" is further on than the answer. */
-        if (answer && answer.state && card.last().status === was && TICKING.has(was)) {
-          supersedeRuns();
-          card.absorb({ ...card.last(), status: answer.state });
-        }
-      }
-    } catch (e) {
-      if (card) setText(card.problem, e.message);
-      else complain(e.message);
-    }
-    await refreshRuns();
-  }
-
-  /** Pull whatever log lines a run has produced since this card last looked. */
-  async function catchUpLog(run, card) {
-    const after = cursors.get(run.id);
-    // A run whose ring has already scrolled past this cursor — a tab away for
-    // longer than five hundred lines — restarts from the oldest line still
-    // held rather than silently showing a gap as continuity.
-    const from = after === undefined ? run.log_from : after;
-    let data;
-    try {
-      data = await api(
-        `/api/index/log?store=${encodeURIComponent(run.store)}&run=${run.id}${
-          from === undefined || from === null ? "" : `&after=${from}`
-        }`,
-      );
-    } catch (_) {
-      return;
-    }
-    for (const line of data.lines || []) logLine(card.log, line);
-    if (data.cursor !== null && data.cursor !== undefined) cursors.set(run.id, data.cursor);
-  }
-
-  function paint(data) {
-    const runs = data?.runs || [];
-    paintStart(runs);
-    const seen = new Set();
-    for (const run of runs) {
-      seen.add(run.id);
-      let card = drawn.get(run.id);
-      if (!card) {
-        card = runCard(run, {
-          hold: (wantPause) => control(run.store, wantPause ? "pause" : "resume", run.id),
-          stop: (queued) => {
-            if (queued) return control(run.store, "dequeue", run.id);
-            /* "Also delete the store". Ticked for a store this run is
-             * creating — it held nothing before, or the run has not started
-             * and nobody knows yet — because stopping that run leaves an
-             * empty store nobody asked for. Unticked for a store that held
-             * files, and the dialog says how many stay. */
-            const before = (drawn.get(run.id)?.last() || run).files_before;
-            const box = el("input", {
-              type: "checkbox",
-              class: "pick",
-              checked: !before,
-            });
-            const consequence = el("p", { class: "note" });
-            const files = `${n(before)} file${before === 1 ? "" : "s"}`;
-            const explain = () =>
-              setText(
-                consequence,
-                box.checked
-                  ? `${before ? `This store holds ${files}. ` : ""}The store is deleted once the run is undone. The files on disk are untouched.`
-                  : before
-                    ? `This store holds ${files}; they stay.`
-                    : "The store stays, empty.",
-              );
-            box.addEventListener("change", explain);
-            explain();
-            ask({
-              title: `Stop ${run.store}'s index run?`,
-              body: "Everything it has embedded so far is undone, so the store is left exactly as it was before the run started. The other runs are untouched.",
-              extra: [
-                el("label", { class: "filters" }, box, el("span", { class: "subtitle", text: "Also delete the store" })),
-                consequence,
-              ],
-              confirm: "Stop and undo",
-              tone: "bad",
-              run: () => control(run.store, "stop", run.id, { delete: box.checked }),
-            });
-          },
-          // Dismissing a card, which touches nothing in the store. No confirm,
-          // for the same reason taking a folder out of the queue has none.
-          remove: () => control(run.store, "remove", run.id),
-          // The card has just been unfolded and wants the lines it skipped.
-          reveal: () => {
-            const card = drawn.get(run.id);
-            if (card) catchUpLog(run, card);
-          },
-        });
-        // Not appended here: `arrange` below inserts it where the order puts
-        // it, so a new card is one insertion rather than an append and a move.
-        drawn.set(run.id, card);
-      } else {
-        card.absorb(run);
-      }
-      // Only what the reader can see. A finished card starts folded, and
-      // fetching the log of every one of them on the first paint is a request
-      // per card for lines nobody is looking at.
-      if (card.isOpen()) catchUpLog(run, card);
-    }
-    // A run the daemon has forgotten — its card was removed, its store was
-    // deleted, or the daemon restarted — loses its card rather than keeping a
-    // stale one.
-    for (const [id, card] of drawn) {
-      if (seen.has(id)) continue;
-      card.node.remove();
-      drawn.delete(id);
-      cursors.delete(id);
-    }
-
-    /* Live runs above finished ones, and newest first within each half. The
-     * run somebody is watching used to be appended below every card that had
-     * already finished, which on the fourth run put it off the bottom of the
-     * screen. */
-    const order = runs
-      .slice()
-      .sort((a, b) => {
-        const live = Number(TICKING.has(b.status)) - Number(TICKING.has(a.status));
-        return live || (b.id || 0) - (a.id || 0);
-      })
-      .map((run) => drawn.get(run.id)?.node)
-      .filter(Boolean);
-    // Only what is out of place moves. Every card used to be re-appended once
-    // a second, which blurred the button under the reader's keyboard and
-    // threw every log back to its top.
-    arrange(cards, order);
-
-    // "N runs queued." is an answer to a button, and it stops being true the
-    // moment nothing is waiting: the cards say the rest. It sits in the button
-    // row, so its going moves nothing under it.
-    const queuing = runs.some((run) => run.status === "queued") || (data?.queue || []).length > 0;
-    const held = runs.some((run) => run.status === "review");
-    if ((transient === "queued" && !queuing) || (transient === "scan" && !held)) {
-      transient = false;
-      say("");
-    }
-
-    clearDone.hidden = !runs.some((run) => !TICKING.has(run.status));
-
-    /* A page with nothing on it says nothing.
-     *
-     * Before the split this page ended in three cards about the corpus, so an
-     * idle machine still had something under the button band. Those moved to
-     * `Inside the index`, and what was left on a machine with no run in flight
-     * was a heading, a text box and four buttons over half a screen of white.
-     * The design draws the run card in both states; this is its idle one. */
-    idle.hidden = runs.length > 0 || (data?.queue || []).length > 0;
-
-    /* The queue, one row per waiting run, kept across polls like the cards.
-     * It was rebuilt whole on every poll while anything waited, so the "Take
-     * out of the queue" button under the pointer was a different button each
-     * second and lost its focus with the one before it. A row's store and
-     * paths are fixed for its run; only its place in line moves. */
-    const queue = data?.queue || [];
-    queueCard.hidden = !queue.length;
-    const waiting = new Set();
-    for (const row of queue) {
-      const key = String(row.run ?? row.store);
-      waiting.add(key);
-      let drawnRow = queued.get(key);
-      if (!drawnRow) {
-        const position = el("span", { class: "key" });
-        drawnRow = {
-          position,
-          node: el(
-            "div",
-            { class: "queue-row" },
-            position,
-            el("span", { class: "name", text: row.store }),
-            pathCell((row.paths || []).join(", ")),
-            el("span", { class: "spacer" }),
-            el("button", {
-              class: "button secondary small",
-              type: "button",
-              text: "Take out of the queue",
-              // Nothing of it was embedded, so there is nothing to undo and
-              // nothing to confirm.
-              onclick: () => control(row.store, "dequeue", row.run),
-            }),
-          ),
-        };
-        queued.set(key, drawnRow);
-      }
-      setText(drawnRow.position, `${row.position}`);
-    }
-    for (const [key, row] of queued) {
-      if (waiting.has(key)) continue;
-      row.node.remove();
-      queued.delete(key);
-    }
-    arrange(
-      queueList,
-      queue.map((row) => queued.get(String(row.run ?? row.store)).node),
-    );
-
-    paintSettings(data?.limits, data?.compaction, data?.vector_cache);
-  }
-
-  async function saveSetting(key, value) {
-    // The answer is said inside the card, under the three fields. On the
-    // page's note it appeared above everything, pushing the card that had just
-    // been typed into down a line at the moment it was being looked at.
-    try {
-      const answer = await post("/api/index/settings", { [key]: value });
-      settingsNote.className = "note";
-      // What the daemon is running with now, in its words: all three take
-      // effect at once, the running runs at their next batch.
-      setText(settingsNote, answer.applied ? `Saved — ${answer.applied}.` : "Saved.");
-      paintSettings(answer.limits, answer.compaction, answer.vector_cache);
-    } catch (e) {
-      settingsNote.className = "note bad";
-      setText(settingsNote, e.message);
-    }
-  }
-
-  /* The machine-limits card, built on the first reading and patched in place
-   * after it.
-   *
-   * It used to be rebuilt with `fill` whenever any field of any limit moved,
-   * and one of them always did: two reasons quoted the memory free now, and
-   * the memory ceiling is derived from it, so the card was torn down and
-   * rebuilt about once a second — under the cursor of anyone typing a number
-   * into it, and with a new input in place of the focused one. Now a changed
-   * number is a changed text node and nothing else. */
-  const settingsNote = el("div", { class: "note" });
-  const compactSection = compactionSettings(saveSetting);
-  const accel = accelSection();
-  let limitsCard = null;
-  function paintSettings(limits, compaction, vectorCache) {
-    if (!limits) return;
-    const machine = limits.machine || {};
-    if (!limitsCard) {
-      const cores = document.createTextNode("");
-      const total = document.createTextNode("");
-      const free = document.createTextNode("");
-      limitsCard = {
-        cores,
-        total,
-        free,
-        fields: [
-          settingField("runs_at_once", "runs at once", limits.runs_at_once, saveSetting),
-          settingField("embed_threads", "threads each", limits.embed_threads, saveSetting),
-          settingField("index_memory_mb", "MiB per store", limits.index_memory_mb, saveSetting),
-        ],
-      };
-      fill(
-        settingsCard,
-        el("span", { class: "eyebrow", text: "How hard this machine may work" }),
-        el(
-          "p",
-          { class: "subtitle" },
-          cores,
-          " logical core(s), ",
-          total,
-          " MiB of memory, ",
-          free,
-          " MiB free now. Each value below starts from that and is yours to change — they answer each other, so raising one moves what the others suggest. Each stops where this machine does.",
-        ),
-        el(
-          "div",
-          { class: "settings" },
-          limitsCard.fields.map((field) => field.node),
-        ),
-        settingsNote,
-        compactSection.node,
-        accel.node,
-      );
-    }
-    compactSection.update(compaction, vectorCache);
-    // Every field of every limit, every time, and each patch is a no-op when
-    // nothing moved. `embed_threads` is derived from the runs actually in
-    // force, so changing `runs at once` changes the *sentence* under `threads
-    // each` while leaving its number alone — which is why the three are
-    // patched together rather than only the one that was saved.
-    setText(limitsCard.cores, `${machine.logical_cores}`);
-    setText(limitsCard.total, n(machine.total_memory_mb));
-    setText(limitsCard.free, n(machine.available_memory_mb));
-    const [runsAtOnce, threads, memory] = limitsCard.fields;
-    runsAtOnce.update(limits.runs_at_once);
-    threads.update(limits.embed_threads);
-    memory.update(limits.index_memory_mb);
-  }
-
-  // The path field takes one path per line, so several folders can be started
-  // without the picker at all.
-  const field = el("textarea", {
-    rows: "2",
-    placeholder: "~/work/api\n~/work/cli",
-    value: state.pendingPath || "",
-  });
-  state.pendingPath = "";
-
-  const target = el(
-    "select",
-    { class: "select", "aria-label": "Where to index into" },
-    el("option", { value: "each", text: "each folder becomes its own store" }),
-    liveStores().map((store) =>
-      el("option", { value: store.name, text: `add to ${store.name}` }),
-    ),
-  );
-
-  /* Which stores could hold the paths in the box.
-   *
-   * A store is about its roots, and indexing a folder into a store whose roots
-   * do not cover it is how the `semlith` store came to hold 262 files
-   * belonging to `ultraship`. The daemon refuses it now; this is so the
-   * dropdown does not offer it in the first place. */
-  function paintTargets() {
-    const paths = field.value
-      .split("\n")
-      .map((path) => path.trim())
-      .filter(Boolean);
-    const covers = (store) =>
-      !paths.length ||
-      paths.every((path) =>
-        (store.roots || []).some((root) => root.present && path.startsWith(root.path)),
-      );
-    const chosen = target.value;
-    fill(
-      target,
-      el("option", { value: "each", text: "each folder becomes its own store" }),
-      liveStores().map((store) =>
-        el("option", {
-          value: store.name,
-          text: covers(store)
-            ? `add to ${store.name}`
-            : `add to ${store.name} — outside its roots`,
-          disabled: !covers(store),
-        }),
-      ),
-    );
-    // A selection that has just become invalid falls back to the choice that
-    // is always right: a folder of its own.
-    target.value = [...target.options].some((o) => o.value === chosen && !o.disabled)
-      ? chosen
-      : "each";
-  }
-  field.addEventListener("input", paintTargets);
-  // New paths are a new request: the button offers to scan them.
-  field.addEventListener("input", () => paintStart(state.runs?.runs));
-  paintTargets();
-
-  fill(
-    urlTarget,
-    liveStores().map((store) => el("option", { value: store.name, text: store.name })),
-  );
-  // With one store there is no choice to make, so the panel makes it. With
-  // several the field starts empty and the button says so rather than the
-  // request being refused by a control on another panel.
-  const only = liveStores();
-  urlTarget.value = only.length === 1 ? only[0].name : "";
-  if (only.length !== 1) {
-    urlTarget.prepend(el("option", { value: "", text: "choose a store…" }));
-    urlTarget.value = "";
-  }
-
-  const picker = folderPicker({
-    multiple: true,
-    onChoose: (paths) => {
-      if (!paths || !paths.length) return;
-      const already = field.value.split("\n").map((p) => p.trim()).filter(Boolean);
-      field.value = [...new Set([...already, ...paths])].join("\n");
-      field.rows = Math.min(8, Math.max(2, field.value.split("\n").length));
-      paintStart(state.runs?.runs);
-    },
-    onError: (message) => complain(message),
-  });
-
-  const projects = projectsChecklist({
-    onChoose: (paths) => {
-      field.value = paths.join("\n");
-      field.rows = Math.min(8, Math.max(2, paths.length));
-      target.value = "each";
-      paintStart(state.runs?.runs);
-    },
-    onError: (message) => complain(message),
-  });
-
-  const folderButton = el(
-    "button",
-    {
-      class: "button secondary",
-      type: "button",
-      "aria-pressed": "false",
-      onclick: () => reveal("picker"),
-    },
-    icon(ICONS.folder),
-    "Choose folders…",
-  );
-  const projectsButton = el(
-    "button",
-    {
-      class: "button secondary",
-      type: "button",
-      "aria-pressed": "false",
-      onclick: () => reveal("projects"),
-    },
-    icon(ICONS.folder),
-    "Projects under a folder…",
-  );
-  const urlButton = el(
-    "button",
-    {
-      class: "button secondary",
-      type: "button",
-      "aria-pressed": "false",
-      onclick: () => reveal("url"),
-    },
-    icon(ICONS.file),
-    "Add from a URL",
-  );
-  /* The machine's three numbers are a panel like the others rather than a card
-   * standing open under the page. They are read once, changed rarely, and
-   * having them permanently on screen gave the most static thing here the most
-   * room. */
-  const settingsButton = el(
-    "button",
-    {
-      class: "button secondary",
-      type: "button",
-      "aria-pressed": "false",
-      onclick: () => reveal("settings"),
-    },
-    icon(ICONS.sliders),
-    "Machine limits",
-  );
-
-  /* The four ways to open something here are mutually exclusive: two open at
-   * once is two answers to one question. */
-  function reveal(which) {
-    const wantPicker = which === "picker" && !picker.isOpen();
-    const wantProjects = which === "projects" && !projects.isOpen();
-    const wantUrl = which === "url" && urlCard.hidden;
-    const wantSettings = which === "settings" && settingsCard.hidden;
-    if (!wantPicker) picker.close();
-    if (!wantProjects) projects.close();
-    urlCard.hidden = !wantUrl;
-    settingsCard.hidden = !wantSettings;
-    if (wantPicker) picker.open("");
-    if (wantProjects) projects.open("");
-    if (wantUrl) urlField.focus();
-    // "Projects under a folder…" makes each project its own store, so an
-    // "add to <store>" sitting beside it is an instruction that contradicts
-    // the picker that is open.
-    if (wantProjects) target.value = "each";
-    target.disabled = wantProjects;
-    target.title = wantProjects
-      ? "Each project under the folder becomes its own store."
-      : "";
-    folderButton.setAttribute("aria-pressed", String(wantPicker));
-    projectsButton.setAttribute("aria-pressed", String(wantProjects));
-    urlButton.setAttribute("aria-pressed", String(wantUrl));
-    settingsButton.setAttribute("aria-pressed", String(wantSettings));
-  }
-
-  const idle = el(
-    "div",
-    { class: "card pad run-idle" },
-    el(
-      "div",
-      { class: "card-head" },
-      el("h2", { text: "Nothing is being read right now" }),
-      el("span", { class: "spacer" }),
-      el("span", { class: "mono-chip", text: "queued · writer idle" }),
-    ),
-    el("p", {
-      class: "subtitle",
-      text: "Name a folder above and press Scan: the plan comes first, then Start indexing. The run lives in the daemon, so you can close this tab and come back to it.",
-    }),
-    el("p", {
-      class: "note",
-      text: "Checkpointed every 30 seconds: vectors are written before the files they cover are marked indexed, so a run that is killed resumes rather than starting again.",
-    }),
-  );
-
-  /* One button for the whole flow (2.7): it reads Scan, and a scan holds
-   * its runs after the scan phase; while any run is held it reads Start
-   * indexing, which queues them. A clean scan waits for the press too, so
-   * nothing is ever embedded before its plan has been on screen. */
-  const start = el("button", { class: "button", type: "button", text: "Scan" });
-  const discard = el("button", {
-    class: "button secondary",
-    type: "button",
-    text: "Discard scan",
-    hidden: "",
-  });
-  const scan = scanPanel();
-  let scanning = false;
-  /* The runs this form just started. Until they end, or somebody names
-   * something new to read, the button says the work is going rather than
-   * offering to scan paths the field no longer holds. */
-  let launched = new Set();
-  function paintStart(runs) {
-    const held = (runs || []).filter((run) => run.status === "review");
-    const going = (runs || []).some(
-      (run) => launched.has(run.id) && TICKING.has(run.status) && run.status !== "review",
-    );
-    if (!going || field.value.trim()) launched = new Set();
-    const indexing = going && !field.value.trim();
-    setText(
-      start,
-      scanning ? "Scanning…" : held.length ? "Start indexing" : indexing ? "Indexing…" : "Scan",
-    );
-    start.disabled = scanning || indexing;
-    discard.hidden = !held.length || scanning;
-    scan.paint(runs);
-  }
-  const addButton = el("button", {
-    // The accent shape, like `Start indexing` beside it. Both of them begin
-    // work on the machine, and one of the two reading as a quiet secondary
-    // made the URL card look like a thing that had not been finished.
-    class: "button",
-    type: "button",
-    text: "Fetch and index",
-  });
-
-  /** Ask the daemon to start the runs, and let the poll draw them. */
-  async function begin(route, body) {
-    start.disabled = true;
-    try {
-      const answer = await post(route, body);
-      const started = (answer.runs || []).filter((run) => run.run !== undefined);
-      const refused = (answer.runs || []).filter((run) => run.error);
-      transient = body.review === "always" ? "scan" : "queued";
-      const many = started.length === 1 ? "" : "s";
-      const done =
-        body.review === "always"
-          ? `Scanned ${started.length} folder${many}: the plan is below. Press Start indexing when it looks right`
-          : `${started.length} run${many} queued`;
-      say(`${done}${refused.length ? `; ${refused.length} refused` : ""}.`);
-      if (refused.length) {
-        complain(refused.map((run) => `${run.path}: ${run.error}`).join("; "));
-      }
-      // Straight away rather than on the next tick: the cards are the answer
-      // to the button, and a second of nothing reads as a button that failed.
-      await refreshStores();
-      await refreshRuns();
-      return null;
-    } catch (e) {
-      complain(e.message);
-      return e.message;
-    } finally {
-      start.disabled = false;
-    }
-  }
-
-  start.addEventListener("click", async () => {
-    const held = scan.held();
-    if (held.length) {
-      start.disabled = true;
-      try {
-        for (const run of held) {
-          await post("/api/index/control", { store: run.store, run: run.id, action: "start" });
-        }
-        transient = "queued";
-        say(`${held.length} run${held.length === 1 ? "" : "s"} queued.`);
-        // What was asked for is on its way; the field is ready for the next.
-        launched = new Set(held.map((run) => run.id));
-        field.value = "";
-        field.rows = 2;
-        paintTargets();
-      } catch (e) {
-        complain(e.message);
-      }
-      await refreshRuns();
-      paintStart(state.runs?.runs);
-      return;
-    }
-    const paths = field.value
-      .split("\n")
-      .map((path) => path.trim())
-      .filter(Boolean);
-    if (!paths.length) {
-      complain("Give a path to scan, or choose a folder.", field);
-      return;
-    }
-    scanning = true;
-    paintStart(state.runs?.runs);
-    await begin("/api/index", { path: paths, store: target.value, review: "always" });
-    scanning = false;
-    paintStart(state.runs?.runs);
-  });
-
-  discard.addEventListener("click", async () => {
-    for (const run of scan.held()) {
-      // A folder that had no store before its scan leaves none behind.
-      await control(run.store, "stop", run.id, run.files_before === 0 ? { delete: true } : {});
-      await control(run.store, "remove", run.id);
-    }
-    say("Scan discarded.");
-    await refreshStores();
-    await refreshRuns();
-    paintStart(state.runs?.runs);
-  });
-
-  addButton.addEventListener("click", async () => {
-    const url = urlField.value.trim();
-    if (!url) {
-      urlNote.className = "note bad";
-      urlNote.textContent = "Give an https URL to fetch.";
-      urlField.focus();
-      return;
-    }
-    urlNote.className = "note";
-    urlNote.textContent = "";
-    if (!urlTarget.value) {
-      urlNote.className = "note bad";
-      urlNote.textContent =
-        "Pick the store to fetch into, in the selector beside this field.";
-      urlTarget.focus();
-      return;
-    }
-    const failed = await begin("/api/add", { url, store: urlTarget.value });
-    // A failed fetch leaves the card open with what went wrong on it. Closing
-    // it would take the message away and leave the page looking as though
-    // nothing had been asked for.
-    if (failed) {
-      urlNote.className = "note bad";
-      urlNote.textContent = failed;
-      urlCard.hidden = false;
-    }
-  });
-
-  clearDone.addEventListener("click", async () => {
-    const finished = (state.runs?.runs || []).filter((run) => !TICKING.has(run.status));
-    /* A card whose stop deleted its store has no store left to clear, and
-     * `clear` naming one was refused after it had already dropped every such
-     * card — so the refusal landed on the page note over the cards. Those are
-     * removed one by one, by run, which the route answers without a store. */
-    const gone = (run) => (run.delete || "").startsWith("the store was deleted");
-    for (const run of finished.filter(gone)) await control(run.store, "remove", run.id);
-    const stores = new Set(finished.filter((run) => !gone(run)).map((run) => run.store));
-    for (const store of stores) await control(store, "clear");
-  });
-
-  paint(first);
-  // The page's only subscription. The shared poll decides when; this decides
-  // what with. No timer of this page's own.
-  // The poll hands this the runs it just read, and `paint` reads them off it.
-  // Calling it with nothing — which an added second painter made easy to do —
-  // redraws the page as though every run had ended.
-  state.onRuns = (data) => paint(data);
-  // The lanes with the runs: a lane starts, downloads and carries its share
-  // while a run is going, which is when the runs domain moves.
-  accel.refresh();
-  watchLive(["runs", "stores"], () => {
-    refreshRuns();
-    accel.refresh();
-  });
-  // A store deleted, or made, while the page is open: the dropdown stops
-  // offering the one that is gone. Not while it is open under the pointer.
-  state.onStores = () => {
-    if (document.activeElement !== target) paintTargets();
-  };
-
-  return el(
-    "div",
-    { class: "view" },
-    pageHead("Index", "What to read, and the run that reads it."),
-    says(
-      "Each folder becomes its own store, indexed by its own writer. A run lives in the daemon, not in this page — leaving, refreshing or closing the tab changes nothing, and a run ends only on its Stop or when ",
-      mono("semlith start"),
-      " does.",
-    ),
-    el(
-      "div",
-      { class: "field tall full area" },
-      el("span", { class: "prefix", text: "paths" }),
-      labelled("index-path", "Paths to index, one per line", field),
-    ),
-    /* Two groups on one line: the ways to choose what to read on the left,
-     * and where it goes and the button that reads it on the right, kept
-     * together when the line wraps. */
-    el(
-      "div",
-      { class: "index-bar" },
-      el("div", { class: "index-bar-group" }, folderButton, projectsButton, urlButton, settingsButton),
-      el("div", { class: "index-bar-group end" }, target, discard, start),
-    ),
-    note,
-    el(
-      "div",
-      { class: "scroller" },
-      /* The design's order.
-       *
-       * This page was the design's two merged — `INDEX`, which is the picked
-       * files and the run, and `CORPUS`, which is what the store already
-       * holds. They are two pages again: everything about what the store
-       * already contains moved to `Inside the index`, and what is left here is
-       * the question "read this" and the answer "reading it". */
-      /* Every panel the button band opens, in one slot directly under it.
-       *
-       * They were in four places: the folder picker here, the repository
-       * checklist and the URL card below the corpus cards, and the queue and
-       * the machine limits at the very foot of the page. Pressing `Choose
-       * folders…` opened something you were looking at; pressing any of the
-       * other three opened something a screen and a half away, with nothing
-       * saying it had happened. One slot, so a button and what it opens are
-       * always in the same relationship. */
-      picker.node,
-      projects.node,
-      fill(
-        urlCard,
-        el("span", { class: "eyebrow", text: "Add from a URL" }),
-        el("p", {
-          class: "subtitle",
-          text: "One https request, for exactly this URL — a page, a PDF, or a file on GitHub. Nothing is crawled and no credential is ever sent. The file is saved inside this store's downloads folder, never in your working tree.",
-        }),
-        el(
-          "div",
-          { class: "field tall full" },
-          el("span", { class: "prefix", text: "url" }),
-          labelled("index-url", "URL to fetch and index", urlField),
-        ),
-        el(
-          "div",
-          { class: "filters" },
-          labelled("index-url-store", "Fetch into", urlTarget),
-          el("span", { class: "spacer" }),
-          addButton,
-        ),
-        urlNote,
-      ),
-      /* What the scan found, first: it is waiting on the person reading. */
-      scan.node,
-      queueCard,
-      settingsCard,
-      /* Then the run itself. */
-      cards,
-      idle,
-      el("div", { class: "filters" }, el("span", { class: "spacer" }), clearDone),
-    ),
-  );
-}
-
-/* Inside the index: what the store already holds, measured.
- *
- * The design's CORPUS page, which until now was the bottom half of the
- * indexing page. Every figure comes from `/api/corpus`, which counts them out
- * of the store when it is called — the page's own subtitle says "measured, not
- * estimated", and a cached number under that sentence would make the page a
- * liar about itself.
- *
- * PDF pages, slides, spreadsheet cells and notebook cells are counted by the
- * extractors as they read each file (0.34.0) and held in `files.units`; a
- * store an older binary wrote gains them on its next index pass, and the
- * prose panel names the files still waiting.
- */
-
-/** Words a printed page holds, and words a reader gets through in a minute.
- *
- * Both are conventions rather than measurements, so they are written down
- * where the page can point at them: roughly 500 words on a page of A4 set at a
- * readable size, and 250 words a minute is the figure reading research has
- * settled on for prose. The word count they multiply is measured. */
-const WORDS_PER_PAGE = 500;
-const WORDS_PER_MINUTE = 250;
-
-/** What one kind of file holds: `412 pages · 9 PDFs`, or `31 files` for a
- * kind with no unit. Counted files only; the uncounted ones are named apart. */
-const KIND_NOUNS = { PDF: "PDF", "Slide deck": "deck", Spreadsheet: "spreadsheet", Notebook: "notebook" };
-function kindFigure(k) {
-  const plural = (count, word) => `${n(count)} ${word}${count === 1 ? "" : "s"}`;
-  if (!k.unit) return plural(k.count, "file");
-  const counted = k.count - k.uncounted;
-  if (!counted) return plural(k.count, KIND_NOUNS[k.name] || "file");
-  const unit = k.units === 1 ? k.unit.replace(/s$/, "") : k.unit;
-  return `${n(k.units)} ${unit} · ${plural(counted, KIND_NOUNS[k.name] || "file")}`;
-}
-
-/** `26 days`, `4 hours`, `18 minutes` — one unit, the largest that fits. */
-function spellDuration(minutes) {
-  if (minutes < 90) return `${Math.max(1, Math.round(minutes))} minutes`;
-  const hours = minutes / 60;
-  if (hours < 48) return `${Math.round(hours)} hours`;
-  return `${Math.round(hours / 24)} days`;
-}
-
-/** `7 years, 6 months` between two unix seconds. */
-function spellSpan(from, to) {
-  if (!from || !to || to <= from) return "—";
-  const months = Math.max(0, Math.round((to - from) / (86400 * 30.44)));
-  const years = Math.floor(months / 12);
-  const rest = months % 12;
-  if (!years) return `${months} month${months === 1 ? "" : "s"}`;
-  return `${years} year${years === 1 ? "" : "s"}${rest ? `, ${rest} month${rest === 1 ? "" : "s"}` : ""}`;
-}
-
-/** A label over a value, as the design's four small panels list their facts. */
-function factRow(label, value) {
-  return el(
-    "div",
-    { class: "kv-row" },
-    el("span", { class: "k", text: label }),
-    el("span", { class: "v", text: value }),
-  );
-}
-
-function factPanel(title, rows) {
-  return el(
-    "section",
-    { class: "card pad kv-panel" },
-    el("h2", { text: title }),
-    el("div", { class: "kv-list" }, rows.filter(Boolean)),
-  );
-}
-
-/** The hover card, in the design's shape: a title with its colour, then
- * label and value rows. Every card in the portal is built here — the canvases
- * and the elements that carry one alike — so they cannot drift apart.
- * `tone` is a class that colours the dot: `tone-N`, an edge tier, `blue` or
- * `accent`. */
-function tipCard(title, tone, rows) {
-  return el(
-    "div",
-    { class: "tip-card" },
-    el(
-      "div",
-      { class: "tip-head" },
-      el("span", { class: `legend-dot ${tone || "blue"}` }),
-      el("span", { class: "name", text: title }),
-    ),
-    rows.length
-      ? el(
-          "div",
-          { class: "tip-rows" },
-          rows.map(([label, value]) =>
-            el("div", { class: "tip-row" }, el("span", { class: "k", text: label }), el("span", { class: "v", text: String(value) })),
-          ),
-        )
-      : null,
-  );
-}
-
-/** An element's own card, carried as `data-tip-title`, `data-tip-tone` and a
- * JSON `data-tip-rows`, so it goes through the one delegated tooltip. */
-function tipCardOf(target) {
-  let rows = [];
-  try {
-    rows = JSON.parse(target.getAttribute("data-tip-rows") || "[]");
-  } catch (_) {
-    rows = [];
-  }
-  return tipCard(target.getAttribute("data-tip-title") || "", target.getAttribute("data-tip-tone"), rows);
-}
-
-/** The twelve months ending at the newest one the store holds.
- *
- * The design draws twelve bars. A store indexed this morning has one month in
- * it, and one bar in a full-width card is a chart that has failed rather than a
- * corpus that is young — so the months with nothing in them are drawn at zero
- * and the chart keeps its shape. */
-function twelveMonths(months) {
-  const known = [...months.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  if (!known.length) return [];
-  const [lastYear, lastMonth] = known[known.length - 1][0].split("-").map(Number);
-  const out = [];
-  for (let back = 11; back >= 0; back -= 1) {
-    // `Date.UTC` so the arithmetic wraps the year for us rather than by hand.
-    const at = new Date(Date.UTC(lastYear, lastMonth - 1 - back, 1));
-    const key = `${at.getUTCFullYear()}-${String(at.getUTCMonth() + 1).padStart(2, "0")}`;
-    out.push([key, months.get(key) || 0]);
-  }
-  return out;
-}
-
-const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-function monthLabel(key) {
-  const [year, month] = key.split("-").map(Number);
-  return `${MONTH_NAMES[month - 1]} ${year}`;
-}
-
-/** Chunks added per month, full width, as the design draws it. */
-function monthsCard(months, span) {
-  const bars = twelveMonths(months);
-  const peak = Math.max(1, ...bars.map(([, count]) => count));
-  const total = bars.reduce((sum, [, count]) => sum + count, 0) || 1;
-  return el(
-    "section",
-    { class: "card pad months-card" },
-    el(
-      "div",
-      { class: "card-head" },
-      el("h2", { text: "Chunks added per month" }),
-      el("span", { class: "spacer" }),
-      el("span", { class: "mono-chip", text: span }),
-    ),
-    bars.length
-      ? el(
-          "div",
-          { class: "month-chart" },
-          bars.map(([key, count], i) =>
-            el(
-              "div",
-              {
-                class: `month-col${i === bars.length - 1 ? " now" : ""}${count ? "" : " none"}`,
-                tabindex: "0",
-                "data-tip-title": monthLabel(key),
-                "data-tip-tone": i === bars.length - 1 ? "accent" : "blue",
-                "data-tip-rows": JSON.stringify([
-                  ["chunks added", n(count)],
-                  ["share of year", share(count, total)],
-                  ["vs. peak", share(count, peak)],
-                ]),
-              },
-              // Height as a share of the busiest month, and opacity with it, so
-              // a quiet month reads as quiet rather than only as short. A month
-              // with nothing in it still draws a sliver, because an absent bar
-              // and a bar at zero say different things.
-              sized("height", count ? Math.max(0.06, count / peak) : 0.05, { class: "col" }),
-            ),
-          ),
-        )
-      : el("div", { class: "rail-hint", text: "No files indexed yet." }),
-    bars.length
-      ? el(
-          "div",
-          { class: "month-axis" },
-          bars.map(([key], i) =>
-            el("span", {
-              // Five labels across twelve bars, as the design spaces them.
-              text: i % 3 === 0 || i === bars.length - 1 ? MONTH_NAMES[Number(key.split("-")[1]) - 1] : "",
-            }),
-          ),
-        )
-      : null,
-    el("p", { class: "note", text: "When semlith read the file, not when it was written." }),
-  );
-}
-
-/* The four confidences an edge can carry, in the order the graph rail lists
- * them, so the bar and the legend read the same way round everywhere. */
-const EDGE_TIERS = ["extracted", "resolved", "ambiguous", "unresolved"];
-
-/** Graph health, full width, as the design draws it. */
-function graphHealthCard(corpus) {
-  const tiers = new Map(corpus.tiers);
-  const total = EDGE_TIERS.reduce((sum, tier) => sum + (tiers.get(tier) || 0), 0);
-  const settled = (tiers.get("extracted") || 0) + (tiers.get("resolved") || 0);
-  // The share the README quotes is over the edges that could be settled at
-  // all: an unresolved edge names something no store here holds, and counting
-  // it against the resolver is counting a dependency nobody indexed.
-  const answerable = settled + (tiers.get("ambiguous") || 0);
-  return el(
-    "section",
-    { class: "card pad health-card-full" },
-    el(
-      "div",
-      { class: "card-head" },
-      el("h2", { text: "Graph health" }),
-      el("span", { class: "mono-chip", text: "counted from the edge table, every open store" }),
-    ),
-    el("span", { class: "eyebrow", text: "Call edges by tier" }),
-    total
-      ? el(
-          "div",
-          { class: "tier-bar", role: "img", "aria-label": EDGE_TIERS.map((t) => `${t} ${tiers.get(t) || 0}`).join(", ") },
-          EDGE_TIERS.map((tier) =>
-            // A tier with nothing in it still draws a sliver, because a legend
-            // that names four and a bar that shows three is a bar with a
-            // missing piece nobody can find.
-            sized("width", Math.max(0.01, (tiers.get(tier) || 0) / total), {
-              class: `seg ${tier}`,
-              tabindex: "0",
-              "data-tip-title": tier,
-              "data-tip-tone": tier,
-              "data-tip-rows": JSON.stringify([
-                ["edges", n(tiers.get(tier) || 0)],
-                ["share", share(tiers.get(tier) || 0, total)],
-                ["of total", n(total)],
-              ]),
-            }),
-          ),
-        )
-      : el("div", { class: "rail-hint", text: "No call edges yet." }),
-    el(
-      "div",
-      { class: "tier-legend" },
-      EDGE_TIERS.map((tier) =>
-        el(
-          "span",
-          { class: "tier-key" },
-          el("span", { class: `legend-dot ${tier}` }),
-          el("span", { text: `${tier} ${n(tiers.get(tier) || 0)}` }),
-        ),
-      ),
-    ),
-    el("p", {
-      class: "note",
-      // The design's caption is a note about its own mock. This is the same
-      // sentence about this store: what settled, and what the hints are for.
-      text: total
-        ? `${share(settled, answerable || 1)} of the answerable edges settled on one definition. Unresolved ones name code no open store holds — the standard library, a dependency nobody indexed, a typo.`
-        : "Index something with a language that carries edges and this fills in.",
-    }),
-    el(
-      "div",
-      { class: "health-columns" },
-      el(
-        "div",
-        { class: "health-col" },
-        el("span", { class: "eyebrow", text: "Unresolved targets" }),
-        el("span", {
-          class: "health-figure",
-          text: total ? `${n(corpus.unresolved)} · ${share(corpus.unresolved, total)}` : "—",
-        }),
-        corpus.unresolvedNames.length
-          ? el(
-              "div",
-              { class: "chips" },
-              corpus.unresolvedNames.slice(0, 7).map(([name, count]) =>
-                el("span", {
-                  class: "chip-flat",
-                  tabindex: "0",
-                  "data-tip-title": name,
-                  "data-tip-rows": JSON.stringify([["calls", n(count)]]),
-                  text: name,
-                }),
-              ),
-            )
-          : null,
-        el("p", { class: "note", text: "Calls into code the store does not hold; hidden from views by default." }),
-      ),
-      el(
-        "div",
-        { class: "health-col" },
-        el("span", { class: "eyebrow", text: "Names with several definitions" }),
-        el("span", { class: "health-figure", text: n(corpus.ambiguousNames) }),
-        el(
-          "div",
-          { class: "kv-list" },
-          corpus.ambiguousWorst.length
-            ? corpus.ambiguousWorst.slice(0, 5).map(([name, count]) => factRow(name, n(count)))
-            : factRow("None", "—"),
-        ),
-      ),
-      el(
-        "div",
-        { class: "health-col" },
-        el("span", { class: "eyebrow", text: "Languages carrying edges" }),
-        el("span", {
-          class: "health-figure",
-          text: `${n(corpus.languagesWithEdges)} of ${n(corpus.languageCount)}`,
-        }),
-        el("button", {
-          class: "link-button",
-          type: "button",
-          text: "The language table",
-          onclick: () => go("about"),
-        }),
-      ),
-    ),
-  );
-}
-
-async function corpusView() {
-  await refreshStores();
-  let data;
-  try {
-    data = await api("/api/corpus");
-  } catch (e) {
-    return el("div", { class: "view" }, pageHead("Inside the index"), error(e.message));
-  }
-  // The ledger's own summary, for the last of the three cards at the foot. It
-  // is the one figure on this page that is about what the corpus *saved*
-  // rather than about what it contains, and the ledger is where that is
-  // measured.
-  let ledger = null;
-  try {
-    ledger = await api("/api/ledger");
-  } catch (_) {
-    /* the card says so */
-  }
-
-  const stores = (data.stores || []).filter((row) => !row.error);
-  const broken = (data.stores || []).filter((row) => row.error);
-  const sum = (field) => stores.reduce((total, row) => total + (row[field] || 0), 0);
-
-  const files = sum("files");
-  const chunks = sum("chunks");
-  const lines = sum("lines");
-  const words = sum("words");
-  const characters = sum("characters");
-  const blank = sum("blank_lines");
-  const comments = sum("comment_lines");
-  const symbols = sum("symbols");
-  const dim = stores.length ? stores[0].vector_dim || 384 : 384;
-  const numbers = chunks * dim;
-
-  // Merged across stores, because the reader has several open and the page is
-  // about what this machine holds.
-  const pile = (field, key) => {
-    const into = new Map();
-    for (const store of stores) {
-      for (const row of store[field] || []) {
-        into.set(row[key], (into.get(row[key]) || 0) + (row.count || row.lines || 0));
-      }
-    }
-    return [...into.entries()].sort((a, b) => b[1] - a[1]);
-  };
-  const languages = pile("languages", "language");
-  // Kinds merged with their units: a PDF's pages, a deck's slides, a sheet's
-  // or a notebook's cells, as `/api/corpus` counts them per store.
-  const kindTotals = new Map();
-  for (const store of stores) {
-    for (const k of store.kinds || []) {
-      const t = kindTotals.get(k.name) || { name: k.name, unit: k.unit, count: 0, units: 0, uncounted: 0 };
-      t.count += k.count || 0;
-      t.units += k.units || 0;
-      t.uncounted += k.uncounted || 0;
-      kindTotals.set(k.name, t);
-    }
-  }
-  const kinds = [...kindTotals.values()].sort((a, b) => b.count - a.count);
-  const uncounted = kinds.reduce((total, k) => total + k.uncounted, 0);
-  const ambiguousWorst = pile("ambiguous_worst", "name");
-  const languageTotal = languages.reduce((total, [, count]) => total + count, 0) || 1;
-
-  const longest = stores
-    .map((row) => row.longest_file)
-    .filter(Boolean)
-    .sort((a, b) => b.lines - a.lines)[0];
-  const deepest = Math.max(0, ...stores.map((row) => row.deepest_path || 0));
-  const first = Math.min(...stores.map((row) => row.first_indexed || 0).filter(Boolean));
-  const last = Math.max(0, ...stores.map((row) => row.last_indexed || 0));
-  const ms = stores.map((row) => row.median_query_ms || 0).filter(Boolean);
-  const median = ms.length ? Math.round(ms.reduce((a, b) => a + b, 0) / ms.length) : 0;
-
-  const months = new Map();
-  for (const store of stores) {
-    for (const row of store.months || []) {
-      months.set(row.month, (months.get(row.month) || 0) + row.chunks);
-    }
-  }
-  const busiest = [...months.entries()].sort((a, b) => b[1] - a[1])[0];
-
-  const empty = !files;
-  const pages = Math.round(words / WORDS_PER_PAGE);
-
-  /* The language mix, by line rather than by file.
-   *
-   * By file is the wrong denominator for this question: a repository of four
-   * hundred small TypeScript files and thirty large Rust ones is mostly Rust
-   * by every measure that matters to a reader, and mostly TypeScript by file
-   * count. The design measures lines, and this measures lines.
-   *
-   * `.mix-row .meter` deliberately, which is the shape the rest of the portal
-   * draws a proportion in and the shape the drive checks for a CSP-dropped
-   * width. */
-  const mixCard = el(
-    "section",
-    { class: "card pad mix-card" },
-    el(
-      "div",
-      { class: "card-head" },
-      el("h2", { text: "Language mix, by line" }),
-      el("span", { class: "spacer" }),
-      el("span", {
-        class: "mono-chip",
-        text: `${n(lines)} lines · ${languages.length} language${languages.length === 1 ? "" : "s"}`,
-      }),
-    ),
-    languages.length
-      ? el(
-          "div",
-          { class: "mix-bar", role: "img", "aria-label": languages.map(([k, v]) => `${k} ${v} lines`).join(", ") },
-          languages.map(([language, count], i) =>
-            sized("width", count / languageTotal, {
-              class: `seg tone-${i % 6}`,
-              tabindex: "0",
-              "data-tip-title": language,
-              "data-tip-tone": `tone-${i % 6}`,
-              "data-tip-rows": JSON.stringify([
-                ["lines", n(count)],
-                ["share", share(count, languageTotal)],
-                ["of total", n(languageTotal)],
-              ]),
-            }),
-          ),
-        )
-      : null,
-    languages.length
-      ? el(
-          "div",
-          { class: "mix" },
-          languages.slice(0, 8).map(([language, count], i) =>
-            el(
-              "div",
-              {
-                class: "mix-row",
-                tabindex: "0",
-                "data-tip-title": language,
-                "data-tip-tone": `tone-${i % 6}`,
-                "data-tip-rows": JSON.stringify([
-                  ["lines", n(count)],
-                  ["share", share(count, languageTotal)],
-                  ["of total", n(languageTotal)],
-                ]),
-              },
-              el("span", { class: `swatch tone-${i % 6}` }),
-              el("span", { class: "k", text: language }),
-              el("span", { class: "meter" }, sized("width", count / languageTotal, { class: `tone-${i % 6}` })),
-              el("span", { class: "v", text: n(count) }),
-              el("span", { class: "pct", text: share(count, languageTotal) }),
-            ),
-          ),
-        )
-      : el("div", { class: "rail-hint", text: "Nothing indexed yet." }),
-    el("p", { class: "note", text: "Every one of these carries graph edges as well as search." }),
-  );
-
-  const coverage = coveragePanel();
-
-  const unresolved = stores.reduce((sum, row) => sum + (row.unresolved || 0), 0);
-  const ambiguousNames = stores.reduce((sum, row) => sum + (row.ambiguous_names || 0), 0);
-  const languagesWithEdges = stores.reduce((sum, row) => sum + (row.languages_with_edges || 0), 0);
-  const tiers = pile("tiers", "name");
-  const spanLabel = first && last
-    ? `corpus spans ${new Date(first * 1000).toLocaleDateString(undefined, { month: "short", year: "numeric" })} → ${when(last)}`
-    : "nothing indexed yet";
-
-  const ratio = ledger && ledger.ratio ? ledger.ratio : 0;
-
-  return el(
-    "div",
-    { class: "view" },
-    pageHead(
-      "Inside the index",
-      "Measured from the store itself, not estimated. Nobody else can show you this, because nobody else keeps the whole corpus on your machine.",
-      {
-        pill: el("span", {
-          class: "mono-chip",
-          text: `${stores.length} store${stores.length === 1 ? "" : "s"} · recomputed on every read`,
-        }),
-      },
-    ),
-    // Two different failures, said differently. A store the fleet could not
-    // open at all is the shared notice every cross-store page draws; a store
-    // that opened and could not be measured is this page's own problem and is
-    // named here with what it said.
-    unreadableNotice(data.failed),
-    broken.length
-      ? el(
-          "div",
-          { class: "notice bad" },
-          el("div", {
-            class: "what",
-            text: `${broken.length} store${broken.length === 1 ? "" : "s"} could not be measured, so ${
-              broken.length === 1 ? "it is" : "they are"
-            } not in these figures.`,
-          }),
-          el(
-            "div",
-            { class: "rows tight" },
-            broken.map((row) =>
-              el(
-                "details",
-                { class: "unreadable" },
-                el("summary", {}, el("span", { class: "name", text: row.store })),
-                el("pre", { class: "code", text: row.error }),
-              ),
-            ),
-          ),
-        )
-      : null,
-    empty
-      ? el("p", { class: "subtitle", text: "Nothing is indexed yet, so there is nothing to measure." })
-      : null,
-    el(
-      "div",
-      { class: "stat-cards" },
-      stat("Lines of code", n(lines), "counted, not estimated — comments and blanks separated out"),
-      stat("Words indexed", n(words), "code, prose, slides, spreadsheets and notebooks together"),
-      stat(
-        "If it were printed",
-        `${n(pages)} pp`,
-        `a stack of A4 you can search in ${median ? `${median} ms` : "milliseconds"}`,
-      ),
-      stat(
-        "Reading time",
-        spellDuration(words / WORDS_PER_MINUTE),
-        "non-stop at 250 words a minute, no sleep",
-      ),
-    ),
-    /* The design's arrangement: two equal columns, the mix on the left and the
-     * four panels as a two-by-two on the right, each card as tall as what it
-     * holds. A row of four put the mix in a band of its own with a
-     * quarter-width column of facts under each end of it. */
-    el(
-      "div",
-      { class: "corpus-top" },
-      mixCard,
-      el(
-        "div",
-        { class: "corpus-panels" },
-        factPanel(
-          "What is in the prose",
-          // Pages, slides and cells where the format has them, counted as
-          // each file was read; files for everything else. A file an older
-          // binary stored has no count until the next index pass reads it
-          // again, and the panel says how many are waiting rather than
-          // printing a total that quietly leaves them out.
-          kinds.length
-            ? [
-                ...kinds.map((k) => factRow(k.name, kindFigure(k))),
-                uncounted
-                  ? factRow("Not counted yet", `${n(uncounted)} file${uncounted === 1 ? "" : "s"} · next index pass`)
-                  : null,
-              ]
-            : [factRow("Nothing indexed", "—")],
-        ),
-        factPanel("Shape of the code", [
-          factRow("Average line", lines ? `${Math.round(characters / lines)} chars` : "—"),
-          factRow("Comment lines", lines ? share(comments, lines) : "—"),
-          factRow("Blank lines", lines ? share(blank, lines) : "—"),
-          factRow("Longest file", longest ? `${shortPath(longest.path)} · ${n(longest.lines)}` : "—"),
-          factRow("Deepest path", `${deepest} folder${deepest === 1 ? "" : "s"}`),
-        ]),
-        factPanel("Time in the corpus", [
-          // Indexed, not written: the store records when it read a file and has
-          // never been told when anybody wrote it.
-          factRow("First read", Number.isFinite(first) && first ? new Date(first * 1000).toLocaleDateString() : "—"),
-          factRow("Newest write", last ? when(last) : "—"),
-          factRow("Span", spellSpan(first, last)),
-          factRow("Busiest month", busiest ? `${busiest[0]} · ${n(busiest[1])} chunks` : "—"),
-        ]),
-        factPanel("The vectors themselves", [
-          factRow("Vectors", n(chunks)),
-          factRow("Numbers stored", n(numbers)),
-          factRow("As float32 it would be", bytes(numbers * 4)),
-          factRow("Quantised to int8", bytes(numbers)),
-          factRow("Query at this size", median ? `${median} ms` : "not measured yet"),
-        ]),
-      ),
-    ),
-    monthsCard(months, spanLabel),
-    graphHealthCard({
-      tiers,
-      unresolved,
-      unresolvedNames: pile("unresolved_names", "name"),
-      ambiguousNames,
-      ambiguousWorst,
-      languagesWithEdges,
-      languageCount: languages.length,
-    }),
-    el(
-      "div",
-      { class: "fact-cards" },
-      el(
-        "section",
-        { class: "fact-card" },
-        el("h2", { text: `${n(characters)} characters` }),
-        el("p", { text: "Every keystroke in the corpus, kept on this machine and nowhere else." }),
-      ),
-      el(
-        "section",
-        { class: "fact-card" },
-        el("h2", { text: median ? `${median} ms` : "milliseconds" }),
-        el("p", {
-          text: median
-            ? "The middle of every retrieval this machine has recorded — meaning, not just words."
-            : "Ask this index something and the ledger will start recording how long it took.",
-        }),
-      ),
-      el(
-        "section",
-        { class: "fact-card" },
-        el("h2", { text: ratio ? `${ratio.toFixed(1)}× fewer tokens` : `${n(symbols)} definitions` }),
-        el("p", {
-          text: ratio
-            ? `What your agents read versus reading those files whole · coverage ${ledger.coverage}% · ${ledger.tier}`
-            : "Every definition the graph extracted from this corpus.",
-        }),
-      ),
-    ),
-    el("span", { class: "eyebrow", text: "What the graph covers" }),
-    coverage.node,
-  );
-}
-
-/** The repositories under a folder, as a checklist.
- *
- * A folder of projects is the case the folder picker handles badly: ticking
- * twelve repositories one directory at a time is twelve walks into and back
- * out of the same parent. This asks the daemon which of the children are
- * repositories and offers them all at once, already ticked.
- */
-function projectsChecklist(options) {
-  const { onChoose, onError } = options || {};
-  const card = el("div", { class: "card picker", hidden: true });
-  const ticked = new Set();
-
-  async function open(path) {
-    let data;
-    try {
-      data = await api(`/api/projects?path=${encodeURIComponent(path || "")}`);
-    } catch (e) {
-      if (onError) onError(e.message);
-      return false;
-    }
-    card.hidden = false;
-    const rows = data.projects || [];
-    // Repositories start ticked because that is what was asked for; one
-    // already indexed starts unticked but is shown, so the list says what is
-    // covered rather than quietly omitting it.
-    for (const row of rows) {
-      if (data.repositories && !row.indexed && !ticked.size) ticked.add(row.path);
-    }
-
-    const paint = () => open(data.path);
-    fill(
-      card,
-      el(
-        "div",
-        { class: "crumbs" },
-        // The same navigation the folder picker beside it has had all along.
-        // Without it this opened at the home directory and stayed there, so a
-        // monorepo anywhere else on the machine was unreachable.
-        el("button", {
-          class: "button secondary small",
-          type: "button",
-          text: "Up",
-          disabled: !data.parent,
-          onclick: () => open(data.parent),
-        }),
-        el("span", { class: "where", text: data.path }),
-        el("span", { class: "spacer" }),
-        el("button", {
-          class: "button secondary small",
-          type: "button",
-          text: "All",
-          onclick: () => {
-            for (const row of rows) ticked.add(row.path);
-            paint();
-          },
-        }),
-        el("button", {
-          class: "button secondary small",
-          type: "button",
-          text: "None",
-          onclick: () => {
-            ticked.clear();
-            paint();
-          },
-        }),
-        el("button", {
-          class: "button small",
-          type: "button",
-          disabled: !ticked.size,
-          text: ticked.size ? `Use ${ticked.size}` : "Use",
-          onclick: () => {
-            card.hidden = true;
-            if (onChoose) onChoose([...ticked]);
-            ticked.clear();
-          },
-        }),
-        el("button", {
-          class: "button secondary small",
-          type: "button",
-          text: "Close",
-          onclick: () => {
-            card.hidden = true;
-          },
-        }),
-      ),
-      el("p", {
-        class: "subtitle",
-        text: data.repositories
-          ? "The repositories directly under this folder. One level only: a monorepo is one store, and its nested repositories are its own business."
-          : "Nothing under this folder is a repository, so these are its plain subfolders.",
-      }),
-      el(
-        "div",
-        { class: "entries" },
-        rows.length
-          ? rows.map((row) => {
-              const box = el("input", {
-                type: "checkbox",
-                class: "tick",
-                "aria-label": `Index ${row.name}`,
-                checked: ticked.has(row.path),
-                onchange: () => {
-                  if (box.checked) ticked.add(row.path);
-                  else ticked.delete(row.path);
-                  paint();
-                },
-              });
+            rows.map((c) => {
+              const tags = [
+                ["skill", c.skill],
+                [`hook${c.hook_mode ? ` (${c.hook_mode})` : ""}`, c.hook],
+                ["rule", c.rules],
+              ].filter(([, st]) => st && st !== "paste");
               return el(
-                "div",
-                { class: "entry-row" },
-                box,
-                el(
-                  "button",
-                  {
-                    class: "entry",
-                    type: "button",
-                    title: `Open ${row.path}`,
-                    onclick: () => open(row.path),
-                  },
-                  icon(ICONS.folder),
-                  el("span", { class: "name", text: row.name }),
-                  row.indexed ? pill(`in ${row.indexed}`, "warn") : null,
-                ),
+                "tr",
+                {},
+                el("td", { class: "t-m nowrap", text: c.name }),
+                el("td", {}, pill(c.registered ? `registered (${c.scope || "user"})` : c.in_use || c.present ? "found · not registered" : "not installed", c.fault ? "red" : c.registered ? "green" : c.in_use || c.present ? "amber" : "grey", { dot: false })),
+                el("td", {}, tags.length ? el("div", { class: "row gap4" }, tags.map(([k, st]) => pill(`${k} ${st}`, AGENTFILE_TONE[st] || "grey", { dot: false, sm: true }))) : el("span", { class: "muted", text: "—" })),
+                el("td", { class: "ms", text: c.explain || c.repair || ((c.disabled_in || []).length ? `switched off in ${c.disabled_in.length} folder${c.disabled_in.length === 1 ? "" : "s"}` : c.in_use && !c.registered ? "Register it on Add a client" : "—") }),
               );
-            })
-          : empty("Nothing here that Semlith can index."),
-      ),
-      // Everything else under this folder, so the picker can be walked to
-      // wherever the projects actually are.
-      (data.folders || []).filter((f) => !rows.some((row) => row.path === f.path)).length
-        ? el(
-            "div",
-            { class: "entries" },
-            el("p", { class: "subtitle", text: "Or open one of these:" }),
-            (data.folders || [])
-              .filter((f) => !rows.some((row) => row.path === f.path))
-              .map((folder) =>
-                el(
-                  "div",
-                  { class: "entry-row" },
-                  el(
-                    "button",
-                    {
-                      class: "entry",
-                      type: "button",
-                      title: `Open ${folder.path}`,
-                      onclick: () => open(folder.path),
-                    },
-                    icon(ICONS.folder),
-                    el("span", { class: "name", text: folder.name }),
-                  ),
-                ),
-              ),
-          )
-        : null,
-    );
-    return true;
-  }
-
-  return {
-    node: card,
-    open,
-    close: () => {
-      card.hidden = true;
-    },
-    isOpen: () => !card.hidden,
-  };
-}
-
-// -------------------------------------------------------- install panel
-
-/* What this machine has set up, and the one thing the page can fix itself.
- *
- * The install commands that used to head this card belonged on a machine that
- * does not have semlith yet — which is not the machine reading this page. What
- * is useful here is the state of each step and a way to act on the one that is
- * not done.
- */
-function installPanel() {
-  const card = el("div", { class: "card pad install-panel" });
-  const title = () => el("span", { class: "card-title", text: "This machine" });
-  fill(card, title(), el("p", { class: "subtitle", text: "Checking…" }));
-
-  const stateWord = {
-    done: "done",
-    "already-done": "already done",
-    skipped: "not done",
-    failed: "failed",
-  };
-  const tone = (state) =>
-    state === "done" || state === "already-done" ? "good" : state === "failed" ? "bad" : "warn";
-
-  function paint(setup) {
-    const note = el("div", { class: "note" });
-
-    const fixPath = el("button", {
-      class: "button small",
-      type: "button",
-      text: "Add it to PATH",
-      onclick: async () => {
-        fixPath.disabled = true;
-        note.className = "note";
-        note.textContent = "Editing your shell profile…";
-        try {
-          const done = await post("/api/setup", { step: "path" });
-          note.textContent = `${done.step.detail} — open a new terminal for it to take effect.`;
-          paint(done.status);
-        } catch (e) {
-          note.className = "note bad";
-          note.textContent = e.message;
-          fixPath.disabled = false;
-        }
-      },
-    });
-
-    const install = el("button", {
-      class: "button small",
-      type: "button",
-      text: "Install it",
-      disabled: true,
-      onclick: async () => {
-        install.disabled = true;
-        check.disabled = true;
-        note.className = "note";
-        note.textContent = "Downloading and verifying…";
-        try {
-          const done = await post("/api/upgrade", { action: "apply" });
-          note.textContent = done.restart;
-        } catch (e) {
-          note.className = "note bad";
-          note.textContent = e.message;
-        } finally {
-          check.disabled = false;
-        }
-      },
-    });
-
-    const check = el("button", {
-      class: "button secondary small",
-      type: "button",
-      text: "Check for updates",
-      onclick: async () => {
-        check.disabled = true;
-        note.className = "note";
-        note.textContent = "Asking GitHub…";
-        try {
-          const found = await post("/api/upgrade", { action: "check" });
-          note.textContent = found.available
-            ? `${found.latest} is available; you are on ${found.installed}.`
-            : `Already on the newest build, ${found.installed}.`;
-          if (found.blocked) note.textContent += ` ${found.blocked}`;
-          install.disabled = !found.available || Boolean(found.blocked);
-        } catch (e) {
-          note.className = "note bad";
-          note.textContent = e.message;
-        } finally {
-          check.disabled = false;
-        }
-      },
-    });
-
-    fill(
-      card,
-      title(),
-      el(
-        "div",
-        { class: "rows" },
-        (setup.steps || []).map((step) =>
-          el(
-            "div",
-            { class: "kv step" },
-            pill(stateWord[step.state] || step.state, tone(step.state)),
-            el("span", { class: "card-title", text: step.name }),
-            lineCell(step.detail, "meta"),
-            // The one step this page can perform, and only while there is
-            // something to do: the step's own state is the answer, not the
-            // live PATH, which a daemon started before the edit never sees.
-            // The others are an install and a model download, which belong to
-            // the command that owns them.
-            step.name === "path" && step.state !== "already-done" && step.state !== "done"
-              ? el("span", { class: "spacer" })
-              : null,
-            step.name === "path" && step.state !== "already-done" && step.state !== "done"
-              ? fixPath
-              : null,
+            }),
           ),
         ),
       ),
-      note,
-      el("hr", { class: "rule" }),
-      el("span", { class: "eyebrow", text: `Installed version ${setup.version}` }),
-      el("div", { class: "actions" }, check, install),
-    );
-  }
-
-  api("/api/setup")
-    .then(paint)
-    .catch((e) => fill(card, title(), error(e.message)));
-
-  return card;
-}
-
-// ---------------------------------------------------------------- agents
-
-/* ---------------------------------------------------------------- doctor */
-
-/* `semlith doctor`, as a page.
- *
- * The parity rule is why it exists: the command was added in 0.18.0, so its
- * view is in the same release. It reads the same two functions the command
- * prints — the per-client report and the four Privacy rules that are readings
- * of this machine — so the page and the terminal cannot disagree about whether
- * a client is registered or a rule holds.
- *
- * The repair buttons post to `/api/privacy/fix`, which calls what
- * `semlith doctor --fix` calls. A second implementation in the browser would
- * be a second answer to what "safe" means. */
-async function doctorView() {
-  let data;
-  try {
-    data = await api("/api/doctor");
-  } catch (e) {
-    return el("div", { class: "view" }, pageHead("Doctor"), error(e.message));
-  }
-
-  const state = (c) => {
-    if (c.note) return { text: "cannot register", kind: null };
-    if (c.registered) return { text: `registered (${c.scope || "user"})`, kind: "good" };
-    if (!c.command) return { text: "not registered", kind: "bad" };
-    if (!c.present) return { text: "not installed", kind: null };
-    if (c.scope === "project")
-      return { text: "one project only", kind: "bad" };
-    return { text: "installed, not registered", kind: "bad" };
-  };
-
-  /* What this client has beyond its registration, in the words the terminal
-   * uses. A client that documents none of the three says nothing rather than
-   * three columns of "paste needed" on twenty rows that never asked for one. */
-  /* Each part with whether it is healthy, decided from the state rather than
-   * from the words: `hook present (soft)`, `always loaded` and `research
-   * agent` are all healthy, and a tone read off the text's last word painted
-   * every one of them amber. */
-  const steering = (r) => {
-    const parts = [];
-    if (r.skill && r.skill !== "paste") parts.push([`skill ${r.skill === "present" ? "linked" : r.skill}`, r.skill === "present"]);
-    if (r.hook && r.hook !== "paste")
-      parts.push([`hook ${r.hook}${r.hook_mode ? ` (${r.hook_mode})` : ""}`, r.hook === "present"]);
-    if (r.always_load != null) parts.push([r.always_load ? "always loaded" : "alwaysLoad missing", !!r.always_load]);
-    if (r.explorer != null) parts.push([r.explorer ? "research agent" : "no research agent", !!r.explorer]);
-    if (r.rules && r.rules !== "paste") parts.push([`rule ${r.rules}`, r.rules === "present"]);
-    return parts;
-  };
-
-  const clients = dataTable({
-    caption:
-      "Every documented client, whether it is on this machine, whether it is registered, whether the skill and the steering hook are installed, and what would fix it.",
-    rows: data.clients || [],
-    columns: [
-      { key: "name", label: "Client", sortable: true, value: (r) => r.name },
-      {
-        key: "state",
-        label: "semlith",
-        sortable: true,
-        value: (r) => state(r).text,
-        render: (r) => {
-          const s = state(r);
-          return pill(s.text, s.kind);
-        },
-      },
-      {
-        /* Registration says the client can reach semlith. Steering says its
-         * agent will actually call it, which is a different question and the
-         * one 0.24.0 exists to answer. Same source as the terminal's own line:
-         * `semlith doctor` computes both and this renders what it computed. */
-        key: "steering",
-        label: "Skill & hook",
-        sortable: true,
-        value: (r) => steering(r).map(([text]) => text).join(", "),
-        render: (r) => {
-          const parts = steering(r);
-          if (!parts.length) return el("span", { class: "sub", text: "—" });
-          return el("span", { class: "pills" }, ...parts.map(([text, good]) => pill(text, good ? "good" : "warn")));
-        },
-      },
-      {
-        key: "repair",
-        label: "To fix",
-        render: (r) =>
-          r.repair
-            ? copyField(r.repair)
-            : el("span", { class: "sub", text: r.note ? "nothing to run" : "—" }),
-      },
-    ],
-  });
-
-  const rulesBox = el("div", { class: "strip" });
-  const note = el("div", { class: "note" });
-
-  const paintRules = (rules) => {
-    rulesBox.textContent = "";
-    for (const rule of rules) {
-      const row = el(
-        "div",
-        { class: "stat fact" },
-        el("span", { class: "eyebrow", text: rule.id }),
-        el("span", {
-          /* Three states. A rule this platform cannot take a reading for —
-           * the two mode rules on Windows — is neither green nor red, because
-           * a tick it has not earned is worse than no tick. */
-          class:
-            rule.applicable === false
-              ? "fact-value"
-              : rule.ok
-                ? "fact-value"
-                : "fact-value bad",
-          text: rule.applicable === false ? "not applicable" : rule.ok ? "holds" : "fails",
-        }),
-        el("span", { class: "sub", text: rule.check }),
-      );
-      if (!rule.ok && rule.manual) row.appendChild(copyField(rule.manual));
-      /* A button only where a repair qualifies. A rule the daemon cannot
-       * repair — `private addresses` is set in the environment the daemon
-       * inherited, and no process can unset a variable in its parent's — gets
-       * the manual step and nothing else, rather than a button that apologises
-       * after the click. */
-      if (!rule.ok && rule.repair) {
-        const fix = el("button", {
-          class: "button secondary small",
-          type: "button",
-          text: "Fix",
-          onclick: async () => {
-            fix.disabled = true;
-            note.className = "note";
-            note.textContent = "Applying…";
-            try {
-              const out = await post("/api/privacy/fix", { rule: rule.id });
-              const applied = (out.applied || [])[0];
-              /* What it changed and what it was before, so the user can undo
-               * it by hand. The rules come back re-read, so the row redraws
-               * from a measurement rather than from the click having worked. */
-              note.textContent = applied
-                ? `${applied.path}: ${applied.now}, was ${applied.was}` +
-                  (applied.rechecked_ok ? "" : " — the rule still does not hold")
-                : "Nothing to apply.";
-              paintRules(out.rules || []);
-            } catch (e) {
-              note.className = "note bad";
-              note.textContent = e.message;
-              fix.disabled = false;
-            }
-          },
-        });
-        row.appendChild(fix);
-      }
-      rulesBox.appendChild(row);
-    }
-  };
-  paintRules(data.rules || []);
-
-  /* The GPU check: `semlith doctor --gpu`, from the page. Each lane embeds the
-   * committed known-answer texts and is compared with the CPU's fp32 vectors,
-   * so "the GPU works" is a cosine and a rate rather than a device name. On
-   * request only: the first check of a lane downloads what it needs, which is
-   * nothing a page load should do on its own. */
-  const gpuNote = el("div", { class: "note" });
-  const gpuTable = dataTable({
-    caption:
-      "Each accelerator lane's check: whether its vectors match the CPU's, on which device and variant, the lowest cosine over the known answers, and its rate.",
-    rows: [],
-    columns: [
-      { key: "lane", label: "Lane", value: (r) => LANE_NAMES[r.lane] || r.lane },
-      {
-        key: "result",
-        label: "Result",
-        value: (r) => (r.reason ? "n/a" : r.passed ? "ok" : "FAIL"),
-        render: (r) =>
-          r.reason ? pill("n/a", null) : r.passed ? pill("ok", "good") : pill("FAIL", "bad"),
-      },
-      { key: "device", label: "Device", value: (r) => r.device || r.reason || "—" },
-      { key: "variant", label: "Variant", value: (r) => r.variant || "—" },
-      {
-        key: "cosine",
-        label: "Cosine",
-        value: (r) => (typeof r.cosine === "number" ? r.cosine.toFixed(4) : "—"),
-      },
-      {
-        key: "rate",
-        label: "Chunks/s",
-        value: (r) => (typeof r.chunks_per_s === "number" ? perSecond(r.chunks_per_s) : "—"),
-      },
-    ],
-  });
-  gpuTable.node.hidden = true;
-  const gpuButton = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: "Run the GPU check",
-    onclick: async () => {
-      gpuButton.disabled = true;
-      gpuButton.setAttribute("aria-busy", "true");
-      setText(gpuButton, "Checking…");
-      gpuNote.className = "note";
-      setText(gpuNote, "Checking each lane. The first check of a lane downloads what it needs, so it can take a minute.");
-      try {
-        const answer = await post("/api/doctor/gpu", {});
-        gpuTable.update(answer.checks || []);
-        gpuTable.node.hidden = false;
-        setText(gpuNote, "");
-      } catch (e) {
-        gpuNote.className = "note bad";
-        setText(gpuNote, e.message);
-      } finally {
-        gpuButton.disabled = false;
-        gpuButton.removeAttribute("aria-busy");
-        setText(gpuButton, "Run the GPU check");
-      }
-    },
-  });
-
-  // What the table is a list of, said once above it rather than counted off
-  // the rows by the reader — the page is twelve rows and two of them
-  // matter.
-  const rows = data.clients || [];
-  const registered = rows.filter((c) => c.registered).length;
-  // Every row with a command in its To-fix cell, registered or not: a stale
-  // hook on a registered client is a fix like any other, and a header that
-  // said "0 to fix" above one read as the page contradicting itself.
-  const fixable = rows.filter((c) => c.repair).length;
-
-  return el(
-    "div",
-    { class: "view" },
-    pageHead(
-      "Doctor",
-      "Whether each agent client on this machine can reach semlith, and what to run for the ones that cannot.",
-    ),
-    /* The rules first, then the table.
-     *
-     * The clients table is twelve rows and pages ten at a time, so the
-     * rules underneath it were below a screenful of table on every visit —
-     * and they are the part that answers "is this machine set up correctly",
-     * which is the question the page is for. The table is the detail.
-     *
-     * The rules are already cards — one `.stat` each — so they sit in the view
-     * beside their heading rather than inside a second card. A card of cards
-     * is a border drawn around some borders. */
-    el(
-      "div",
-      { class: "head" },
-      el("span", { class: "card-title", text: "Rules" }),
-      el("span", {
-        class: "meta",
-        text: "what the daemon found when it looked, not what the documentation says",
-      }),
-    ),
-    rulesBox,
-    el(
-      "div",
-      { class: "card pad" },
-      el(
-        "div",
-        { class: "head" },
-        el("span", { class: "card-title", text: "GPU check" }),
-        el("span", { class: "spacer" }),
-        gpuButton,
-      ),
-      el("p", {
-        class: "subtitle",
-        text: "Whether each accelerator lane's vectors agree with the CPU's, and how fast it runs. The same check as semlith doctor --gpu.",
-      }),
-      gpuNote,
-      gpuTable.node,
     ),
     el(
       "div",
-      // `card pad`, like every other section on every other page. A bare card
-      // has no padding, so the title sat against the border and the table
-      // squared off the corner under it.
-      { class: "card pad" },
-      el(
-        "div",
-        { class: "head" },
-        el("span", { class: "card-title", text: "Clients" }),
-        el("span", { class: "spacer" }),
-        el("span", {
-          class: "meta",
-          text: `${n(registered)} registered · ${n(fixable)} to fix · ${n(rows.length)} known`,
-        }),
-      ),
-      clients.node,
+      { class: "auto-fit m220" },
+      (data.privacy?.rules || [])
+        .filter((r) => r.applicable !== false && r.check)
+        .slice(0, 6)
+        .map((r) => el("div", { class: "check-card" }, el("div", { class: "row nowrap" }, dot(r.ok ? "green" : "amber"), el("span", { class: "eyebrow grow min0 ell", text: r.id, title: r.id }), el("span", { class: `t-mono t-m ${r.ok ? "green-ink" : "amber-ink"}`, text: r.ok ? "holds" : "to fix" })), el("span", { class: "ink2 t-sm anywhere", text: r.check }), r.manual && !r.ok ? copyField(r.manual) : null)),
     ),
-    note,
   );
 }
 
-async function agentsView() {
-  let data;
-  try {
-    data = await api("/api/agents");
-  } catch (e) {
-    return el("div", { class: "view" }, pageHead("Agents"), error(e.message));
-  }
+// -------------------------------------------------------------------- ledger
 
-  noteAgents(data);
-  const clients = data.clients || [];
-  const tools = data.tools || [];
-  const live = data.connections || [];
-  const endpoint = data.endpoint || { url: "", open: false };
+const lg = { tab: "sessions", filter: null, q: "", store: "all", tier: "all", zero: false, replay: null };
 
-  // ---- the endpoint, in the page header
-  const address = el("code", { class: "text", text: endpoint.url });
-  const endpointNote = el("div", { class: "note" });
-  const toggle = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: endpoint.open ? "Stop" : "Start",
-    onclick: () => {
-      // Every other consequential action on this page confirms — delete a
-      // store, forget a file, stop a run — and this is the one that takes
-      // semlith away from every connected agent at once. Starting it back up
-      // costs nothing, so only the stop asks.
-      if (!endpoint.open) return apply();
-      ask({
-        title: "Close the MCP endpoint?",
-        body: "Every connected agent loses semlith until it is started again. The daemon, the watcher and the portal are unaffected, and Start puts it back.",
-        confirm: "Close the endpoint",
-        tone: "bad",
-        run: apply,
-      });
-    },
-  });
-
-  /** Open or close the endpoint, once whoever asked has confirmed. */
-  async function apply() {
-    toggle.disabled = true;
-    endpointNote.className = "note";
-    endpointNote.textContent = endpoint.open ? "Closing…" : "Opening…";
-    try {
-      const done = await post("/api/endpoint", { open: !endpoint.open });
-      endpoint.open = done.open;
-      toggle.textContent = done.open ? "Stop" : "Start";
-      endpointNote.textContent = done.open
-        ? "The endpoint is answering. A configured client reconnects on its next call."
-        : "The endpoint is closed. The daemon, the watcher and the portal are unaffected.";
-      fill(statePill, el("i", {}), done.open ? "answering" : "closed");
-      statePill.className = done.open ? "pill good" : "pill warn";
-    } catch (e) {
-      endpointNote.className = "note bad";
-      endpointNote.textContent = e.message;
-    } finally {
-      toggle.disabled = false;
-    }
-  }
-  const statePill = pill(endpoint.open ? "answering" : "closed", endpoint.open ? "good" : "warn");
-
-  // ---- rotation
-  const keyNote = el("div", { class: "note" });
-  const rotate = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: "Rotate key",
-    onclick: async () => {
-      rotate.disabled = true;
-      keyNote.className = "note";
-      keyNote.textContent = "Rotating…";
-      try {
-        const done = await post("/api/key", {});
-        // Only if the page was already showing the real one; otherwise the
-        // stanza still names the variable, which is now correct for the new
-        // key without anybody touching it.
-        if (stanzas.revealed) stanzas.key = done.key;
-        showClient(chosen);
-        const carried = done.updated || [];
-        // Said plainly, because the two halves have different consequences:
-        // what was rewritten needs nothing done to it, and what was not needs
-        // the stanza above pasted in before the old key stops working.
-        const rewrote = carried.length
-          ? `Carried the new key into ${carried.length} configuration file${
-              carried.length === 1 ? "" : "s"
-            }: ${carried.join(", ")}.`
-          : "No configuration file on this machine carried the old key.";
-        keyNote.textContent = done.previous_valid
-          ? `New key. ${rewrote} The previous one keeps working for fifteen minutes, so a session already open finishes — any client configured elsewhere needs the new stanza before then.`
-          : `New key. ${rewrote} The previous one is refused now; any client configured elsewhere needs the new stanza.`;
-      } catch (e) {
-        keyNote.className = "note bad";
-        keyNote.textContent = e.message;
-      } finally {
-        rotate.disabled = false;
-      }
-    },
-  });
-
-  // ---- the key itself, only when asked for
-  /* Masked until asked for. The route does not send a preview either: a
-   * preview of an agent key still begins `sml_`, and the point is that nothing
-   * about the credential arrives unasked. */
-  const MASKED = data.key_set ? "sml_" + "•".repeat(24) : "no key yet";
-  const keyBox = el("code", { class: "text", text: MASKED });
-  const reveal = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: "Reveal",
-    onclick: async () => {
-      if (stanzas.revealed) {
-        // Pressed again: put it away. A page left open on a screen should not
-        // keep showing a live credential because somebody looked at it once.
-        stanzas.revealed = false;
-        stanzas.key = "${" + KEY_ENV + "}";
-        keyBox.textContent = MASKED;
-        reveal.textContent = "Reveal";
-        showClient(chosen);
-        return;
-      }
-      reveal.disabled = true;
-      try {
-        const shown = await post("/api/agents/reveal", {});
-        stanzas.revealed = true;
-        stanzas.key = String(shown.key);
-        keyBox.textContent = stanzas.key;
-        reveal.textContent = "Hide";
-        showClient(chosen);
-      } catch (e) {
-        keyNote.className = "note bad";
-        keyNote.textContent = e.message;
-      } finally {
-        reveal.disabled = false;
-      }
-    },
-  });
-
-  // ---- connected clients
-  const connected = dataTable({
-    className: "w-agents",
-    caption: "Every documented client, whether it is on this machine, and whether it is registered.",
-    sort: "name",
-    grow: false,
-    rows: live,
-    columns: [
-      {
-        key: "name",
-        label: "Connected",
-        value: (c) => c.name,
-        render: (c) =>
-          el(
-            "div",
-            { class: "who" },
-            el("span", { class: "dot good" }),
-            c.name,
-            c.sessions > 1 ? el("span", { class: "meta", text: ` · ${n(c.sessions)} sessions` }) : null,
-          ),
-      },
-      { key: "version", label: "Version", className: "meta narrow-drop", value: (c) => c.version || "—" },
-      { key: "transport", label: "Transport", className: "meta", value: (c) => c.transport },
-      { key: "revision", label: "Revision", className: "meta narrow-drop", value: (c) => c.revision },
-      {
-        key: "queries",
-        label: "Queries",
-        className: "num",
-        value: (c) => c.queries,
-        render: (c) => n(c.queries),
-      },
-    ],
-  });
-
-  // ---- stanzas, grouped
-  const GROUPS = [
-    ["terminal", "Terminal"],
-    ["editor", "Editors"],
-    ["desktop", "Desktop"],
-  ];
-  /* What a stanza carries.
-   *
-   * The variable form by default: a configuration file that names
-   * `${SEMLITH_AGENT_KEY}` keeps working across every rotation, and a file that
-   * carries the key itself goes stale the moment somebody presses Rotate. The
-   * real key is fetched only when Reveal is pressed — `/api/agents` no longer
-   * returns it, so a page that is merely open never receives the credential
-   * that opens the MCP endpoint. */
-  const KEY_ENV = data.key_env || "SEMLITH_AGENT_KEY";
-  const stanzas = { key: "${" + KEY_ENV + "}", revealed: false };
-  const OS_NAMES = { macos: "macOS", linux: "Linux", windows: "Windows" };
-  let group = GROUPS.find(([id]) => clients.some((c) => c.group === id))[0];
-  let chosen = clients.findIndex((c) => c.group === group);
-  const tabs = el("div", { class: "tabs" });
-  const chips = el("div", { class: "filters" });
-  const body = el("div", { class: "stanza" });
-
-  /** The HTTP form, built here from the key the route just handed back. */
-  /** The placeholder the README prints where a real key goes. */
-  const KEY_SLOT = "${SEMLITH_AGENT_KEY}";
-
-  /** Whether a stanza configures the endpoint rather than a subprocess. */
-  const overHttp = (text) => text.includes("/mcp") || text.includes("--transport http");
-
-  function httpStanza() {
-    return `{\n  "mcpServers": {\n    "semlith": {\n      "url": "${endpoint.url}",\n      "headers": { "Authorization": "Bearer ${stanzas.key}" }\n    }\n  }\n}`;
-  }
-
-  function showGroup(id) {
-    group = id;
-    const first = clients.findIndex((c) => c.group === id);
-    showClient(first < 0 ? chosen : first);
-  }
-
-  function showClient(index) {
-    chosen = index;
-    const client = clients[index];
-    fill(
-      tabs,
-      GROUPS.map(([id, label]) => {
-        const count = clients.filter((c) => c.group === id).length;
-        return el(
-          "button",
-          {
-            class: "tab",
-            type: "button",
-            "aria-pressed": String(id === group),
-            onclick: () => showGroup(id),
-          },
-          label,
-          el("span", { class: "count", text: String(count) }),
-        );
-      }),
-    );
-    fill(
-      chips,
-      clients.map((c, i) =>
-        c.group === group
-          ? el("button", {
-              class: "chip",
-              type: "button",
-              "aria-pressed": String(i === chosen),
-              text: c.name,
-              onclick: () => showClient(i),
-            })
-          : null,
-      ),
-    );
-    if (!client) {
-      fill(body, empty("No client stanza is compiled into this build."));
-      return;
-    }
-    // The documented stanzas. They name ${SEMLITH_AGENT_KEY}, which is what a
-    // client should carry: it survives a rotation, and the key stays in one
-    // file with one set of permissions. Pressing Reveal substitutes the literal
-    // value for a reader who wants to paste it somewhere that cannot read an
-    // environment variable.
-    const own = (client.stanzas || []).map((s) => ({
-      format: s.format,
-      text: s.text.trimEnd().replaceAll(KEY_SLOT, stanzas.key),
-      // Where the block goes, and on which system: one client can document a
-      // file per operating system, and two unlabelled blocks read as two
-      // answers to one question.
-      where: s.path
-        ? `${s.os ? s.os.split(",").map((os) => OS_NAMES[os.trim()] || os).join(" and ") : "macOS, Linux and Windows"}: ${s.path}`
-        : null,
-    }));
-    // A one-line command belongs in a field with a Copy beside it, not in a
-    // slab of dark code: it is a thing you paste into a shell, not a file you
-    // are going to read.
-    // Shell one-liners, labelled by what they register rather than mixed in
-    // with the block above: several clients configure the endpoint in a file
-    // but can only add a subprocess from their CLI, and an unlabelled command
-    // under an HTTP stanza reads as a second way to do the same thing.
-    const shells = own.filter((s) => s.format === "sh");
-    const wired = shells.filter((s) => overHttp(s.text));
-    const spawned = shells.filter((s) => !overHttp(s.text));
-    const blocks = own.filter((s) => s.format !== "sh");
-    const http = blocks.filter((s) => overHttp(s.text));
-    const stdio = blocks.filter((s) => !overHttp(s.text));
-    const config = http.length ? http : stdio;
-    fill(
-      body,
+VIEWS.ledger = {
+  needs: (route) => ["ledger", "stores"].concat((route.parts[0] || "sessions") === "replay" ? ["replay"] : []),
+  live: ["ledger"],
+  render(route) {
+    lg.tab = route.parts[0] || "sessions";
+    const L = data.ledger || {};
+    const rec = recordingWord();
+    const recState = L.recording && typeof L.recording === "object" ? L.recording : { on: rec === "on", reason: rec === "on" ? null : "flag" };
+    const lockedOff = recState.reason === "flag" || recState.reason === "env";
+    const byClient = Object.entries(L.by_client || {}).sort((a, b) => b[1] - a[1]);
+    const maxClient = byClient.length ? byClient[0][1] : 1;
+    const sessionsAll = L.sessions || [];
+    const rowsAll = L.rows || [];
+    const match = (c) => !lg.filter || sameClient(c, lg.filter);
+    const zeroShare = L.queries ? (L.zero_hit / L.queries) * 100 : 0;
+    const lastRow = rowsAll[0];
+    const parts = [
       el(
         "div",
         { class: "head" },
-        el("span", { class: "card-title", text: client.name }),
-        el("span", { class: "meta", text: client.note }),
+        el("div", { class: "titles" }, el("div", { class: "row nowrap gap10" }, el("div", { class: "h1", text: "Retrieval ledger" }), pill(rec === "on" ? "recording" : rec === "paused" ? "paused" : "off", rec === "on" ? "green" : "grey", { pulse: rec === "on" })), el("div", { class: "lead", text: "Every query an agent ran and what it was sent — recorded on this machine, hash-chained, never uploaded." })),
+        toggle(
+          rec === "on",
+          rec === "on" ? "Recording" : lockedOff ? `Off — ${recState.reason === "env" ? "SEMLITH_LEDGER=0" : "--no-ledger"}` : "Recording paused",
+          async (v) => {
+            const out = await act(() => post("/api/ledger/recording", { on: v }), v ? "Recording again" : "Paused — nothing is recorded until you resume");
+            if (out) await loadMany(["ledger", "about"], true), paintChrome(), repaint();
+          },
+          { cls: "boxed strong", disabled: lockedOff, tip: lockedOff ? "This daemon was started with recording off; restart it without the flag to turn it on here" : null },
+        ),
+        btn({ class: "btn dark", onclick: () => go("reports") }, "Build a report"),
       ),
-      // A client with no HTTP stanza of its own gets the generic one, which is
-      // the shape most schemas take. A client with one gets its own: `httpUrl`
-      // for Gemini, `streamableHttp` for Cline, TOML for Codex — a generic block
-      // beside those is a second, wrong answer.
-      // One configuration block, not two. A client that can reach the
-      // endpoint is shown the endpoint; one that cannot — Zed and Claude
-      // Desktop, which have nowhere to put a header — is shown the subprocess
-      // it can run. Printing both left a reader choosing between two answers
-      // with nothing to choose on.
-      el("span", {
-        class: "eyebrow",
-        text: config.length && config === http
-          ? "Over HTTP — one endpoint, one key, no subprocess"
-          : "As a subprocess — no key needed",
-      }),
-      (config.length ? config : [{ text: httpStanza(), where: null }]).flatMap((s) => [
-        s.where ? el("span", { class: "meta", text: s.where }) : null,
-        codeBlock(s.text, "Copy stanza"),
-      ]),
-      wired.length ? el("span", { class: "eyebrow", text: "Or from a terminal" }) : null,
-      wired.map((s) => copyField(s.text, true)),
-      spawned.length
-        ? el("span", { class: "eyebrow", text: "Or add the subprocess from a terminal" })
-        : null,
-      spawned.map((s) => copyField(s.text, true)),
-    );
-  }
-  showClient(chosen);
-
-  /* `semlith setup --register-all`, as a control.
-   *
-   * Ten clients have no registration command of their own, so the only way
-   * semlith reaches them is by writing their configuration file — and
-   * `src/setup.rs` states the rule that bends: a tool that edits a file it does
-   * not own eventually corrupts one. It holds for every default install. This
-   * is the user overriding it for their own machine, which is why the plan is
-   * fetched and shown first and nothing is written until a second click.
-   *
-   * Each file is backed up beside itself before its first write, each merge
-   * keeps every key it did not come to change, and a file that does not parse
-   * is refused rather than replaced. */
-  const planBox = el("div", { class: "rules" });
-  const planNote = el("div", { class: "note" });
-  let planned = null;
-
-  /* The safe one is the primary. The amber button that writes into ten real
-   * configuration files across the machine used to be the primary and the dry
-   * run beside it the secondary, so the visual hierarchy was upside down
-   * against the risk and the writing button was reachable without ever having
-   * looked at the preview. */
-  const write = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: "Write these files",
-    hidden: true,
-    onclick: async () => {
-      write.disabled = true;
-      planNote.className = "note";
-      planNote.textContent = "Writing…";
-      try {
-        const out = await post("/api/agents/register", { confirm: true });
-        const written = out.written || [];
-        planNote.textContent = written.length
-          ? `Wrote ${written.length} file${written.length === 1 ? "" : "s"}. Each has a .semlith-backup beside it.`
-          : "Nothing needed writing.";
-        planned = out.plan || [];
-        paintPlan();
-      } catch (e) {
-        planNote.className = "note bad";
-        planNote.textContent = e.message;
-        write.disabled = false;
-      }
-    },
-  });
-
-  const paintPlan = () => {
-    planBox.textContent = "";
-    for (const item of planned || []) {
-      const what =
-        item.action === "create"
-          ? "will be created"
-          : item.action === "merge"
-            ? "will be merged into"
-            : item.action === "already-done"
-              ? "already has semlith"
-              : `will be left alone — ${item.reason}`;
-      planBox.appendChild(
+    ];
+    if (!L.queries)
+      parts.push(
         el(
           "div",
-          { class: "rule-row" },
-          el(
-            "div",
-            { class: "rule-head" },
-            el("span", { class: "rule-id", text: item.client }),
-          ),
-          el("code", { class: "rule-check", text: item.path }),
-          el("span", { class: "sub", text: what }),
+          { class: "drop-hint sm" },
+          el("div", { class: "col gap2 grow" }, el("span", { class: "t-b", text: "Nothing recorded yet" }), el("span", { class: "muted t-sm", text: rec === "on" ? "The ledger fills in the moment an agent asks something." : "Recording is off, so nothing will be listed until it is on." })),
+          btn({ class: "btn", onclick: () => go("agents") }, "Check agents"),
         ),
       );
-    }
-    const pending = (planned || []).some(
-      (p) => p.action === "create" || p.action === "merge",
-    );
-    write.hidden = !pending;
-    write.disabled = !pending;
-  };
-
-  const preview = el("button", {
-    class: "button small",
-    type: "button",
-    text: "Show what would be written",
-    onclick: async () => {
-      preview.disabled = true;
-      planNote.className = "note";
-      planNote.textContent = "Reading…";
-      try {
-        const out = await post("/api/agents/register", {});
-        planned = out.plan || [];
-        planNote.textContent = planned.length
-          ? "Nothing has been written yet."
-          : "There is no client on this machine whose file semlith would write.";
-        paintPlan();
-      } catch (e) {
-        planNote.className = "note bad";
-        planNote.textContent = e.message;
-      } finally {
-        preview.disabled = false;
-      }
-    },
-  });
-
-  const registerAll = el(
-    "div",
-    { class: "card pad" },
-    el("span", { class: "card-title", text: "Register the clients that have no command" }),
-    // Inline code as code, not as a pair of backtick characters. Every other
-    // code reference on this page is styled; this one was printed verbatim.
-    says(
-      "Six of the twelve cannot be asked to register themselves, so semlith would write their configuration file. Every path is listed before anything is written, each file is backed up beside itself, and one that does not parse is left alone. This is the terminal's ",
-      mono("semlith setup --register-all"),
-      ".",
-    ),
-    el("div", { class: "head" }, preview, write),
-    planBox,
-    planNote,
-  );
-
-  // ---- the login service
-  /* Whether the endpoint survives a reboot.
-   *
-   * The header above says "One endpoint, every client, no per-client process",
-   * and until 0.21.0 that endpoint existed only for as long as somebody kept a
-   * terminal open for it. This card is where that sentence is either true on
-   * this machine or not, named in the mechanism the platform actually uses.
-   *
-   * There is no Install button. No route installs a login service, and a
-   * button that posts to nothing is worse than the command it would hide. */
-  const MECHANISMS = {
-    launchd: "a launchd login agent",
-    systemd: "a systemd user service",
-    schtasks: "a Windows logon task",
-  };
-
-  /** A path or a command, labelled, monospace, and copyable. */
-  const labelled = (label, value) =>
-    el(
-      "div",
-      { class: "rows tight" },
-      el("span", { class: "eyebrow", text: label }),
-      copyField(value),
-    );
-
-  const serviceCard = () => {
-    // An older daemon, or a page cached from one, sends no `service` at all.
-    // No card is better than a card reporting "not installed" because it was
-    // never told either way.
-    if (!data.service) return null;
-    const status = data.service.status || {};
-    const mechanism = MECHANISMS[status.mechanism] || "a login service";
-    // Nothing at all when the daemon has not recorded a start: "never started"
-    // under a daemon that is answering this very request is a sentence that
-    // reads as a bug in the page.
-    const started = data.service.last_started
-      ? ` Last started ${when(data.service.last_started)}.`
-      : "";
-
-    const bits = [];
-    if (status.installed) {
-      bits.push(
-        says(
-          `The daemon is installed as ${mechanism}, so the endpoint is answering again after a reboot without anybody opening a terminal for it.${started}`,
+    if (L.intact === false)
+      parts.push(
+        el(
+          "div",
+          { class: "notice red" },
+          icon(I.alert, 17, { w: 1.8 }),
+          el("div", { class: "body" }, el("span", { class: "ttl", text: "The hash chain does not verify" }), el("span", { class: "sub", text: `${L.break ? `Row ${n(L.break.row)} in ${L.break.store} is the first that does not match its parent` : "A row does not match its parent"} — rows were edited or removed after they were written. Totals below still count every row.` })),
+          btn({ class: "btn danger", onclick: reverify }, "Re-verify"),
         ),
       );
-    } else {
-      bits.push(
-        says(
-          `The daemon is not installed as a login service, so the endpoint lives exactly as long as whatever started it: close that terminal, or reboot, and every client configured below loses semlith until somebody starts it again.${started}`,
-        ),
-        labelled("To install", "semlith start --service"),
-      );
-    }
-    if (status.definition) bits.push(labelled("Definition", status.definition));
-    if (status.log) bits.push(labelled("Log", status.log));
-    // Said rather than left implied. A logon task is restarted when it *fails*;
-    // nothing supervises one that exited cleanly. A page that prints
-    // "installed" over both platforms claims a parity the product does not
-    // have.
-    if (status.installed && status.restarts === false) {
-      bits.push(
-        el("div", {
-          class: "note",
-          text: "A logon task is restarted only when it failed. One that exited cleanly stays stopped until the next logon, so a daemon stopped on purpose is a daemon started again on purpose.",
-        }),
-      );
-    }
-
-    return el(
-      "div",
-      { class: "card pad dense" },
+    if (L.legacy_rows) parts.push(el("div", { class: "notice plain", text: "Some rows were written by an older semlith, one per open store, so totals that include them may count one search more than once. The chain is not rewritten to hide it." }));
+    parts.push(
       el(
         "div",
-        { class: "head" },
-        el("span", { class: "card-title", text: "Login service" }),
-        el("span", { class: "spacer" }),
-        pill(
-          status.installed ? "installed" : "not installed",
-          status.installed ? "good" : "warn",
-        ),
+        { class: "q4" },
+        kpi("Queries recorded", n(L.queries), `${plural(L.clients || byClient.length, "client")}${lastRow ? ` · last ${ago(lastRow.at)}` : ""}`),
+        kpi("Fewer tokens", L.ratio ? `${L.ratio.toFixed(1)}×` : "—", L.ratio ? `than reading those files whole · coverage ${L.coverage}% · ${L.tier}` : "counted once an agent asks", { warn: false }),
+        kpi("Net tokens not read", n(L.net_tokens), "whole-file less excerpt, rows with a hit"),
+        kpi("Zero-hit", `${zeroShare.toFixed(0)}%`, `${n(L.zero_hit)} queries the corpus could not answer`),
       ),
-      bits,
     );
-  };
-
-  // ---- the clients somebody on this machine actually has
-  /* `semlith doctor`, cut to the clients in use.
-   *
-   * All twelve rows are the Doctor page's job. The question here is
-   * narrower — of the clients this machine has, is each one reaching the
-   * endpoint — so the rows are the ones `doctor` itself calls in use and
-   * nothing else. A client nobody has is not a finding.
-   *
-   * `disabled_here` is deliberately not a state on this page. "Here" for the
-   * daemon is wherever a service manager started it, usually `/`, which is
-   * nobody's working directory; a row reading "switched off here" would be
-   * answering a question about a directory the reader has never stood in.
-   * `disabled_in` is the honest form — it names directories, and the reader is
-   * the one who knows which of them they work in. */
-  const inUse = (data.doctor || []).filter((c) => c && c.in_use);
-
-  const clientState = (c) => {
-    if (c.note) return { text: "cannot register", kind: null };
-    if (c.registered) return { text: `registered (${c.scope || "user"})`, kind: "good" };
-    if (!c.command) return { text: "not registered", kind: "bad" };
-    if (!c.present) return { text: "not installed", kind: null };
-    if (c.scope === "project") return { text: "one project only", kind: "bad" };
-    return { text: "installed, not registered", kind: "bad" };
-  };
-
-  /* Why a row is not green, and what to run about it.
-   *
-   * `explain` is written for `semlith doctor` run from a directory, so it says
-   * "this directory" — true of the shell that ran the command, and not of a
-   * daemon a launch agent started from the root of the disk. Where it says
-   * that, the line is composed from `disabled_in` instead, which names the
-   * directories rather than pointing at one. */
-  const clientWhy = (c) => {
-    const lines = [];
-    if (c.note) lines.push(el("span", { class: "sub", text: c.note }));
-    if (c.explain && !/this directory/i.test(c.explain))
-      lines.push(el("span", { class: "sub", text: c.explain }));
-    const off = (c.disabled_in || []).filter(Boolean);
-    if (off.length)
-      lines.push(el("span", { class: "meta", text: `switched off for: ${off.join(", ")}` }));
-    if (c.repair) lines.push(copyField(c.repair));
-    // A row the daemon calls a fault is coloured like one, so it does not get
-    // to stay silent about why: a red pill over an em dash is an accusation
-    // with no sentence after it. There is nothing to repair for a client that
-    // is not here, so what it gets is the reading rather than a command.
-    if (!lines.length && !c.present && c.fault)
-      lines.push(
-        el("span", {
-          class: "sub",
-          text: c.command
-            ? `Nothing named ${c.command} is on this machine.`
-            : "None of this client's configuration files are on this machine.",
-        }),
-      );
-    return lines.length
-      ? el("div", { class: "rows tight" }, lines)
-      : el("span", { class: "sub", text: "—" });
-  };
-
-  const inUseTable = inUse.length
-    ? dataTable({
-        caption:
-          "Every agent client installed on this machine, whether it is registered with semlith, and what to run for the ones that are not.",
-        sort: "name",
-        grow: false,
-        rows: inUse,
-        columns: [
-          { key: "name", label: "Client", sortable: true, value: (c) => c.name },
-          {
-            key: "state",
-            label: "semlith",
-            sortable: true,
-            value: (c) => clientState(c).text,
-            // `fault` is the daemon's own verdict, so a row it calls a fault
-            // reads as one whatever the text works out to. A client with a
-            // note is not a fault and must not borrow the colour of one.
-            render: (c) => {
-              const s = clientState(c);
-              return pill(s.text, c.fault ? "bad" : s.kind);
-            },
-          },
-          // Not `narrow-drop`: the reason is the point of the row, so on a
-          // phone the table scrolls sideways inside its card — the Doctor
-          // page's behaviour with the same rows — rather than hiding the one
-          // column that says what to do. The page itself never scrolls.
-          { key: "why", label: "Why", className: "why", render: clientWhy },
-        ],
-      })
-    : null;
-
-  const inUseCard = data.doctor
-    ? el(
+    const whole = L.whole_file_tokens || 0;
+    const sent = L.excerpt_tokens || 0;
+    parts.push(
+      el(
         "div",
-        { class: "card pad" },
+        { class: "split s-12-1 stretch" },
         el(
           "div",
-          { class: "head" },
-          el("span", { class: "card-title", text: "Clients in use" }),
-          el("span", { class: "spacer" }),
-          el("span", {
-            class: "meta",
-            text: `${n(inUse.length)} of ${n((data.doctor || []).length)} known`,
+          { class: "card pad" },
+          el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "What agents read, against reading whole files" }), el("span", { class: "t-mono-sm", text: "store tokenizer · modelled" })),
+          [
+            ["Reading every file a retrieval answered from", whole, 100, "line"],
+            ["What agents were actually sent", sent, whole ? Math.max(0.6, (sent / whole) * 100) : 0, "accent"],
+          ].map(([k, v, p, tone]) => {
+            const b = bar(p, `h10 ${tone === "accent" ? "accent" : ""}`);
+            if (tone === "line") b.firstChild.style.background = "var(--line)";
+            b.setAttribute("data-tip", k);
+            b.setAttribute("data-tip-rows", rows([["tokens", n(v)], ["relative", `${p.toFixed(1)}%`], ["that is", p < 100 && L.ratio ? `${L.ratio.toFixed(1)}× fewer` : "the baseline"]]));
+            return el("div", { class: "col gap4" }, el("div", { class: "row base t-sm" }, el("span", { class: "grow ink2", text: k }), el("span", { class: "mono t-b", text: n(v) })), b);
           }),
+          el("div", { class: "row gap6 tb-line" }, [`coverage ${L.coverage || 0}%`, `refunds ${n(L.refunds)} · ${L.refunds_measured ? "measured" : "a floor"}`, `tier ${L.tier || "modelled"}`].map((f) => el("span", { class: "factchip", text: f }))),
         ),
-        inUseTable
-          ? inUseTable.node
-          : empty("No documented client is installed on this machine."),
-        says("All twelve, including the ones nobody here has, are on the Doctor page."),
-      )
-    : null;
-
-  return el(
-    "div",
-    { class: "view" },
-    pageHead("Agents", "One endpoint, every client, no per-client process.", {
-      pill: statePill,
-      actions: [
-        el("div", { class: "copyfield worded" }, address, copyButton(endpoint.url, "Copy", true)),
-        toggle,
-        rotate,
+        el(
+          "div",
+          { class: "card pad" },
+          el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "By client" }), el("span", { class: "t-mono-sm", text: "MCP, HTTP and CLI" })),
+          byClient.length
+            ? byClient.slice(0, 7).map(([k, v]) => {
+                const b = bar((v / maxClient) * 100, lg.filter === k ? "accent" : "");
+                return btn(
+                  { class: `bar-row${lg.filter === k ? " on" : ""}`, "data-tip": k, "data-tip-rows": rows([["queries", n(v)], ["share", pct(v, L.queries)], ["click", lg.filter === k ? "clear the filter" : "filter the tables"]]), onclick: () => ((lg.filter = lg.filter === k ? null : k), repaint()) },
+                  el("span", { class: "k ell", text: k }),
+                  b,
+                  el("span", { class: "right muted", text: n(v) }),
+                );
+              })
+            : empty("No client has asked anything yet."),
+        ),
+      ),
+    );
+    // Usage from the clients' own logs: their tokens and cost beside ours.
+    const usage = L.usage || {};
+    const tabsNode = tabs(
+      [
+        ["sessions", "Sessions"],
+        ["retrievals", "Retrievals"],
+        ["replay", "Session replay"],
       ],
-    }),
-    endpointNote,
-    el(
-      "div",
-      { class: "grid scroller agent-row" },
-      el(
-        "div",
-        { class: "rows" },
-        live.length
-          ? connected.node
-          : el(
-              "div",
-              { class: "card pad dense" },
-              el("span", { class: "card-title", text: "Connected" }),
-              empty("No client is talking to this daemon right now."),
-            ),
-        el(
-          "div",
-          { class: "card pad dense tools" },
-          el(
-            "div",
-            { class: "head" },
-            el("span", { class: "card-title", text: "Tools exposed" }),
-            el("span", {
-              class: "meta",
-              text: `${tools.length} tool${tools.length === 1 ? "" : "s"}`,
-            }),
-          ),
-          // The schema is the first thing every agent reads and the last thing
-          // anyone thinks to measure: it is paid once per session, before a
-          // single question is asked. Measured from what this daemon is
-          // serving right now rather than quoted from a release, so the number
-          // cannot go stale on the page.
-          el(
-            "div",
-            { class: "cost" },
-            el("span", { class: "card-title", text: "What the tool list costs" }),
-            el("span", {
-              class: "cost-line",
-              /* Measured, not "about". The daemon counts it with a store's own
-               * tokenizer where one is loaded and says which counter produced
-               * the figure, the same two tiers the ledger reports — because
-               * four characters to a token is an estimate and this page should
-               * not present one as a measurement. */
-              text: `${tools.length} tools · ${n(data.tool_list_bytes || 0)} bytes · ${n(
-                data.tool_list_tokens || Math.ceil((data.tool_list_bytes || 0) / 4),
-              )} tokens per session`,
-            }),
-            el("span", {
-              class: "cost-note",
-              text: `read once, before the agent asks anything — counted ${
-                data.tool_list_tier || "chars4"
-              }`,
-            }),
-          ),
-          el(
-            "div",
-            { class: "tool-grid" },
-            // The name and what it is for, both read from the tool's own
-            // definition: a second copy is how a tool ends up served with one
-            // description and documented with another.
-            tools.flatMap((tool) => [
-              el("span", { class: "tool-name", text: tool.name }),
-              el("span", { class: "tool-about", text: tool.about }),
-            ]),
-          ),
-        ),
-        // Under the tools rather than beside the registration card: it is a
-        // short card about this machine, and paired with a wide one it was
-        // stretched to that card's height and centred in it.
-        installPanel(),
-      ),
-      el("div", { class: "card pad stanzas" }, tabs, chips, body),
-    ),
-    /* Everything below is this project's own, after the four panels the v4
-     * design draws. They were interleaved with them — the service card, the
-     * agent key and the two registration cards sat between the endpoint note
-     * and `Connected`, and the installer sat inside the design's own grid
-     * between `Tools exposed` and the stanzas — so a reader following the
-     * design's argument met four unrelated cards in the middle of it. */
-    /* Two columns, equal height. These were five full-width cards down a page
-     * that is mostly narrow text, so the page scrolled for a screenful of
-     * content and every card was the width of the window for no reason. The
-     * service card and the key are a pair — what runs the daemon and what an
-     * agent authenticates with — and the two registration cards are another. */
-    el(
-      "div",
-      { class: "grid agent-row agent-extras" },
-      serviceCard(),
-      el(
-      "div",
-      { class: "card pad dense" },
-      el("span", { class: "card-title", text: "Agent key" }),
-      el("div", { class: "copyfield" }, keyBox, el("div", { class: "actions" }, reveal)),
-      says(
-        "Shown truncated, and fetched in full only when you press Reveal — the page does not receive it just for being open. No registration semlith writes carries it: a registered client launches ",
-        mono("semlith mcp"),
-        ", which reads the key from ",
-        mono(data.key_path || "~/.semlith/agent.key"),
-        " itself, so a rotation reconfigures nothing. The key is for the HTTP stanzas below, which a daemon on another machine still needs — paste one of those and you export ",
-        mono("${" + KEY_ENV + "}"),
-        " yourself.",
-      ),
-    ),
-    ),
-    keyNote,
-    pricesCard(),
-    registerAll,
-    inUseCard,
-  );
-}
-
-/* The model price table: what the ledger's usage cost and every savings
- * figure are priced by, where it came from, and the one button on this page
- * that reaches the network — `semlith prices update`, run because somebody
- * pressed it. On the Agents page because the prices are the prices of the
- * agents' models. */
-function pricesCard() {
-  const facts = el("div", { class: "kv-list" });
-  const note = el("p", { class: "note" });
-  const update = el("button", { class: "button secondary small", type: "button", text: "Update prices" });
-  function paint(p) {
-    fill(
-      facts,
-      factRow("Source", `${p.source} · ${p.url}`),
-      factRow("Fetched", p.fetched),
-      factRow("Models", n(p.models)),
-      factRow("In use", p.downloaded ? "downloaded by semlith prices update" : "built into this binary"),
-    );
-  }
-  update.addEventListener("click", async () => {
-    update.disabled = true;
-    note.textContent = "Fetching models.dev…";
-    try {
-      paint(await api("/api/prices", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ update: true }),
-      }));
-      note.textContent = "Updated. New ledger rows are priced by this table; rows already priced keep the table and date they name.";
-    } catch (e) {
-      note.textContent = e.message;
-    }
-    update.disabled = false;
-  });
-  (async () => {
-    try {
-      paint(await api("/api/prices"));
-    } catch (e) {
-      note.textContent = e.message;
-    }
-  })();
-  return el(
-    "div",
-    { class: "card pad dense" },
-    el("div", { class: "card-head" }, el("span", { class: "card-title", text: "Model prices" }), el("span", { class: "spacer" }), update),
-    says(
-      "What the ledger's usage cost and every savings figure are priced by: models.dev's table of input, output, cache-read and cache-write rates, per vendor and gateway. A snapshot is built into the binary; ",
-      mono("semlith prices update"),
-      " or the button fetches a fresh one, and nothing else here reaches the network. A subscription client is shown at the API price of the same tokens.",
-    ),
-    facts,
-    note,
-  );
-}
-
-// --------------------------------------------------------------- privacy
-
-async function privacyView() {
-  let data;
-  try {
-    data = await api("/api/privacy");
-  } catch (e) {
-    return el("div", { class: "view" }, pageHead("Privacy"), error(e.message));
-  }
-
-  // Live: a repair applied here or from `semlith doctor --fix` moves the
-  // privacy counter, so the rows say what is true now rather than what was
-  // true when the page was opened.
-  watchLive(["privacy"], repaintView);
-
-  const tokenBox = el("code", { class: "text", text: data.token_preview || "—" });
-  const rotateNote = el("div", { class: "note" });
-  const rotate = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: "Rotate",
-    onclick: async () => {
-      rotate.disabled = true;
-      rotateNote.className = "note";
-      rotateNote.textContent = "Rotating…";
-      try {
-        const fresh = await post("/api/rotate", {});
-        // The rotate response is the one place the whole token appears after
-        // the printed URL, and this page has to take the new one before its
-        // next request: nothing else will tell it. What is shown is still the
-        // preview — a page that prints a live credential in full is a page
-        // someone screenshots.
-        session.set(String(fresh.token));
-        tokenBox.textContent = `${String(fresh.token).slice(0, 16)}…`;
-        rotateNote.textContent =
-          "Rotated. The old token stopped working immediately. This is the portal's own session token, not the agent key: no client stanza carries it, so nothing needs reconfiguring. The agent key is rotated on the Agents page.";
-      } catch (e) {
-        rotateNote.className = "note bad";
-        rotateNote.textContent = e.message;
-      } finally {
-        rotate.disabled = false;
-      }
-    },
-  });
-
-  const fact = (key, value, why) =>
-    el(
-      "div",
-      { class: "stat fact" },
-      el("span", { class: "eyebrow", text: key }),
-      el("span", { class: "fact-value", text: value }),
-      el("span", { class: "sub", text: why }),
-    );
-
-  /* The rules, with a way to act on them. Until 0.18.0 this page reported a
-   * failing rule and left the user to work out the command; a page that tells
-   * someone their store home is world-readable and stops there has done half a
-   * job.
-   *
-   * Every failing row gets the manual step, always, because that half works
-   * everywhere — including on Windows, where the mode rules have no reading at
-   * all. A row gets a button only where the daemon can repair it safely:
-   * narrowing, idempotent, on a path semlith owns, and re-checked by the rule's
-   * own check afterwards. `private addresses` has no button, and cannot: it is
-   * set in the environment the daemon inherited, and no process can unset a
-   * variable in its parent's.
-   *
-   * The button posts to the engine `semlith doctor --fix` calls. A repair
-   * implemented in the browser would be a second answer to what "safe" means,
-   * on the page whose whole subject is that question. */
-  const rulesBox = el("div", { class: "rules" });
-  const fixNote = el("div", { class: "note" });
-
-  const paintRules = (rules) => {
-    rulesBox.textContent = "";
-    for (const rule of rules) {
-      const unmeasured = rule.applicable === false;
-      const row = el(
-        "div",
-        { class: rule.ok || unmeasured ? "rule-row" : "rule-row bad" },
-        el(
-          "div",
-          { class: "rule-head" },
-          el("span", { class: "dot " + (unmeasured ? "" : rule.ok ? "good" : "warn") }),
-          el("span", { class: "rule-id", text: rule.id }),
-        ),
-        el("p", { class: "rule-text", text: rule.rule }),
-        // The reading, under the rule rather than beside it: it is a path or a
-        // count often enough that a column would spend the whole card's width
-        // on one of them and wrap the rest.
-        el(
-          "div",
-          { class: "rule-found" },
-          el("span", { class: "eyebrow", text: "found" }),
-          el("code", { class: "rule-check", text: rule.check }),
-        ),
-      );
-      if (!rule.ok && rule.manual) {
-        row.appendChild(
-          el(
-            "div",
-            { class: "rule-found" },
-            el("span", { class: "eyebrow", text: "to fix" }),
-            copyField(rule.manual),
-          ),
-        );
-      }
-      if (!rule.ok && rule.repair) {
-        const fix = el("button", {
-          class: "button secondary small",
-          type: "button",
-          text: "Fix",
-          onclick: async () => {
-            fix.disabled = true;
-            fixNote.className = "note";
-            fixNote.textContent = "Applying…";
-            try {
-              const out = await post("/api/privacy/fix", { rule: rule.id });
-              const applied = (out.applied || [])[0];
-              fixNote.textContent = applied
-                ? `${applied.path}: ${applied.now}, was ${applied.was}` +
-                  (applied.rechecked_ok ? "" : " — the rule still does not hold")
-                : "Nothing to apply.";
-              paintRules(out.rules || []);
-            } catch (e) {
-              fixNote.className = "note bad";
-              fixNote.textContent = e.message;
-              fix.disabled = false;
-            }
-          },
-        });
-        row.appendChild(fix);
-      }
-      rulesBox.appendChild(row);
-    }
-  };
-  paintRules(data.rules || []);
-
-  /* The scan, behind a button rather than in the page's load.
-   *
-   * It reads the stored text of every file in every store, which on a large one
-   * takes long enough that loading it with the page would make the whole
-   * Privacy page wait on a measurement most visits never look at. */
-  const scanNote = el("div", { class: "note" });
-  const scanBox = el("div", { class: "rows tight" });
-
-  const scanTable = dataTable({
-    caption: "Every file a store is still holding that semlith would refuse to index today.",
-    sort: "path",
-    columns: [
-      { key: "store", label: "Store", className: "meta", sortable: true, value: (f) => f.store },
+      lg.tab,
+      (t) => go("ledger", t === "sessions" ? undefined : t),
       {
-        key: "path",
-        label: "Path",
-        sortable: true,
-        value: (f) => f.path,
-        render: (f) => pathCell(f.path),
-      },
-      /* The rule, or the kind of credential and the line it sits on — never
-       * the text that matched. The route does not return it, and a page whose
-       * subject is what stays on this machine would be a poor place to reprint
-       * a secret in order to report that one was found. */
-      {
-        key: "why",
-        label: "Why it would be refused",
-        sortable: false,
-        render: (f) => lineCell(f.why),
-      },
-      {
-        key: "forget",
-        label: "",
-        sortable: false,
-        render: (f) =>
-          el("button", {
-            class: "forget",
-            type: "button",
-            text: "Forget",
-            onclick: () =>
-              ask({
-                title: "Forget this file?",
-                body: `${f.path} — its chunks and vectors are dropped from ${f.store}. The file on disk is untouched.`,
-                confirm: "Forget it",
-                tone: "bad",
-                run: () => forgetFound([f]),
-              }),
-          }),
-      },
-    ],
-    rows: [],
-  });
-
-  async function forgetFound(findings) {
-    scanNote.className = "note";
-    scanNote.textContent = "";
-    // One call per store: a write names the store it is for, and a set that
-    // spans two of them is two writes rather than an ambiguous one.
-    const byStore = new Map();
-    for (const f of findings) {
-      if (!byStore.has(f.store)) byStore.set(f.store, []);
-      // The store's own key, not the plain path beside it. On Windows they
-      // differ — the key carries the `\\?\` prefix — and a forget is a
-      // lookup, so it has to be spelled the way the store spelled it. `path`
-      // is what the row shows a person.
-      byStore.get(f.store).push(f.key || f.path);
-    }
-    try {
-      for (const [store, paths] of byStore) await post("/api/forget", { paths, store });
-    } catch (e) {
-      scanNote.className = "note bad";
-      scanNote.textContent = e.message;
-      // Rethrown so the dialog that asked stays open and shows it too.
-      throw e;
-    }
-    // Scanned again rather than spliced: the list has to redraw from a fresh
-    // reading, not from the assumption that the write did what it was asked.
-    await runScan();
-  }
-
-  const scanButton = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: "Scan",
-    onclick: () => runScan(),
-  });
-
-  async function runScan() {
-    scanButton.disabled = true;
-    scanButton.textContent = "Scanning…";
-    scanNote.className = "note";
-    scanNote.textContent = "";
-    try {
-      const found = (await api("/api/privacy/scan")).findings || [];
-      scanTable.update(found);
-      const stores = [...new Set(found.map((f) => f.store))];
-      fill(
-        scanBox,
-        found.length
-          ? [
-              el(
-                "div",
-                { class: "bulk" },
-                el("span", {
-                  class: "meta",
-                  text: `${n(found.length)} file${found.length === 1 ? "" : "s"} would be refused today`,
-                }),
-                el("span", { class: "spacer" }),
-                el("button", {
-                  class: "button danger small",
-                  type: "button",
-                  text: "Forget all",
-                  onclick: () =>
-                    ask({
-                      title: `Forget ${n(found.length)} file${found.length === 1 ? "" : "s"}?`,
-                      body: `Their chunks and vectors are dropped from ${stores.join(
-                        " and ",
-                      )}. The files on disk are untouched.`,
-                      confirm: `Forget ${n(found.length)} file${found.length === 1 ? "" : "s"}`,
-                      tone: "bad",
-                      run: () => forgetFound(found),
-                    }),
-                }),
-              ),
-              scanTable.node,
-            ]
-          : empty("Nothing this store holds would be refused today."),
-      );
-    } catch (e) {
-      scanNote.className = "note bad";
-      scanNote.textContent = e.message;
-    } finally {
-      scanButton.disabled = false;
-      scanButton.textContent = "Scan again";
-    }
-  }
-
-  /* The four steps, numbered, each with its own copy button. A packet capture
-   * is the only one of them that proves anything on its own; the others are
-   * what make the first one quick to believe. */
-  const step = (number, what, command) =>
-    el(
-      "div",
-      { class: "step-row" },
-      el("span", { class: "n", text: number }),
-      el(
-        "div",
-        { class: "what" },
-        el("div", { class: "say", text: what }),
-        copyField(command),
-      ),
-    );
-
-  return el(
-    "div",
-    { class: "view" },
-    pageHead(
-      "Privacy",
-      "The claim is “nothing leaves this machine”. This page is how you check it yourself, in about a minute.",
-      { pill: pill(data.airgap ? "airgap mode armed" : "airgap off", data.airgap ? "good" : null) },
-    ),
-    el(
-      "div",
-      { class: "strip" },
-      fact("Bind address", data.bind, "loopback only, with no flag to change it"),
-      fact("CORS", "none", "no origin may read this server's responses"),
-      fact("Host check", "localhost only", "a foreign Host header gets 400 before anything runs"),
-      fact("Assets", "include_bytes!", "the page you are reading is inside the binary"),
-      fact("Telemetry", "none", "no analytics, and no update check Semlith makes on its own"),
-      // Said on this page, not only on the Ledger page. Somebody checking the
-      // privacy claim should find the one thing semlith writes down about
-      // them here, with how to stop it, rather than discovering it elsewhere.
-      fact(
-        "Retrieval ledger",
-        "records locally",
-        "the daemon prints this on every start; --no-ledger stops it for a session, SEMLITH_LEDGER=0 for a machine, and the rows never leave the store",
-      ),
-      fact("Model cache", data.model_cached ? "cached" : "not downloaded", data.model_cache),
-      // Said here because this is where somebody comes to find out what
-      // semlith reads. The binary contacts cloud.semlith.com only after a
-      // `semlith cloud login`, which this release does not have — so the
-      // honest reading is that nothing does.
-      fact(
-        "Cloud",
-        "not connected",
-        "this binary has no cloud command and opens no connection to any host; the Cloud page describes an optional service and contacts nothing",
-      ),
-    ),
-    /* Every download there is, listed rather than implied by "no telemetry":
-     * the embedding model on first use, and the two accelerator packs only
-     * when their lane is on. Each says where it comes from, how large it is,
-     * when it would happen, and whether it already has. */
-    el(
-      "div",
-      { class: "card pad" },
-      el(
-        "div",
-        { class: "head" },
-        el("span", { class: "card-title", text: "Downloads" }),
-        el("span", { class: "spacer" }),
-        el("span", {
-          class: "meta",
-          text: "everything semlith ever fetches, and when",
-        }),
-      ),
-      dataTable({
-        caption:
-          "Every file semlith can download: what it is, where it comes from, its size, when the download happens, and whether it is on this machine already.",
-        rows: data.downloads || [],
-        columns: [
-          { key: "what", label: "What", value: (r) => r.what },
-          { key: "source", label: "From", value: (r) => r.source },
-          { key: "bytes", label: "Size", value: (r) => r.bytes, render: (r) => bytes(r.bytes) },
-          { key: "when", label: "When", value: (r) => r.when },
-          {
-            key: "cached",
-            label: "Here",
-            value: (r) => (r.cached ? "here" : "not downloaded"),
-            render: (r) => pill(r.cached ? "here" : "not downloaded", r.cached ? "good" : null),
-          },
-        ],
-      }).node,
-    ),
-    el(
-      "div",
-      { class: "grid scroller" },
-      /* How to check the promise, and what the stores already hold: both are
-       * things a reader does rather than reads, so they share a column. */
-      el(
-        "div",
-        { class: "rows" },
-        el(
-          "div",
-          { class: "card pad" },
-          el("span", { class: "card-title", text: "Verify it yourself" }),
-          el(
-            "div",
-            { class: "steps-list" },
-            step(
-              "1",
-              "Ask the operating system what this process has open. Only loopback should appear.",
-              "lsof -nP -p $(pgrep -f 'semlith start') -i",
-            ),
-            step(
-              "2",
-              "Watch every interface but loopback while you search. Nothing should appear.",
-              "sudo tcpdump -i any -n 'not host 127.0.0.1 and not host ::1'",
-            ),
-            step(
-              "3",
-              "Arm the refusal. Anything that would reach the network exits instead, naming what it refused.",
-              "semlith start --airgap",
-            ),
-            step("4", "Or pull the cable: the portal loads and searches with no network at all.", "ifconfig en0 down"),
-            // The fifth step the design ends on, and the one that settles the
-            // ledger: it is a table in a file on this disk, readable by anything
-            // that reads SQLite, and countable without asking semlith.
-            step(
-              "5",
-              "See the ledger for what it is: one local table, written by this machine and nothing else.",
-              `sqlite3 ${data.store_home || "~/.semlith"}/stores/<name>/store.db 'select count(*) from retrievals'`,
-            ),
-          ),
-        ),
-        el(
-          "div",
-          { class: "card pad" },
-          el(
-            "div",
-            { class: "head" },
-            // The heading said "Scan" and the button beside it said "Scan",
-            // which rendered as the word twice.
-            el("span", { class: "card-title", text: "What is already stored" }),
-            el("span", { class: "spacer" }),
-            scanButton,
-          ),
-          el("p", {
-            class: "subtitle",
-            text: "The rules below decide what semlith will take in from now on. This checks what the stores are already holding: every file that semlith would refuse today — indexed before a rule widened, or before the credential content scan existed.",
-          }),
-          scanBox,
-          scanNote,
-        ),
-        /* Under the stored-files card, in the left column: the right one
-         * holds the outbound card and the two switches, and with the token
-         * there too it ran a screen longer than the left. */
-        el(
-          "div",
-          { class: "card pad" },
-          el("span", { class: "card-title", text: "Session token" }),
-          el("div", { class: "copyfield" }, tokenBox, el("div", { class: "actions" }, rotate)),
-          rotateNote,
-          says(
-            "Generated at start, handed to this page once by the printed URL, and sent back as a ",
-            mono(data.token_header),
-            " header on every ",
-            mono("/api"),
-            " route. It is in no cookie: every port on localhost is the same site, so a cookie would travel to a page served by anything else on this machine, and a header will not. Shown truncated — no response carries it in full except the one that rotates it.",
-          ),
-          el("hr", { class: "rule" }),
-          el("span", { class: "card-title", text: "Content-Security-Policy" }),
-          codeBlock(data.csp),
-          el("p", {
-            class: "subtitle",
-            text: `Host headers answered: ${(data.host_allowed || []).join(", ")}. Everything else gets 400.`,
-          }),
-        ),
-      ),
-      el(
-        "div",
-        { class: "rows" },
-        /* The rules this release added, each with what the daemon found when it
-         * looked. A page that states a policy is a page; a page that states a
-         * policy and the reading behind it is something a reader can disagree
-         * with, which is the only version worth putting on a Privacy page. */
-        el(
-          "div",
-          { class: "card pad" },
-          el("span", { class: "card-title", text: "The one outbound connection that exists" }),
-          says(
-            "The embedding model is downloaded once, on first index, and cached. ",
-            mono("semlith upgrade"),
-            ", ",
-            mono("semlith add"),
-            " and ",
-            mono("semlith prices update"),
-            " reach the network only in the second you ask them to. ",
-            mono("--airgap"),
-            " refuses all four and exits naming what it refused.",
-          ),
-          copyField("SEMLITH_MODEL_CACHE=/media/usb/models semlith index ."),
-          el(
-            "div",
-            { class: "chips" },
-            pill(data.model_cached ? "model cached" : "model not downloaded", data.model_cached ? "good" : "warn"),
-            el("span", {
-              class: "meta",
-              text: "granite-embedding-small-english-r2 · int8 · Apache-2.0",
-            }),
-          ),
-        ),
-        /* Fifth, between the outbound card and the session token, which is
-         * where the design has it. It stood outside this grid entirely, so
-         * the one switch on the page sat above the cards that explain what
-         * the page promises rather than among them. */
-        sessionReplayToggle(),
-        ledgerUsageToggle(),
-      ),
-    ),
-    /* After the grid, at the page's full width. Inside either column it is a
-     * narrow strip holding eight rules of prose, several screens tall on its
-     * own, and the page scrolled almost entirely because of it. Across the
-     * page its rules sit two or three abreast. */
-    el(
-      "div",
-      { class: "card pad rules-card" },
-      el(
-        "div",
-        { class: "head" },
-        el("span", { class: "card-title", text: "Rules" }),
-        el("span", { class: "spacer" }),
-        pill(
-          // What the badge is actually about. "All holding" read as a
-          // statement about everything semlith is storing, three lines
-          // above a scan that had found a private key in a store — the
-          // rules are forward-looking, and this now says so.
-          (data.rules || []).every((r) => r.ok)
-            ? "holding for new writes"
-            : "check the rows",
-          (data.rules || []).every((r) => r.ok) ? "good" : "warn",
-        ),
-      ),
-      el("p", {
-        class: "subtitle",
-        text: "What semlith refuses, and what this daemon found when it checked. Every row is a rule the binary enforces and a test that fails if it stops.",
-      }),
-      rulesBox,
-      fixNote,
-    ),
-  );
-}
-
-// ----------------------------------------------------------------- about
-
-/* Every name `--lang` accepts, with a tick on the ones the graph is extracted
- * from. It lives here rather than on a page of its own because it is a fact
- * about the binary, and a page that held one table was a click between the
- * reader and a list they wanted to scan. */
-function langCard(languages, withEdges) {
-  const edges = new Set(withEdges);
-  return el(
-    "div",
-    { class: "card pad lang-card" },
-    el(
-      "div",
-      { class: "rows tight" },
-      el("span", { class: "card-title", text: `${languages.length} languages` }),
-      el("span", {
-        class: "subtitle",
-        text:
-          edges.size === languages.length
-            ? `Search filters and the code graph read the same table, so the two cannot disagree. Every one carries graph edges.`
-            : `Search filters and the code graph read the same table, so the two cannot disagree. ${edges.size} of ${languages.length} carry graph edges.`,
-      }),
-    ),
-    el(
-      "div",
-      { class: "lang-grid" },
-      languages.map((lang) => {
-        const has = edges.has(lang.name);
-        const names = (lang.extensions || [])
-          .map((e) => `.${e}`)
-          .concat(lang.filenames || []);
-        return el(
-          "div",
-          { class: "lang-row" },
-          // Every row is ticked, because every row is true of the thing the
-          // tick says: the language is indexed and `--lang` selects it. A
-          // language that also carries graph edges says so beside its name.
-          // Since 0.17.0 that is all of them, and the mark stays rather than
-          // being dropped as redundant: if a grammar is ever refused — a
-          // copyleft licence is the case that would do it — the gap has to be
-          // visible here rather than inferred from its absence.
-          el("span", {
-            class: "tick on",
-            title: "indexed, and --lang selects it",
-            text: "✓",
-          }),
-          el("span", { class: "name", text: lang.name }),
-          has ? el("span", { class: "graph-mark", text: "graph" }) : null,
+        cls: "in-card",
+        extra: [
           el("span", { class: "spacer" }),
-          el("span", { class: "exts", text: names.join(" ") }),
-        );
-      }),
-    ),
-    says(
-      `All ${languages.length} are indexed and selectable with `,
-      mono("--lang"),
-      edges.size === languages.length
-        ? ", and every one marked "
-        : `. The ${edges.size} marked `,
-      mono("graph"),
-      edges.size === languages.length
-        ? " carries symbols and edges as well, from a tree-sitter grammar. "
-        : " carry symbols and edges as well, from a tree-sitter grammar; the rest are searched as text. ",
-      mono("semlith languages"),
-      " prints the same table. Extension and filename decide the language — file contents are never read to guess it, because a store is searched far more often than it is built. Those grammars are most of what the binary weighs, and no language was dropped to hit a size.",
-    ),
-  );
-}
+          lg.tab !== "replay"
+            ? toggle(!!usage.enabled, "Usage from client logs", async (v) => {
+                const out = await act(() => post("/api/ledger/usage", { on: v }), v ? "Reading each client's own usage logs" : "Usage from client logs off");
+                if (out) await load("ledger", true), repaint();
+              }, { cls: "t125", tip: "Fills the model and the real cost of each call from the client's own logs on this machine" })
+            : null,
+          lg.tab !== "replay" ? el("div", { class: "row gap6 pad7" }, ["Markdown", "CSV", "JSON"].map((x) => btn({ class: "btn xs", onclick: () => exportLedger(x) }, x))) : null,
+        ],
+      },
+    );
+    const card = el("div", { class: "card" }, tabsNode);
+    if (lg.tab === "sessions") card.append(...ledgerSessions(sessionsAll.filter((s) => match(s.client))));
+    else if (lg.tab === "retrievals") card.append(...ledgerRetrievals(rowsAll.filter((r) => match(r.client))));
+    else card.append(ledgerReplay());
+    parts.push(card);
+    parts.push(
+      el(
+        "div",
+        { class: "row" },
+        el("span", { class: "muted t-sm", text: "Same thing in a terminal" }),
+        [
+          ["semlith ledger --last 20", "Prints the same rows this page shows"],
+          ["semlith ledger --verify", "Re-walks the hash chain and names the first row that does not verify"],
+          ["semlith start --no-ledger", "Run without recording, for this session only"],
+        ].map(([c, tipText]) => btn({ class: "cmdchip", "data-tip": tipText, onclick: () => copy(c) }, c, icon(I.copy, 11, { w: 2 }))),
+        el("span", { class: "spacer" }),
+        el("span", { class: "t-mono-sm", text: "~/.semlith/stores/<name>/store.db · table retrievals" }),
+      ),
+    );
+    return el("div", { class: "page" }, parts);
+  },
+};
 
-async function aboutView() {
-  let about;
-  let languages;
+async function reverify() {
   try {
-    [about, languages] = await Promise.all([api("/api/about"), api("/api/languages")]);
-  } catch (e) {
-    return el("div", { class: "view" }, pageHead("About"), error(e.message));
-  }
-
-  const row = (key, value) =>
-    el(
-      "div",
-      { class: "kv pair" },
-      el("span", { class: "k", text: key }),
-      el("span", { class: "v", text: value }),
-    );
-
-  return el(
-    "div",
-    { class: "view" },
-    pageHead("About", "One Rust binary. The portal you are reading is compiled into it."),
-    el(
-      "div",
-      // Sized to its content rather than to the height left over, so the page
-      // scrolls as one. With `grow` the two columns were capped at the
-      // viewport and the language card — 46 rows — pushed the rest of the left
-      // column out of sight with nothing to scroll it back.
-      //
-      // The language card is out of the columns entirely and full width under
-      // them, the way the v4 About page lays it out. Inside a column its 46
-      // rows stretched the row, and the models table beside it was cut off
-      // mid-row by its own scroller with no way to tell that from a bug.
-      { class: "grid two about-grid" },
-      el(
-        "div",
-        { class: "rows" },
-        el(
-          "div",
-          { class: "card pad" },
-          row("Version", `${about.version} · store format ${about.format_version}`),
-          row("Binary", `${about.binary} · ${bytes(about.binary_bytes)} · ${about.target}`),
-          row("Bound to", about.bind),
-          row("Store home", about.store_home),
-          row("Model cache", about.model_cache),
-          // `MCP revisions` stood here. The v4 design's About page has seven
-          // facts and this is not one of them, and what it showed -- which
-          // protocol revisions a client may negotiate -- is a thing an agent
-          // settles in its handshake and a person never acts on. The route
-          // still answers `revisions` for anything else that reads it.
-          row("Source", `${about.license} · free and complete`),
-          row("Uptime", `${Math.floor(about.uptime / 60)}m · pid ${about.pid}`),
-        ),
-      ),
-      // The models table stood between these two. Forty-eight rows of a
-      // catalogue, of which this machine has fetched one -- the design has no
-      // place for it, and `semlith models` prints the same list for anyone who
-      // wants it. `/api/models` is left answering and is now the one route with
-      // no portal view; that exception is argued in `tests/portal.rs` and
-      // recorded in `docs/compatibility.md` rather than assumed.
-      langCard(languages.languages || [], about.graph_languages || []),
-    ),
-    el("p", {
-      class: "subtitle",
-      text: "The model is fixed when a store is created — vectors from two models are not comparable. To switch, delete the store and index again.",
-    }),
-  );
-}
-
-// --------------------------------------------------------------- welcome
-
-function welcomeView() {
-  const note = el("div", { class: "note" });
-  const field = el("input", { type: "text", placeholder: "~/Documents/work" });
-
-  /* The version beside the mark, as the v4 lockup has it. The stylesheet has
-   * carried `.lockup .ver` since the design was ported; nothing rendered into
-   * it, so the first screen never said which build was running. */
-  const version = el("span", { class: "ver" });
-  (async () => {
-    try {
-      const about = await api("/api/about");
-      version.textContent = `v${about.version}`;
-    } catch (_) {
-      // The lockup reads fine without it; a failed probe is not worth a row.
-    }
-  })();
-
-  const step = (num, title, what) =>
-    el(
-      "div",
-      { class: "step" },
-      el("span", { class: "eyebrow", text: num }),
-      el("span", { class: "card-title", text: title }),
-      el("span", { class: "what", text: what }),
-    );
-
-  return el(
-    "div",
-    { class: "welcome" },
-    el("div", { class: "lockup" }, logoImage(38), el("span", { class: "name", text: "Semlith" }), version),
-    el(
-      "div",
-      { class: "hero" },
-      el(
-        "div",
-        { class: "titles" },
-        el("h1", { class: "hero-title", text: "No stores yet" }),
-        el("p", {
-          class: "subtitle",
-          text: "The daemon is running and holds nothing. Point it at a folder and it indexes everything a person could read in there — code, Markdown, PDFs, Office files, notebooks, books and mail.",
-        }),
-      ),
-      el(
-        "div",
-        { class: "field tall" },
-        el("span", { class: "prefix", text: "path" }),
-        labelled("welcome-path", "Folder to index", field),
-      ),
-      note,
-      el(
-        "div",
-        { class: "actions" },
-        el("button", {
-          class: "button",
-          type: "button",
-          text: "Index this folder",
-          onclick: () => {
-            const path = field.value.trim();
-            if (!path) {
-              note.className = "note bad";
-              note.textContent = "Give a path first, or open the picker instead.";
-              field.focus();
-              return;
-            }
-            // Carried across rather than dropped: this button used to validate
-            // a path and then open the Index view with an empty field.
-            state.pendingPath = path;
-            go("index");
-          },
-        }),
-        el("button", {
-          class: "button secondary",
-          type: "button",
-          text: "Open the folder picker",
-          onclick: () => go("index"),
-        }),
-        // The v4 welcome offers this beside indexing, and the portal has had
-        // the feature on Stores all along — it was simply unreachable from the
-        // one screen that exists to get a first store open.
-        el("button", {
-          class: "button secondary",
-          type: "button",
-          text: "Adopt an existing .semlith",
-          onclick: () => go("stores"),
-        }),
-        el("button", {
-          class: "button secondary",
-          type: "button",
-          text: "Skip for now",
-          // Stores, not About: skipping the first run means going to the page
-          // this screen is standing in front of.
-          onclick: () => go("stores"),
-        }),
-      ),
-      el("hr", { class: "rule" }),
-      el("span", { class: "eyebrow", text: "Or from a terminal" }),
-      copyField("semlith index ~/Documents/work"),
-      says(
-        "No ",
-        mono("--store"),
-        " flag. It lands in ",
-        mono("~/.semlith/stores/work"),
-        " and is registered against that root.",
-      ),
-      // The ledger is on by default, so the screen that introduces the product
-      // is where it has to be said — the v4 welcome says it here too.
-      says(
-        "Queries are recorded to a local file in that store and never leave this machine. Start with ",
-        mono("semlith start --no-ledger"),
-        " to skip recording.",
-      ),
-    ),
-    el(
-      "div",
-      { class: "steps" },
-      step("01", "It reads the folder", "Code, Markdown, PDF, Office, notebooks, HTML — chunked and embedded locally."),
-      step("02", "It stays current", "The watcher re-embeds and re-extracts edges on every save."),
-      step("03", "Your agents connect", "One HTTP endpoint for Claude Code, Codex, Cursor, Zed and the rest."),
-      step("04", "It keeps a local record", "Records what agents retrieve, locally; --no-ledger to skip."),
-    ),
-    // The port is half the sentence: "loopback only" means nothing without the
-    // address the reader can go and check.
-    el("div", { class: "foot", text: `${location.host} · loopback only · no external asset` }),
-  );
-}
-
-// ---------------------------------------------------------------- router
-
-/* Filled by the release's own tasks: Impact (T02), Reports (T08) and Cloud
- * (T10). They exist from the shell task so the sidebar never holds an entry
- * that navigates to nothing. */
-
-/* Map: the subsystems, as a list.
- *
- * Communities over the settled `calls` and `imports` edges — no prose, no
- * model, and no second picture beside the canvas. It sits outside the rail
- * because the rail is about whichever node is selected and this is about the
- * store, so selecting a node must not wipe it. */
-function mapPanel() {
-  const body = el("div", { class: "map-body" }, skeletonRows(4));
-  const shown = el("div", { class: "map-shown" });
-
-  (async () => {
-    let data;
-    try {
-      data = await api("/api/map");
-    } catch (e) {
-      fill(body, error(e.message));
-      return;
-    }
-    const list = data.communities || [];
-    if (!list.length) {
-      fill(body, el("div", { class: "rail-hint", text: "No call or import edges to group yet." }));
-      return;
-    }
-    fill(
-      body,
-      list.map((community) =>
-        el(
-          "button",
-          {
-            class: "map-row",
-            type: "button",
-            // The busiest member is the handle on a community, so the row
-            // goes where a reader would go next: that name, in Search.
-            onclick: () => {
-              state.pendingQuery = community.label;
-              go("search");
-            },
-          },
-          el(
-            "span",
-            { class: "line one" },
-            el("span", { class: "label", text: community.label }),
-            el("span", { class: "size", text: `${community.size} symbol${community.size === 1 ? "" : "s"}` }),
-          ),
-          el("span", {
-            class: "line hubs",
-            text: `hubs: ${community.hubs
-              .map((hub) => (hub.path ? `${hub.name} · ${shortPath(hub.path)}:${hub.line}` : hub.name))
-              .join(" · ")}`,
-          }),
-          el("span", {
-            class: "line cross",
-            text: community.cross
-              ? `${community.label} → ${community.cross[0]} · ${community.cross[1]} settled edge${community.cross[1] === 1 ? "" : "s"}`
-              : "nothing leaves this group",
-          }),
-        ),
-      ),
-    );
-    fill(
-      shown,
-      el("span", {
-        text: `Shown ${data.shown} of ${data.total} · communities over settled calls and imports edges`,
-      }),
-    );
-  })();
-
-  return el(
-    "section",
-    { class: "map-panel" },
-    el("div", { class: "card-head" }, el("h2", { text: "Map" }), el("span", { class: "mono-chip", text: "subsystems" })),
-    body,
-    shown,
-  );
-}
-
-/* Impact: the graph read backwards.
- *
- * The Graph page answers "what is around this"; this one answers "who would
- * notice if it changed", which is a different question with a different
- * shape — a list by hop rather than a picture. Under it sit the path finder
- * and Trace, because all three read the same edges and a reader who has just
- * seen who reaches a symbol is one question away from asking how.
- *
- * Two deviations from the v4 design, both because the design is a mock over
- * fixed sample data and this is a page over a store: there is a symbol box
- * and a real hop control (the mock's subject arrives only from a Graph-page
- * link and its `depth 4 · reverse` pill is decoration), and every reached row
- * carries its file and line, which the mock drops. */
-
-/** The uppercase mono label the v4 cards put above a value.
- *
- * `.eyebrow` already is that label — a second class for one would be two
- * spellings of one thing in a stylesheet shared with semlith-cloud. */
-function capLabel(text) {
-  return el("span", { class: "eyebrow", text });
-}
-
-function statCell(label, value) {
-  return el("div", { class: "impact-stat" }, capLabel(label), el("span", { class: "n", text: String(value) }));
-}
-
-/* Reverse reachability, drawn the way the Graph page draws the graph.
- *
- * This was a static painter: concentric rings, one per hop, drawn once and
- * redrawn only on a resize or a theme change. It said the hop count clearly and
- * said nothing else — the nodes could not be moved, hovered or picked, and a
- * ring with more symbols than fit at its radius simply counted the rest.
- *
- * The design paints this canvas with the same force simulation the Graph page
- * uses, and that is what the page is for: the same picture, the same
- * interactions, the same drift, on a subgraph instead of on the whole store. So
- * this is `graphCanvas` with an impact answer converted into its nodes and
- * edges, rather than a second painter with its own behaviour to keep in step.
- *
- * Hop is not lost by dropping the rings — every row carries it in the table
- * beside this, and each edge here is one hop, so the distance from the subject
- * is the number of edges to it.
- */
-
-/* The most nodes worth laying out. `graphView` caps at 180 for a whole store;
- * this card is a third of that one's height, so it takes a third of its
- * budget. Nearest hops are kept, because a caller two hops away is the one the
- * reader is looking for. */
-const IMPACT_NODE_CAP = 34;
-
-function impactCanvas() {
-  /* The Graph page's hover card, with what this answer knows about the node:
-   * how far it is from the subject, where it lives, and which edge reached it. */
-  const graph = graphCanvas({
-    onHover: (node, x, y) => {
-      if (!node) return tip.hide("impact");
-      tip.atPoint(
-        x,
-        y,
-        node.hop
-          ? tipCard(node.name, "blue", [
-              ["hops", node.hop],
-              ["file", node.path ? `${shortPath(node.path)}:${node.line}` : "—"],
-              ["reaches", `${node.via} · ${node.edge}`],
-              ["confidence", node.confidence || "—"],
-            ])
-          : tipCard(node.name, "accent", [["hops", "0 · the subject"]]),
-        "impact",
-      );
-    },
-  });
-  const caption = el("span", { class: "canvas-caption", text: "reverse reachability" });
-  const wrap = el("div", { class: "card impact-canvas-card" }, graph.node, caption);
-
-  /* An impact answer is a list of rows, each naming what it reaches through.
-   * The canvas wants nodes and edges, so `via` becomes the other end: a row is
-   * the edge `name -> via`, and the subject is the node every chain ends at. */
-  function shape(subject, rows) {
-    const index = new Map([[subject, 0]]);
-    const nodes = [{ name: subject, kind: "symbol" }];
-    const edges = [];
-    const add = (name) => {
-      if (index.has(name)) return index.get(name);
-      if (nodes.length >= IMPACT_NODE_CAP) return null;
-      index.set(name, nodes.length);
-      nodes.push({ name, kind: "symbol" });
-      return nodes.length - 1;
-    };
-    // Nearest first, so the cap drops the far edge of the answer rather than
-    // whichever rows the store happened to return last.
-    for (const row of [...rows].sort((a, b) => a.hop - b.hop)) {
-      const from = add(row.name);
-      // The first row to reach a node is its nearest, and the one the card
-      // describes. The subject is never a row's `name`, so it keeps no hop.
-      if (from !== null && from !== 0 && !nodes[from].hop) {
-        Object.assign(nodes[from], {
-          hop: row.hop,
-          path: row.path,
-          line: row.line,
-          via: row.via,
-          edge: row.kind || "calls",
-          confidence: row.confidence,
-        });
+    const out = await post("/api/ledger/verify", { repair: false });
+    const broken = (out.stores || []).filter((s) => !s.intact);
+    if (!broken.length) {
+      toast("Re-walked every chain · intact");
+    } else {
+      const ok = await ask({
+        title: "Re-anchor the chain?",
+        body: `${broken.map((s) => `${s.store} breaks at row ${n(s.break_row)}`).join(" · ")}. A repair appends one note row saying so and verifies from there. No recorded row is edited or removed, so the break stays visible in the record.`,
+        ok: "Append the note",
+      });
+      if (ok) {
+        await post("/api/ledger/verify", { repair: true });
+        toast("Chain re-anchored with a note row · nothing rewritten");
       }
-      const to = add(row.via);
-      if (from === null || to === null) continue;
-      edges.push({ from, to, kind: row.kind || "calls", confidence: row.confidence });
     }
-    return { nodes, edges, total: rows.length + 1 };
+  } catch (e) {
+    toast(e.message, true);
   }
-
-  return {
-    node: wrap,
-    show(name, reached) {
-      if (!name) return this.clear();
-      const data = shape(name, reached || []);
-      graph.draw(data);
-      // The subject selected, as though it had been clicked: it is the one node
-      // every other node on this canvas is measured from, and selecting it
-      // lights its own edges as well as drawing it in the accent.
-      graph.pick(name);
-      const hidden = data.total - data.nodes.length;
-      caption.textContent = hidden > 0
-        ? `reverse reachability · ${hidden} beyond the ${IMPACT_NODE_CAP} drawn`
-        : "reverse reachability";
-      graph.start();
-    },
-    clear() {
-      graph.draw({ nodes: [], edges: [], total: 0 });
-      caption.textContent = "reverse reachability";
-    },
-  };
+  await load("ledger", true);
+  paintChrome();
+  repaint();
 }
 
-async function impactView() {
-  await refreshStores();
+function storeSelect(value, onPick) {
+  return dropdown({ label: "Store", value, options: [["all", "All stores"], ...liveStores().map((s) => [s.name, s.name])], onChange: onPick });
+}
 
-  const results = el("div", { class: "impact-results" });
-  const subject = el("span", { class: "impact-subject", text: "—" });
-  const depthPill = el("span", { class: "pill warn", text: "depth 3 · reverse" });
-  const rings = impactCanvas();
-  /* The store the question is about. Carried from the Graph page's Blast
-   * radius, which knows which store the symbol was picked in; the same name in
-   * another open store is another symbol with another reach. */
-  let store = state.impactStore || "";
-  const scope = () => store;
-  const pathCard = pathFinderCard(scope);
-  const traceLane = traceCard(scope);
-  const reached = statCell("Reached", 0);
-  const files = statCell("Files", 0);
-  const inferredCell = statCell("Inferred", 0);
-  const stats = el("div", { class: "impact-stats" }, reached, files, inferredCell);
-  const setStats = (a, b, c) => {
-    reached.querySelector(".n").textContent = String(a);
-    files.querySelector(".n").textContent = String(b);
-    inferredCell.querySelector(".n").textContent = String(c);
-  };
+function clientSelect(rowsList) {
+  const names = [...new Set(rowsList.map((r) => r.client))].sort();
+  return dropdown({ label: "Client", value: lg.filter || "all", options: [["all", "All clients"], ...names.map((c) => [c, c])], onChange: (v) => ((lg.filter = v === "all" ? null : v), repaint()) });
+}
 
-  const nameInput = el("input", {
-    type: "search",
-    placeholder: "A symbol's name, matched exactly",
-    "aria-label": "Symbol",
-    onkeydown: (e) => {
-      if (e.key === "Enter") run();
-    },
+function ledgerSessions(list) {
+  const q = lg.q.toLowerCase();
+  const all = data.ledger?.sessions || [];
+  const filtered = list.filter((s) => (lg.store === "all" || s.store === lg.store) && (lg.tier === "all" || s.tier === lg.tier) && (!q || `${s.session} ${s.client}`.toLowerCase().includes(q)));
+  const usage = data.ledger?.usage?.enabled;
+  const priced = filtered.some((s) => s.saved_usd != null);
+  const qInput = el("input", { value: lg.q, placeholder: "Filter by session or agent", "data-keep": "lg-q", "aria-label": "Filter sessions", oninput: (e) => ((lg.q = e.target.value), repaint()) });
+  const g = grid({
+    key: "lg:sessions",
+    caption: "Ledger sessions",
+    rows: filtered,
+    sort: "seen",
+    dir: "desc",
+    empty: all.length ? "No session matches." : "No session recorded yet.",
+    onClear: all.length ? clearLedger : null,
+    columns: [
+      { key: "seen", label: "Last seen", cls: "ms nowrap", firstDir: "desc", sort: (s) => s.last, render: (s) => el("span", { "data-tip": s.when, text: dayClock(s.last) }) },
+      { key: "id", label: "Session", cls: "t-mono", sort: (s) => s.session, render: (s) => el("span", { "data-tip": s.session, text: String(s.session || "").slice(0, 10) }) },
+      { key: "agent", label: "Agent", cls: "t13", sort: (s) => s.client, render: (s) => s.client },
+      { key: "store", label: "Store", cls: "ms", sort: (s) => s.store, render: (s) => s.store },
+      usage ? { key: "model", label: "Model", cls: "ms", sort: (s) => s.model || "", render: (s) => s.model || "—" } : null,
+      { key: "reads", label: "Reads", cls: "m r", sort: (s) => s.retrievals, render: (s) => n(s.retrievals) },
+      { key: "net", label: "Net tokens", cls: "m r", sort: (s) => s.net_tokens, render: (s) => n(s.net_tokens) },
+      priced ? { key: "cost", label: "Saved", cls: "m r", sort: (s) => s.saved_usd || 0, render: (s) => (s.saved_usd != null ? el("span", { "data-tip": `at ${s.model}'s input price` }, dollars(s.saved_usd)) : "—") } : null,
+      { key: "tier", label: "Tier", sort: (s) => s.tier, render: (s) => pill(s.tier, s.tier === "measured" ? "blue" : "grey", { dot: false, tip: s.tier === "measured" ? "Measured from the agent's own session log" : "Modelled with the store tokenizer, not observed" }) },
+    ].filter(Boolean),
   });
-  if (state.impactSymbol) nameInput.value = state.impactSymbol;
-
-  const depthInput = el("input", {
-    type: "number",
-    min: "1",
-    max: "10",
-    value: "3",
-    "aria-label": "Hops",
-    class: "hops",
-  });
-
-  let allEdges = false;
-  // The same control the path finder below carries, drawn the same way: two
-  // looks for one named toggle on one page reads as two different things.
-  const verified = chipToggle("Prefer verified edges", true, (on) => {
-    allEdges = !on;
-    if (nameInput.value.trim()) run();
-  });
-
-  const reach = el("button", { class: "button small", type: "button", text: "Reach", onclick: () => run() });
-  const storeChip = el("span", { class: "chips" });
-  function paintStore() {
-    fill(
-      storeChip,
-      store
-        ? el("button", {
-            class: "chip sm",
-            type: "button",
-            "aria-pressed": "true",
-            title: "Answering about this store only. Press to ask every open store.",
-            text: `in ${store} ×`,
-            onclick: () => {
-              store = "";
-              state.impactStore = "";
-              paintStore();
-              if (nameInput.value.trim()) run();
-            },
-          })
-        : null,
-    );
-  }
-  paintStore();
-
-  /* Where to start, for a page opened with no question: the Graph is where a
-   * symbol is usually found, and its Blast radius button lands here with the
-   * symbol and its store already filled in. */
-  function emptyImpact() {
-    return el(
-      "div",
-      { class: "rows" },
-      el("p", {
-        class: "subtitle",
-        text: "Type a symbol's exact name above and press Reach, or find it on the Graph page, pick it, and press Blast radius.",
-      }),
-      el("div", {}, el("button", { class: "button secondary small", type: "button", text: "Open Graph", onclick: () => go("graph") })),
-    );
-  }
-
-  /* A real table row, in a real table.
-   *
-   * These were `div`s on a grid, and a grid is only a table for as long as
-   * every row agrees about its tracks: a long symbol pushed its own row's
-   * columns out of line with the heading above it, and the whole block read as
-   * loose text rather than as an answer with columns. `table` is the element
-   * for this, its heading sticks, and the browser sizes the columns from the
-   * content instead of from a guess written in `fr` units. */
-  function reachedRow(row) {
-    return el(
-      "tr",
-      { class: "impact-row" },
-      el("td", { class: "sym" }, el("code", { title: row.name, text: row.name })),
-      // The call site, where the store recorded one: the line to open to see
-      // the call, which can sit hundreds of lines below the definition. An
-      // edge an older binary wrote has none, and the cell says so rather
-      // than passing the definition off as the call. The whole path is in the
-      // title, because the cell truncates it.
-      row.at
-        ? el("td", {
-            class: "where path",
-            title: `${row.path}:${row.at} · call in ${row.name}, defined at line ${row.line}`,
-            text: `${shortPath(row.path)}:${row.at}`,
-          })
-        : el("td", {
-            class: "where path",
-            title: `${row.path}:${row.line} · no call-site line in this store; a re-index adds it`,
-            text: `${shortPath(row.path)}:${row.line} (definition)`,
-          }),
-      el(
-        "td",
-        { class: "via" },
-        el("span", { class: "one-line", text: `${row.via} · ${row.kind}` }),
-        confidenceBadge(row.confidence),
-      ),
-      el("td", { class: "hops-n num", text: String(row.hop) }),
-    );
-  }
-
-  // One table, split into a `tbody` per hop, rather than one table per hop:
-  // the hops are groups of one answer and share its columns, so the heading is
-  // written once and the group label rides a row that spans it.
-  function hopGroup(hop, rows) {
-    return el(
-      "tbody",
-      { class: "impact-block" },
-      el(
-        "tr",
-        { class: "impact-hop-row" },
-        el(
-          "th",
-          { colspan: "4", scope: "rowgroup" },
-          el(
-            "div",
-            { class: "impact-hop" },
-            el("h2", { text: `${hop} hop${hop === 1 ? "" : "s"}` }),
-            el("span", { class: "muted", text: `${rows.length} definition${rows.length === 1 ? "" : "s"}` }),
-          ),
-        ),
-      ),
-      rows.map(reachedRow),
-    );
-  }
-
-  async function run() {
-    const name = nameInput.value.trim();
-    state.impactSymbol = name;
-    if (!name) {
-      subject.textContent = "—";
-      setStats(0, 0, 0);
-      rings.clear();
-      fill(results, emptyImpact());
-      return;
-    }
-    const depth = Math.min(10, Math.max(1, Number(depthInput.value) || 3));
-    depthInput.value = String(depth);
-    subject.textContent = name;
-    depthPill.textContent = `depth ${depth} · reverse`;
-    fill(results, el("p", { class: "subtitle", text: "Reading…" }));
-    let data;
-    try {
-      const query = new URLSearchParams({ name, depth: String(depth) });
-      if (allEdges) query.set("all_edges", "1");
-      if (store) query.set("store", store);
-      data = await api(`/api/impact?${query}`);
-    } catch (e) {
-      rings.clear();
-      setStats(0, 0, 0);
-      fill(results, error(e.message));
-      return;
-    }
-    const impact = data.impact;
-    if (!impact || !impact.reached.length) {
-      // A canvas still showing the last symbol's rings under a headline about
-      // this one is the worst thing this page could draw.
-      rings.clear();
-      setStats(0, impact ? impact.files.length : 0, 0);
-      fill(
-        results,
-        el("p", { class: "headline", text: data.headline || "nothing reaches that name" }),
-        impact && impact.definitions.length
-          ? el("p", { class: "note", text: "The symbol is indexed; nothing in an open store calls it." })
-          : el("p", {
-              class: "note",
-              text: "No definition of that name is in an open store. Check the spelling, or index the repository that holds it.",
-            }),
-      );
-      return;
-    }
-
-    const inferred = impact.reached.filter((r) => r.confidence === "inferred" || r.confidence === "ambiguous").length;
-    const byHop = new Map();
-    for (const row of impact.reached) {
-      if (!byHop.has(row.hop)) byHop.set(row.hop, []);
-      byHop.get(row.hop).push(row);
-    }
-
-    // The three figures belong to the `Changing` card in the left column, where
-    // the design puts them, not to the table below. `Inferred` is the design's
-    // own word for this cell; it read `Unsettled` here, which is the word this
-    // project uses for the pair of confidences and not the word on the page.
-    setStats(impact.reached.length, impact.files.length, inferred);
-    rings.show(name, impact.reached);
-
-    /* The two cards below now have a question to answer.
-     *
-     * The furthest caller to the symbol being changed: the longest chain this
-     * answer contains, which is the one worth reading. Seeded only while both
-     * fields are empty, so a question somebody typed is never overwritten. */
-    const furthest = impact.reached[impact.reached.length - 1];
-    if (furthest) {
-      pathCard.seed(furthest.name, name);
-      traceLane.seed(furthest.name, name);
-    }
-
-    fill(
-      results,
-      el("p", { class: "headline", text: data.headline }),
-      impact.unqualified
-        ? el("p", {
-            class: "note",
-            text: `Nothing named ${name} matched that owner, so this is every definition of the bare name.`,
-          })
-        : null,
-      allEdges
-        ? el("p", {
-            class: "note hypothesis",
-            text: "Walked names with several definitions. Rows badged ambiguous are a hypothesis, not a finding.",
-          })
-        : null,
-      el(
-        "div",
-        { class: "card table-card impact-table" },
-        el(
-          "div",
-          { class: "table-wrap" },
-          el(
-            "table",
-            {},
-            el("caption", { class: "sr-only", text: `Everything that reaches ${name}, nearest hop first` }),
-            el(
-              "thead",
-              {},
-              el(
-                "tr",
-                {},
-                el("th", { text: "Reached symbol" }),
-                el("th", { text: "Where" }),
-                el("th", { text: "Via" }),
-                el("th", { class: "num", text: "Hops" }),
-              ),
-            ),
-            [...byHop.entries()].map(([hop, rows]) => hopGroup(hop, rows)),
-          ),
-        ),
-      ),
-      el(
-        "div",
-        { class: "card table-card impact-table" },
-        el("div", { class: "table-head" }, el("h2", { text: "Files" })),
-        el(
-          "div",
-          { class: "table-wrap" },
-          el(
-            "table",
-            {},
-            el("caption", { class: "sr-only", text: "The files those definitions are in" }),
-            el(
-              "thead",
-              {},
-              el(
-                "tr",
-                {},
-                el("th", { text: "File" }),
-                el("th", { class: "num", text: "Definitions" }),
-                el("th", { class: "num", text: "Nearest" }),
-              ),
-            ),
-            el(
-              "tbody",
-              // Its own class: a file is not an edge and carries no support
-              // class, so a check counting unbadged hops must be able to tell
-              // the two blocks apart.
-              { class: "impact-block impact-files" },
-              impact.files.map((file) =>
-                el(
-                  "tr",
-                  { class: "impact-row" },
-                  el("td", { class: "sym path", text: shortPath(file.path) }),
-                  el("td", { class: "num", text: String(file.symbols) }),
-                  el("td", { class: "num", text: `${file.nearest} hop${file.nearest === 1 ? "" : "s"}` }),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-      impact.hidden
-        ? el("p", { class: "note", text: `${impact.hidden} more left out at the limit of ${data.limit}.` })
-        : null,
-    );
-  }
-
-  fill(results, emptyImpact());
-  if (state.impactSymbol) run();
-
-  return el(
-    "div",
-    { class: "view" },
-    pageHead("Impact", "Reverse reachability. What breaks if this changes — before the edit, not after the test run."),
-    /* Two columns, as the design lays the page out: the answer on the left,
-     * the two questions that follow from it on the right, and the canvas at
-     * the top of the right column rather than spanning.
-     *
-     * The `Changing` row and the three figures were two unboxed page-wide
-     * bands across the top; they are one card at the head of the left column,
-     * which is where the design has them and is why the right column used to
-     * read as a large empty area beside them.
-     *
-     * The search band is this project's own addition -- the design is a
-     * prototype with one fixed subject and no way to ask about another -- and
-     * it sits at the head of that same card rather than after it. Against a
-     * real store there is nothing on this page until a name is typed, so a
-     * control placed below the answer it produces would be a control nobody
-     * finds. Recorded as a deliberate departure. */
+  lg.shown = g.shown;
+  return [
     el(
       "div",
-      { class: "impact-columns" },
-      el(
-        "div",
-        { class: "impact-col" },
-        el(
-          "div",
-          { class: "card pad impact-subject-card" },
-          el(
-            "div",
-            { class: "impact-band" },
-            nameInput,
-            el("label", { class: "hops-label" }, el("span", { text: "hops" }), depthInput),
-            verified,
-            reach,
-          ),
-          el(
-            "div",
-            { class: "impact-subject-row" },
-            capLabel("Changing"),
-            subject,
-            storeChip,
-            el("span", { class: "spacer" }),
-            depthPill,
-          ),
-          stats,
-          // What the figures and the controls above them mean, once.
-          el(
-            "ul",
-            { class: "impact-guide" },
-            el("li", {}, el("b", { text: "Reached" }), " — every definition that calls, references or imports this one, directly or through others."),
-            el("li", {}, el("b", { text: "Inferred" }), " — linked by a bare name match only. Corroborate before relying on it."),
-            el("li", {}, el("b", { text: "Hops" }), " — how far back to read: 1 is direct callers only. Prefer verified edges leaves out names with several definitions."),
-          ),
-        ),
-        results,
-      ),
-      el("div", { class: "impact-col" }, rings.node, pathCard, traceLane),
+      { class: "filterbar" },
+      el("div", { class: "box h28 w220 full-sm" }, icon(I.searchSm, 13, { w: 1.8 }), qInput),
+      clientSelect(all),
+      storeSelect(lg.store, (v) => ((lg.store = v), repaint())),
+      dropdown({
+        label: "Tier",
+        value: lg.tier,
+        options: [
+          ["all", "Any tier"],
+          ["measured", "measured"],
+          ["modelled", "modelled"],
+        ],
+        onChange: (v) => ((lg.tier = v), repaint()),
+      }),
     ),
-  );
-}
-
-/* What each of these two cards says before it has been asked anything.
- *
- * Both said `Name both ends of the chain.` -- the same sentence at four sites,
- * two of which sit one above the other on screen, which reads as a page that
- * has failed rather than as two cards waiting for a question. Each says what
- * it will do with the two names instead, and the two differ because the cards
- * do: one finds a chain, the other writes the chain out with its evidence. */
-const PATH_EMPTY = "Two names, and this walks the edges between them.";
-const TRACE_EMPTY = "Two names, and this writes the chain out with the lines that support it.";
-
-/* The path finder, which until now answered only from the terminal.
- *
- * `Prefer verified edges` is the default and `Strict` says it out loud — the
- * same pair the CLI takes, and `Strict` wins over the other for the same
- * reason it does there. */
-function pathFinderCard(scope) {
-  const from = el("input", { type: "text", placeholder: "from", "aria-label": "Path from" });
-  const to = el("input", { type: "text", placeholder: "to", "aria-label": "Path to" });
-  const body = el("div", { class: "path-body" });
-  const query = el("span", { class: "mono-chip", text: "max 6 hops" });
-
-  let preferVerified = true;
-  let strict = false;
-
-  const verifiedChip = chipToggle("Prefer verified edges", true, (on) => {
-    preferVerified = on;
-    if (!on) strict = false;
-    strictChip.setAttribute("aria-pressed", String(strict));
-    run();
-  });
-  const strictChip = chipToggle("Strict", false, (on) => {
-    strict = on;
-    if (on) {
-      preferVerified = true;
-      verifiedChip.setAttribute("aria-pressed", "true");
-    }
-    run();
-  });
-
-  async function run() {
-    const a = from.value.trim();
-    const b = to.value.trim();
-    if (!a || !b) {
-      fill(body, el("p", { class: "subtitle", text: PATH_EMPTY }));
-      return;
-    }
-    // `--strict` wins over `--all-edges`, exactly as it does on the command
-    // line: asking for both is asking for the refusal you named explicitly.
-    const allEdges = !preferVerified && !strict;
-    query.textContent = `${a} → ${b} · max 6 hops`;
-    fill(body, el("p", { class: "subtitle", text: "Walking…" }));
-    let data;
-    try {
-      const q = new URLSearchParams({ from: a, to: b, depth: "6" });
-      if (allEdges) q.set("all_edges", "1");
-      if (scope && scope()) q.set("store", scope());
-      data = await api(`/api/path?${q}`);
-    } catch (e) {
-      fill(body, error(e.message));
-      return;
-    }
-    if (!data.path) {
-      fill(
-        body,
-        el(
-          "div",
-          { class: "refusal" },
-          el("p", {
-            class: "mono",
-            text: allEdges
-              ? "Not connected within 6 hops by any edge in the store"
-              : "Not connected within 6 hops by resolved edges",
-          }),
-          allEdges
-            ? null
-            : el("button", {
-                class: "link",
-                type: "button",
-                text: "Show inferred chain",
-                onclick: () => {
-                  preferVerified = false;
-                  strict = false;
-                  verifiedChip.setAttribute("aria-pressed", "false");
-                  strictChip.setAttribute("aria-pressed", "false");
-                  run();
-                },
-              }),
-        ),
-      );
-      return;
-    }
-    fill(body, chainBlock(data.path, data.summary));
-  }
-
-  fill(body, el("p", { class: "subtitle", text: PATH_EMPTY }));
-
-  const node = el(
-    "section",
-    { class: "card pad path-card" },
-    el("div", { class: "card-head" }, el("h2", { text: "Path finder" }), query),
-    el("div", { class: "path-band" }, from, to, verifiedChip, strictChip, el("button", { class: "button small", type: "button", text: "Walk", onclick: () => run() })),
-    body,
-  );
-  /* Seeded from the answer above it, once, and never over a typed question.
-   *
-   * Arriving here from the Graph page's `Blast radius` fills the reach box and
-   * runs it, and these two cards sat empty underneath saying "two names" — with
-   * the two names on screen a few inches above them. The design shows both
-   * cards answering, which is only possible if something puts a question in
-   * them. */
-  node.seed = (a, b) => {
-    if (from.value.trim() || to.value.trim()) return;
-    if (!a || !b || a === b) return;
-    from.value = a;
-    to.value = b;
-    run();
-  };
-  return node;
-}
-
-/** A pill that is on or off, in the two states the v4 design draws. */
-function chipToggle(label, on, onchange) {
-  const node = el("button", {
-    // A chip, at the smaller of the design's two chip sizes. The pressed look
-    // comes from `aria-pressed` through `.chip`, so a toggle and a filter chip
-    // cannot drift apart -- and the state a screen reader is told is the same
-    // attribute the stylesheet paints from, rather than a class beside it.
-    class: "chip sm",
-    type: "button",
-    text: label,
-    "aria-pressed": String(on),
-    onclick: () => {
-      const next = node.getAttribute("aria-pressed") !== "true";
-      node.setAttribute("aria-pressed", String(next));
-      onchange(next);
-    },
-  });
-  return node;
-}
-
-/** The hops of a chain, with the seam drawn where the chain changed subject. */
-function chainBlock(steps, summary) {
-  const rows = [];
-  steps.forEach((step, i) => {
-    rows.push(
-      el(
-        "div",
-        { class: "hop" },
-        el("span", { class: "n", text: String(i + 1) }),
-        el("span", { class: "end", text: `${step.from} @ ${shortPath(step.from_path)}:${step.from_line}` }),
-        el("span", { class: "arrow", "aria-hidden": "true", text: "→" }),
-        el("span", { class: "end", text: `${step.to} @ ${shortPath(step.to_path)}:${step.to_line}` }),
-        el("span", { class: "kind", text: step.kind }),
-        confidenceBadge(step.confidence),
-      ),
-    );
-    const next = steps[i + 1];
-    if (next && (next.from_path !== step.to_path || next.from_line !== step.to_line)) {
-      rows.push(
-        el("div", { class: "seam" }, `seam · ${step.to}: ${Math.max(2, step.definitions)} definitions · continues from ${next.from} @ ${shortPath(next.from_path)}:${next.from_line}`),
-      );
-    }
-  });
-  const s = summary || {};
-  let trailer = `${s.hops} hop${s.hops === 1 ? "" : "s"} · ${s.extracted} extracted · ${s.resolved} resolved · ${s.inferred} inferred · ${s.ambiguous} ambiguous`;
-  if (s.seams) {
-    const names = (s.ambiguous_names || []).map(([name, count]) => `${name}: ${count} definitions`).join(", ");
-    trailer += ` · ${s.seams} through ambiguous names (${names})`;
-  }
-  return [
-    ...rows,
-    el("p", { class: "trailer mono", text: trailer }),
-    s.hypothesis
-      ? el("p", {
-          class: "note hypothesis",
-          text: "A hypothesis, not a finding. Read the seam before you rely on it.",
-        })
-      : null,
+    g.node,
   ];
 }
 
-/* Trace: the same chain, as something a reader can paste into a review.
- *
- * The sentence, the hops, and one line of source per hop — each marked a
- * supporting fact or a candidate, from the hop's own support class. Nothing
- * here re-walks the graph: `/api/trace` reads the chain the finder produced. */
-function traceCard(scope) {
-  const from = el("input", { type: "text", placeholder: "from", "aria-label": "Trace from" });
-  const to = el("input", { type: "text", placeholder: "to", "aria-label": "Trace to" });
-  const body = el("div", { class: "trace-body" });
-  let evidenceText = "";
-
-  const copy = copyButton(() => evidenceText, "Copy as evidence", true);
-
-  async function run() {
-    const a = from.value.trim();
-    const b = to.value.trim();
-    if (!a || !b) {
-      fill(body, el("p", { class: "subtitle", text: TRACE_EMPTY }));
-      return;
-    }
-    fill(body, el("p", { class: "subtitle", text: "Reading…" }));
-    let data;
-    try {
-      const q = new URLSearchParams({ from: a, to: b, depth: "6" });
-      if (scope && scope()) q.set("store", scope());
-      data = await api(`/api/trace?${q}`);
-    } catch (e) {
-      fill(body, error(e.message));
-      return;
-    }
-    const trace = data.trace;
-    evidenceText = data.evidence || "";
-    const parts = [capLabel("Answer"), el("p", { class: "answer", text: trace.answer })];
-    if (trace.chain && trace.chain.steps.length) {
-      parts.push(capLabel("Chain"));
-      parts.push(...chainBlock(trace.chain.steps, trace.chain.summary));
-      parts.push(capLabel("Supporting lines"));
-      for (const line of trace.lines) {
-        parts.push(
-          el(
-            "div",
-            { class: "support" },
-            el("code", { text: line.at ? `${line.at}   ${line.code}` : "no call line recorded" }),
-            el(
-              "div",
-              { class: "support-foot" },
-              el("span", { class: "hop-of", text: line.hop }),
-              el("span", {
-                class: `mark ${line.mark.startsWith("candidate") ? "candidate" : "fact"}`,
-                text: line.mark,
-              }),
-            ),
-          ),
-        );
-      }
-    }
-    fill(body, ...parts);
-  }
-
-  fill(body, el("p", { class: "subtitle", text: TRACE_EMPTY }));
-
-  const node = el(
-    "section",
-    { class: "card pad trace-card" },
+function ledgerRetrievals(list) {
+  const q = lg.q.toLowerCase();
+  const filtered = list.filter((r) => (lg.store === "all" || r.store === lg.store) && (!lg.zero || r.hits === 0) && (!q || String(r.query).toLowerCase().includes(q)));
+  const qInput = el("input", { value: lg.q, placeholder: "Filter by query", "data-keep": "lg-q", "aria-label": "Filter retrievals", oninput: (e) => ((lg.q = e.target.value), repaint()) });
+  const g = grid({
+    key: "lg:retrievals",
+    caption: "Ledger retrievals",
+    rows: filtered,
+    sort: "when",
+    dir: "desc",
+    empty: (data.ledger?.rows || []).length ? "No retrieval matches." : "No retrieval recorded yet.",
+    onClear: (data.ledger?.rows || []).length ? clearLedger : null,
+    columns: [
+      { key: "when", label: "When", cls: "ms nowrap", firstDir: "desc", sort: (r) => r.at, render: (r) => el("span", { "data-tip": r.when, text: dayClock(r.at) }) },
+      { key: "client", label: "Client", cls: "t13 nowrap", sort: (r) => r.client, render: (r) => r.client },
+      { key: "store", label: "Store", cls: "ms", sort: (r) => r.store, render: (r) => r.store },
+      { key: "q", label: "Query", cls: "m cap", sort: (r) => r.query, render: (r) => el("span", { "data-tip": r.query, "data-tip-full": "", text: r.query }) },
+      { key: "hits", label: "Hits", cls: "m r", sort: (r) => r.hits, render: (r) => n(r.hits) },
+      { key: "sent", label: "Sent", cls: "m r", sort: (r) => r.excerpt_tokens, render: (r) => `${n(r.excerpt_tokens)} tok` },
+      { key: "ms", label: "ms", cls: "ms r", sort: (r) => r.ms, render: (r) => n(r.ms) },
+    ],
+  });
+  lg.shown = g.shown;
+  return [
     el(
       "div",
-      { class: "card-head" },
-      el("h2", { text: "Trace" }),
-      el("span", { class: "mono-chip", text: "evidence view" }),
-      el("span", { class: "spacer" }),
-      copy,
+      { class: "filterbar" },
+      el("div", { class: "box h28 w220 full-sm" }, icon(I.searchSm, 13, { w: 1.8 }), qInput),
+      clientSelect(data.ledger?.rows || []),
+      storeSelect(lg.store, (v) => ((lg.store = v), repaint())),
+      btn({ class: "chip", "aria-pressed": String(lg.zero), onclick: () => ((lg.zero = !lg.zero), repaint()) }, "Zero-hit only"),
     ),
-    el("div", { class: "path-band" }, from, to, el("button", { class: "button small", type: "button", text: "Trace", onclick: () => run() })),
-    body,
-  );
-  // Seeded like the path finder above it, and for the same reason. See there.
-  node.seed = (a, b) => {
-    if (from.value.trim() || to.value.trim()) return;
-    if (!a || !b || a === b) return;
-    from.value = a;
-    to.value = b;
-    run();
-  };
-  return node;
+    g.node,
+  ];
 }
 
-/* Reports: five, generated here, exported in five formats.
- *
- * The page asks `/api/report` for the text and hands it to the viewer — the
- * export is not a second renderer, so a file saved from here and one written
- * by `semlith report` are the same bytes. */
-/* The five reports, as the v4 picker draws them: what each one is, who reads
- * it, and what it answers once it is generated. The third line is the design's
- * `who` — a report nobody can name a reader for is a report nobody asks for. */
-const REPORTS = [
-  [
-    "savings",
-    "Retrieval savings",
-    "Tokens the agents did not read, counted from the ledger instead of claimed.",
-    "for whoever approves the spend",
-    "What retrieval actually saved, per client, with the arithmetic shown.",
-  ],
-  [
-    "access",
-    "AI access audit",
-    "Which agent read which file, when, in a hash-chained record nothing can quietly edit.",
-    "for security review and AI-use policy",
-    "Exactly what the assistants were shown, session by session.",
-  ],
-  [
-    "change",
-    "Change brief",
-    "Blast radius for what this machine re-read, written as a note you paste into the pull request.",
-    "for the reviewer, before the merge",
-    "What changed, what reaches it, and which callers the tests cover.",
-  ],
-  [
-    "health",
-    "Index health",
-    "Stale files, roots never indexed, formats skipped, and how much of the tree the graph covers.",
-    "for the person who owns the store",
-    "Whether the answers your agents get are current, and where the index has holes.",
-  ],
-  [
-    "gaps",
-    "Knowledge gaps",
-    "Questions the agents asked that your corpus could not answer well — a to-do list for documentation.",
-    "for whoever writes the docs",
-    "Asked and not answered, called and not found, and the names that mislead.",
-  ],
-];
+function clearLedger() {
+  lg.filter = null;
+  lg.q = "";
+  lg.store = "all";
+  lg.tier = "all";
+  lg.zero = false;
+  repaint();
+}
 
+const REPLAY_TONE = { refund: "amber", miss: "red", sufficed: "green", unknown: "grey" };
+
+function ledgerReplay() {
+  lg.shown = null;
+  const r = data.replay || {};
+  if (!r.enabled)
+    return el(
+      "div",
+      { class: "card-b" },
+      el(
+        "div",
+        { class: "row gap12" },
+        el("span", { class: "grow muted t-sm", text: "Session replay reads this machine's agent session logs to show what an agent did after each answer. It is off. Local only — nothing is uploaded." }),
+        btn({ class: "btn dark", onclick: () => setReplay(true) }, "Turn it on"),
+      ),
+    );
+  const sessions = r.sessions || [];
+  return el(
+    "div",
+    { class: "col" },
+    el("div", { class: "card-note", text: `Read from ${r.client || "Claude Code"} transcripts under ${tilde(r.from || "")}${r.skipped ? ` · ${n(r.skipped)} older transcripts not read` : ""} · turn off on the Privacy page` }),
+    !sessions.length ? empty(`On, and no transcript under ${tilde(r.from || "this machine")} holds a semlith call yet.`) : null,
+    sessions.slice(0, 20).map((s) =>
+      el(
+        "div",
+        { class: "card-b line-row gap8" },
+        el(
+          "div",
+          { class: "row base nowrap t-mono" },
+          el("span", { class: "t-m", text: String(s.id).slice(0, 12) }),
+          el("span", { class: "muted grow ell", text: `${plural(s.answers, "answer")} · ${s.project}` }),
+          el("span", { class: "muted", text: [s.refund && `${s.refund} refund`, s.miss && `${s.miss} miss`, s.sufficed && `${s.sufficed} sufficed`].filter(Boolean).join(" · ") }),
+        ),
+        (s.recent || []).slice(-6).map((a) =>
+          el(
+            "div",
+            { class: "replay-item" },
+            el("span", { class: "t-mono-sm", text: a.at ? new Date(a.at).toTimeString().slice(0, 8) : "" }),
+            el("span", { class: "q" }, a.query || a.tool, " ", el("span", { class: "muted t-xs", text: a.query ? a.tool : "" })),
+            pill(a.word, REPLAY_TONE[a.outcome] || "grey", { dot: false }),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+async function setReplay(on) {
+  const out = await act(() => post("/api/ledger/replay", { on }), on ? "Session replay on · local logs only" : "Session replay off");
+  if (out) {
+    await load("replay", true);
+    repaint();
+  }
+}
+
+// A download's name without the model detail in brackets: the portal says
+// "the embedding model", never which one.
+function plainWhat(what) {
+  return String(what || "").replace(/\s*\([^)]*\)/g, "");
+}
+
+function exportLedger(format) {
+  const sessions = lg.tab === "sessions";
+  const list = lg.shown ? lg.shown() : sessions ? data.ledger?.sessions || [] : data.ledger?.rows || [];
+  const cols = sessions ? ["when", "session", "client", "store", "retrievals", "net_tokens", "tier", "model"] : ["when", "client", "store", "query", "hits", "excerpt_tokens", "whole_file_tokens", "ms"];
+  const stamp = new Date().toISOString().slice(0, 10);
+  const name = `ledger-${sessions ? "sessions" : "retrievals"}-${stamp}`;
+  if (format === "JSON") return download(`${name}.json`, JSON.stringify(list, null, 2), "application/json");
+  const cell = (v) => (v === null || v === undefined ? "" : String(v));
+  // A Markdown table cell: backslashes first, then the pipe that would end
+  // the cell, and a line break folded to a space so the row stays one row.
+  const mdCell = (v) => cell(v).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+  if (format === "CSV") {
+    const esc = (v) => (/[",\n]/.test(cell(v)) ? `"${cell(v).replace(/"/g, '""')}"` : cell(v));
+    return download(`${name}.csv`, [cols.join(","), ...list.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n"), "text/csv");
+  }
+  const md = [`# Retrieval ledger — ${sessions ? "sessions" : "retrievals"}`, "", `Exported ${new Date().toString()} from this machine.`, "", `| ${cols.join(" | ")} |`, `| ${cols.map(() => "---").join(" | ")} |`, ...list.map((r) => `| ${cols.map((c) => mdCell(r[c])).join(" | ")} |`)].join("\n");
+  download(`${name}.md`, md, "text/markdown");
+}
+
+// ------------------------------------------------------------------- reports
+
+const REPORTS = [
+  ["savings", "Retrieval savings", "Tokens agents did not read, counted from the ledger.", "for whoever approves the spend", "What retrieval actually saved, per client, with the arithmetic shown."],
+  ["access", "AI access audit", "Which agent read which file, when — from a hash-chained record.", "for security review", "Every file an agent was shown, by client, in the window."],
+  ["change", "Change brief", "Blast radius for what changed, as a note to paste in the PR.", "for the reviewer", "What the change reaches."],
+  ["health", "Index health", "Stale files, skipped formats and graph coverage.", "for whoever owns the store", "What the index holds, skipped, and let go stale."],
+  ["gaps", "Knowledge gaps", "Questions the corpus could not answer well — a docs to-do list.", "for whoever writes the docs", "The questions that came back empty or thin."],
+];
 const REPORT_FORMATS = [
   ["markdown", "Markdown", "md", "text/markdown"],
   ["csv", "CSV", "csv", "text/csv"],
   ["json", "JSON", "json", "application/json"],
   ["html", "HTML", "html", "text/html"],
-  /* The fifth format is bytes, not text. `/api/report?format=pdf` answers
-   * `application/pdf` outside the JSON envelope the other four ride in, so it
-   * is fetched as a blob and named in the preview rather than painted into it:
-   * a PDF rendered as characters is a screenful of noise with a filename. */
   ["pdf", "PDF", "pdf", "application/pdf"],
 ];
-
-/* The design's four window chips, and the name `/api/report` takes for each.
- *
- * `report::WINDOWS` also has `all`, and naming no window at all is a fifth
- * behaviour again — but the design draws neither, and a chip this page invents
- * is a chip the design cannot be checked against. Leaving a store's whole
- * history unreachable from here costs nothing a reader can see, because the
- * three reports that count over it ignore the window anyway. */
 const REPORT_WINDOWS = [
   ["day", "24 hours"],
   ["week", "7 days"],
   ["month", "30 days"],
-  ["quarter", "This quarter"],
+  ["quarter", "Quarter"],
+];
+const WINDOWED = ["access", "change"];
+const CADENCES = [
+  ["day", 86400],
+  ["week", 604800],
+  ["month", 2592000],
 ];
 
-/* The two reports that carry a date to narrow by.
- *
- * `report::generate_over` windows `access` and `change` and nothing else; the
- * other three are lifetime aggregates over what is on disk now, and
- * `Window::note` makes each of them say so in its own heading. The chips
- * follow that rather than offering a dial that moves no figure — a control
- * that cannot change the file it claims to change is worse than no control. */
-/* The reports whose figures a window actually moves.
- *
- * `savings` and `gaps` joined these in 0.27.0. Every row in the ledger carries
- * `at` and always has; what was missing was a reader that took a bound, so the
- * page drew four window chips over the savings figure, disabled them, and
- * explained why the control it had just drawn could not work. The readers take
- * a bound now.
- *
- * `health` is still out, and genuinely: it is the index as it stands — files,
- * chunks, stale rows — and none of those figures has a date to narrow by. */
-const WINDOWED_KINDS = ["access", "change", "savings", "gaps"];
+const rp = { kind: "savings", window: "month", format: "markdown", stores: [], hash: false, excerpts: false, model: "", out: null, busy: false, picking: false };
 
-/* The design's cadence chips, as the interval `schedule::Schedule` holds.
- *
- * The record's field is `every_seconds` and these are shortcuts over it, not a
- * smaller vocabulary: a cadence no chip spells is still a cadence, and
- * `semlith schedule add --every` can still say it. The design's fourth chip,
- * `On git commit`, is not here — nothing in this binary hooks a commit, and a
- * chip for it would be the one kind of lie this page exists to refuse. */
-const REPORT_CADENCES = [
-  ["Daily", 86400],
-  ["Weekly", 604800],
-  ["Monthly", 2592000],
-];
-
-/** An interval in seconds, as the design's cadence blocks read it. */
-/* A chip is one line and cannot hold an absolute path. The design's chip reads
- * `~/.semlith/reports/`; a real store home is longer than that, so the tail is
- * what the chip shows and the whole path travels in its title and in the spec
- * line under the button. */
-function tailPath(path) {
-  const parts = String(path).split("/").filter(Boolean);
-  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}/` : `${path}/`;
-}
-
-function everyWords(seconds) {
-  const hit = REPORT_CADENCES.find(([, every]) => every === seconds);
-  if (hit) return hit[0].toLowerCase();
-  const plural = (count, unit) => `every ${count} ${unit}${count === 1 ? "" : "s"}`;
-  if (seconds % 86400 === 0) return plural(seconds / 86400, "day");
-  if (seconds % 3600 === 0) return plural(seconds / 3600, "hour");
-  return plural(Math.max(1, Math.round(seconds / 60)), "minute");
-}
-
-/** How long until a unix second, in words. `when()` only looks backwards. */
-function until(unix) {
-  if (!unix) return "not scheduled";
-  const seconds = unix - Math.floor(Date.now() / 1000);
-  if (seconds <= 0) return "due now";
-  if (seconds < 60) return `in ${seconds}s`;
-  if (seconds < 3600) return `in ${Math.round(seconds / 60)}m`;
-  if (seconds < 86400) return `in ${Math.round(seconds / 3600)}h`;
-  return `in ${Math.round(seconds / 86400)}d`;
-}
-
-/* Reports, in the v4 shape: pick a type, set it up, read the result.
- *
- * The page used to be five cards each carrying its own Generate button and its
- * own row of four format buttons — twenty-five controls for five reports, and
- * a preview at the bottom that could be showing any of them. The design's
- * shape is one selection and one builder: the picker says which report, the
- * builder says how, and the preview is the one it is about.
- *
- * Window and Scope are here now because `/api/report` takes them, and so are
- * two of the design's three toggles: `Hash the query text` replaces every query
- * with a digest of it wherever one reaches the page, and `Attach retrieved
- * excerpts` unrolls the access report's session lines into the retrievals
- * behind them. The design draws a third, `Sign the report`, and it is not here:
- * signing needs a key, and where that key lives, how it rotates and what a
- * reader checks it against are decisions this product has not made. A switch
- * with nothing behind it is a promise the file does not keep, so the option is
- * gone rather than drawn and disabled. */
-async function reportsView() {
-  await refreshStores();
-
-  /* The real store home, so the paths this page prints are the daemon's own
-   * rather than `~/.semlith/` assumed. A home the page cannot read leaves the
-   * paths out rather than guessing at them. */
-  let home = "";
-  try {
-    home = (await api("/api/about")).store_home || "";
-  } catch (_) {
-    /* The page still works; only the paths in two footers go unnamed. */
-  }
-  const reportDir = home ? `${home}/reports/` : "the store home's reports/ directory";
-  const schedulesFile = home ? `${home}/schedules.json` : "schedules.json in the store home";
-
-  let prices = MODEL_PRICES;
-  try {
-    prices = modelPrices((await api("/api/prices")).savings_models);
-  } catch (_) {
-    /* The default model still prices the report. */
-  }
-  let kind = REPORTS[0][0];
-  let format = REPORT_FORMATS[0][0];
-  let model = prices[0];
-  let span = "month";
-  /* Empty is every open store, which is exactly what `/api/report` means by no
-   * `scope` — so "all stores" is the absence of a narrowing, not a value. */
-  let scope = [];
-  // The two content toggles, off to begin with, which is the request 0.26.x
-  // made and the file it produced.
-  let redact = false;
-  let excerpts = false;
-  let body = "";
-  let file = null;
-  let report = null;
-  /* What this page actually wrote, this session. Not the daemon's directory —
-   * see the Written reports card for why that list cannot be read from here. */
-  let written = [];
-
-  const def = () => REPORTS.find(([id]) => id === kind);
-  const fmt = () => REPORT_FORMATS.find(([id]) => id === format);
-  const ext = () => fmt()[2];
-  const windowed = () => WINDOWED_KINDS.includes(kind);
-  const spanName = () => (REPORT_WINDOWS.find(([id]) => id === span) || REPORT_WINDOWS[2])[1];
-  const scopeWords = () => (scope.length ? scope.join(", ") : "all stores");
-  /* The date in the filename is the one inside the file, taken off the report
-   * the daemon generated, so the two cannot disagree. */
-  const stamp = () => (report && report.generated ? report.generated.slice(0, 10) : "");
-  const baseName = () => `${kind}${stamp() ? `-${stamp()}` : ""}.${ext()}`;
-
-  const picker = el("div", { class: "report-types" });
-  const builder = el("div", { class: "card pad report-builder" });
-  const builderProblem = el("div", { class: "note bad" });
-  // Plain, not bold: in the design this is a label on the previewed file, at
-  // the body's own weight and 12px mono. See `.name.plain`.
-  const previewName = el("span", { class: "name plain" });
-  const previewBody = el("pre", { class: "report-text" });
-  const previewMeta = el("span", { class: "meta" });
-  const savingsCard = el("section", { class: "card pad savings-card" });
-  const gapsCard = el("section", { class: "card pad gaps-card" });
-  const writtenCard = el("section", { class: "card written-card" });
-  const scheduleCard = el("section", { class: "card pad schedules-card" });
-  const cliCard = el("section", { class: "card pad report-cli-card" });
-
-  /* A labelled row of chips, the shape all five chip groups on this page take.
-   * `inline` is the design's 10.5px eyebrow, for the two groups that sit beside
-   * a heading rather than above a column of controls. */
-  function chipGroup(label, chips, options) {
-    const { inline, note, group } = options || {};
-    return el(
-      "div",
-      {
-        class: inline ? "chip-group inline" : "chip-group",
-        // A name a test can hold on to. The eyebrow is the label a reader
-        // sees and is free to be reworded; this is not.
-        "data-group": group || label.toLowerCase(),
-      },
-      el("span", { class: inline ? "eyebrow sm" : "eyebrow", text: label }),
-      el("div", { class: "filters" }, chips),
-      note ? el("p", { class: "subtitle", text: note }) : null,
-    );
-  }
-
-  function chip(label, on, onclick, why) {
-    return el("button", {
-      class: "chip",
-      type: "button",
-      text: label,
-      "aria-pressed": String(on),
-      disabled: !onclick,
-      title: why || null,
-      onclick: onclick || null,
-    });
-  }
-
-  // ------------------------------------------------------------- the report
-
-  /** Generate the chosen report and show it. One request, whose bytes are then
-   * what Copy copies, what Export writes and what Save to disk saves — so the
-   * four cannot disagree, and none of them is a second renderer. */
-  async function generate() {
-    previewName.textContent = `reports/${baseName()}`;
-    previewMeta.textContent = "Generating…";
-    fill(previewBody, "");
-    body = "";
-    file = null;
-    report = null;
-    const query = new URLSearchParams({ kind, format, model: model[0] });
-    // Omitted rather than sent and ignored: a report that cannot honour a
-    // window should not have one in the URL that produced it.
-    if (windowed()) query.set("window", span);
-    for (const name of scope) query.append("scope", name);
-    // Sent only when on, so the URL that produced a plain report is the URL
-    // 0.26.x would have produced.
-    if (excerpts) query.set("excerpts", "1");
-    if (redact) query.set("redact", "1");
-    try {
-      if (format === "pdf") {
-        // The one format outside the JSON envelope: bytes, fetched as bytes.
-        const response = await fetch(`/api/report?${query}`, {
-          credentials: "omit",
-          headers: authed(),
-        });
-        if (!response.ok) throw new Error(response.statusText || "request failed");
-        file = await response.blob();
-      } else {
-        const data = await api(`/api/report?${query}`);
-        body = data.text;
-        report = data.report;
-        file = new Blob([body], { type: `${fmt()[3]};charset=utf-8` });
+VIEWS.reports = {
+  needs: () => ["stores", "prices", "schedules"],
+  live: [],
+  render(route, holder) {
+    const prices = data.prices || {};
+    const models = prices.savings_models || [];
+    if (!rp.model || !models.some((m) => m.name === rp.model)) rp.model = (models.find((m) => /sonnet/i.test(m.name)) || models[0] || {}).name || "";
+    const def = REPORTS.find((r) => r[0] === rp.kind);
+    const inert = !WINDOWED.includes(rp.kind);
+    const fmt = REPORT_FORMATS.find((f) => f[0] === rp.format);
+    const fileName = `${rp.kind}-${new Date().toISOString().slice(0, 10)}.${fmt[2]}`;
+    const preview = el("div", { class: "preview", "data-scroll-keep": "rp-preview" });
+    const previewMeta = el("div", { class: "card-foot" });
+    const savingsCard = el("div", {});
+    holder.onData = () => {};
+    const generate = async () => {
+      // Only the latest request paints: a slow report finishing after a
+      // quick one used to put the old answer back. Seconds tick meanwhile, so
+      // a large store's report reads as working rather than stuck.
+      const mine = (rp.seq = (rp.seq || 0) + 1);
+      rp.busy = true;
+      const began = Date.now();
+      setText(preview, "Generating on this machine…");
+      const tick = setInterval(() => {
+        if (rp.seq !== mine || !preview.isConnected) return clearInterval(tick);
+        setText(preview, `Generating on this machine… ${Math.round((Date.now() - began) / 1000)} s — a report over a large store reads all of it`);
+      }, 1000);
+      const p = new URLSearchParams({ kind: rp.kind, format: rp.format === "pdf" ? "markdown" : rp.format, model: rp.model });
+      if (!inert) p.set("window", rp.window);
+      for (const s of rp.stores) p.append("scope", s);
+      if (rp.hash) p.set("redact", "1");
+      if (rp.excerpts) p.set("excerpts", "1");
+      try {
+        const out = await api(`/api/report?${p}`);
+        if (rp.seq !== mine) return;
+        rp.out = out;
+        setText(preview, rp.out.text || "");
+        fill(previewMeta, `${def[4]} · ${rp.format} · ${rp.out.report ? rp.out.report.window : ""} · generated ${rp.out.generated || ""} · nothing uploaded`);
+        paintSavings();
+      } catch (e) {
+        if (rp.seq !== mine) return;
+        rp.out = null;
+        setText(preview, e.message);
+      } finally {
+        clearInterval(tick);
+        if (rp.seq === mine) rp.busy = false;
       }
-    } catch (e) {
-      // The failure goes beside the controls that caused it, not into the
-      // preview: the preview is the file, and an error is not one.
-      previewMeta.textContent = "";
-      previewBody.textContent = "";
-      fill(builderProblem, error(e.message));
-      paintAll();
-      return;
-    }
-    fill(builderProblem);
-    previewName.textContent = `reports/${baseName()}`;
-    if (format === "pdf") {
-      previewBody.textContent =
-        `${bytes(file.size)} of PDF. A page cannot show it as text; ` +
-        `Export and Save to disk write these exact bytes.`;
-    } else {
-      previewBody.textContent = body;
-    }
-    paintMeta();
-    paintAll();
-  }
-
-  /* The three things the footer states, each read off the file that exists
-   * rather than estimated from the preview:
-   *   rows shown  — every `Table` block's row count in the generated report,
-   *                 which is the rows in the document, not the rows on screen;
-   *   full file   — `Blob.size`, the byte length Export hands the browser;
-   *   format      — the format the request asked for and the envelope echoed.
-   * The design's fourth is a signature, and it is not here: nothing in this
-   * binary signs a report, and a footer reading `unsigned` on every file for
-   * ever is a column about a feature rather than about the document.
-   * The trailing clause is the design's and is true of all three: every byte
-   * above was produced on this machine. */
-  function paintMeta() {
-    const rows = ((report && report.blocks) || [])
-      .filter((block) => block.block === "table")
-      .reduce((total, block) => total + block.rows.length, 0);
-    const size = file ? bytes(file.size) : "—";
-    const parts = [
-      format === "pdf" ? "rows not counted in a PDF" : `${rows} rows shown`,
-      `full file ${size}`,
-      format,
-      "written to disk, never uploaded",
-    ];
-    previewMeta.textContent = parts.join(" · ");
-  }
-
-  const copy = copyButton(() => body, "Copy", true);
-
-  const exportButton = el("button", {
-    // The design's 26px ink shape: the smallest solid control on the page, and
-    // the toolbar's own action rather than the page's primary one.
-    class: "button tiny ink",
-    type: "button",
-    text: "Export",
-    onclick: () => {
-      if (!file) return;
-      offerDownload(baseName(), file, fmt()[3]);
-    },
-  });
-
-  /* The design's accent action. It saves the file and logs it; `Export` beside
-   * the filename above saves it and says nothing, which is the split the design
-   * draws — its own Save to disk writes no file at all and only prepends a row.
-   *
-   * It is the browser's save, not the daemon's: no route on this machine writes
-   * a report into `reports/`, so a button claiming to fill that directory would
-   * be claiming something no request from this page can do. The picker API was
-   * tried here and taken out again — `showSaveFilePicker` exists in a headless
-   * browser and its promise then never settles, which is a button that silently
-   * does nothing for ever. */
-  const saveButton = el("button", {
-    class: "button",
-    type: "button",
-    text: "Save to disk",
-    title: "Saves through the browser and lists it below",
-    onclick: () => {
-      if (!file) return;
-      offerDownload(baseName(), file, fmt()[3]);
-      record(baseName(), file.size);
-    },
-  });
-
-  /** Remember a file this page really wrote, for the Written reports table. */
-  function record(name, size) {
-    written.unshift({
-      name,
-      title: def()[1],
-      span: report ? report.window : "",
-      size,
-      at: Math.floor(Date.now() / 1000),
-    });
-    // The design caps its log at six rows once anything is saved.
-    written = written.slice(0, 6);
-    paintWritten();
-  }
-
-  // ------------------------------------------------------------- the builder
-
-  function paintPicker() {
-    fill(
-      picker,
-      REPORTS.map(([id, title, blurb, who]) =>
+    };
+    const save = async () => {
+      const p = new URLSearchParams({ kind: rp.kind, format: rp.format, model: rp.model });
+      if (!inert) p.set("window", rp.window);
+      for (const s of rp.stores) p.append("scope", s);
+      if (rp.hash) p.set("redact", "1");
+      if (rp.excerpts) p.set("excerpts", "1");
+      try {
+        const out = await api(`/api/report?${p}`);
+        if (out instanceof Blob) download(fileName, out, fmt[3]);
+        else download(fileName, out.text || "", fmt[3]);
+        toast(`Saved ${fileName} through the browser`);
+      } catch (e) {
+        toast(e.message, true);
+      }
+    };
+    function paintSavings() {
+      if (rp.kind !== "savings" || !rp.out || !rp.out.report) return fill(savingsCard);
+      const blocks = rp.out.report.blocks || [];
+      const table = blocks.find((b) => b.block === "table");
+      const facts = (blocks.find((b) => b.block === "facts") || {}).facts || [];
+      const net = facts.find((f) => f[0] === "Net") || [];
+      const netCost = facts.find((f) => /cost avoided/i.test(f[0])) || [];
+      const model = models.find((m) => m.name === rp.model);
+      fill(
+        savingsCard,
         el(
-          "button",
-          {
-            class: `report-type${id === kind ? " on" : ""}`,
-            type: "button",
-            "aria-pressed": String(id === kind),
-            onclick: () => {
-              kind = id;
-              paintPicker();
-              generate();
-            },
-          },
-          el("span", { class: "name", text: title }),
-          el("span", { class: "what", text: blurb }),
-          el("span", { class: "for-whom", text: who }),
-        ),
-      ),
-    );
-  }
-
-  function paintBuilder() {
-    const [, title, , , answers] = def();
-    /* Under the title, the report's own sentence about the span it was taken
-     * over — `Window::note`, which for savings, health and gaps says outright
-     * that it counts over a store's whole history and has no date to narrow
-     * by. That is the page's one statement about the window, and it comes from
-     * the file rather than from the chip that is pressed. */
-    const spanLine = report ? report.window : answers;
-    fill(
-      builder,
-      el(
-        "div",
-        { class: "titles" },
-        el("span", { class: "card-title", text: title }),
-        el("p", { class: "subtitle", text: answers }),
-        el("p", { class: "subtitle span-note", text: spanLine }),
-      ),
-      chipGroup(
-        "Window",
-        REPORT_WINDOWS.map(([id, label]) =>
-          chip(
-            label,
-            windowed() && id === span,
-            windowed()
-              ? () => {
-                  span = id;
-                  generate();
-                }
-              : null,
-            windowed() ? null : `${title} has no date to narrow by`,
-          ),
-        ),
-      ),
-      chipGroup("Scope", [
-        chip("all stores", scope.length === 0, () => {
-          scope = [];
-          generate();
-        }),
-        ...state.stores.map((store) =>
-          chip(store.name, scope.includes(store.name), () => {
-            scope = scope.includes(store.name)
-              ? scope.filter((name) => name !== store.name)
-              : scope.concat(store.name);
-            generate();
-          }),
-        ),
-      ]),
-      chipGroup(
-        "Format",
-        REPORT_FORMATS.map(([id, label]) =>
-          chip(label, id === format, () => {
-            format = id;
-            generate();
-          }),
-        ),
-      ),
-      el(
-        "div",
-        { class: "report-toggles" },
-        [
-          [
-            "Hash the query text",
-            "Keeps the who, when and which-file; drops what was asked.",
-            () => redact,
-            (on) => {
-              redact = on;
-            },
-          ],
-          [
-            "Attach retrieved excerpts",
-            "The exact lines each agent was shown. Larger file.",
-            () => excerpts,
-            (on) => {
-              excerpts = on;
-            },
-          ],
-        ].map(([label, note, get, set]) => {
-          const node = el(
-            "button",
-            { class: "report-toggle", type: "button", "aria-pressed": String(get()) },
-            el("span", { class: "knob" }),
-            el(
-              "span",
-              { class: "stack" },
-              el("span", { class: "label", text: label }),
-              el("span", { class: "why", text: note }),
-            ),
-          );
-          node.onclick = () => {
-            const next = node.getAttribute("aria-pressed") !== "true";
-            node.setAttribute("aria-pressed", String(next));
-            set(next);
-            generate();
-          };
-          return node;
-        }),
-      ),
-      builderProblem,
-    );
-  }
-
-  // ------------------------------------------------- the savings breakdown
-
-  /** One fact out of the generated report, by the label `report.rs` gives it. */
-  function fact(label) {
-    for (const block of (report && report.blocks) || []) {
-      if (block.block !== "facts") continue;
-      const hit = block.facts.find(([name]) => name === label);
-      if (hit) return hit;
-    }
-    return null;
-  }
-
-  function factValue(label, fallback) {
-    const hit = fact(label);
-    return hit ? hit[1] : fallback || "—";
-  }
-
-  function tableStarting(prefix) {
-    return ((report && report.blocks) || []).find(
-      (block) => block.block === "table" && block.title.startsWith(prefix),
-    );
-  }
-
-  function trustBadge(text, tone) {
-    return el("span", { class: `trust ${tone}`, text });
-  }
-
-  function paintSavings() {
-    const table = tableStarting("What was not read");
-    if (!table) {
-      fill(savingsCard, el("span", { class: "card-title", text: "Retrieval savings" }), empty("Nothing generated yet."));
-      return;
-    }
-    const chain = fact("Ledger chain");
-    fill(
-      savingsCard,
-      el(
-        "div",
-        { class: "savings-head" },
-        el("span", { class: "card-title", text: "Retrieval savings" }),
-        el("span", { class: "spacer" }),
-        /* The design puts the model chips here, in this card's header, rather
-         * than in the builder — they price one report, not all five. */
-        /* A select rather than the design's chips: the table offers a
-         * model per vendor, which is too many chips for one header. */
-        el(
-          "select",
-          {
-            class: "chip",
-            "aria-label": "Model",
-            onchange: (e) => {
-              model = prices[Number(e.currentTarget.value)] || prices[0];
-              generate();
-            },
-          },
-          prices.map(([name], i) => el("option", { value: String(i), text: name, selected: name === model[0] })),
-        ),
-        /* The rate itself, a number the reader can check against the
-         * arithmetic below; the table and its date are on the Agents page. */
-        el("span", { class: "mono-chip", text: `$${model[1].toFixed(2)} per Mtok, input` }),
-        el("span", { class: "rule" }),
-        chipGroup(
-          "Cycle",
-          REPORT_WINDOWS.slice(1).map(([, label]) => chip(label, false, null, "This report has no date to narrow by")),
-          { inline: true },
-        ),
-      ),
-      el(
-        "div",
-        { class: "savings-lines" },
-        table.rows.map(([name, tokens, cost, rule]) =>
+          "div",
+          { class: "card" },
           el(
             "div",
-            { class: "savings-line" },
+            { class: "card-h" },
+            el("span", { class: "card-t grow", text: "The savings, line by line" }),
+            el("span", { class: "eyebrow sm", text: "PRICED AT" }),
+            // One dropdown with every model the savings can be priced at.
+            dropdown({ label: "Price the savings at", value: rp.model, options: models.map((m) => [m.name, m.name, `$${m.input}/Mtok`]), width: 280, onChange: (v) => ((rp.model = v), generate()) }),
+            el("span", { class: "t-mono-sm", text: model ? `$${Number(model.input).toFixed(2)} / Mtok input · prices from ${prices.source || "the built-in table"}${prices.fetched ? ` · ${prices.fetched}` : ""}` : "" }),
+            btn({ class: "btn xs", onclick: updatePrices, "data-tip": `One request to ${prices.url || "models.dev"}, made now because you asked` }, "Update prices"),
+          ),
+          table
+            ? table.rows.map((r) => el("div", { class: "save-line" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: r[0] }), el("span", { class: "muted t-xs", text: r[3] || "" })), el("span", { class: "tok", text: r[1] }), el("span", { class: "cost", text: r[2] || "—" })))
+            : empty("No savings recorded yet."),
+          el(
+            "div",
+            { class: "save-line net" },
+            el("span", { class: "row gap6" }, el("span", { class: "t-b big14", text: "Net" }), facts.filter((f) => !/^Net/.test(f[0])).map((f) => el("span", { class: "factchip sm", text: `${f[0].toLowerCase()} ${f[1]}` }))),
+            el("span", { class: "tok", text: net[1] || "—" }),
+            el("span", { class: "cost", text: netCost[1] || "—" }),
+          ),
+        ),
+      );
+    }
+    const optRow = (key, title, sub) => toggleRow(rp[key], title, sub, (v) => ((rp[key] = v), repaint(), generate()));
+    const schedules = Object.entries((data.schedules || {}).schedules || {});
+    const cli = `semlith report ${rp.kind} \\\n  --format ${rp.format} \\\n  ${inert ? "" : `--window ${rp.window} \\\n  `}--model "${rp.model}"${rp.stores.length ? ` \\\n  ${rp.stores.map((s) => `--store ${s}`).join(" ")}` : ""}${rp.hash ? " \\\n  --redact" : ""}${rp.excerpts ? " \\\n  --excerpts" : ""}`;
+    const node = el(
+      "div",
+      { class: "page" },
+      el("div", { class: "titles" }, el("div", { class: "h1", text: "Reports" }), el("div", { class: "lead", text: "Turn the ledger, index and graph into a file someone else can read. Generated here, saved through the browser, never uploaded." })),
+      el(
+        "div",
+        { class: "split s-260" },
+        el("div", { class: "col gap8" }, REPORTS.map(([id, title, desc, who]) => btn({ class: `kind-card${id === rp.kind ? " on" : ""}`, "aria-pressed": String(id === rp.kind), onclick: () => ((rp.kind = id), repaint()) }, el("span", { class: "t", text: title }), el("span", { class: "d", text: desc }), el("span", { class: "w", text: who })))),
+        el(
+          "div",
+          { class: "stack" },
+          el(
+            "div",
+            { class: "card pad auto-fit m320 gap14" },
+            el("div", { class: "col gap6" }, el("span", { class: "eyebrow sm", text: "WINDOW" }), seg(REPORT_WINDOWS, inert ? "" : rp.window, (v) => ((rp.window = v), repaint()), { disabled: () => inert }), inert ? el("span", { class: "muted t-xs", text: "This report counts the whole history." }) : null),
+            el("div", { class: "col gap6" }, el("span", { class: "eyebrow sm", text: "FORMAT" }), seg(REPORT_FORMATS.map((f) => [f[0], f[1]]), rp.format, (v) => ((rp.format = v), repaint()))),
             el(
               "div",
-              { class: "row" },
-              el("span", { class: "name", text: name }),
-              el("span", { class: "spacer" }),
-              el("span", { class: "tok", text: tokens }),
-              el("span", { class: "amount", text: cost || "—" }),
-            ),
-            el("p", { class: "subtitle", text: rule }),
-          ),
-        ),
-      ),
-      el(
-        "div",
-        { class: "savings-net" },
-        el("span", { class: "name", text: "Net" }),
-        el("span", { class: "spacer" }),
-        el("span", { class: "tok", text: factValue("Net") }),
-        el("span", { class: "amount", text: factValue("Net cost avoided") }),
-      ),
-      el(
-        "div",
-        { class: "trust-strip" },
-        trustBadge(`coverage ${factValue("Coverage")}`, "blue"),
-        trustBadge(`zero-hit ${factValue("Zero-hit")}`, "plain"),
-        trustBadge(`refunds ${factValue("Refund rate")}`, "plain"),
-        trustBadge(`p50 ${factValue("p50")} · p95 ${factValue("p95")}`, "plain"),
-        trustBadge(`tier ${factValue("Tier")}`, "blue"),
-        trustBadge(
-          `ledger ${chain ? chain[2] : "no rows yet"} · ${factValue("Ledger chain", "unknown")}`,
-          chain && chain[1] === "verifies" ? "green" : "amber",
-        ),
-      ),
-      /* The design's footnote says the baseline is priced at the cache-write
-       * rate and that a reconciliation states a drift against Claude's own
-       * counter. Neither is true of this binary: the savings figure is input
-       * pricing from the models.dev table, and nothing reconciles anything. What is written here is what the numbers above actually are. */
-      el("p", {
-        class: "subtitle",
-        text:
-          "Priced at input rates, because a retrieval is something an agent reads. " +
-          "Token counts are this store's own tokenizer; a model's counter will differ, " +
-          "and nothing here reconciles the two.",
-      }),
-    );
-  }
-
-  // ------------------------------------------------------------ the gaps card
-
-  function paintGaps() {
-    const several = fact("Names that mislead");
-    fill(
-      gapsCard,
-      el(
-        "div",
-        { class: "card-head" },
-        el("h2", { text: "Names that mislead" }),
-        el("span", { class: "mono-chip", text: several ? `${several[1]} names` : "—" }),
-      ),
-      several ? el("p", { class: "subtitle", text: several[2] }) : null,
-      /* The design lists each name with its definition count and how many
-       * hypothesis chains it sits on. `store::names_with_several_definitions`
-       * returns a count and nothing else, and no route breaks it down, so the
-       * rows are absent rather than invented. */
-      empty(
-        "Which names, and how many chains each sits on, is not in the gaps report — " +
-          "the store counts them without listing them.",
-      ),
-    );
-  }
-
-  // -------------------------------------------------------- written reports
-
-  function paintWritten() {
-    const head = (text, right) =>
-      el("th", { class: right ? "right" : null, scope: "col", text });
-    fill(
-      writtenCard,
-      el(
-        "div",
-        { class: "written-head" },
-        el("span", { class: "card-title", text: "Written reports" }),
-        el("span", { class: "mono-chip", text: reportDir }),
-      ),
-      el(
-        "div",
-        { class: "scroll-x" },
-        el(
-          "table",
-          { class: "written-table" },
-          el(
-            "thead",
-            null,
-            el("tr", null, head("Written"), head("Report"), head("Window"), head("Size", true), head("When", true)),
-          ),
-          el(
-            "tbody",
-            null,
-            written.map((row) =>
+              { class: "col gap6 full-row" },
+              el("span", { class: "eyebrow sm", text: "STORES" }),
               el(
-                "tr",
-                null,
-                el("td", { class: "file", text: row.name }),
-                el("td", { class: "type", text: row.title }),
-                el("td", { class: "window", text: row.span }),
-                el("td", { class: "size right", text: bytes(row.size) }),
-                el("td", { class: "when right", text: when(row.at) }),
+                "div",
+                { class: "row gap6" },
+                btn({ class: "chip sm mono", "aria-pressed": String(!rp.stores.length), onclick: () => ((rp.stores = []), repaint()) }, "all stores"),
+                liveStores().map((s) => btn({ class: "chip sm mono", "aria-pressed": String(rp.stores.includes(s.name)), onclick: () => ((rp.stores = rp.stores.includes(s.name) ? rp.stores.filter((x) => x !== s.name) : rp.stores.concat(s.name)), repaint()) }, s.name)),
               ),
             ),
+            el("div", { class: "row gap8 full-row" }, optRow("hash", "Hash the query text", "Keeps who, when and which file; drops what was asked."), optRow("excerpts", "Attach the excerpts", "The exact lines each agent was shown. A larger file.")),
           ),
+          el(
+            "div",
+            { class: "card flexcol" },
+            el(
+              "div",
+              { class: "card-h tight" },
+              icon(I.file, 14, { w: 1.6 }),
+              el("span", { class: "mono t-m t-sm grow anywhere", text: fileName }),
+              btn({ class: "btn sm t125", onclick: () => rp.out && copy(rp.out.text || "", "Report copied") }, "Copy"),
+              btn({ class: "btn sm t125", onclick: () => ((rp.picking = true), repaint()) }, "Schedule…"),
+              btn({ class: "btn sm primary t125", onclick: save }, "Save to disk"),
+            ),
+            preview,
+            previewMeta,
+          ),
+          savingsCard,
         ),
       ),
-      /* Not the daemon's directory. Nothing serves a listing of it — there is
-       * no route that reads `reports/`, and `/api/dirs` answers names without
-       * a size or a time, which is three of these five columns empty. What is
-       * listed is what this page wrote, which it knows exactly. */
-      written.length
-        ? null
-        : empty(
-            `Nothing written from this page yet. What the daemon has already put in ${reportDir} ` +
-              "is not listed here: no route reads that directory.",
+      el(
+        "div",
+        { class: "split s-1-1 stretch" },
+        el(
+          "div",
+          { class: "card flexcol" },
+          el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Schedules" }), el("span", { class: "t-mono-sm", text: "run by the daemon · ~/.semlith/schedules.json" })),
+          !schedules.length && !rp.picking ? empty("None yet. Set a report up above and press Schedule — the daemon writes the file in place, so it can be a tracked file with a readable diff.") : null,
+          schedules.map(([id, s]) =>
+            el(
+              "div",
+              { class: "sched-row" },
+              el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: (REPORTS.find((r) => r[0] === s.kind) || [, s.kind])[1] }), el("span", { class: "txt-dim", text: `${tilde(s.dir)} · ${s.format}${s.last_error ? ` · last run failed: ${s.last_error}` : s.next_run ? ` · next ${until(s.next_run)}` : ""}` })),
+              pill(everyWord(s.every_seconds), s.last_error ? "red" : "blue", { dot: false }),
+              btn({ class: "x-btn", "aria-label": "Remove schedule", onclick: () => removeSchedule(id) }, icon(I.x, 12, { w: 2 })),
+            ),
           ),
+          rp.picking
+            ? el(
+                "div",
+                { class: "card-foot sans" },
+                el("span", { class: "ink2 t-sm", text: "Every" }),
+                CADENCES.map(([label, secs]) => btn({ class: "chip sm", onclick: () => addSchedule(secs) }, label)),
+                el("span", { class: "spacer" }),
+                lnk("Cancel", () => ((rp.picking = false), repaint()), "muted"),
+              )
+            : null,
+        ),
+        el(
+          "div",
+          { class: "card flexcol" },
+          el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Without the browser" }), lnk("Copy", () => copy(cli.replace(/\\\n\s*/g, "")))),
+          el("div", { class: "code flat wrap grow", text: cli }),
+          el("div", { class: "card-note" }, "An agent can ask too: ", el("span", { class: "mono ink2", text: "semlith_report" }), " returns the same document over MCP."),
+        ),
+      ),
     );
-  }
+    setTimeout(generate, 0);
+    return node;
+  },
+};
 
-  // ---------------------------------------------------------- the schedules
+function until(unix) {
+  const s = unix - Math.floor(Date.now() / 1000);
+  if (s <= 0) return "due now";
+  if (s < 3600) return `in ${Math.round(s / 60)}m`;
+  if (s < 86400) return `in ${Math.round(s / 3600)}h`;
+  return `in ${Math.round(s / 86400)}d`;
+}
 
-  let schedules = [];
-  let scheduleProblem = "";
-  /* A refused write, kept apart from a missing route: the list is reloaded
-   * after every write, so a refusal folded into the same slot would be wiped
-   * by the very read that followed it and the button would look inert. */
-  let scheduleRefused = "";
-  let cadence = REPORT_CADENCES[2][1];
-  const destinations = [[tailPath(`${home}/reports`), home ? `${home}/reports` : ""]].concat(
-    state.stores.map((store) => [`${store.name} root`, store.dir]),
-  );
-  let destination = destinations[0][1];
+function everyWord(seconds) {
+  const hit = CADENCES.find(([, s]) => s === seconds);
+  if (hit) return `every ${hit[0]}`;
+  if (seconds % 86400 === 0) return `every ${seconds / 86400} days`;
+  return `every ${Math.round(seconds / 3600)} h`;
+}
 
-  async function loadSchedules() {
-    try {
-      const data = await api("/api/schedules");
-      schedules = Object.entries(data.schedules || {}).map(([id, one]) => ({ id, ...one }));
-      scheduleProblem = "";
-    } catch (e) {
-      schedules = [];
-      scheduleProblem = e.message;
-    }
-    paintSchedules();
-  }
+async function addSchedule(every) {
+  const dir = await pickFolder({ title: "Where should the daemon write it?", ok: "Write it here", hint: "The file is replaced in place on each run, so a tracked folder shows a readable diff." });
+  if (!dir) return;
+  const out = await act(() => post("/api/schedules", { action: "add", kind: rp.kind, format: rp.format, model: rp.model, every_seconds: every, dir, window: WINDOWED.includes(rp.kind) ? rp.window : undefined, stores: rp.stores }), `Scheduled ${everyWord(every)}`);
+  rp.picking = false;
+  if (out) await load("schedules", true);
+  repaint();
+}
 
-  /* Every change is a POST to the one route, naming the verb `semlith
-   * schedule` names. The page holds no schedule state of its own: the daemon
-   * owns the file, and a card that remembered what it asked for would be a
-   * second copy of what a schedule is. */
-  async function writeSchedule(sent) {
-    scheduleRefused = "";
-    try {
-      await post("/api/schedules", sent);
-    } catch (e) {
-      // The daemon names what would have worked -- a destination that is not a
-      // directory, a kind this binary does not have. Printed as it was said.
-      scheduleRefused = e.message;
-    }
-    // Reloaded rather than patched in place: the card states what the daemon
-    // holds, and the daemon is the only thing that knows what it now holds.
-    loadSchedules();
-  }
+async function removeSchedule(id) {
+  const out = await act(() => post("/api/schedules", { action: "remove", id }), "Schedule removed");
+  if (out) await load("schedules", true), repaint();
+}
 
-  function scheduleRow(one) {
-    const title = (REPORTS.find(([id]) => id === one.kind) || [, one.kind])[1];
-    const where = String(one.dir || "");
-    const spec = [
-      everyWords(one.every_seconds),
-      one.format,
-      one.stores && one.stores.length ? one.stores.join(", ") : "all stores",
-    ].join("  ·  ");
+async function updatePrices() {
+  const ok = await ask({ title: "Update the price table?", body: `One request to ${data.prices?.url || "models.dev"}, made now because you asked. ${data.privacy?.airgap?.on || data.privacy?.airgap === true ? "Airgap is on, so it will be refused." : "Nothing else is sent."}`, ok: "Update" });
+  if (!ok) return;
+  const out = await act(() => post("/api/prices", { update: true }), (o) => `Prices updated · ${o.models} models`);
+  if (out) await loadMany(["prices", "privacy"], true), repaint();
+}
+
+// ------------------------------------------------------------------- privacy
+
+const pvUi = { done: {}, scan: null, scanning: false };
+
+// Each rule in a line, as the design writes them, and its finding in a few
+// words. A rule that does not hold keeps the daemon's full wording, because
+// then the detail is the point; the full finding is always on hover.
+const RULE_COPY = {
+  "header-borne token": ["The session token travels in a Semlith-Token header, never a cookie — every localhost port is the same site.", () => "no route sets or reads a cookie"],
+  "same-origin writes": ["Every non-GET carries Sec-Fetch-Site: same-origin and a JSON content type, checked before the token.", () => "enforced before any route runs"],
+  "refused-file acceptance": ["A person decides about refused files, one or several at once — never an agent.", () => "the decision routes take the session token only"],
+  "store trust": ["A store outside the store home opens only after semlith trust records it.", (c) => (/no store/.test(c) ? "no untrusted store open" : shortPaths(c))],
+  "index boundary": ["An agent indexes only under a store's registered roots or home.", () => "enforced per path"],
+  "deny-list": ["No credential directory or credential-named file is indexed by an agent or the portal.", (c) => c.replace(/ and /, " · ").replace(/name patterns/, "patterns")],
+  "private addresses": ["semlith add refuses loopback, RFC 1918, link-local and unique-local.", (c) => c],
+  "pinned models": ["Every model file is checked against a pinned hash before it loads.", () => "pinned hash matches"],
+  "model cache": ["Weights load only from a cache no other account owns or can write to.", () => "yours alone"],
+  "directory modes": ["The store home, every store, the model cache and daemon.json are readable by you alone.", (c) => (/0700/.test(c) ? "all 0700" : shortPaths(c))],
+  "agent key": ["The agent key is one file, readable by you alone; nothing writes it into a client's config.", (c) => (/600/.test(c) ? "600, owner only" : shortPaths(c))],
+};
+
+VIEWS.privacy = {
+  needs: () => ["privacy", "replay", "stores"],
+  live: ["privacy"],
+  render() {
+    savePrefs({ privacySeen: true });
+    const P = data.privacy || {};
+    const airgap = P.airgap && typeof P.airgap === "object" ? P.airgap : { on: !!P.airgap, reason: P.airgap ? "flag" : null };
+    const outbound = P.outbound || { count: 0, recent: [] };
+    const downloads = P.downloads || [];
+    const cached = downloads.filter((d) => d.cached);
+    const replayOn = !!(data.replay && data.replay.enabled);
+    const rules = P.rules || [];
+    const holding = rules.every((r) => r.ok !== false);
+    const left = outbound.count > 0;
+    const verifyCmds = [
+      ["Ask the operating system what this process has open. Only loopback should appear.", "lsof -nP -p $(pgrep -f 'semlith start') -i"],
+      ["Watch every interface but loopback while you search. Nothing should appear.", "sudo tcpdump -i any -n 'not host 127.0.0.1 and not host ::1'"],
+      ["Arm the refusal: anything that would reach the network exits instead, naming it.", "semlith start --airgap"],
+      ["Or pull the cable. The portal loads and searches with no network at all.", "networksetup -setairportpower en0 off"],
+      ["See the ledger for what it is: one local table.", "sqlite3 ~/.semlith/stores/<name>/store.db 'select * from retrievals'"],
+    ];
+    const nDone = verifyCmds.filter((_, i) => pvUi.done[i]).length;
     return el(
       "div",
-      { class: "schedule-row" },
-      el("button", {
-        class: `schedule-knob${one.enabled ? " on" : ""}`,
-        type: "button",
-        disabled: Boolean(scheduleProblem),
-        title: one.enabled ? "Pause this schedule" : "Resume this schedule",
-        "aria-pressed": String(Boolean(one.enabled)),
-        onclick: () => writeSchedule({ action: "set", id: one.id, enabled: !one.enabled }),
-      }),
+      { class: "page" },
+      el("div", { class: "titles" }, el("div", { class: "h1", text: "Privacy" }), el("div", { class: "lead", text: "The claim is “nothing leaves this machine”. This page is how you check it yourself, in about a minute." })),
       el(
         "div",
-        { class: "stack" },
-        el("span", { class: "name", text: `${title} → ${where.split("/").filter(Boolean).pop() || where}` }),
-        el("span", { class: "spec", text: `${spec}  →  ${where}` }),
-        el("span", {
-          class: "next",
-          text: one.enabled ? `next run ${until(one.next_run)}` : "paused",
-        }),
-        /* The failure this feature will actually meet: a destination deleted,
-         * renamed or unmounted. `Schedule::last_error` carries the whole chain
-         * and the card prints it, because a schedule that says it is running
-         * beside a folder that never fills is the worst outcome available. */
-        one.last_error ? el("span", { class: "failed", text: `failed: ${one.last_error}` }) : null,
-        one.last_path ? el("span", { class: "wrote", text: `last wrote ${one.last_path}` }) : null,
-      ),
-      el("span", { class: "spacer" }),
-      el("span", { class: `state-pill ${one.enabled ? "on" : "paused"}`, text: one.enabled ? "on" : "paused" }),
-      el("button", {
-        class: "schedule-remove",
-        type: "button",
-        text: "×",
-        disabled: Boolean(scheduleProblem),
-        title: "Remove schedule",
-        onclick: () => writeSchedule({ action: "remove", id: one.id }),
-      }),
-    );
-  }
-
-  function paintSchedules() {
-    const [, title] = def();
-    /* The design's sentence, with this build's values in it. The window clause
-     * is dropped for the three reports that have no window, rather than
-     * printed and then quietly ignored by the schedule it describes. */
-    const describes =
-      `Takes the report set up above — ${title.toLowerCase()}, ` +
-      (windowed() ? `last ${spanName().toLowerCase()}, ` : "") +
-      `${scopeWords()}, as ${fmt()[1]}. Change those and add again for a second schedule.`;
-    fill(
-      scheduleCard,
-      el(
-        "div",
-        { class: "card-head" },
-        el("h2", { text: "Schedules" }),
-        /* The design says `crontab in ~/.semlith/schedules.toml`. The file is
-         * `schedules.json`, it is not a crontab, and its directory is whatever
-         * home this daemon was started on. */
-        el("span", { class: "mono-chip", text: `run by the daemon · ${schedulesFile}` }),
-      ),
-      scheduleProblem
-        ? el("p", {
-            class: "subtitle",
-            text:
-              `This daemon serves no schedules route (${scheduleProblem}), so the card is ` +
-              "read-only until it does. The records themselves are real: `semlith schedule " +
-              "list` reads the same file the daemon runs from.",
-          })
-        : null,
-      scheduleRefused ? el("div", { class: "note bad" }, scheduleRefused) : null,
-      schedules.length
-        ? el("div", { class: "schedule-list" }, schedules.map(scheduleRow))
-        : el("div", { class: "empty centred" }, "No schedules. Set up a report above, then add it here — the daemon writes the file while it is running."),
-      el(
-        "div",
-        { class: "new-schedule" },
-        el("span", { class: "eyebrow", text: "New schedule" }),
-        el("p", { class: "subtitle strong", text: describes }),
+        { class: `verdict${left ? " amber" : ""}` },
+        el("span", { class: "ic" }, icon(I.shield, 18, { w: 1.8 })),
         el(
           "div",
-          { class: "filters" },
-          REPORT_CADENCES.map(([label, every]) =>
-            chip(label, every === cadence, () => {
-              cadence = every;
-              paintSchedules();
-            }),
-          ),
+          { class: "col gap2 grow" },
+          el("span", { class: "t", text: left ? `${plural(outbound.count, "request")} left this machine since start` : "Nothing has left this machine" }),
+          el("span", { class: "l", text: `${n(outbound.count)} outbound connections since ${outbound.since ? clock(outbound.since) : "start"}${outbound.recent && outbound.recent.length ? ` · last: ${outbound.recent[0].what} to ${outbound.recent[0].host}` : ""} · ${cached.length ? `${plural(cached.length, "download")} on disk: ${cached.map((d) => `${plainWhat(d.what).replace(/^the /, "")} ${bytes(d.bytes)}`).join(", ")}` : "nothing downloaded"}${airgap.on ? " · airgap on" : ""}` }),
         ),
+        toggle(airgap.on, "Airgap · refuse every outbound request", async (v) => {
+          const out = await act(() => post("/api/airgap", { on: v }), v ? "Airgap on — any outbound request exits and names itself" : "Airgap off");
+          if (out) await load("privacy", true), repaint();
+        }, { disabled: airgap.reason === "flag" || airgap.reason === "env", tip: airgap.reason === "flag" || airgap.reason === "env" ? "Set by the flag or SEMLITH_AIRGAP this daemon started with" : null }),
+      ),
+      el(
+        "div",
+        { class: "auto-fit m200" },
+        [
+          ["Bind address", P.bind || location.host, "loopback only, no flag to change it"],
+          ["CORS", P.cors ? "on" : "none", "no origin may read a response"],
+          ["Host check", "localhost only", `a foreign Host header gets 400 · ${(P.host_allowed || []).join(", ")}`],
+          ["Telemetry", "none", "no analytics, no update check of its own"],
+          ["Assets", "inside the binary", "this page is compiled in, include_bytes!"],
+          ["Ledger", "local table", "in each store's own database"],
+          ["Model cache", shortPath(P.model_cache || "", 30), P.model_cached ? "read once, then offline" : "empty until the first run"],
+          ["Cloud", "not connected", "no cloud command, no connection to any host"],
+        ].map(([k, v, d]) => el("div", { class: "fact-card" }, el("span", { class: "eyebrow sm", text: k }), el("span", { class: "v", text: v }), el("span", { class: "d", text: d }))),
+      ),
+      el(
+        "div",
+        { class: "split s-1-1" },
         el(
           "div",
-          { class: "filters" },
-          el("span", { class: "write-to", text: "write to" }),
-          destinations.map(([label, path]) =>
-            chip(
-              label,
-              path === destination,
-              () => {
-                destination = path;
-                paintSchedules();
-              },
-              path,
+          { class: "card" },
+          el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Verify it yourself" }), meta(nDone ? `${nDone} of 5 checked` : "tick each one off as you go")),
+          verifyCmds.map(([t, c], i) =>
+            el(
+              "div",
+              { class: "verify-row" },
+              btn({ class: `verify-dot${pvUi.done[i] ? " done" : ""}`, "aria-pressed": String(!!pvUi.done[i]), "aria-label": `Mark step ${i + 1} checked`, onclick: () => ((pvUi.done[i] = !pvUi.done[i]), repaint()) }, pvUi.done[i] ? "✓" : String(i + 1)),
+              el("div", { class: "col gap6" }, el("span", { class: "t13", text: t }), copyField(c, { btn: "xxs" })),
             ),
           ),
         ),
         el(
           "div",
-          { class: "filters" },
-          el("button", {
-            class: "button add-schedule",
-            type: "button",
-            /* The design's label carries a cron phrase — `1st of the month,
-             * 08:00`. The record holds an interval and nothing else, so what
-             * is promised here is the interval. */
-            text: `Add schedule · ${everyWords(cadence)}`,
-            disabled: Boolean(scheduleProblem) || !destination,
-            onclick: () =>
-              writeSchedule({
-                action: "add",
-                kind,
-                format,
-                model: model[0],
-                every_seconds: cadence,
-                dir: destination,
-                // Null rather than absent for the three reports with no date
-                // to narrow by: `Window::Unset` is what the record holds.
-                window: windowed() ? span : null,
-                stores: scope,
-              }),
-          }),
-          el("span", {
-            class: "mono-chip",
-            text: `${everyWords(cadence)}  →  ${destination || "?"}/${kind}-<date>.${ext()}`,
-          }),
+          { class: "stack" },
+          el(
+            "div",
+            { class: "card" },
+            el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Everything semlith ever fetches" }), meta(`${downloads.length + 2} things, each on your say-so`)),
+            downloads.map((d) => el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: cap(plainWhat(d.what)) }), el("span", { class: "muted t-xs", text: `${d.source} · ${bytes(d.bytes)} · ${d.when}` })), pill(d.cached ? "on disk" : "never fetched", d.cached ? "green" : "grey", { dot: false }))),
+            el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "A URL you add to a store" }), el("span", { class: "muted t-xs", text: "one https request for exactly that URL · only when you press Fetch" })), pill("on request", "grey", { dot: false })),
+            el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "The release check and the price table" }), el("span", { class: "muted t-xs", text: "github.com and models.dev · only when you press the button in Settings or Reports" })), pill("on request", "grey", { dot: false })),
+            outbound.recent && outbound.recent.length ? el("div", { class: "card-foot", text: `last ${outbound.recent.length}: ${outbound.recent.slice(0, 4).map((r) => `${clock(r.at)} ${r.what} → ${r.host}`).join(" · ")}` }) : null,
+          ),
+          el(
+            "div",
+            { class: "card pad" },
+            el("div", { class: "row" }, el("span", { class: "card-t grow", text: "What the stores already hold" }), btn({ class: "btn sm t125", disabled: pvUi.scanning ? true : null, onclick: scanStores }, pvUi.scan ? "Check again" : "Check now")),
+            el("span", { class: "muted t-sm pretty", text: "Checks for any file the rules would refuse today — indexed before a rule widened, or before the credential scan existed." }),
+            pvUi.scanning ? el("div", { class: "row gap8 muted t-sm" }, el("span", { class: "spinner" }), "Reading every store…") : null,
+            pvUi.scan && !pvUi.scanning
+              ? pvUi.scan.error
+                ? errorBox(pvUi.scan.error)
+                : pvUi.scan.findings.length
+                  ? el(
+                      "div",
+                      { class: "col gap4" },
+                      el("div", { class: "notice amber" }, el("span", { class: "sub", text: `${plural(pvUi.scan.findings.length, "file")} the rules would refuse today` })),
+                      pvUi.scan.findings.slice(0, 20).map((f) => el("div", { class: "row nowrap" }, el("span", { class: "row gap6 grow min0 mono t-xs", "data-tip": f.why }, el("span", { class: "nowrap", text: `${f.store} ·` }), pathSpan(tilde(f.path), "min0", f.path)), lnk("Forget", () => forgetFound(f), "amber"))),
+                    )
+                  : el("div", { class: "notice green" }, el("span", { class: "dot green" }), `${plural(liveStores().length, "store")} checked · 0 files the rules would refuse today`)
+              : null,
+          ),
+          toggleRow(replayOn, `Session replay · ${replayOn ? "on" : "off"}`, "Reads this machine's agent session logs to confirm what an agent did after a semlith answer. Local only. Nothing is uploaded.", (v) => setReplay(v), { big: true }),
         ),
       ),
-      el("p", {
-        class: "subtitle",
-        text:
-          "The daemon runs these while it is up and writes the file in place, so a report can be " +
-          `a tracked file in the repo with a readable diff each month. The list is ${schedulesFile}; ` +
-          "× removes one.",
-      }),
-    );
-  }
-
-  // ------------------------------------------------------------- the CLI card
-
-  function paintCli() {
-    const flags = [`--format ${format}`];
-    if (windowed()) flags.push(`--window ${span}`);
-    for (const name of scope) flags.push(`--scope ${name}`);
-    if (kind === "savings") flags.push(`--model "${model[0]}"`);
-    const out = home ? `${home}/reports/` : ".";
-    // What the Copy button puts on the clipboard: one line, runnable as it is.
-    const one = `semlith report ${kind} ${flags.join(" ")} --out ${out}`;
-    /* What the card shows: the same command wrapped the way the design wraps
-     * it, with a continuation at each break. A single line of eight flags ran
-     * off the right edge of a half-width card and the reader saw `semlith
-     * report savings --format mark…` — the flags are the part worth reading.
-     * Backslashes rather than a soft wrap, so what is on screen is still
-     * something that runs if it is selected by hand. */
-    const wrapped = [`semlith report ${kind} \\`, ...flags.map((f) => `  ${f} \\`), `  --out ${out}`];
-    const block = [
-      ...wrapped,
-      "",
-      // The design's comment, and true of this build: the list is a file.
-      "# the schedule list is a file — add, edit or delete by hand:",
-      `semlith schedule add ${kind} \\`,
-      `  --every ${cadence} --to ${destination || reportDir} \\`,
-      `  --format ${format}`,
-      "semlith schedule list   ·   semlith schedule remove 2",
-    ].join("\n");
-    fill(
-      cliCard,
       el(
         "div",
-        { class: "card-head" },
-        el("h2", { text: "Same thing without the browser" }),
-        el("span", { class: "spacer" }),
-        /* The 26px copy sibling of Export: the same height, in the secondary
-         * shape rather than filled with ink. The height comes from the card's
-         * own rule, because `copyButton` is shared with eight other sites. */
-        copyButton(one, "Copy", true),
-      ),
-      el("pre", { class: "code report-cli", text: block }),
-      /* The design's footnote, verbatim, with `semlith_report` set in mono. It
-       * is the only place the slug appears on this page: the v4 header has no
-       * right-hand mono slug on Reports, unlike Impact. */
-      el(
-        "p",
-        { class: "subtitle" },
-        "The agent can ask for one too: ",
-        mono("semlith_report"),
-        " returns the same document over MCP, so “write a change brief for this PR” needs no copy-paste.",
-      ),
-    );
-  }
-
-  function paintAll() {
-    paintBuilder();
-    paintMeta();
-    savingsCard.hidden = kind !== "savings";
-    gapsCard.hidden = kind !== "gaps";
-    if (kind === "savings") paintSavings();
-    if (kind === "gaps") paintGaps();
-    paintSchedules();
-    paintCli();
-  }
-
-  paintPicker();
-  paintWritten();
-  paintAll();
-  generate();
-  loadSchedules();
-
-  return el(
-    "div",
-    { class: "view" },
-    pageHead(
-      "Reports",
-      // The claim at the end is not decoration and is asserted by the drive:
-      // this is the one page whose whole job is turning a local record into a
-      // file for somebody else, so where that file is built and where it goes
-      // are the first things a reader needs to know.
-      "Turn the ledger, the index and the graph into a file someone else can read — a saving number for finance, an access record for audit, a blast radius for a pull request. Generated locally and exported as a file you own. Nothing leaves the machine.",
-    ),
-    picker,
-    el(
-      "div",
-      { class: "grid two report-row" },
-      builder,
-      el(
-        "section",
-        { class: "card report-preview-card" },
+        { class: "card" },
+        el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Rules the binary enforces" }), pill(holding ? "all holding" : `${rules.filter((r) => r.ok === false).length} to fix`, holding ? "green" : "amber")),
         el(
           "div",
-          { class: "report-bar" },
-          previewName,
-          el("span", { class: "spacer" }),
-          copy,
-          exportButton,
+          { class: "auto-fill m300" },
+          rules.map((r) =>
+            el(
+              "div",
+              { class: "rule" },
+              el("div", { class: "t" }, dot(r.ok === false ? "amber" : "green"), cap(r.id)),
+              el("span", { class: "d", text: r.ok === false ? r.rule.replace(/\s+/g, " ") : (RULE_COPY[r.id] || [r.rule])[0].replace(/\s+/g, " ") }),
+              el("span", { class: "f", "data-tip": r.check, text: `found: ${r.ok === false ? shortPaths(r.check) : (RULE_COPY[r.id] && RULE_COPY[r.id][1] ? RULE_COPY[r.id][1](r.check) : shortPaths(r.check))}` }),
+              r.ok === false && r.repair ? btn({ class: "btn xs", onclick: () => fixRule(r.id) }, "Repair") : r.ok === false && r.manual ? copyField(r.manual) : null,
+            ),
+          ),
         ),
-        previewBody,
-        el("div", { class: "foot" }, previewMeta, el("span", { class: "spacer" }), saveButton),
       ),
-    ),
-    savingsCard,
-    gapsCard,
-    writtenCard,
-    el("div", { class: "grid two report-row" }, scheduleCard, cliCard),
-    /* What the design has no place for, after everything it does place. Both
-     * lines are facts about this build rather than about the design, which is
-     * why they are here and not woven into a card above. */
-    el(
-      "section",
-      { class: "card pad report-extras" },
-      el("span", { class: "card-title", text: "About this build" }),
-      el("p", {
-        class: "subtitle",
-        text:
-          "PDF is written by the binary itself — the same blocks as the other four formats, " +
-          "typeset on US Letter. Export and Save to disk hand you those bytes unchanged.",
-      }),
-      el("p", {
-        class: "subtitle",
-        text:
-          "Savings, index health and knowledge gaps count over a store's whole history and " +
-          "have no date to narrow by, so the Window chips are inert while one of them is chosen.",
-      }),
-    ),
-  );
+    );
+  },
+};
+
+function cap(s) {
+  const t = String(s || "");
+  return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
-/* Cloud: a page about a service this binary does not talk to.
- *
- * It is here because the portal is the whole product and a reader should be
- * able to find out what the hosted option is without leaving it — and it is
- * only the not-connected state, because this release ships no cloud client.
- * There is no `semlith cloud` command, no token store and no code path that
- * opens a socket: the command blocks below are text to copy, and what they
- * will do arrives in a later release. */
-const CLOUD_ROWS = [
-  [
-    "One URL for cloud agents",
-    "Claude Code cloud sessions, routines and CI cannot reach a laptop; they can reach an org store.",
-  ],
-  [
-    "The whole organisation in one index",
-    "Cross-repository paths, and documents beside code.",
-  ],
-  [
-    "A pull-request check that states what the graph proves",
-    "With no model and no guess.",
-  ],
-];
+async function scanStores() {
+  pvUi.scanning = true;
+  repaint();
+  try {
+    pvUi.scan = await api("/api/privacy/scan");
+  } catch (e) {
+    pvUi.scan = { error: e.message, findings: [] };
+  }
+  pvUi.scanning = false;
+  repaint();
+}
 
-async function cloudView() {
-  return el(
-    "div",
-    // Capped at the design's measure. The page is three paragraphs and two
-    // commands; run to 1 400px it reads as a wall rather than as a page.
-    { class: "view cloud-page" },
-    pageHead("Cloud", null, { pill: pill("not connected", null) }),
-    el("p", {
-      class: "subtitle",
-      text: "Semlith Cloud is one hosted store for a whole organisation: every connected repository a root of it, indexed on push, served over MCP to any agent, with a pull-request impact check and a team ledger. This binary works without it. Nothing here contacts a server.",
-    }),
+async function forgetFound(f) {
+  const ok = await ask({ title: `Forget ${baseName(f.path)}?`, body: `${f.why}. Its chunks leave ${f.store}; the file on disk is untouched.`, ok: "Forget", danger: true });
+  if (!ok) return;
+  const out = await act(() => post("/api/forget", { store: f.store, paths: [f.key || f.path] }), "Forgotten");
+  if (out) scanStores();
+}
+
+async function fixRule(id) {
+  const out = await act(() => post("/api/privacy/fix", { rule: id }), "Repaired");
+  if (out) await load("privacy", true), repaint();
+}
+
+// ------------------------------------------------------------------ settings
+
+VIEWS.settings = {
+  needs: (route) => {
+    const sec = route.parts[0] || "perf";
+    return sec === "perf" ? ["runs", "accel"] : sec === "access" ? ["about", "agents", "privacy"] : sec === "about" ? ["about", "languages", "prices"] : ["about"];
+  },
+  live: ["runs"],
+  morph: (route) => (route.parts[0] || "perf") === "perf",
+  // Each limit's reason quotes free memory, which moves every poll; what is
+  // drawn changes only when a value or where it came from does.
+  sig: () => {
+    const L = data.runs?.limits || {};
+    const set = Object.entries(L).filter(([k]) => k !== "machine").map(([k, v]) => [k, v && v.value, v && v.source]);
+    return JSON.stringify([set, data.runs?.compaction, data.runs?.vector_cache?.cap_mb, (data.accel?.lanes || []).map((l) => [l.lane, l.enabled])]);
+  },
+  render(route) {
+    const sec = route.parts[0] || "perf";
+    const machine = data.runs?.limits?.machine;
+    const sections = [
+      ["perf", "Performance", machine ? `${machine.logical_cores} cores` : ""],
+      ["access", "Agent access", "key · token"],
+      ["cloud", "Cloud", "off"],
+      ["about", "About", state.version],
+    ];
+    const body = { perf: sePerf, access: seAccess, cloud: seCloud, about: seAbout }[sec] || sePerf;
+    return el(
+      "div",
+      { class: "page" },
+      el("div", { class: "titles" }, el("div", { class: "h1", text: "Settings" }), el("div", { class: "lead", text: "How hard this machine works, who may reach the endpoint, and what is installed." })),
+      el(
+        "div",
+        { class: "split s-200" },
+        el("div", { class: "subnav" }, sections.map(([id, label, m]) => btn({ "aria-current": String(id === sec), onclick: () => go("settings", id === "perf" ? undefined : id) }, el("span", { class: "grow", text: label }), el("span", { class: "meta", text: m })))),
+        el("div", { class: "stack" }, body()),
+      ),
+    );
+  },
+};
+
+// A stepper button that reaches its end says so with aria-disabled rather than
+// disabled: a disabled button drops the focus a keyboard user just gave it.
+// The processor, as the CPU lane names it ("Apple M1").
+function cpuName() {
+  return ((data.accel?.lanes || []).find((l) => l.lane === "cpu") || {}).device || "";
+}
+
+function stepBtn(off, label, onclick, text) {
+  return btn({ "aria-disabled": off ? "true" : "false", "aria-label": label, onclick: () => !off && onclick() }, text);
+}
+
+async function saveLimits(patch, word) {
+  // The daemon says what it now runs with; that is the message, when it says.
+  const out = await act(() => post("/api/index/settings", patch), (o) => (o && o.applied) || word || "Saved");
+  if (out) await load("runs", true), repaint();
+}
+
+function sePerf() {
+  const R = data.runs || {};
+  const L = R.limits || {};
+  const m = L.machine || {};
+  const comp = R.compaction || {};
+  const vc = R.vector_cache || {};
+  const limit = (key, label, lim, note, step, unit) => {
+    if (!lim) return null;
+    const env = lim.source === "set by the environment";
+    return el(
+      "div",
+      { class: "limit-row" },
+      el("span", { class: "col gap2" }, el("span", { class: "k", text: label }), el("span", { class: "n", text: `${note}${lim.derived !== lim.value ? ` This machine suggests ${n(lim.derived)}${unit || ""}.` : ""}${env ? " Set by the environment, so the page cannot change it." : ""}` })),
+      el(
+        "div",
+        { class: "stepper", "data-tip": lim.reason || null },
+        stepBtn(env || lim.value <= 1, `Lower ${label}`, () => saveLimits({ [key]: Math.max(1, lim.value - step) }), "−"),
+        el("span", { class: "v", text: `${n(lim.value)}${unit || ""}` }),
+        stepBtn(env || lim.value >= lim.ceiling, `Raise ${label}`, () => saveLimits({ [key]: Math.min(lim.ceiling, lim.value + step) }), "+"),
+      ),
+    );
+  };
+  const plain = (key, label, value, note, step, min, max, unit) =>
+    el(
+      "div",
+      { class: "limit-row" },
+      el("span", { class: "col gap2" }, el("span", { class: "k", text: label }), el("span", { class: "n", text: note })),
+      el(
+        "div",
+        { class: "stepper" },
+        stepBtn(value <= min, `Lower ${label}`, () => saveLimits({ [key]: Math.max(min, value - step) }), "−"),
+        el("span", { class: "v", text: `${value === 0 ? "off" : `${n(value)}${unit || ""}`}` }),
+        stepBtn(value >= max, `Raise ${label}`, () => saveLimits({ [key]: Math.min(max, value + step) }), "+"),
+      ),
+    );
+  const lanes = data.accel?.lanes || [];
+  return [
+    el(
+      "div",
+      { class: "model-line t-mono ink2" },
+      el("span", { class: "eyebrow sm", text: "THIS MACHINE" }),
+      m.logical_cores ? `${cpuName() ? `${cpuName()} · ` : ""}${m.logical_cores} logical cores · ${n(m.total_memory_mb)} MiB · ${n(m.available_memory_mb)} MiB free now` : "reading…",
+      el("span", { class: "spacer" }),
+      lnk("Reset to what it suggests", () => saveLimits({ runs_at_once: L.runs_at_once?.derived, embed_threads: L.embed_threads?.derived, index_memory_mb: L.index_memory_mb?.derived, compact_threshold_percent: comp.default_threshold_percent, history_retention_days: comp.default_retention_days, vector_cache_mb: vc.default_cap_mb }, "Limits reset to what this machine suggests")),
+    ),
+    el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t", text: "Limits" })),
+      limit("runs_at_once", "Runs at once", L.runs_at_once, "How many stores may index at the same time.", 1),
+      limit("embed_threads", "Threads per run", L.embed_threads, "Embedding threads, with one core kept free for you.", 1),
+      limit("index_memory_mb", "Memory per store", L.index_memory_mb, "Vectors held in memory per open store. Lower it if other apps feel slow.", 64, " MiB"),
+      plain("compact_threshold_percent", "Compact past", comp.threshold_percent ?? 25, "An idle store more reclaimable than this is compacted on its own. 0 turns it off.", 5, 0, 90, "%"),
+      plain("history_retention_days", "Keep retired definitions", comp.retention_days ?? 90, "How long a compaction keeps the history of a symbol that was renamed or deleted. 0 keeps everything.", 15, 0, 3650, " days"),
+      vc.from_environment
+        ? el("div", { class: "limit-row" }, el("span", { class: "col gap2" }, el("span", { class: "k", text: "Vector cache" }), el("span", { class: "n", text: `Set by SEMLITH_VECTOR_CACHE_MB · ${cacheWord(vc)}` })), el("span", { class: "mono right", text: `${n(vc.cap_mb)} MiB` }))
+        : plain("vector_cache_mb", "Vector cache", vc.cap_mb ?? 1024, `Vectors kept so a chunk met again is not re-embedded · ${cacheWord(vc)}.`, 256, 0, 16384, " MiB"),
+    ),
+    el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Where embedding runs" }), btn({ class: "btn sm t125", onclick: checkLanes }, seUi.gpu ? "Run the check again" : "Check each lane against the CPU")),
+      data.accel?.cpu_fallback ? el("div", { class: "card-note", text: "The CPU is carrying the work: no other lane can." }) : null,
+      // Lanes this machine can run first; the ones built for another OS or
+      // hardware after them, under their own line, switched off and said so
+      // in a few words rather than a row that reads like the others.
+      [...lanes.filter((l) => l.status?.state !== "unavailable"), ...lanes.filter((l) => l.status?.state === "unavailable")].map((l, i, all) => {
+        const na = ["unavailable"].includes(l.status?.state);
+        const firstNa = na && (i === 0 || all[i - 1].status?.state !== "unavailable");
+        const check = seUi.gpu && (seUi.gpu.checks || []).find((x) => x.lane === l.lane);
+        const row = el(
+          "div",
+          { class: `lane-row${na ? " off na" : ""}`, "aria-disabled": na ? "true" : null },
+          btn({ class: `switch${l.enabled ? " on" : ""}`, role: "switch", "aria-checked": String(!!l.enabled), "aria-label": `${l.label || l.lane} lane`, disabled: na ? true : null, onclick: () => laneSwitch(l) }, el("span", { class: "tg" })),
+          el(
+            "span",
+            { class: "col" },
+            el("span", { class: "row gap8 t-m t13" }, `${l.label || laneName(l.lane)}${l.variant ? ` · ${l.variant}` : ""}`, l.experimental ? el("span", { class: "exp", text: "experimental" }) : null),
+            na
+              ? el("span", { class: "muted t-xs", text: `Not available on this ${osWord()}: ${String(l.status?.reason || "").replace(/^the .*? lane (is )?/i, "").replace(/^unavailable — /, "")}` })
+              : el("span", { class: "muted t-xs", text: `${l.device || "named when it starts"} · ${laneState(l.status)}${(data.accel.bytes || {})[l.lane] ? ` · ${bytes(data.accel.bytes[l.lane])} on disk` : ""}` }),
+          ),
+          na ? el("span", { class: "t-mono-sm muted right nowrap", text: "off" }) : check ? laneCheck(check) : el("span", { class: "t-mono-sm ink2 right nowrap", text: `${Math.round(l.share || 0)}% of the work` }),
+          // Its own column at the far right, kept on every row, so the share
+          // column lines up whether or not a lane has files to remove.
+          el("span", { class: "lane-act" }, (data.accel.bytes || {})[l.lane] ? btn({ class: "btn xs", "aria-label": `Remove ${l.label || laneName(l.lane)}'s downloaded files`, onclick: () => laneRemove(l) }, "Remove") : null),
+        );
+        return firstNa ? [el("div", { class: "lane-group", text: `Not for this ${osWord()}` }), row] : row;
+      }),
+    ),
+  ];
+}
+
+const seUi = { gpu: null, reveal: null, update: null };
+
+function cacheWord(vc) {
+  if (!vc.cap_mb) return "off";
+  const used = vc.bytes ? `${n(vc.bytes / 1048576)} of ${n(vc.cap_mb)} MiB used` : "empty";
+  return `${used}${vc.lookups ? ` · ${Math.round((vc.hits * 100) / vc.lookups)}% hit` : ""}`;
+}
+
+function laneState(status) {
+  const st = (status && status.state) || "idle";
+  const p = status && typeof status.percent === "number" ? ` ${status.percent}%` : "";
+  const left = status && typeof status.eta_ms === "number" ? ` · ${spellLeft(status.eta_ms)}` : "";
+  if (st === "compiling") return `compiling${p}${left} — first time only, runs wait for it`;
+  if (st === "downloading") return `downloading${p}${left}`;
+  if (status && status.reason) return `${st} — ${status.reason}`;
+  return `${st}${p}`;
+}
+
+async function laneSwitch(l) {
+  const on = !l.enabled;
+  if (on && l.download_bytes && !l.installed) {
+    const ok = await ask({ title: `Turn ${l.label || l.lane} on?`, body: `It downloads the ${l.label || l.lane} pack first, ${bytes(l.download_bytes)}, once, into this machine's model cache.${l.experimental ? " It is experimental: built and checked without its hardware." : ""}`, ok: "Download and turn on" });
+    if (!ok) return;
+  }
+  const out = await act(() => post("/api/accel", { lane: l.lane, action: on ? "on" : "off" }), (o) => o.said || `${l.label || l.lane} ${on ? "on" : "off"}`);
+  if (out) await load("accel", true), repaint();
+}
+
+// A lane's downloaded files, taken off the disk. A lane that is on is turned
+// off first: its files are in use, and the CPU (or another lane) carries on.
+async function laneRemove(l) {
+  const name = l.label || laneName(l.lane);
+  const size = bytes((data.accel.bytes || {})[l.lane] || 0);
+  const ok = await ask({
+    title: `Remove ${name}'s files?`,
+    body: `${l.enabled ? `${name} is turned off first, and the other lanes carry the work. ` : ""}${size} comes off the disk. Turning it on again downloads it again.`,
+    ok: "Remove",
+    danger: true,
+  });
+  if (!ok) return;
+  if (l.enabled && !(await act(() => post("/api/accel", { lane: l.lane, action: "off" }), null))) return;
+  const out = await act(() => post("/api/accel", { lane: l.lane, action: "remove" }), (o) => o.said || `${name}'s files removed`);
+  if (out || l.enabled) await load("accel", true), repaint();
+}
+
+// "Mac", "Windows" or "Linux", for the lanes this machine cannot run.
+function osWord() {
+  const ua = navigator.userAgent || "";
+  return /Mac/.test(ua) ? "Mac" : /Windows/.test(ua) ? "Windows PC" : /Linux|X11/.test(ua) ? "Linux machine" : "machine";
+}
+
+// One lane's answer from the known-answer check, where its share sits: it
+// agrees with the reference (cosine, speed), it failed, or why it was not run.
+function laneCheck(c) {
+  if (c.passed) return el("span", { class: "t-mono-sm right nowrap ok-ink", "data-tip": `Embeds the known sentences as the reference does · ${c.variant || ""}` }, `agrees · cosine ${Number(c.cosine).toFixed(4)}${c.chunks_per_s ? ` · ${perSecond(c.chunks_per_s)}/s` : ""}`);
+  if (c.passed === false) return el("span", { class: "t-mono-sm right nowrap red-ink", "data-tip": c.reason || "" }, "failed");
+  const why = String(c.reason || "").replace(/ — .*$/, "");
+  return el("span", { class: "t-mono-sm muted right nowrap", "data-tip": c.reason || "" }, why === "off" ? "off · not checked" : "not checked");
+}
+
+// Every lane that is on embeds a few known sentences and is compared with
+// the CPU's answer. A lane's first check starts its worker, which can take a
+// while on a cold machine, so the button spins and the toast says so.
+async function checkLanes() {
+  toast("Checking each lane that is on against the CPU — a few seconds per lane");
+  try {
+    seUi.gpu = await post("/api/doctor/gpu", {});
+    const ran = (seUi.gpu.checks || []).filter((c) => c.passed !== undefined);
+    const bad = ran.filter((c) => !c.passed);
+    toast(bad.length ? `${plural(bad.length, "lane")} failed: ${bad.map((c) => c.label || c.lane).join(", ")}` : `${plural(ran.length, "lane")} checked — every one agrees with the CPU`, bad.length > 0);
+  } catch (e) {
+    toast(e.message, true);
+  }
+  await load("accel", true);
+  repaint();
+}
+
+// A client's note, as its first sentence: the rest (file formats, flags,
+// where the source says so) is a press away, not a wall of text by default.
+function clientNote(note) {
+  const first = (note.match(/^.*?[.!?](?=\s|$)/) || [note])[0];
+  if (first.length >= note.length - 2) return el("span", { class: "muted t-xs", text: note });
+  const open = ag.noteOpen === note;
+  return el("span", { class: "muted t-xs" }, open ? note : first, " ", lnk(open ? "Less" : "More", () => ((ag.noteOpen = open ? null : note), repaint())));
+}
+
+function seAccess() {
+  const a = data.agents || {};
+  const P = data.privacy || {};
+  const about = data.about || {};
+  const login = about.login || {};
+  const keyValue = seUi.reveal || (a.key_set ? "sml_••••••••••••••••••••••" : "not created yet");
+  return [
     el(
       "div",
       { class: "card pad" },
-      // Title over description, as the design stacks them: a reason and its
-      // explanation are two things, and running them into one sentence made
-      // the three reasons read as one paragraph of marketing.
+      el("span", { class: "card-t", text: "Agent key" }),
       el(
         "div",
-        { class: "cloud-rows" },
-        CLOUD_ROWS.map(([lead, rest]) =>
-          el(
-            "div",
-            { class: "cloud-row" },
-            el("span", { class: "lead", text: lead }),
-            el("span", { class: "what", text: rest }),
-          ),
-        ),
+        { class: "copyfield h34" },
+        el("span", { class: "t", text: keyValue }),
+        btn({ class: "btn xs", onclick: revealKey }, seUi.reveal ? "Hide" : "Reveal"),
+        seUi.reveal ? copyBtn(seUi.reveal, "Copy", "xs") : null,
+        btn({ class: "btn xs", onclick: rotateKey }, "Rotate"),
       ),
-      el("hr", { class: "rule" }),
-      el("div", { class: "cloud-block" }, copyField("semlith cloud login"), el("p", {
-        class: "subtitle",
-        text: "Not in this release. When it arrives it will store an org token under ~/.semlith/ and send it to that host and no other.",
-      })),
-      el("div", { class: "cloud-block" }, copyField("semlith cloud connect acme"), el("p", {
-        class: "subtitle",
-        text: "Will add the org's store to this machine's registry as a remote store, listed beside the local ones with a remote badge.",
-      })),
-      el("p", {
-        class: "note",
-        text: "This build has no cloud command and opens no connection to any host. The Privacy page's own reading is where to check that rather than take it from here.",
-      }),
-      // The v4 design closes this page with a link to semlith.com/data. It is
-      // named rather than linked, and that is deliberate: this page is served
-      // from a binary that opens no socket, `nothing_in_the_portal_points_at_
-      // another_origin` is the test that keeps it that way, and a link the
-      // reader cannot follow with the cable out is worse than an address they
-      // can type when they have a network.
-      el(
-        "div",
-        { class: "cloud-foot" },
-        el("span", { text: "What the cloud stores and deletes is written up at " }),
-        mono("semlith.com/data"),
-        el("span", { text: "." }),
-      ),
+      el("span", { class: "muted t-sm pretty", text: `Only the HTTP form needs it. A registered client launches semlith mcp, which reads ${shortPath(a.key_path || "~/.semlith/agent.key", 40)} itself, so rotating reconfigures nothing.${P.key_grace_seconds ? ` The previous key keeps working for ${Math.ceil(P.key_grace_seconds / 60)} more minutes.` : ""}` }),
     ),
-  );
-}
-
-const RENDER = {
-  stores: storesView,
-  files: filesView,
-  index: indexView,
-  corpus: corpusView,
-  search: searchView,
-  agents: agentsView,
-  privacy: privacyView,
-  doctor: doctorView,
-  about: aboutView,
-  graph: graphView,
-  ledger: ledgerView,
-  impact: impactView,
-  reports: reportsView,
-  cloud: cloudView,
-};
-
-function go(id) {
-  // On a phone the drawer covers the page it is navigating to, so it closes on
-  // the way out. Done here rather than on each nav item because every route
-  // into a page goes through this — the rail, the drawer, the brand, the search
-  // launcher, the "Index a folder" button and the `/` shortcut.
-  if (shell.main && window.matchMedia(NARROW).matches && state.navOpen) {
-    setNav(false);
-  }
-  // Re-render even when the hash is already this page: clicking the nav item
-  // for the page you are on should still do something, and no hashchange
-  // fires for an unchanged hash.
-  if ((location.hash || "").slice(1) === id) render();
-  else location.hash = `#${id}`;
-}
-
-/** Whether dark is showing, whether by choice or by the OS. */
-function isDark() {
-  const chosen = document.documentElement.getAttribute("data-theme");
-  if (chosen) return chosen === "dark";
-  return window.matchMedia("(prefers-color-scheme: dark)").matches;
-}
-
-/** The mark, in whichever theme is showing. */
-function logoImage(size) {
-  return el("img", {
-    class: "logo",
-    src: isDark() ? "logo-dark.svg" : "logo.svg",
-    alt: "",
-    width: size,
-    height: size,
-  });
-}
-
-/** The three states the control offers, in the order it cycles them. */
-const THEMES = ["system", "light", "dark"];
-
-function theme(next) {
-  // "system" is the absence of a choice, which is what the stylesheet's
-  // prefers-color-scheme block reads. Before this the first click wrote a
-  // choice and there was no way back to following the OS without clearing the
-  // site's storage.
-  if (next === "system") {
-    document.documentElement.removeAttribute("data-theme");
-  } else {
-    document.documentElement.setAttribute("data-theme", next);
-  }
-  state.theme = next;
-  try {
-    if (next === "system") localStorage.removeItem("semlith-theme");
-    else localStorage.setItem("semlith-theme", next);
-  } catch (_) {
-    /* a private window refuses storage; the toggle still works for this run */
-  }
-  for (const img of document.querySelectorAll("img.logo")) {
-    img.src = isDark() ? "logo-dark.svg" : "logo.svg";
-  }
-  paintThemeButton();
-}
-
-/** The control shows where it goes, not where you are. */
-function paintThemeButton() {
-  const button = shell.themeButton;
-  if (!button) return;
-  const next = THEMES[(THEMES.indexOf(state.theme || "system") + 1) % THEMES.length];
-  const label = {
-    system: "Follow the system theme",
-    light: "Switch to light",
-    dark: "Switch to dark",
-  }[next];
-  const glyph = { system: ICONS.monitor, light: ICONS.sun, dark: ICONS.moon }[next];
-  fill(button, icon(glyph));
-  button.setAttribute("aria-label", label);
-  button.setAttribute("title", label);
-}
-
-// ----------------------------------------------------------------- shell
-
-const shell = {};
-
-function buildShell() {
-  const hamburger = el(
-    "button",
-    {
-      class: "hamburger",
-      type: "button",
-      "aria-label": "Toggle navigation",
-      "aria-expanded": String(state.navOpen),
-      onclick: () => setNav(!state.navOpen, true),
-    },
-    icon(ICONS.menu, 17),
-  );
-
-  const pageTitle = el("span", { class: "page-title" });
-
-  const themeButton = el("button", {
-    class: "icon-button",
-    type: "button",
-    // system → light → dark → system. Three states rather than two, because
-    // "follow the system" is one of them and the two-state toggle could not
-    // return to it.
-    onclick: () =>
-      theme(THEMES[(THEMES.indexOf(state.theme || "system") + 1) % THEMES.length]),
-  });
-  shell.themeButton = themeButton;
-  paintThemeButton();
-
-  const topbar = el(
-    "div",
-    { class: "topbar" },
-    hamburger,
-    el(
-      "button",
-      {
-        class: "brand",
-        type: "button",
-        "aria-label": "Semlith — go to Stores",
-        onclick: () => go("stores"),
-      },
-      logoImage(26),
-      el("span", { class: "wordmark", text: "Semlith" }),
-    ),
-    el("span", { class: "divider-v" }),
-    pageTitle,
-    // On every page, not only on Index: a run the user started and navigated
-    // away from should never be something that happened out of sight.
-    el("button", {
-      class: "pill good run-count",
-      type: "button",
-      hidden: true,
-      title: "Go to Index",
-      onclick: () => go("index"),
-    }),
-    el("span", { class: "spacer" }),
-    el(
-      "button",
-      {
-        class: "search-launcher",
-        type: "button",
-        "aria-label": "Search the index",
-        onclick: () => go("search"),
-      },
-      icon(ICONS.search, 15),
-      el("span", { class: "what", text: "Ask the index a question" }),
-      el("span", { class: "key-hint", text: "/" }),
-    ),
-    themeButton,
-  );
-
-  const groups = [];
-  for (const view of VIEWS) {
-    const last = groups[groups.length - 1];
-    if (last && last.label === view.group) last.items.push(view);
-    else groups.push({ label: view.group, items: [view] });
-  }
-
-  const rail = el(
-    "nav",
-    { class: "rail", "aria-label": "Sections" },
-    groups.map((group, i) =>
-      el(
-        "div",
-        { class: "rail-group" },
-        group.items.map((view) =>
-          el(
-            "button",
-            {
-              class: "rail-item",
-              type: "button",
-              "data-view": view.id,
-              "aria-label": view.label,
-              title: view.label,
-              onclick: () => go(view.id),
-            },
-            icon(NAV_ICONS[view.id], 17),
-          ),
-        ),
-        i < groups.length - 1 ? el("div", { class: "rail-rule" }) : null,
-      ),
-    ),
-    el("span", { class: "spacer" }),
-    el("span", { class: "live-dot", title: "semlith start" }),
-  );
-
-  const sidebar = el(
-    "nav",
-    { class: "sidebar", "aria-label": "Sections" },
-    groups.map((group) =>
-      el(
-        "div",
-        { class: "nav-group" },
-        el("div", { class: "nav-group-label", text: group.label }),
-        group.items.map((view) =>
-          el(
-            "button",
-            {
-              class: "nav-item",
-              type: "button",
-              "data-view": view.id,
-              onclick: () => go(view.id),
-            },
-            icon(NAV_ICONS[view.id], 16),
-            el("span", { text: view.label }),
-          ),
-        ),
-      ),
-    ),
-    el("span", { class: "spacer" }),
     el(
       "div",
-      { class: "daemon-card" },
-      el("div", { class: "who" }, el("span", { class: "live-dot" }), mono("semlith start")),
-      // The address with its port: "127.0.0.1" alone does not tell you which
-      // of two daemons this tab is looking at.
-      el("div", { class: "fact", text: `${location.host} · sole writer` }),
-      el("div", { class: "fact", id: "daemon-stores", text: "" }),
+      { class: "card pad" },
+      el("span", { class: "card-t", text: "Session token" }),
+      el("div", { class: "copyfield h34" }, el("span", { class: "t", text: P.token_preview || "…" }), btn({ class: "btn xs", onclick: rotateToken }, "Rotate")),
+      el("span", { class: "muted t-sm pretty", text: `Handed to this page once by the printed URL and sent back as a ${P.token_header || "Semlith-Token"} header on every /api route. Never in a cookie.` }),
+    ),
+    el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Start at login" }), toggle(!!login.installed, login.installed ? "installed" : "off", setLogin, { cls: "t125" })),
+      [
+        ["MECHANISM", login.mechanism || a.service?.status?.mechanism || "—"],
+        ["DEFINITION", login.path ? tilde(login.path) : a.service?.status?.path ? tilde(a.service.status.path) : "not installed"],
+        ["LAST STARTED", login.last_start ? `${ago(login.last_start)} · pid ${about.pid}` : a.service?.last_started ? ago(a.service.last_started) : "—"],
+      ].map(([k, v]) => el("div", { class: "kv sm" }, el("span", { class: "k", text: k }), el("span", { class: "v", text: v }))),
+    ),
+  ];
+}
+
+async function revealKey() {
+  if (seUi.reveal) {
+    seUi.reveal = null;
+    return repaint();
+  }
+  const out = await act(() => post("/api/agents/reveal", {}));
+  if (out) {
+    seUi.reveal = out.key;
+    repaint();
+  }
+}
+
+async function rotateKey() {
+  const ok = await ask({ title: "Rotate the agent key?", body: "Registered clients keep working: they read the key from its file. Anything you pasted an HTTP stanza into needs the new key; the old one is honoured for fifteen minutes.", ok: "Rotate" });
+  if (!ok) return;
+  const out = await act(() => post("/api/key", {}), "Agent key rotated");
+  if (out) {
+    seUi.reveal = null;
+    await loadMany(["agents", "privacy"], true);
+    repaint();
+  }
+}
+
+async function rotateToken() {
+  const ok = await ask({ title: "Rotate the session token?", body: "This tab moves to the new token straight away. Any other open tab of the portal has to be reopened from the URL `semlith start` prints.", ok: "Rotate" });
+  if (!ok) return;
+  const out = await act(() => post("/api/rotate", {}), "Session token rotated · this tab re-authenticated");
+  if (out && out.token) {
+    session.set(out.token);
+    await load("privacy", true);
+    repaint();
+  }
+}
+
+async function setLogin(on) {
+  const ok = on ? true : await ask({ title: "Stop starting at login?", body: "The login service is removed. After a reboot, start semlith yourself with `semlith start` — agents cannot reach it until you do.", ok: "Remove it", danger: true });
+  if (!ok) return;
+  const out = await act(() => post("/api/login-item", { on }), on ? "Installed as a login service" : "Removed the login service");
+  if (out) await load("about", true), repaint();
+}
+
+function seCloud() {
+  return el(
+    "div",
+    { class: "card" },
+    el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Semlith Cloud" }), pill("not connected", "grey", { dot: false })),
+    el("div", { class: "card-b line-row muted t13 pretty", text: "One hosted store for a whole organisation: every repository a root of it, indexed on push, served over MCP to any agent, with a pull-request impact check and a team ledger. This binary works without it and contacts nothing until you log in." }),
+    el(
+      "div",
+      { class: "auto-fit m200 gap0" },
+      [
+        ["One URL for cloud agents", "Cloud sessions and CI can't reach a laptop; they can reach an org store."],
+        ["The whole organisation in one index", "Cross-repository paths, and documents beside code."],
+        ["A pull-request check", "States what the graph proves, with no model and no guess."],
+      ].map(([t, d]) => el("div", { class: "point" }, el("span", { class: "t-b t13", text: t }), el("span", { class: "muted t-xs", text: d }))),
+    ),
+    el(
+      "div",
+      { class: "card-b" },
+      [
+        ["semlith cloud login", "Not in this release. It will store an org token under ~/.semlith/ and send it to that host only."],
+        ["semlith cloud connect <org>", "Will add the org's store beside the local ones, with a remote badge."],
+      ].map(([c, note]) => el("div", { class: "col gap4" }, copyField(c, { noCopy: true }), el("span", { class: "muted t-xs", text: note }))),
     ),
   );
-
-  const scrim = el("button", {
-    class: "scrim",
-    type: "button",
-    "aria-label": "Close navigation",
-    hidden: true,
-    onclick: () => setNav(false, true),
-  });
-
-  const main = el("main", {});
-  const body = el("div", { class: "body" }, rail, sidebar, scrim, main);
-
-  Object.assign(shell, { topbar, pageTitle, rail, sidebar, scrim, main, hamburger });
-  return el("div", { id: "app" }, topbar, body);
 }
 
-/** Open or close the navigation without re-rendering the view inside it. */
-function setNav(open, fromUser) {
-  const was = state.navOpen;
-  state.navOpen = open;
-  const narrow = window.matchMedia(NARROW).matches;
-  shell.hamburger.setAttribute("aria-expanded", String(open));
-  shell.sidebar.hidden = !open;
-  // The rail is the wide-screen stand-in for the closed drawer. On a narrow
-  // screen CSS hides it outright, so it is only ever a wide-screen concern.
-  shell.rail.hidden = open || narrow;
-  shell.scrim.hidden = !(open && narrow);
-
-  // Over a page, the drawer is a cover — so the keyboard goes into it when it
-  // opens and comes back to the button that opened it when it closes. Only for
-  // a deliberate toggle: stealing focus on load or on a resize would be rude.
-  if (!fromUser || !narrow || open === was) return;
-  if (open) {
-    const first = shell.sidebar.querySelector(".nav-item");
-    if (first) first.focus();
-  } else {
-    shell.hamburger.focus();
-  }
+function seAbout() {
+  const a = data.about || {};
+  const langs = data.languages?.languages || [];
+  const withGraph = new Set(a.graph_languages || []);
+  const prices = data.prices || {};
+  const up = seUi.update;
+  return [
+    el(
+      "div",
+      { class: "split s-13-1 stretch" },
+      el(
+        "div",
+        { class: "card" },
+        [
+          ["VERSION", `${a.version} · store format ${a.format_version}`],
+          ["BINARY", `${shortPath(a.binary, 44)} · ${bytes(a.binary_bytes)} · ${a.target}`],
+          ["BOUND TO", a.bind],
+          ["STORE HOME", shortPath(a.store_home, 44)],
+          ["SOURCE", `${a.license} · free and complete`],
+          ["UPTIME", `${spellTook((a.uptime || 0) * 1000)} · pid ${a.pid}`],
+        ].map(([k, v]) => el("div", { class: "kv" }, el("span", { class: "k", text: k }), el("span", { class: "v", text: v }))),
+      ),
+      el(
+        "div",
+        { class: "stack" },
+        el(
+          "div",
+          { class: "card pad" },
+          el("span", { class: "card-t", text: "Updates" }),
+          el("span", { class: "muted t-sm pretty", text: up ? (up.error ? up.error : up.available ? `${up.latest} is out; this is ${up.installed}.${up.blocked ? ` It cannot be installed from here: ${up.blocked}` : ""}` : `${up.installed} is the latest release. Checked just now — that one request is the only time semlith asks.`) : "semlith never checks on its own. Press the button and it asks github.com once." }),
+          el(
+            "div",
+            { class: "row" },
+            btn({ class: "btn sm", onclick: checkUpdate }, up ? "Check again" : "Check for updates"),
+            up && up.available && !up.blocked ? btn({ class: "btn sm primary", onclick: installUpdate }, `Install ${up.latest}`) : null,
+          ),
+        ),
+        el(
+          "div",
+          { class: "card pad" },
+          el("span", { class: "card-t", text: "Prices" }),
+          el("span", { class: "muted t-sm pretty", text: `${n(prices.models)} models priced, from ${prices.source || "the built-in table"}${prices.fetched ? ` (${prices.fetched})` : ""}. Savings in Reports and the Ledger are priced from this table.` }),
+          btn({ class: "btn sm", onclick: updatePrices }, "Update prices"),
+        ),
+        el("div", { class: "card pad dashed" }, el("span", { class: "card-t", text: "First-run screen" }), el("span", { class: "muted t-sm", text: "See the welcome and the machine checks again. Nothing is deleted." }), btn({ class: "btn sm dark", onclick: () => go("welcome") }, "Open the first-run screen")),
+      ),
+    ),
+    el(
+      "div",
+      { class: "card" },
+      el("div", { class: "card-h" }, el("span", { class: "card-t", text: plural(langs.length, "language") }), el("span", { class: "muted t-sm grow", text: "Search filters and the code graph read the same table, so the two cannot disagree." })),
+      el(
+        "div",
+        { class: "auto-fill m200" },
+        langs.map((l) => el("div", { class: "lang-cell", "data-tip": withGraph.has(l.name) ? "search and graph" : "search only — no grammar for edges" }, el("span", { class: withGraph.has(l.name) ? "ok" : "muted", text: withGraph.has(l.name) ? "✓" : "·" }), el("span", { class: "n", text: l.name }), el("span", { class: "spacer" }), el("span", { class: "e", text: [...(l.extensions || []).map((e) => `.${e}`), ...(l.filenames || [])].slice(0, 3).join(" ") }))),
+      ),
+    ),
+  ];
 }
 
-function markCurrent(current) {
-  for (const node of document.querySelectorAll("[data-view]")) {
-    if (node.getAttribute("data-view") === current) node.setAttribute("aria-current", "page");
-    else node.removeAttribute("aria-current");
-  }
-}
-
-let renderGeneration = 0;
-
-async function render() {
-  const current = (location.hash || "#stores").slice(1);
-  const root = document.getElementById("root");
-
-  // With no store there is nothing for the navigation to navigate, so the
-  // first-run screen is the whole page rather than a view inside the shell.
-  // `#welcome` asks for it deliberately, from the sidebar's own link, which is
-  // the only way back to it once a store exists.
-  if (current === "welcome" || (!state.stores.length && current !== "index" && current !== "about")) {
-    fill(root, welcomeView());
-    shell.main = null;
-    return;
-  }
-
-  if (!shell.main || !root.contains(shell.main)) {
-    fill(root, buildShell());
-    setNav(state.navOpen);
-  }
-
-  // Every watcher belongs to the view that registered it, so they go when it
-  // does. Without this, leaving a page would leave its refetch running.
-  resetLive();
-  state.onRuns = null;
-  state.onStores = null;
-
-  const view = VIEWS.find((v) => v.id === current) || VIEWS[0];
-  shell.pageTitle.textContent = view.title;
-  document.title = `Semlith · ${view.title}`;
-  markCurrent(view.id);
-
-  paintStoreCount();
-  paintRunCount();
-
-  const mine = ++renderGeneration;
-  fill(shell.main, loadingView(view.title));
+async function checkUpdate() {
   try {
-    const node = await (RENDER[view.id] || RENDER.stores)();
-    if (mine !== renderGeneration) return;
-    fill(shell.main, node);
+    seUi.update = await post("/api/upgrade", { action: "check" });
   } catch (e) {
-    if (mine !== renderGeneration) return;
-    fill(shell.main, el("div", { class: "view" }, error(e.message)));
+    seUi.update = { error: e.message };
+  }
+  repaint();
+}
+
+async function installUpdate() {
+  const up = seUi.update;
+  const ok = await ask({ title: `Install ${up.latest}?`, body: "Downloads the release from github.com and replaces this binary. The running daemon keeps the old one until you restart it.", ok: "Install" });
+  if (!ok) return;
+  const out = await act(() => post("/api/upgrade", { action: "apply", version: up.latest }), (o) => o.restart || "Installed — restart semlith to use it");
+  if (out) {
+    seUi.update = { ...up, available: false, installed: up.latest };
+    repaint();
   }
 }
+
+// --------------------------------------------------------------------- boot
 
 async function boot() {
   let saved = null;
@@ -14147,67 +9063,68 @@ async function boot() {
   } catch (_) {
     /* private window */
   }
-  // Only an explicit choice stamps the attribute. Without one the stylesheet's
-  // prefers-color-scheme block decides, so a machine set to dark is not shown
-  // a white page and asked to go and find the toggle.
-  if (saved === "dark" || saved === "light") {
-    theme(saved);
-  } else {
-    state.theme = "system";
-  }
+  state.theme = ["light", "dark", "system"].includes(saved) ? saved : "system";
+  applyTheme();
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => state.theme === "system" && applyTheme());
+  tip.wire();
 
-  wireTips();
-
-  /* The change counters' baseline, read before anything they describe. The
-   * first poll used to take it a second after the page had drawn, so a change
-   * landing in between — a store deleted while the page loaded — was folded
-   * into the baseline and never refetched: the page counted a store that was
-   * gone until the next unrelated change. Read first, a change in that gap is
-   * one the next poll sees move. */
+  // The boot animation covers exactly the first fetches, and goes the frame
+  // they answer.
+  const done = openLoader(true);
+  // The change counters' baseline first, so a change landing while the page
+  // loads is one the first poll sees move.
   await pollChanges();
-  await refreshStores();
-  // Not awaited: the sidebar's agent count is a detail, and `claude mcp list`
-  // behind this route is slow on some machines. It fills itself in.
-  api("/api/agents").then(noteAgents).catch(() => {});
-  // Same reasoning for whether the ledger is recording: one boolean the
-  // sidebar states, read once for the life of the tab because a daemon cannot
-  // start recording without being restarted.
-  api("/api/about")
-    .then((about) => {
-      state.ledger = about.ledger !== false;
-      paintStoreCount();
-    })
-    .catch(() => {});
-  // Likewise the run count: a page opened while three runs are on should say
-  // so, and the number is not worth holding the first paint for.
-  refreshRuns().catch(() => {});
-  await render();
-
-  // One clock, started once, for the life of the tab. Every live view hangs
-  // off it; no view starts a timer of its own.
+  // One dropped connection is not a daemon that is down: the first fetches
+  // are asked again, with a growing pause, for about ten seconds before the
+  // page says it could not reach it.
+  let first = await loadMany(["stores", "about", "runs", "refused"]);
+  for (const wait of [400, 800, 1600, 3000, 4000]) {
+    if (data.stores) break;
+    await new Promise((r) => setTimeout(r, wait));
+    first = await loadMany(["stores", "about", "runs", "refused"], true);
+  }
+  done();
+  const failed = first.find((x) => x && x.__error);
+  if (failed && !data.stores) {
+    fill(
+      document.getElementById("root"),
+      el(
+        "div",
+        { id: "app" },
+        el("header", { class: "top wide-pad" }, logo(), el("span", { class: "wordmark", text: "Semlith" })),
+        el("div", { class: "welcome-body" }, el("div", { class: "welcome-card max560" }, el("div", { class: "welcome-h", text: "The portal could not reach the daemon" }), el("div", { class: "welcome-lead", text: `${failed.__error.message} — trying again every few seconds.` }), btn({ class: "btn primary", onclick: () => location.reload() }, "Try again"))),
+      ),
+    );
+    // It keeps asking, and loads the portal the moment the daemon answers,
+    // so a daemon that was restarting needs no reload by hand; a move to
+    // another page asks at once.
+    const retry = async () => {
+      try {
+        await api("/api/stores");
+        location.reload();
+      } catch (_) {
+        /* still down */
+      }
+    };
+    setInterval(retry, 3000);
+    window.addEventListener("hashchange", retry);
+    return;
+  }
+  render();
+  // Details the shell states on every page, filled in when they arrive.
+  for (const key of ["agents", "ledger", "privacy"]) load(key).then(paintChrome).catch(() => {});
   startLive();
-
   window.addEventListener("hashchange", render);
-
-  // A width change moves the drawer between overlay and column. Without this
-  // the scrim stayed over the content after a resize until the next navigation.
-  window.matchMedia(NARROW).addEventListener("change", (e) => {
-    if (shell.main) setNav(!e.matches);
-  });
-
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && state.navOpen && window.matchMedia(NARROW).matches && shell.main) {
-      setNav(false, true);
+    if (e.key === "Escape" && state.tier === "s" && state.navOpen && shell.nav) {
+      setNav(false);
       return;
     }
-    if (e.key !== "/" || e.target.matches("input, textarea, select")) return;
+    if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey || (e.target && e.target.matches && e.target.matches("input, textarea, select, [contenteditable]"))) return;
+    if (state.screen !== "app") return;
     e.preventDefault();
-    if ((location.hash || "").slice(1) === "search") {
-      const box = document.querySelector(".search-field input");
-      if (box) box.focus();
-      return;
-    }
-    go("search");
+    if (state.route.page === "search") shell.main.querySelector('[data-keep="sr-q"]')?.focus();
+    else go("search");
   });
 }
 

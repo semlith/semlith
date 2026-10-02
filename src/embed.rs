@@ -473,6 +473,7 @@ impl Pinned {
             return Ok(path);
         }
         let url = self.api.repo(self.repo.clone()).url(file);
+        crate::add::note_outbound("model", &url);
         let watch = Watch::default();
         let (done, answer) = std::sync::mpsc::channel();
         let (api, repo, name, seen) = (
@@ -742,7 +743,7 @@ pub fn airgap() -> bool {
     matches!(
         std::env::var(AIRGAP_ENV).ok().as_deref(),
         Some("1" | "true" | "yes")
-    )
+    ) || crate::add::runtime_airgap()
 }
 
 /// Whether the cache already holds something to load.

@@ -629,58 +629,75 @@ fn the_ledger_groups_retrievals_into_sessions() {
 }
 
 /// The sessions table's controls exist on the page, and its export writes
-/// the columns the page shows.
+/// the rows the page shows.
 #[test]
 fn the_ledger_page_can_filter_sort_page_and_export_its_sessions() {
     const APP_JS: &str = include_str!("../src/portal/app.js");
+    // The v6 Ledger's Sessions tab (0.35.0): a client filter, a tier filter,
+    // a saved-cost column when prices are known, and a dated export name.
     for wanted in [
         "function ledgerSessions(",
-        "Filter by client",
-        "Filter by tier",
-        "cost at ",
-        "w-sessions",
-        "semlith-sessions",
+        "\"All clients\"",
+        "\"Any tier\"",
+        "label: \"Saved\"",
+        "ledger-${sessions ? \"sessions\" : \"retrievals\"}",
     ] {
         assert!(
             APP_JS.contains(wanted),
             "the sessions table is missing {wanted:?}"
         );
     }
-    // Sort and pagination come from `dataTable`, which every other table on
-    // the portal uses — a second implementation for this one table would be
-    // a second set of bugs.
+    // Sort and pagination come from `grid`, which every other table on the
+    // portal uses — a second implementation for this one table would be a
+    // second set of bugs.
     let block = APP_JS
         .split("function ledgerSessions(")
         .nth(1)
+        .and_then(|rest| rest.split("\nfunction ").next())
         .expect("ledgerSessions exists");
+    assert!(block.contains("grid({"), "the table is not a grid");
+    // Pages at `grid`'s default, which every table opens at from 0.35.0.
     assert!(
-        block.contains("dataTable({"),
-        "the table is not a dataTable"
-    );
-    // Pages at `dataTable`'s default, which every table opens at from 0.29.0.
-    assert!(
-        APP_JS.contains("perPage: spec.perPage || 5,"),
-        "dataTable does not page at 5 by default"
+        APP_JS.contains("per: spec.per || 10"),
+        "grid does not page at 10 by default"
     );
     assert!(block.contains("sort:"), "the table does not sort");
-    // Export writes what is on screen: the same filter, the same rows.
+    // Export writes what is on screen: the same filter, the same order.
     assert!(
-        block.contains("exportRows(") && block.contains("shown()"),
+        APP_JS.contains("shown: () => sorted()") && block.contains("lg.shown = g.shown"),
+        "export must write the filtered rows, not every row"
+    );
+    let export = APP_JS
+        .split("function exportLedger(")
+        .nth(1)
+        .expect("exportLedger exists");
+    assert!(
+        export.contains("lg.shown()"),
         "export must write the filtered rows, not every row"
     );
     for format in ["Markdown", "CSV", "JSON"] {
-        assert!(block.contains(format), "no {format} export");
+        assert!(
+            APP_JS.contains(&format!("\"{format}\"")),
+            "no {format} export"
+        );
     }
 }
 
-/// Session replay reads nothing until it is turned on, and says so.
+/// Session replay is on until the Privacy page turns it off (0.35.0), and a
+/// file that said off before keeps saying it.
 #[test]
-fn session_replay_is_off_until_the_privacy_page_turns_it_on() {
-    // The setting's absence is off, not a default that happens to be false
-    // somewhere else: what it reads belongs to another program.
+fn session_replay_is_on_unless_the_privacy_page_turned_it_off() {
+    // The setting's absence is on: the owner's 0.35.0 decision. What was
+    // written stays what it was, so nobody who switched it off is switched
+    // back on by an upgrade.
     let fresh = semlith::home::Settings::default();
     assert_eq!(fresh.session_replay, None);
-    assert!(!fresh.session_replay.unwrap_or(false));
+    assert!(fresh.replay_on());
+    let off: semlith::home::Settings =
+        serde_json::from_str(r#"{"session_replay": false}"#).unwrap();
+    assert!(!off.replay_on());
+    let on: semlith::home::Settings = serde_json::from_str(r#"{"session_replay": true}"#).unwrap();
+    assert!(on.replay_on());
 
     // And the reader, pointed at a directory with no transcripts, answers
     // with an empty reading rather than an error.

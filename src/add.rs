@@ -37,6 +37,114 @@ pub const MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// than in however many the server felt like.
 const MAX_REDIRECTS: usize = 5;
 
+static RUNTIME_AIRGAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The Privacy page's airgap switch, for this process.
+///
+/// A flag rather than `SEMLITH_AIRGAP`: the daemon has threads by the time a
+/// person flips it, and setting the environment then is not sound. Every
+/// outbound path asks `embed::airgap()`, which asks this too, so the switch
+/// and the flag refuse the same things.
+pub fn set_runtime_airgap(on: bool) {
+    RUNTIME_AIRGAP.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn runtime_airgap() -> bool {
+    RUNTIME_AIRGAP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `{on, reason}` for the Privacy page: `flag` for `--airgap` (which sets
+/// the variable before any thread starts, so the command line is what tells
+/// the two apart), `env` for `SEMLITH_AIRGAP`, `runtime` for the switch.
+/// The flag and the variable outrank the switch: turning it off cannot
+/// override them.
+pub fn airgap_state() -> serde_json::Value {
+    let from_env = matches!(
+        std::env::var(embed::AIRGAP_ENV).ok().as_deref(),
+        Some("1" | "true" | "yes")
+    );
+    let reason = if from_env {
+        Some(if std::env::args().any(|a| a == "--airgap") {
+            "flag"
+        } else {
+            "env"
+        })
+    } else if runtime_airgap() {
+        Some("runtime")
+    } else {
+        None
+    };
+    serde_json::json!({ "on": reason.is_some(), "reason": reason })
+}
+
+/// Every outbound connection this process has opened, counted in one place.
+struct Outbound {
+    count: u64,
+    since: u64,
+    /// `(at, what, host)`, newest last.
+    recent: std::collections::VecDeque<(u64, String, String)>,
+}
+
+/// How many connections the Privacy page lists by name.
+const OUTBOUND_RECENT: usize = 20;
+
+static OUTBOUND: std::sync::Mutex<Option<Outbound>> = std::sync::Mutex::new(None);
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Start the count now, if nothing has: the daemon calls this at start so
+/// `since` is when it began listening rather than its first fetch.
+pub fn start_counting() {
+    let mut out = OUTBOUND.lock().unwrap_or_else(|e| e.into_inner());
+    out.get_or_insert_with(|| Outbound {
+        count: 0,
+        since: unix_now(),
+        recent: Default::default(),
+    });
+}
+
+/// Count one connection about to be opened. `what` says which feature
+/// (`add`, `model`, `pack`, `upgrade`, `prices`); only the host of `url` is
+/// kept, never its path or query, which can carry a token.
+pub fn note_outbound(what: &str, url: &str) {
+    let host = url
+        .split_once("://")
+        .map_or(url, |(_, rest)| rest)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h).to_string();
+    start_counting();
+    let mut out = OUTBOUND.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(out) = out.as_mut() else { return };
+    out.count += 1;
+    out.recent.push_back((unix_now(), what.to_string(), host));
+    while out.recent.len() > OUTBOUND_RECENT {
+        out.recent.pop_front();
+    }
+}
+
+/// `{count, since, recent: [{at, what, host}]}`, newest first.
+pub fn outbound() -> serde_json::Value {
+    start_counting();
+    let out = OUTBOUND.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(out) = out.as_ref() else {
+        return serde_json::json!({ "count": 0, "since": null, "recent": [] });
+    };
+    serde_json::json!({
+        "count": out.count,
+        "since": out.since,
+        "recent": out.recent.iter().rev().map(|(at, what, host)| serde_json::json!({
+            "at": at, "what": what, "host": host,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// The directory inside a store that fetched files land in.
 ///
 /// Inside the store rather than in the user's corpus: `add` writing into a
@@ -271,6 +379,7 @@ fn get(url: &str) -> Result<(String, String, Vec<u8>)> {
     let mut current = url.to_string();
     require_public(&current)?;
     for _ in 0..=MAX_REDIRECTS {
+        note_outbound("add", &current);
         let mut response = agent
             .get(&current)
             .call()
