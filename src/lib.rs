@@ -6598,6 +6598,46 @@ fn semlithignore_for(dir: &Path) -> Option<ignore::gitignore::Gitignore> {
 mod tests {
     use super::*;
 
+    /// Two scopes asked in turn both stay resolved (#183): a one-entry memo
+    /// resolved each of them again on every call.
+    #[test]
+    #[ignore = "downloads an embedding model on first run"]
+    fn alternating_scopes_both_stay_resolved() {
+        let corpus = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let others: Vec<String> = (0..FILTER_MEMOS).map(|i| format!("other{i}")).collect();
+        for dir in ["one", "two"]
+            .into_iter()
+            .chain(others.iter().map(String::as_str))
+        {
+            std::fs::create_dir(corpus.path().join(dir)).unwrap();
+            std::fs::write(
+                corpus.path().join(dir).join("retry.rs"),
+                format!("fn backoff_{dir}() {{ let delay = base * 2u32.pow(attempt); }}\n"),
+            )
+            .unwrap();
+        }
+        let mut s = Semlith::open(store.path(), None).unwrap();
+        s.quiet = true;
+        s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+            .unwrap();
+        let one = Filter::new(&["one/**".into()], &[], &[]).unwrap();
+        let two = Filter::new(&["two/**".into()], &[], &[]).unwrap();
+        for filter in [&one, &two, &one, &two] {
+            s.search_filtered("retry backoff", 4, filter).unwrap();
+        }
+        assert_eq!(s.filter_memo.len(), 2, "each scope resolved once");
+        // The one asked last is the newest.
+        assert_eq!(s.filter_memo[0].groups, two.groups());
+        // A scope past the memo's size pushes the oldest out, not the newest.
+        for dir in &others {
+            let f = Filter::new(&[format!("{dir}/**")], &[], &[]).unwrap();
+            s.search_filtered("retry backoff", 4, &f).unwrap();
+        }
+        assert_eq!(s.filter_memo.len(), FILTER_MEMOS);
+        assert!(s.filter_memo.iter().all(|m| m.groups != one.groups()));
+    }
+
     /// The head finds repositories below a projects folder, and within one
     /// commit takes the code before the licence and the changelog.
     #[test]
