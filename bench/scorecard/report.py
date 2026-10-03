@@ -86,31 +86,49 @@ def repobench(directory):
 
 
 def competitors(path):
-    rows = json.load(open(path))
-    if isinstance(rows, dict):
-        rows = rows.get("rows") or rows.get("table") or []
+    doc = json.load(open(path))
+    try:
+        versions = json.load(open(os.path.join(os.path.dirname(path), "MANIFEST.json")))["versions"]
+    except (OSError, KeyError, ValueError):
+        versions = {}
+    m = lambda r, key: cell(r, key) if r else "—"
     body = []
-    for r in rows:
-        body.append([r.get("tool") or r.get("arm"), r.get("version", ""), r.get("n", "—"),
-                     cell(r, "any@1"), cell(r, "any@5"), cell(r, "any@10"), cell(r, "tok4000"),
-                     cell(r, "semlith_any@5") if "semlith_any@5" in r else "—", r.get("note", "")])
-    return ("### Competitors, SWE-bench Lite\n\nThe same checkouts and queries for every tool; semlith beside each on "
-            "exactly the instances that tool completed.\n\n"
-            + table(["tool", "version", "instances", "file hit@1", "@5", "@10", "first gold within 4k tokens",
-                     "semlith hit@5, same instances", "note"], body)
-            + "\n\n`python3.11 bench/scorecard/competitors_swe.py walk && python3.11 bench/scorecard/competitors_swe.py score`")
+    for t in doc["tools"]:
+        tm, sm = t["tool_metrics"], t["semlith_metrics"]
+        nr = "; ".join(f"{v}: {k}" for k, v in t["not_run"].items())
+        body.append([t["tool"], versions.get(t["tool"], ""), f"{t['completed']}/{t['of']}", m(tm, "any@1"), m(tm, "any@5"),
+                     m(tm, "any@10"), m(tm, "tok4000"), m(sm, "any@5"), m(sm, "tok4000"), nr or "—"])
+    a = doc.get("semlith_all")
+    if a:
+        body.append(["semlith, every instance", "", f"{a['n']}", cell(a, "any@1"), cell(a, "any@5"), cell(a, "any@10"),
+                     cell(a, "tok4000"), "", "", ""])
+    return ("### Competitors, SWE-bench Lite\n\nThe same base-commit checkouts and issue text for every tool, on a "
+            "seeded random sample of SWE-bench Lite; semlith beside each tool on exactly the instances that tool "
+            "completed (all runs without an error). A tool whose cumulative indexing passed 4x semlith's is stopped "
+            "and its remaining instances are \"not run\".\n\n"
+            + table(["tool", "version", "completed", "file hit@1", "@5", "@10", "first gold within 4k tokens",
+                     "semlith hit@5, same instances", "semlith within 4k, same instances", "not run"], body)
+            + "\n\n`cd bench/scorecard && python3.11 competitors_swe.py walk && python3.11 competitors_swe.py score`")
+
+
+ARMS_AGENT = {"g": "grep (Grep, Glob, Read)", "s": "semlith installed, Grep built in",
+              "gate": "semlith installed, Grep gated to semlith first"}
 
 
 def agent(path):
-    rows = json.load(open(path))
-    if isinstance(rows, dict):
-        rows = rows.get("rows") or rows.get("table") or []
-    body = [[r.get("model"), r.get("arm"), r.get("runs"), r.get("n"), r.get("hit"), r.get("cost_per_session"),
-             r.get("cost_per_correct"), r.get("tokens_in_median"), r.get("sessions_calling_semlith")] for r in rows]
+    order = list(ARMS_AGENT)
+    rows = sorted(json.load(open(path)), key=lambda r: (r["model"] != "opus", order.index(r["arm"])))
+    money = lambda x: f"${x:.3f}"
+    count = lambda x: f"{x:g}"
+    body = [[r["model"], ARMS_AGENT.get(r["arm"], r["arm"]), r["runs"], max(r["n"]), cell(r, "hit"),
+             cell(r, "cost_per_session", money), cell(r, "cost_per_correct", money),
+             cell(r, "tokens_in_median", count), cell(r, "used_semlith", count)] for r in rows]
     return ("### Agents on an unfamiliar codebase\n\nHeadless Claude Code on 50 held-out questions generated from the "
-            "code of a 70-repository corpus (not a public set).\n\n"
+            "code of a 70-repository corpus (not a public set: Opus has memorised SWE-bench Lite, "
+            "`bench/scorecard/agent/contamination.md`).\n\n"
             + table(["model", "arm", "runs", "questions", "correct", "cost / session", "cost / correct answer",
-                     "median input tokens", "sessions calling semlith"], body))
+                     "median input tokens", "sessions calling semlith"], body)
+            + "\n\n`python3 bench/scorecard/agent/corpus_round.py`")
 
 
 def ledger(directory):
