@@ -142,7 +142,18 @@ pub enum Allowlist {
     All,
     /// The filter selects nothing. The query is over before it starts.
     Empty,
+    /// Ascending ids, so a sharded index takes each shard's part by binary
+    /// search instead of testing every id against every shard on every query.
+    /// Built with [`Allowlist::subset`].
     Subset(Vec<u64>),
+}
+
+impl Allowlist {
+    pub fn subset(mut ids: Vec<u64>) -> Self {
+        ids.sort_unstable();
+        ids.dedup();
+        Allowlist::Subset(ids)
+    }
 }
 
 /// A store's vectors, in whichever layout the store was written with.
@@ -695,15 +706,13 @@ impl Sharded {
                 Allowlist::Empty => return Ok((Vec::new(), Vec::new())),
                 Allowlist::All => None,
                 Allowlist::Subset(ids) => {
-                    let mine: Vec<u64> = ids
-                        .iter()
-                        .copied()
-                        .filter(|id| *id >= start && end.is_none_or(|e| *id < e))
-                        .collect();
-                    if mine.is_empty() {
+                    // `ids` ascend, so this shard's part is one contiguous run.
+                    let from = ids.partition_point(|id| *id < start);
+                    let to = end.map_or(ids.len(), |e| ids.partition_point(|id| *id < e));
+                    if from >= to {
                         continue;
                     }
-                    Some(mine)
+                    Some(ids[from..to].to_vec())
                 }
             };
 
