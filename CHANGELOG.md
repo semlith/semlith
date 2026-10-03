@@ -21,6 +21,13 @@ the ledger's real sessions. Data, clones and stores live under
 
 ### Fixed
 
+- **A long query no longer puts a screenshot first.** CLIP reads 77 tokens, so
+  an issue or a pasted paragraph was compared to the store's images by its
+  opening words alone, and a screenshot of text matches the opening of almost
+  any technical prose: on the scorecard's SWE-bench walk a documentation image
+  came first for 57 of 102 Django and Astropy issues, above the code they were
+  about. A query CLIP has to cut short no longer counts as a confident image
+  match; its images still rank, as weak candidates.
 - **A file emptied on disk is evicted from the store.** The index pass skipped an
   empty file without removing what it used to hold, so its old chunks went on
   answering searches for text no longer on disk; the same held for a file that

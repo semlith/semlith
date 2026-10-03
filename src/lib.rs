@@ -4904,7 +4904,7 @@ impl Semlith {
         // query has to be embedded a second time, with CLIP's text encoder
         // rather than the store's own model, and a store of source code should
         // not pay for a model it has nothing to compare against.
-        let images = self.image_search(query, depth, filter)?;
+        let (images, truncated) = self.image_search(query, depth, filter)?;
 
         // Two id spaces — a chunk id and an image id both count from one — so
         // the fusion is keyed by which space an id belongs to as well as by the
@@ -4931,7 +4931,14 @@ impl Semlith {
                 // before: 0.25 / 13 = 0.019 at rank one, against 1 / 61 =
                 // 0.016 under the old flat curve. The order among the
                 // also-rans is unchanged; only the confident case moved.
-                let weight = if *similarity >= image_floor() {
+                //
+                // A query CLIP had to cut short is never confident: the cosine
+                // is of its opening words, not of what was asked. An issue or a
+                // pasted paragraph runs past 77 tokens, and a screenshot of
+                // text matches the opening of almost any technical prose
+                // (0.24-0.31 on Django's docs, against 0.39 for a sentence
+                // describing a screenshot).
+                let weight = if *similarity >= image_floor() && !truncated {
                     TEXT_LISTS
                 } else {
                     WEAK_IMAGE
@@ -5535,7 +5542,7 @@ impl Semlith {
     }
 
     /// The image half of a search: the query in CLIP's text space, against the
-    /// store's image vectors.
+    /// store's image vectors, and whether CLIP had to cut the query short.
     ///
     /// Empty, and free, for a store that holds no image — which is every store
     /// that has only ever been pointed at source code.
@@ -5544,9 +5551,9 @@ impl Semlith {
         query: &str,
         depth: usize,
         filter: &Filter,
-    ) -> Result<Vec<(u64, f32)>> {
+    ) -> Result<(Vec<(u64, f32)>, bool)> {
         if store::image_count(&self.db)? == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
         let allowlist = if filter.is_empty() {
             index::Allowlist::All
@@ -5561,18 +5568,20 @@ impl Semlith {
                 }
             }
             if ids.is_empty() {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), false));
             }
             index::Allowlist::subset(ids)
         };
 
-        let mut vector = self.clip.embed_query(query, self.quiet)?;
+        let (mut vector, truncated) = self.clip.embed_query(query, self.quiet)?;
         normalize(&mut vector);
         let (scores, ids) = self.images.search(&vector, depth, &allowlist)?;
-        Ok(ids
-            .into_iter()
-            .zip(scores.into_iter().chain(std::iter::repeat(0.0)))
-            .collect())
+        Ok((
+            ids.into_iter()
+                .zip(scores.into_iter().chain(std::iter::repeat(0.0)))
+                .collect(),
+            truncated,
+        ))
     }
 
     /// How many images this store holds.
