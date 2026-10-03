@@ -47,7 +47,8 @@ def relativize(excerpts, root):
 
 
 ARMS = {
-    "semlith": lambda q, root, store, files: relativize(arms.semlith(store, q), root),
+    # 100 chunks, so the file ranking reaches ten distinct files for Recall@10.
+    "semlith": lambda q, root, store, files: relativize(arms.semlith(store, q, k=100), root),
     "r0": lambda q, root, store, files: arms.r0(q, root, files),
 }
 
@@ -80,7 +81,10 @@ def walk(args):
             t0 = time.time()
             checkout(root, inst["base_commit"])
             idx = sh([arms.SEMLITH, "index", "--store", store, "-q", root], timeout=7200).stdout.strip().splitlines()
-            files = arms.store_files(store)
+            # `semlith files` prints a path relative to the working directory when it can and
+            # absolute otherwise; every arm and the gold speak root-relative paths.
+            files = [os.path.relpath(f if os.path.isabs(f) else os.path.join(os.getcwd(), f), root)
+                     for f in arms.store_files(store)]
             present = [g for g in inst["gold"] if os.path.exists(os.path.join(root, g))]
             missing = [g for g in present if g not in set(files)]
             with open(rows_path, "a") as f:
