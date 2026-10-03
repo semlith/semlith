@@ -17,7 +17,9 @@ user=nocap
 port=7399
 sudo useradd -m "$user"
 sudo install -m 0755 "$bin" /usr/local/bin/semlith-under-test
-as() { sudo -u "$user" -H env HOME="/home/$user" SEMLITH_NO_SERVICE=1 "$@"; }
+# umask 077: Ubuntu's default 002 makes the model cache group-writable, and
+# semlith refuses to load weights from a directory others can write.
+as() { sudo -u "$user" -H env HOME="/home/$user" SEMLITH_NO_SERVICE=1 sh -c 'umask 077; exec "$@"' sh "$@"; }
 uid=$(id -u "$user")
 corpus=/home/$user/corpus
 

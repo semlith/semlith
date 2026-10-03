@@ -1692,7 +1692,8 @@ fn the_cloud_section_draws_both_states() {
         assert!(APP_JS.contains(needle), "app.js lost `{needle}`");
     }
     let off = &APP_JS[APP_JS.find("function seCloudOff()").unwrap()..];
-    let off = &off[..off.find("\n}\n").unwrap()];
+    // `\n}` and not `\n}\n`: a Windows checkout ends lines with CRLF.
+    let off = &off[..off.find("\n}").unwrap()];
     for price in ["$", "₹", "per month", "/mo", "price"] {
         assert!(
             !off.contains(price),
