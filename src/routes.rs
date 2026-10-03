@@ -2557,17 +2557,6 @@ fn privacy_fix(state: &Arc<State>, request: &Request) -> Response {
     }))
 }
 
-/// Write the configuration file of every client semlith cannot ask to register
-/// itself — the portal's half of `semlith setup --register-all`.
-///
-/// Two calls, deliberately. Without a body it returns the plan: every path and
-/// what would happen to it, which is what the page shows before it asks. With
-/// `{"confirm": true}` it applies that plan. This is the one place the daemon
-/// writes a file it does not own, and a user who has not seen the list has not
-/// agreed to it.
-/// What a typical answer from each tool costs an agent, before it asks.
-///
-
 /// The documented clients as `/api/agents` lists them, each with its id and
 /// whether its own file names semlith now.
 fn client_rows() -> Vec<Value> {
