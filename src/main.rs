@@ -1045,6 +1045,35 @@ enum CloudCommand {
         #[arg(long)]
         org: Option<String>,
     },
+    /// Write one of the cloud's reports here: savings, audit, brief, health
+    /// or gaps.
+    Report {
+        org: String,
+        kind: String,
+        /// md, csv, json, html or pdf.
+        #[arg(long, default_value = "md")]
+        format: String,
+        /// 24h, 7d, 30d, quarter or all.
+        #[arg(long)]
+        window: Option<String>,
+        /// The model a savings figure is priced at.
+        #[arg(long)]
+        model: Option<String>,
+        /// Only these stores, comma-separated.
+        #[arg(long, value_delimiter = ',')]
+        stores: Vec<String>,
+        /// Write it to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Send one Claude Code session transcript you pick to the org's ledger.
+    /// With no session, list the recent ones to pick from. Nothing is sent on
+    /// its own.
+    Replay {
+        session: Option<String>,
+        #[arg(long)]
+        org: Option<String>,
+    },
     /// The org, its plan, its stores and what they cost this month.
     Status {
         org: Option<String>,
@@ -5104,6 +5133,74 @@ fn run_cloud(what: CloudCommand, stores: &[PathBuf]) -> Result<()> {
                 ),
                 None => println!("{store}: ledger sync off; nothing more is sent"),
             }
+        }
+        CloudCommand::Report {
+            org,
+            kind,
+            format,
+            window,
+            model,
+            stores,
+            out,
+        } => {
+            let entry = cloud::entry_for(Some(&org), None)?;
+            if out.is_none() && format == "pdf" && std::io::stdout().is_terminal() {
+                bail!("a PDF is not something to print to a terminal; name a file with --out");
+            }
+            let bytes = cloud::report(
+                &entry,
+                &cloud::ReportAsk {
+                    kind: &kind,
+                    format: &format,
+                    window: window.as_deref(),
+                    model: model.as_deref(),
+                    stores: &stores,
+                },
+            )?;
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, &bytes)?;
+                    println!(
+                        "wrote {} ({})",
+                        path.display(),
+                        semlith::human_bytes(bytes.len() as i64)
+                    );
+                }
+                None => std::io::stdout().write_all(&bytes)?,
+            }
+        }
+        CloudCommand::Replay { session, org } => {
+            let entry = cloud::entry_for(org.as_deref(), None)?;
+            let (dir, found) = cloud::replay_sessions()?;
+            let Some(id) = session else {
+                if found.sessions.is_empty() {
+                    println!(
+                        "no transcript under {} has a semlith call in it",
+                        found.from
+                    );
+                    return Ok(());
+                }
+                for s in &found.sessions {
+                    println!(
+                        "{}  {}  {} answers  {}",
+                        s.id,
+                        s.project,
+                        s.answers,
+                        semlith::clock::local_stamp(s.last)
+                    );
+                }
+                println!("pick one: semlith cloud replay <session>");
+                return Ok(());
+            };
+            let Some(chosen) = semlith::replay::session(&dir, &id)? else {
+                bail!("no transcript called {id} under {}", found.from);
+            };
+            let accepted = cloud::replay(&entry, &chosen)?;
+            println!(
+                "sent {} answers of session {id} to {}; it accepted {accepted}",
+                chosen.recent.len(),
+                entry.org
+            );
         }
         CloudCommand::Disconnect { org } => {
             let gone = cloud::disconnect(&org)?;

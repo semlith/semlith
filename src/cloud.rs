@@ -1797,6 +1797,110 @@ pub fn sync_view() -> Value {
     })
 }
 
+/// The formats `GET /v1/orgs/<org>/reports/<kind>` answers in.
+pub const REPORT_FORMATS: [&str; 5] = ["md", "csv", "json", "html", "pdf"];
+
+/// What a cloud report is asked for.
+pub struct ReportAsk<'a> {
+    pub kind: &'a str,
+    pub format: &'a str,
+    pub window: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub stores: &'a [String],
+}
+
+/// `semlith cloud report`: the cloud's report file, as its bytes.
+pub fn report(entry: &Entry, ask: &ReportAsk<'_>) -> Result<Vec<u8>> {
+    if !REPORT_FORMATS.contains(&ask.format) {
+        bail!(
+            "{} is not a report format; one of {}",
+            ask.format,
+            REPORT_FORMATS.join(", ")
+        );
+    }
+    let mut query = format!("format={}", seg(ask.format));
+    if let Some(window) = ask.window {
+        query.push_str(&format!("&window={}", seg(window)));
+    }
+    if let Some(model) = ask.model {
+        query.push_str(&format!("&model={}", seg(model)));
+    }
+    if !ask.stores.is_empty() {
+        let list: Vec<String> = ask.stores.iter().map(|s| seg(s)).collect();
+        query.push_str(&format!("&stores={}", list.join(",")));
+    }
+    let reply = call_as(
+        entry,
+        "GET",
+        &format!(
+            "/v1/orgs/{}/reports/{}?{query}",
+            seg(&entry.org),
+            seg(ask.kind)
+        ),
+        Send {
+            headers: vec![("Accept", "*/*".into())],
+            timeout: Some(Duration::from_secs(120)),
+            ..Send::default()
+        },
+    )?;
+    Ok(reply.body)
+}
+
+/// `semlith cloud replay <session>`: one transcript the member picked, sent
+/// to the org's ledger. Returns how many answers the cloud accepted.
+pub fn replay(entry: &Entry, session: &crate::replay::Session) -> Result<i64> {
+    let items: Vec<Value> = session
+        .recent
+        .iter()
+        .map(|a| {
+            json!({
+                "at": a.at,
+                "tool": a.tool,
+                "query": a.query,
+                // The contract's word for "nothing recorded".
+                "outcome": if a.outcome == "unknown" { "none" } else { a.outcome },
+            })
+        })
+        .collect();
+    let sent = call_as(
+        entry,
+        "POST",
+        &format!("/v1/orgs/{}/replay", seg(&entry.org)),
+        Send {
+            json: Some(&json!({
+                "session": session.id,
+                "client": crate::replay::CLIENT,
+                "items": items,
+            })),
+            ..Send::default()
+        },
+    );
+    match sent {
+        Ok(reply) => Ok(reply.json()?["accepted"].as_i64().unwrap_or(0)),
+        Err(Failure::Refused { code, message, .. }) if code == "replay_off" => bail!(
+            "{} Session replay is off for {}: an owner turns it on in the cloud app under \
+             Ledger › Session replay. Nothing was kept.",
+            message.trim(),
+            entry.org
+        ),
+        Err(other) => Err(other.into()),
+    }
+}
+
+/// The transcripts this machine may read, or why it may not. The Privacy
+/// page's Session replay switch governs every reader, this one included.
+pub fn replay_sessions() -> Result<(PathBuf, crate::replay::Replay)> {
+    if !crate::home::Settings::load().replay_on() {
+        bail!(
+            "Session replay is off on this machine (the Privacy page's switch), so semlith \
+             reads no transcript; turn it on to pick one to send"
+        );
+    }
+    let dir = crate::replay::transcripts_dir()?;
+    let found = crate::replay::read(&dir, crate::replay::FILES)?;
+    Ok((dir, found))
+}
+
 /// What the portal's Cloud section draws without asking the host anything:
 /// who this machine is signed in as, by prefix. Never the token.
 pub fn local_view() -> Value {

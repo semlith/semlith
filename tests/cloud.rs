@@ -1177,3 +1177,126 @@ fn ledger_sync_is_a_per_store_switch_that_starts_off() {
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), LOCAL_REGISTRY);
 }
+
+// ------------------------------------------------------- report and replay
+
+#[test]
+fn a_cloud_report_is_written_where_asked() {
+    let home = tempfile::tempdir().unwrap();
+    let host = Stub::start(|seen: &Seen| {
+        if seen.path == "/v1/whoami" {
+            return stub::json(200, json!({ "org": { "slug": "acme" } }));
+        }
+        (
+            200,
+            vec![("Content-Type".into(), "text/csv".into())],
+            b"store,saved\nplatform,12\n".to_vec(),
+        )
+    });
+    signed_in(home.path(), &host);
+    let o = semlith(
+        home.path(),
+        &["cloud", "report", "acme", "savings", "--format", "docx"],
+    );
+    assert!(!o.status.success());
+    assert_eq!(host.seen().len(), 1, "a bad format still reached the host");
+
+    let file = home.path().join("savings.csv");
+    let o = semlith(
+        home.path(),
+        &[
+            "cloud",
+            "report",
+            "acme",
+            "savings",
+            "--format",
+            "csv",
+            "--window",
+            "7d",
+            "--stores",
+            "platform,docs",
+            "--out",
+            file.to_str().unwrap(),
+        ],
+    );
+    assert!(o.status.success(), "{}", out(&o));
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "store,saved\nplatform,12\n"
+    );
+    assert_eq!(
+        host.seen().last().unwrap().path,
+        "/v1/orgs/acme/reports/savings?format=csv&window=7d&stores=platform,docs"
+    );
+}
+
+fn transcript(home: &Path, id: &str) {
+    let dir = home.join(".claude/projects/-work-api");
+    std::fs::create_dir_all(&dir).unwrap();
+    let call = |at: &str, name: &str, input: Value| {
+        json!({ "timestamp": at, "message": { "content": [{ "type": "tool_use", "name": name, "input": input }] } })
+            .to_string()
+    };
+    let lines = [
+        call(
+            "2026-10-01T09:14:03Z",
+            "mcp__semlith__semlith_search",
+            json!({ "query": "where is the order total" }),
+        ),
+        call(
+            "2026-10-01T09:14:09Z",
+            "Edit",
+            json!({ "file_path": "src/total.rs" }),
+        ),
+    ];
+    std::fs::write(dir.join(format!("{id}.jsonl")), lines.join("\n") + "\n").unwrap();
+}
+
+#[test]
+fn replay_sends_only_the_session_picked() {
+    let home = tempfile::tempdir().unwrap();
+    let host = Stub::start(|seen: &Seen| match seen.path.as_str() {
+        "/v1/whoami" => stub::json(200, json!({ "org": { "slug": "acme" } })),
+        "/v1/orgs/acme/replay" => stub::json(200, json!({ "accepted": 1 })),
+        _ => stub::error(404, "not_found", "No."),
+    });
+    signed_in(home.path(), &host);
+    transcript(home.path(), "53fc2b7b-ec0");
+    transcript(home.path(), "other-session");
+
+    // No session named: a list to pick from, and nothing sent.
+    let o = semlith(home.path(), &["cloud", "replay"]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(
+        String::from_utf8_lossy(&o.stdout).contains("53fc2b7b-ec0"),
+        "{}",
+        out(&o)
+    );
+    assert!(host.to("/v1/orgs/acme/replay").is_empty());
+
+    let o = semlith(home.path(), &["cloud", "replay", "53fc2b7b-ec0"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let sent = host.to("/v1/orgs/acme/replay");
+    assert_eq!(sent.len(), 1);
+    let body = sent[0].json();
+    assert_eq!(body["session"], "53fc2b7b-ec0");
+    assert_eq!(body["client"], "claude-code");
+    assert_eq!(body["items"][0]["tool"], "semlith_search");
+    assert_eq!(body["items"][0]["query"], "where is the order total");
+    assert_eq!(body["items"][0]["outcome"], "sufficed");
+}
+
+#[test]
+fn replay_off_in_the_org_is_explained() {
+    let home = tempfile::tempdir().unwrap();
+    let host = Stub::start(|seen: &Seen| match seen.path.as_str() {
+        "/v1/whoami" => stub::json(200, json!({ "org": { "slug": "acme" } })),
+        _ => stub::error(409, "replay_off", "Replay is off."),
+    });
+    signed_in(home.path(), &host);
+    transcript(home.path(), "s1");
+    let o = semlith(home.path(), &["cloud", "replay", "s1"]);
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("Ledger › Session replay"), "{err}");
+}
