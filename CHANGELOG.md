@@ -39,7 +39,9 @@ the ledger's real sessions. Data, clones and stores live under
   moving between two repositories resolved each again on every call; it keeps
   the eight most recent now. Allowlists are sorted once when built, so a sharded
   index takes each shard's ids by binary search instead of testing every id
-  against every shard.
+  against every shard. A scope with a literal directory in front, `<root>/**`,
+  is a range of a new index on the lowered path rather than a GLOB over every
+  path; the index is added on open and older binaries ignore it.
 - **A failed accelerator lane is tried again (#188).** One failed start of the
   Neural Engine worker left the daemon embedding on the CPU, about a tenth of the
   speed, until it was restarted — switching the lane off and on from the terminal
