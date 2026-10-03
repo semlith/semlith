@@ -325,7 +325,18 @@ pub struct Lane {
     /// left before the compile has moved: the Neural Engine's first bucket
     /// is a single step of half a minute.
     expected: Mutex<Option<Duration>>,
+    /// When the lane last went from working to failed: a failure is tried
+    /// again after [`LANE_RETRY`] rather than kept for the life of the daemon.
+    failed_at: Mutex<Option<Instant>>,
 }
+
+/// How long a failed lane waits before it is tried again. A Neural Engine
+/// worker that failed once at a daemon's start left that daemon embedding on
+/// the CPU, ten times slower, for the rest of its life, and switching the lane
+/// off and on from the terminal never reached it.
+/// ponytail: one fixed interval; back off if a lane that keeps failing costs
+/// more than the retries are worth.
+const LANE_RETRY: Duration = Duration::from_secs(600);
 
 impl Lane {
     fn new(spec: &Spec) -> Self {
@@ -340,6 +351,7 @@ impl Lane {
             jobs: Mutex::new(None),
             began: Mutex::new(None),
             expected: Mutex::new(None),
+            failed_at: Mutex::new(None),
         }
     }
 
@@ -441,6 +453,22 @@ impl Lane {
             *began = Some((start, Instant::now(), percent));
         }
         drop(began);
+        let mut failed_at = self.failed_at.lock().unwrap_or_else(|e| e.into_inner());
+        match &status {
+            Status::Failed { reason } if !matches!(*current, Status::Failed { .. }) => {
+                *failed_at = Some(Instant::now());
+                // The daemon's log is its stderr: without this line a lane that
+                // failed was visible only to someone who ran `semlith accel`.
+                eprintln!(
+                    "semlith: the {} lane failed: {reason}; it is tried again in {} minutes",
+                    self.id,
+                    LANE_RETRY.as_secs() / 60
+                );
+            }
+            Status::Failed { .. } => {}
+            _ => *failed_at = None,
+        }
+        drop(failed_at);
         *current = status;
     }
 
@@ -454,8 +482,18 @@ impl Lane {
         )
     }
 
-    /// Whether the lane can be used at all: not failed, not unavailable.
+    /// Whether the lane can be used at all: not failed, not unavailable. A
+    /// failure older than [`LANE_RETRY`] is cleared here, so the next run
+    /// tries the lane afresh.
     pub fn usable(&self) -> bool {
+        let due = self
+            .failed_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some_and(|at| at.elapsed() >= LANE_RETRY);
+        if due {
+            self.reset();
+        }
         !matches!(
             self.status(),
             Status::Unavailable { .. } | Status::Failed { .. }
@@ -2096,6 +2134,23 @@ mod tests {
         assert!(!lane.coming());
         lane.set(Status::Active);
         assert!(lane.ready() && !lane.coming());
+    }
+
+    /// A failed lane stays failed for a while and is then tried again, rather
+    /// than for the life of the process.
+    #[test]
+    fn a_failed_lane_is_tried_again_after_its_cool_down() {
+        let lane = Lane::new(spec("ane").unwrap());
+        lane.set(Status::Failed { reason: "x".into() });
+        assert!(!lane.usable());
+        // Failing again does not restart the wait.
+        let first = *lane.failed_at.lock().unwrap();
+        lane.set(Status::Failed { reason: "y".into() });
+        assert_eq!(*lane.failed_at.lock().unwrap(), first);
+        *lane.failed_at.lock().unwrap() = Instant::now().checked_sub(LANE_RETRY);
+        assert!(lane.usable());
+        assert_eq!(lane.status(), Status::Idle);
+        assert!(lane.failed_at.lock().unwrap().is_none());
     }
 
     /// A compile left by a killed worker is deleted; one still being written
