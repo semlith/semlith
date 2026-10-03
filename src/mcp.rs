@@ -815,11 +815,147 @@ fn all_tool_defs(open: &str) -> Value {
     ])
 }
 
+/// Hits a search fetched from remote stores, to merge with the local ones.
+struct Remote {
+    fetched: crate::cloud::Fetched,
+    /// The call named only remote stores, so no local store is searched.
+    skip_local: bool,
+}
+
 fn call_tool(
     stores: &mut Fleet,
     writer: Option<&dyn Writer>,
     params: &Value,
     session: &Session,
+) -> Result<Value, Fail> {
+    // One registry read. Nobody who never connected a remote store goes any
+    // further than this, so their answers are exactly what they were.
+    let remotes = crate::cloud::remote_stores();
+    if remotes.is_empty() {
+        return call_local(stores, writer, params, session, None);
+    }
+    call_with_remotes(stores, writer, params, session, &remotes)
+}
+
+/// A tool call on a machine with remote stores.
+///
+/// Search names a remote store or no store at all: the remote hits are
+/// fetched and merged with the local ones by score under the same `k` and
+/// budget. Any other tool naming a remote store is forwarded to that store's
+/// MCP endpoint and its text appended, store by store. A store that cannot be
+/// asked costs one line saying so; the local answer stays whole.
+fn call_with_remotes(
+    stores: &mut Fleet,
+    writer: Option<&dyn Writer>,
+    params: &Value,
+    session: &Session,
+    remotes: &[(String, crate::home::Remote)],
+) -> Result<Value, Fail> {
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    let named = strings(&args, "store");
+    let is_remote = |n: &String| remotes.iter().any(|(r, _)| r == n);
+    let (remote_named, local_named): (Vec<String>, Vec<String>) =
+        named.iter().cloned().partition(is_remote);
+    let skip_local = !named.is_empty() && local_named.is_empty();
+    let who = crate::cloud::Who {
+        client: &session.client,
+        session: &session.id,
+    };
+    // The same call, with only the local stores named.
+    let local_params = || {
+        let mut p = params.clone();
+        if !named.is_empty() {
+            p["arguments"]["store"] = json!(local_named);
+        }
+        p
+    };
+    let exact = args.get("exact").and_then(Value::as_bool) == Some(true);
+    let targets: Vec<(String, crate::home::Remote)> = remotes
+        .iter()
+        .filter(|(r, _)| {
+            if named.is_empty() {
+                name == "semlith_search"
+            } else {
+                remote_named.contains(r)
+            }
+        })
+        .cloned()
+        .collect();
+    if targets.is_empty()
+        || matches!(
+            name,
+            "semlith_index" | "semlith_forget" | "semlith_add" | "semlith_stats"
+        )
+    {
+        return call_local(stores, writer, params, session, None);
+    }
+
+    if name == "semlith_search" && !exact {
+        let Some(query) = args.get("query").and_then(Value::as_str) else {
+            return Err((-32602, "missing required argument: query".into(), None));
+        };
+        let k = args.get("k").and_then(Value::as_u64).unwrap_or(8) as usize;
+        let fetched = crate::cloud::search(
+            &targets,
+            &crate::cloud::Query {
+                query,
+                k: k.clamp(1, 50),
+                path: &strings(&args, "path"),
+                ext: &strings(&args, "ext"),
+                lang: &strings(&args, "lang"),
+                prefer: args.get("prefer").and_then(Value::as_str),
+            },
+            &who,
+        );
+        let remote = Remote {
+            fetched,
+            skip_local,
+        };
+        return call_local(stores, writer, &local_params(), session, Some(&remote));
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut failed = false;
+    if !skip_local {
+        let local = call_local(stores, writer, &local_params(), session, None)?;
+        failed = local["isError"] == json!(true);
+        parts.push(text_of(&local));
+    }
+    let mut skipped = Vec::new();
+    for (store, remote) in &targets {
+        match crate::cloud::forward_tool(store, remote, name, &args, &who) {
+            Ok(text) => parts.push(format!("{store} ({})\n{text}", crate::cloud::badge(remote))),
+            Err(why) => skipped.push(why),
+        }
+    }
+    if let Some(line) = crate::cloud::skipped_line(&skipped) {
+        parts.push(line);
+    }
+    let mut out = json!({ "content": [{ "type": "text", "text": parts.join("\n\n") }] });
+    if failed && skip_local {
+        out["isError"] = json!(true);
+    }
+    Ok(out)
+}
+
+/// The text of a tool result.
+fn text_of(result: &Value) -> String {
+    result["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn call_local(
+    stores: &mut Fleet,
+    writer: Option<&dyn Writer>,
+    params: &Value,
+    session: &Session,
+    remote: Option<&Remote>,
 ) -> Result<Value, Fail> {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -857,7 +993,7 @@ fn call_tool(
             // should widen the filter, not conclude the corpus is empty. A
             // failure here is a broken store, not an empty selection, and must
             // not be reported as one.
-            let selected = if filter.is_empty() {
+            let selected = if filter.is_empty() || remote.is_some() {
                 1
             } else {
                 match stores.matching_files(&filter) {
@@ -911,7 +1047,31 @@ fn call_tool(
                     [one] => stores.lean(one).unwrap_or_default(),
                     _ => crate::Prefer::default(),
                 });
-                match stores.search_leaning(Some(&only), query, k.clamp(1, 50), &filter, asked) {
+                let found = match remote {
+                    Some(r) if r.skip_local => Ok(Vec::new()),
+                    _ => stores.search_leaning(Some(&only), query, k.clamp(1, 50), &filter, asked),
+                };
+                // Remote hits join here, by score, before the budget cuts: one
+                // list, one `k`, one renderer.
+                let found = match (found, remote) {
+                    (Ok(hits), Some(r)) => {
+                        let label = (stores.len() == 1)
+                            .then(|| stores.labels().first().map(|l| l.to_string()))
+                            .flatten();
+                        Ok(crate::cloud::merge(
+                            hits,
+                            label.as_deref(),
+                            &r.fetched.hits,
+                            k.clamp(1, 50),
+                        ))
+                    }
+                    (found, _) => found,
+                };
+                let skipped = remote.and_then(|r| crate::cloud::skipped_line(&r.fetched.skipped));
+                let answer = match found {
+                    Ok(hits) if hits.is_empty() && remote.is_some_and(|r| r.skip_local) => {
+                        "No match in the remote stores.".to_string()
+                    }
                     Ok(hits) if hits.is_empty() => stores.no_match_reason(&filter),
                     Ok(hits) if excerpts => {
                         format!("{}\n{}", reading(query, prefer), render(&hits))
@@ -920,6 +1080,10 @@ fn call_tool(
                     // Tool failures are reported in-band so the agent can react,
                     // rather than as a protocol-level error.
                     Err(e) => return Ok(tool_error(&e.to_string())),
+                };
+                match skipped {
+                    Some(line) => format!("{answer}\n{line}"),
+                    None => answer,
                 }
             }
         }
@@ -1815,7 +1979,11 @@ fn call_tool(
         other => return Err((-32602, format!("unknown tool: {other}"), None)),
     };
 
-    record(stores, session, name, &args, &body, started.elapsed());
+    // A search that asked only remote stores read nothing here, so there is
+    // no local row to write; the cloud records its own.
+    if !remote.is_some_and(|r| r.skip_local) {
+        record(stores, session, name, &args, &body, started.elapsed());
+    }
     Ok(json!({ "content": [{ "type": "text", "text": body }] }))
 }
 
@@ -2160,6 +2328,11 @@ pub fn brief_reply(fleet: &Fleet, brief: &crate::brief::Brief, filter: &crate::F
     paths.with_header(render_brief(brief, &|p| paths.short(p)))
 }
 
+/// One hit's best line for `query`, as a locate row shows it.
+pub(crate) fn line_for(text: &str, query: &str) -> String {
+    best_line(text, &query_terms(query))
+}
+
 fn query_terms(query: &str) -> Vec<String> {
     query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -2429,7 +2602,7 @@ fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -
     out
 }
 
-fn render(hits: &[crate::Hit]) -> String {
+pub(crate) fn render(hits: &[crate::Hit]) -> String {
     let mut out = String::new();
     for (i, h) in hits.iter().enumerate() {
         // The store, when there is more than one, goes in front of the path:

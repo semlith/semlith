@@ -87,6 +87,19 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(400, &e.to_string());
     }
 
+    if get && let Some(answered) = with_remotes(state, request) {
+        return answered;
+    }
+    dispatch(state, request)
+}
+
+/// The routes themselves, after the guards above. `with_remotes` asks this
+/// for the local half of an answer, so it never forwards twice.
+fn dispatch(state: &Arc<State>, request: &Request) -> Response {
+    let path = request.path.as_str();
+    let get = request.method == "GET";
+    let post = request.method == "POST";
+
     match (get, post, path) {
         (true, _, "/") => crate::portal::page(),
 
@@ -208,6 +221,158 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         ) => Response::error(405, "wrong method for this route"),
         _ => Response::error(404, "no such route"),
     }
+}
+
+/// The read routes a remote store can answer, with the MCP tool that does.
+const FORWARDED: [(&str, &str); 10] = [
+    ("/api/search", "semlith_search"),
+    ("/api/brief", "semlith_brief"),
+    ("/api/read", "semlith_read"),
+    ("/api/symbol", "semlith_symbol"),
+    ("/api/neighbors", "semlith_neighbors"),
+    ("/api/path", "semlith_path"),
+    ("/api/impact", "semlith_impact"),
+    ("/api/trace", "semlith_trace"),
+    ("/api/pattern", "semlith_pattern"),
+    ("/api/files", "semlith_files"),
+];
+
+/// A read route on a machine with remote stores, or `None` to answer it as
+/// always.
+///
+/// `/api/search` naming a remote store or none merges the remote hits into
+/// `hits` by score under the same `k`, each carrying `remote`, `badge`,
+/// `revision` and `behind_seconds`. Any other read naming a remote store asks
+/// that store's MCP endpoint and adds `remote: [{store, badge, text}]` beside
+/// the local answer. A store that cannot be asked is named in
+/// `remote_skipped`; the local answer is untouched.
+fn with_remotes(state: &Arc<State>, request: &Request) -> Option<Response> {
+    let (_, tool) = FORWARDED.iter().find(|(p, _)| *p == request.path)?;
+    let remotes = crate::cloud::remote_stores();
+    if remotes.is_empty() {
+        return None;
+    }
+    let named = request.query_all("store");
+    let is_remote = |n: &String| remotes.iter().any(|(r, _)| r == n);
+    let (remote_named, local_named): (Vec<String>, Vec<String>) =
+        named.iter().cloned().partition(is_remote);
+    let exact = request
+        .query("exact")
+        .is_some_and(|v| v == "1" || v == "true");
+    let merging = *tool == "semlith_search" && !exact;
+    let targets: Vec<(String, home::Remote)> = remotes
+        .iter()
+        .filter(|(r, _)| {
+            if named.is_empty() {
+                merging
+            } else {
+                remote_named.contains(r)
+            }
+        })
+        .cloned()
+        .collect();
+    if targets.is_empty() {
+        return None;
+    }
+    let skip_local = !named.is_empty() && local_named.is_empty();
+    let query = request.query("query").unwrap_or_default();
+
+    let mut answer = if skip_local {
+        let shape = crate::shape_of(query);
+        json!({
+            "hits": [],
+            "offset": 0,
+            "shape": shape,
+            "shape_label": shape.as_str(),
+            "weighting": shape.weighting(),
+        })
+    } else {
+        let mut local = request.clone();
+        if local_named.is_empty() {
+            local.query.remove("store");
+        } else {
+            local
+                .query
+                .insert("store".into(), local_named.join("\u{1}"));
+        }
+        let response = dispatch(state, &local);
+        if response.status() != 200 {
+            return Some(response);
+        }
+        response.json_value()?
+    };
+
+    let who = crate::cloud::Who {
+        client: "portal",
+        session: "portal",
+    };
+    let mut skipped = Vec::new();
+    if merging {
+        let k = request
+            .query("k")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(8)
+            .clamp(1, 100);
+        let fetched = crate::cloud::search(
+            &targets,
+            &crate::cloud::Query {
+                query,
+                k,
+                path: &request.query_all("path"),
+                ext: &request.query_all("ext"),
+                lang: &request.query_all("lang"),
+                prefer: request.query("prefer"),
+            },
+            &who,
+        );
+        let with_text = !request
+            .query("format")
+            .is_some_and(|f| f.eq_ignore_ascii_case("locate"));
+        let mut hits: Vec<Value> = answer["hits"].as_array().cloned().unwrap_or_default();
+        hits.extend(fetched.hits.iter().map(|h| h.to_json(query, with_text)));
+        hits.sort_by(|a, b| {
+            let score = |v: &Value| v["score"].as_f64().unwrap_or(0.0);
+            score(b).total_cmp(&score(a))
+        });
+        hits.truncate(k);
+        answer["hits"] = json!(hits);
+        skipped = fetched.skipped;
+    } else {
+        // The query, as the tool's arguments: one value as a string, a
+        // repeated one as a list.
+        let mut args = serde_json::Map::new();
+        for key in request.query.keys() {
+            let all = request.query_all(key);
+            args.insert(
+                key.clone(),
+                if all.len() == 1 {
+                    json!(all[0])
+                } else {
+                    json!(all)
+                },
+            );
+        }
+        if exact {
+            args.insert("exact".into(), json!(true));
+        }
+        let args = Value::Object(args);
+        let mut rows = Vec::new();
+        for (store, remote) in &targets {
+            match crate::cloud::forward_tool(store, remote, tool, &args, &who) {
+                Ok(text) => rows.push(json!({
+                    "store": store,
+                    "badge": crate::cloud::badge(remote),
+                    "text": text,
+                })),
+                Err(why) => skipped.push(why),
+            }
+        }
+        answer["remote"] = json!(rows);
+    }
+    if let Some(line) = crate::cloud::skipped_line(&skipped) {
+        answer["remote_skipped"] = json!(line);
+    }
+    Some(Response::json(&answer))
 }
 
 /// Every schedule the daemon holds, exactly as the file holds them.

@@ -409,7 +409,14 @@ pub fn call(
     let auth = token.map(|t| format!("Bearer {t}"));
     macro_rules! headed {
         ($req:expr) => {{
-            let mut req = $req.header("Accept", "application/json");
+            let mut req = $req;
+            if !send
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("accept"))
+            {
+                req = req.header("Accept", "application/json");
+            }
             if let Some(auth) = &auth {
                 req = req.header("Authorization", auth);
             }
@@ -874,11 +881,14 @@ pub fn disconnect(org: &str) -> Result<Vec<String>> {
 
 /// Every remote store, by local name. Empty — and no more than one file read
 /// — for anybody who never connected one.
-pub fn remote_stores() -> Vec<(String, crate::home::Remote)> {
+pub fn remote_stores() -> Vec<Named> {
     crate::home::Registry::load()
         .map(|r| r.remote.into_iter().collect())
         .unwrap_or_default()
 }
+
+/// A remote store with the local name it is known by, `<org>/<store>`.
+pub type Named = (String, crate::home::Remote);
 
 /// `remote · acme`, the badge a remote store carries everywhere it is listed.
 pub fn badge(remote: &crate::home::Remote) -> String {
@@ -901,6 +911,363 @@ pub fn remote_rows() -> Vec<Value> {
             })
         })
         .collect()
+}
+
+/// How long a forwarded call may hold up the local answer it rides beside.
+const FORWARD_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Who a forwarded call is for, so the org's ledger names the agent and not
+/// this daemon (`Semlith-Client`, `Semlith-Session`).
+pub struct Who<'a> {
+    pub client: &'a str,
+    pub session: &'a str,
+}
+
+impl Who<'_> {
+    fn headers(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("Semlith-Client", header_safe(self.client)),
+            ("Semlith-Session", header_safe(self.session)),
+        ]
+    }
+}
+
+/// A header value cannot carry a line break or anything outside printable
+/// ASCII; a client name that does is sent with those characters dropped.
+fn header_safe(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(128)
+        .collect()
+}
+
+/// One hit from `POST /v1/orgs/<org>/search`: the binary's own hit shape, plus
+/// where it came from.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteHit {
+    pub score: f32,
+    /// The store's name in the cloud.
+    #[serde(default)]
+    pub store: String,
+    pub path: String,
+    #[serde(default)]
+    pub start_line: u32,
+    #[serde(default)]
+    pub end_line: u32,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub lists: Vec<String>,
+    #[serde(default)]
+    pub symbol: Option<String>,
+    #[serde(default)]
+    pub symbol_kind: Option<String>,
+    #[serde(default = "yes")]
+    pub fresh: bool,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub revision: Option<String>,
+    #[serde(default)]
+    pub behind_seconds: Option<i64>,
+    /// `<org>/<store>`, the name this machine knows it by.
+    #[serde(skip)]
+    pub name: String,
+    #[serde(skip)]
+    pub org: String,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl RemoteHit {
+    /// What a remote row says beside its store: the badge, the revision it
+    /// was indexed at and how far behind its source that is.
+    pub fn provenance(&self) -> String {
+        let mut out = format!("remote · {}", self.org);
+        if let Some(rev) = &self.revision {
+            out.push_str(&format!(" · {rev}"));
+        }
+        if self.behind_seconds.is_some() {
+            out.push_str(&format!(" · {}", lag(self.behind_seconds)));
+        }
+        out
+    }
+
+    /// As a local hit, so one renderer draws both. The provenance rides in
+    /// the store label, which is what a locate row groups by.
+    pub fn to_hit(&self) -> crate::Hit {
+        crate::Hit {
+            score: self.score,
+            path: self.path.clone(),
+            start_line: self.start_line,
+            end_line: self.end_line,
+            text: self.text.clone(),
+            store: Some(format!("{} ({})", self.name, self.provenance())),
+            lists: self
+                .lists
+                .iter()
+                .filter_map(|l| match l.as_str() {
+                    "vector" => Some("vector"),
+                    "keyword" => Some("keyword"),
+                    "image" => Some("image"),
+                    "definition" => Some("definition"),
+                    "graph" => Some("graph"),
+                    _ => None,
+                })
+                .collect(),
+            image: None,
+            fresh: self.fresh,
+            symbol: self.symbol.clone(),
+            symbol_kind: self.symbol_kind.clone(),
+            symbol_line: None,
+            copies: Vec::new(),
+        }
+    }
+
+    /// As a row of `/api/search`, with the remote fields beside the usual ones.
+    pub fn to_json(&self, query: &str, with_text: bool) -> Value {
+        json!({
+            "line": crate::mcp::line_for(&self.text, query),
+            "score": self.score,
+            "path": self.path,
+            "start_line": self.start_line,
+            "end_line": self.end_line,
+            "text": if with_text { self.text.clone() } else { String::new() },
+            "store": self.name,
+            "lists": self.lists,
+            "image": null,
+            "fresh": self.fresh,
+            "symbol": self.symbol,
+            "symbol_kind": self.symbol_kind,
+            "remote": self.org,
+            "badge": format!("remote · {}", self.org),
+            "source": self.source,
+            "revision": self.revision,
+            "behind_seconds": self.behind_seconds,
+        })
+    }
+}
+
+/// What a search across remote stores brought back, and what it could not.
+#[derive(Default)]
+pub struct Fetched {
+    pub hits: Vec<RemoteHit>,
+    /// One phrase per group of stores skipped, naming them and why.
+    pub skipped: Vec<String>,
+}
+
+/// The search a remote store is asked: the same arguments the local one got.
+pub struct Query<'a> {
+    pub query: &'a str,
+    pub k: usize,
+    pub path: &'a [String],
+    pub ext: &'a [String],
+    pub lang: &'a [String],
+    pub prefer: Option<&'a str>,
+}
+
+/// `remote stores skipped: …`, or nothing when nothing was.
+pub fn skipped_line(skipped: &[String]) -> Option<String> {
+    (!skipped.is_empty()).then(|| format!("remote stores skipped: {}", skipped.join("; ")))
+}
+
+/// The remote stores in `targets`, grouped by the credential that reaches
+/// them: one request per org rather than per store.
+fn by_org(targets: &[Named]) -> Vec<(Result<Entry, String>, Vec<&Named>)> {
+    let creds = Credentials::load().ok().flatten();
+    let mut groups: Vec<((String, String), Vec<&Named>)> = Vec::new();
+    for target in targets {
+        let key = (target.1.host.clone(), target.1.org.clone());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, list)) => list.push(target),
+            None => groups.push((key, vec![target])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|((host, org), list)| {
+            let entry = creds
+                .as_ref()
+                .and_then(|c| c.entries.iter().find(|e| e.host == host && e.org == org))
+                .cloned()
+                .ok_or_else(|| format!("not signed in to {org}; run `semlith cloud login {org}`"));
+            (entry, list)
+        })
+        .collect()
+}
+
+fn names(list: &[&Named]) -> String {
+    list.iter()
+        .map(|(n, _)| n.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn nonempty(v: &[String]) -> Value {
+    if v.is_empty() { Value::Null } else { json!(v) }
+}
+
+/// Search `targets` through `POST /v1/orgs/<org>/search`. Never fails: a
+/// store that could not be asked is in `skipped`, and the local answer it
+/// rides beside stays whole.
+pub fn search(targets: &[Named], q: &Query<'_>, who: &Who<'_>) -> Fetched {
+    let mut out = Fetched::default();
+    for (entry, list) in by_org(targets) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(why) => {
+                out.skipped.push(format!("{} ({why})", names(&list)));
+                continue;
+            }
+        };
+        let body = json!({
+            "query": q.query,
+            "k": q.k,
+            "stores": list.iter().map(|(_, r)| r.store.as_str()).collect::<Vec<_>>(),
+            "path": nonempty(q.path),
+            "ext": nonempty(q.ext),
+            "lang": nonempty(q.lang),
+            "prefer": q.prefer,
+            "exact": false,
+        });
+        let reply = call_as(
+            &entry,
+            "POST",
+            &format!("/v1/orgs/{}/search", seg(&entry.org)),
+            Send {
+                json: Some(&body),
+                headers: who.headers(),
+                timeout: Some(FORWARD_TIMEOUT),
+                ..Send::default()
+            },
+        )
+        .and_then(|r| r.json());
+        match reply {
+            Ok(answer) => {
+                for raw in answer["hits"].as_array().into_iter().flatten() {
+                    let Ok(mut hit) = serde_json::from_value::<RemoteHit>(raw.clone()) else {
+                        continue;
+                    };
+                    // A hit for a store this machine did not ask about is not
+                    // one to show; a missing store name is the only one asked.
+                    let Some((name, _)) = list.iter().find(|(_, r)| {
+                        r.store == hit.store || (hit.store.is_empty() && list.len() == 1)
+                    }) else {
+                        continue;
+                    };
+                    hit.name = name.clone();
+                    hit.org = entry.org.clone();
+                    out.hits.push(hit);
+                }
+            }
+            Err(failure) => out.skipped.push(format!("{} ({failure})", names(&list))),
+        }
+    }
+    out
+}
+
+/// Local and remote hits as one list, by score, cut to `k`.
+///
+/// Both sides are the same core's fused scores (cloud-api.md, "Search, for
+/// merging"), which is what makes one order meaningful. Local hits are
+/// labelled with their store when the fleet left them unlabelled, so a
+/// merged list never mixes named and unnamed rows.
+pub fn merge(
+    local: Vec<crate::Hit>,
+    local_label: Option<&str>,
+    remote: &[RemoteHit],
+    k: usize,
+) -> Vec<crate::Hit> {
+    let mut all: Vec<crate::Hit> = local
+        .into_iter()
+        .map(|mut h| {
+            if h.store.is_none() {
+                h.store = local_label.map(str::to_string);
+            }
+            h
+        })
+        .collect();
+    all.extend(remote.iter().map(RemoteHit::to_hit));
+    all.sort_by(|a, b| b.score.total_cmp(&a.score));
+    all.truncate(k);
+    all
+}
+
+/// Forward one tool call to a remote store's MCP endpoint and return its
+/// text, or why it could not be asked.
+pub fn forward_tool(
+    name: &str,
+    remote: &crate::home::Remote,
+    tool: &str,
+    args: &Value,
+    who: &Who<'_>,
+) -> Result<String, String> {
+    let creds = Credentials::load().ok().flatten();
+    let Some(entry) = creds.as_ref().and_then(|c| {
+        c.entries
+            .iter()
+            .find(|e| e.host == remote.host && e.org == remote.org)
+    }) else {
+        return Err(format!(
+            "{name} (not signed in to {}; run `semlith cloud login {}`)",
+            remote.org, remote.org
+        ));
+    };
+    // The kept URL's path, or the documented one: never another origin.
+    let base = mcp_url_for(entry, Some(&remote.mcp_url));
+    let path = base[entry.host.len()..].to_string();
+    let mut arguments = args.clone();
+    if let Some(map) = arguments.as_object_mut() {
+        map.insert("store".into(), json!(remote.store));
+    }
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": arguments },
+    });
+    let mut headers = who.headers();
+    headers.push(("Accept", "application/json, text/event-stream".into()));
+    headers.push(("MCP-Protocol-Version", "2025-06-18".into()));
+    let reply = call_as(
+        entry,
+        "POST",
+        &format!("{path}?store={}", seg(&remote.store)),
+        Send {
+            json: Some(&body),
+            headers,
+            timeout: Some(FORWARD_TIMEOUT),
+            ..Send::default()
+        },
+    )
+    .map_err(|f| format!("{name} ({f})"))?;
+    let answer = rpc_answer(&reply.body)
+        .ok_or_else(|| format!("{name} (the cloud's answer was not an MCP reply)"))?;
+    if let Some(message) = answer["error"]["message"].as_str() {
+        return Err(format!("{name} (refused: {message})"));
+    }
+    let text: Vec<&str> = answer["result"]["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["text"].as_str())
+        .collect();
+    Ok(text.join("\n"))
+}
+
+/// A JSON-RPC reply out of a body that is either JSON or an event stream.
+fn rpc_answer(body: &[u8]) -> Option<Value> {
+    if let Ok(v) = serde_json::from_slice::<Value>(body) {
+        return Some(v);
+    }
+    String::from_utf8_lossy(body)
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+        .rfind(|v| v.get("result").is_some() || v.get("error").is_some())
 }
 
 /// What the portal's Cloud section draws without asking the host anything:
@@ -930,6 +1297,75 @@ mod stub;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn local(score: f32, path: &str) -> crate::Hit {
+        RemoteHit {
+            name: "x".into(),
+            org: "x".into(),
+            ..remote(score, path)
+        }
+        .to_hit()
+    }
+
+    fn remote(score: f32, path: &str) -> RemoteHit {
+        serde_json::from_value(json!({
+            "score": score, "store": "platform", "path": path, "start_line": 1, "end_line": 2,
+            "text": "fn order_total() { a long line of code that costs tokens to show }",
+            "revision": "a41c9e2", "behind_seconds": 38
+        }))
+        .map(|mut h: RemoteHit| {
+            h.name = "acme/platform".into();
+            h.org = "acme".into();
+            h
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_merge_orders_by_score_cuts_to_k_and_labels_both_sides() {
+        let mut mine = local(0.03, "notes/a.md");
+        mine.store = None;
+        let merged = merge(
+            vec![mine, local(0.01, "notes/b.md")],
+            Some("notes"),
+            &[remote(0.02, "r/c.rs"), remote(0.05, "r/d.rs")],
+            3,
+        );
+        let order: Vec<(&str, f32)> = merged.iter().map(|h| (h.path.as_str(), h.score)).collect();
+        assert_eq!(
+            order,
+            [("r/d.rs", 0.05), ("notes/a.md", 0.03), ("r/c.rs", 0.02)]
+        );
+        assert_eq!(merged[1].store.as_deref(), Some("notes"));
+        assert_eq!(
+            merged[0].store.as_deref(),
+            Some("acme/platform (remote · acme · a41c9e2 · 38 s behind)")
+        );
+    }
+
+    /// The budget cuts a merged list as it cuts a local one: the same
+    /// renderer, after the merge.
+    #[test]
+    fn the_token_budget_applies_to_the_merged_list() {
+        let many: Vec<RemoteHit> = (0..40)
+            .map(|i| remote(1.0 - i as f32 / 100.0, &format!("r/{i}.rs")))
+            .collect();
+        let merged = merge(Vec::new(), None, &many, 40);
+        let reply = crate::mcp::search_reply(
+            &crate::fleet::Fleet::empty(),
+            &merged,
+            "order total",
+            crate::Prefer::default(),
+            200,
+        );
+        let kept = reply.kept.iter().filter(|k| **k).count();
+        assert!(kept < 40, "{kept} of 40 kept under 200 tokens");
+        assert!(
+            reply.text.contains(&format!("truncated: {kept} of 40")),
+            "{}",
+            reply.text
+        );
+    }
 
     #[test]
     fn a_host_is_https_or_loopback() {

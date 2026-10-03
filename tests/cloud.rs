@@ -476,9 +476,14 @@ struct Daemon {
 
 impl Daemon {
     fn start(home: &Path) -> Self {
+        Self::start_with(home, &[])
+    }
+
+    fn start_with(home: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Self {
         use std::io::BufRead;
         let mut child = Command::new(env!("CARGO_BIN_EXE_semlith"))
             .args(["start", "--port", "0"])
+            .envs(env.iter().copied())
             .env("SEMLITH_HOME", home.join(".semlith"))
             .env("HOME", home)
             .env_remove("SEMLITH_STORE")
@@ -664,5 +669,290 @@ fn every_write_path_refuses_a_remote_store_with_the_reason() {
             .as_object()
             .unwrap()
             .is_empty()
+    );
+}
+
+// ------------------------------------------------------------ merged answers
+
+/// An org host that also answers search and MCP.
+fn answering_host() -> Stub {
+    Stub::start(move |seen: &Seen| {
+        let path = seen.path.split('?').next().unwrap_or_default();
+        let hit = |score: f64, store: &str, file: &str, line: &str| {
+            json!({ "score": score, "store": store, "path": file, "start_line": 3, "end_line": 9,
+                    "text": line, "lists": ["vector", "keyword"], "symbol": "order_total",
+                    "symbol_kind": "function", "fresh": true, "source": "acme/api",
+                    "revision": "a41c9e2", "behind_seconds": 38 })
+        };
+        match path {
+            "/v1/whoami" => stub::json(200, json!({ "org": { "slug": "acme", "plan": "team" } })),
+            "/v1/orgs/acme/status" => stub::json(
+                200,
+                json!({ "org": { "slug": "acme" }, "mcp_url": "SELF",
+                        "stores": [{ "name": "platform" }, { "name": "docs" }] }),
+            ),
+            "/v1/orgs/acme/search" => stub::json(
+                200,
+                json!({ "hits": [
+                    hit(0.020, "platform", "api/src/low.rs", "fn low_total() {}"),
+                    hit(0.031, "platform", "api/src/total.rs", "fn order_total() -> Money {"),
+                    hit(0.025, "docs", "runbook.md", "The order total is computed in pricing."),
+                    hit(0.040, "elsewhere", "not/asked.rs", "a store nobody asked about"),
+                ] }),
+            ),
+            "/acme/mcp" => {
+                let call = seen.json();
+                let tool = call["params"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let store = call["params"]["arguments"]["store"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                stub::json(
+                    200,
+                    json!({ "jsonrpc": "2.0", "id": 1, "result": { "content": [
+                        { "type": "text", "text": format!("{tool} answered by {store} @ a41c9e2") }
+                    ] } }),
+                )
+            }
+            _ => stub::error(404, "not_found", "No such route."),
+        }
+    })
+}
+
+fn connected(home: &Path) -> Stub {
+    let host = answering_host();
+    signed_in(home, &host);
+    let o = semlith(home, &["cloud", "connect", "acme"]);
+    assert!(o.status.success(), "{}", out(&o));
+    host
+}
+
+#[test]
+fn a_search_naming_remote_stores_is_one_list_by_score_with_provenance() {
+    let home = tempfile::tempdir().unwrap();
+    let host = connected(home.path());
+    let daemon = Daemon::start(home.path());
+
+    let answer = daemon.tool(
+        "semlith_search",
+        json!({ "query": "where is the order total computed", "k": 2, "store": ["acme/platform", "acme/docs"] }),
+    );
+    let text = tool_text(&answer);
+    // k honoured, by score: total.rs (0.031) then runbook.md (0.025); low.rs
+    // and the store nobody asked about are not shown.
+    let total = text.find("api/src/total.rs").expect(&text);
+    let runbook = text.find("runbook.md").expect(&text);
+    assert!(total < runbook, "{text}");
+    assert!(
+        !text.contains("low.rs") && !text.contains("not/asked.rs"),
+        "{text}"
+    );
+    assert!(
+        text.contains("remote · acme · a41c9e2 · 38 s behind"),
+        "{text}"
+    );
+
+    let asked = host.to("/v1/orgs/acme/search");
+    assert_eq!(asked.len(), 1, "one request per org, not per store");
+    let body = asked[0].json();
+    let mut stores: Vec<&str> = body["stores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    stores.sort();
+    assert_eq!(stores, ["docs", "platform"]);
+    assert_eq!(body["k"], 2);
+    // The agent is named, not the daemon.
+    // No initialize, so the host the proxy header named is the client.
+    assert_eq!(asked[0].header("semlith-client"), Some("Claude Code"));
+    assert!(asked[0].header("semlith-session").is_some());
+    assert_eq!(
+        asked[0].header("authorization"),
+        Some(format!("Bearer {TOKEN}").as_str())
+    );
+}
+
+#[test]
+fn another_tool_naming_a_remote_store_is_forwarded_and_appended() {
+    let home = tempfile::tempdir().unwrap();
+    let host = connected(home.path());
+    let daemon = Daemon::start(home.path());
+    let answer = daemon.tool(
+        "semlith_symbol",
+        json!({ "name": "order_total", "store": "acme/platform" }),
+    );
+    let text = tool_text(&answer);
+    assert!(text.contains("acme/platform (remote · acme)"), "{text}");
+    assert!(
+        text.contains("semlith_symbol answered by platform @ a41c9e2"),
+        "{text}"
+    );
+    let mcp = host.to("/acme/mcp");
+    assert_eq!(mcp.len(), 1);
+    assert_eq!(mcp[0].path, "/acme/mcp?store=platform");
+    assert!(mcp[0].header("semlith-session").is_some());
+    // A tool naming no store stays local: nothing more reached the host.
+    daemon.tool("semlith_symbol", json!({ "name": "order_total" }));
+    assert_eq!(host.to("/acme/mcp").len(), 1);
+}
+
+#[test]
+fn the_portal_search_merges_remote_rows_with_their_fields() {
+    let home = tempfile::tempdir().unwrap();
+    let _host = connected(home.path());
+    let daemon = Daemon::start(home.path());
+    let answer = daemon.json("/api/search?query=order%20total&k=2&store=acme/platform");
+    let hits = answer["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 2, "{answer}");
+    assert_eq!(hits[0]["path"], "api/src/total.rs");
+    assert_eq!(hits[0]["store"], "acme/platform");
+    assert_eq!(hits[0]["badge"], "remote · acme");
+    assert_eq!(hits[0]["revision"], "a41c9e2");
+    assert_eq!(hits[0]["behind_seconds"], 38);
+    assert!(answer.get("remote_skipped").is_none());
+
+    let symbol = daemon.json("/api/symbol?name=order_total&store=acme/platform");
+    assert_eq!(symbol["remote"][0]["store"], "acme/platform", "{symbol}");
+}
+
+/// The host goes away: the answer still comes, with one line naming the
+/// stores it could not ask and why.
+#[test]
+fn an_unreachable_host_costs_one_line_and_nothing_else() {
+    let home = tempfile::tempdir().unwrap();
+    let _host = connected(home.path());
+    // Re-point both files at a port nothing listens on.
+    let dead = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}", listener.local_addr().unwrap())
+    };
+    for file in ["cloud.json", "registry.json"] {
+        let path = home.path().join(".semlith").join(file);
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace(&_host.url, &dead);
+        std::fs::write(&path, text).unwrap();
+    }
+    let daemon = Daemon::start(home.path());
+    let answer = daemon.tool("semlith_search", json!({ "query": "order total" }));
+    let text = tool_text(&answer);
+    assert_ne!(answer["result"]["isError"], true, "{answer}");
+    assert!(
+        text.contains("remote stores skipped: acme/docs, acme/platform ("),
+        "{text}"
+    );
+    assert!(text.contains("could not be reached"), "{text}");
+    assert_eq!(text.matches("remote stores skipped").count(), 1);
+
+    let portal = daemon.json("/api/search?query=order%20total");
+    assert!(
+        portal["remote_skipped"]
+            .as_str()
+            .unwrap()
+            .contains("could not be reached"),
+        "{portal}"
+    );
+    assert!(portal["hits"].as_array().unwrap().is_empty());
+}
+
+/// Signed in with nothing connected: a search asks the host nothing.
+#[test]
+fn signed_in_but_not_connected_reaches_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let host = answering_host();
+    signed_in(home.path(), &host);
+    let before = host.seen().len();
+    let daemon = Daemon::start(home.path());
+    daemon.json("/api/stores");
+    daemon.json("/api/search?query=order%20total");
+    assert_eq!(host.seen().len(), before);
+}
+
+/// The model the owner's machine already has, read where it is, so the
+/// ignored test below does not download 52 MB into a temporary home.
+fn model_cache() -> std::path::PathBuf {
+    std::env::var_os("SEMLITH_MODEL_CACHE")
+        .map(Into::into)
+        .unwrap_or_else(|| {
+            Path::new(&std::env::var_os("HOME").unwrap()).join(".cache/semlith/models")
+        })
+}
+
+/// One local store and one remote store, one list with both chips; then the
+/// host goes away and the local answer is still whole.
+#[test]
+#[ignore = "indexes a local store, so it needs the embedding model"]
+fn a_local_and_a_remote_store_answer_as_one_list() {
+    let home = tempfile::tempdir().unwrap();
+    let host = connected(home.path());
+    let corpus = home.path().join("notes");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(
+        corpus.join("pricing.md"),
+        "The order total is the sum of the line totals, then tax.",
+    )
+    .unwrap();
+    let cache = model_cache();
+    let o = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(["index", "--name", "notes"])
+        .arg(&corpus)
+        .env("HOME", home.path())
+        .env("SEMLITH_HOME", home.path().join(".semlith"))
+        .env("SEMLITH_MODEL_CACHE", &cache)
+        .env_remove("SEMLITH_STORE")
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", out(&o));
+
+    let daemon = Daemon::start_with(home.path(), &[("SEMLITH_MODEL_CACHE", cache.as_os_str())]);
+    let answer = daemon.tool(
+        "semlith_search",
+        json!({ "query": "how is the order total computed", "k": 8 }),
+    );
+    let text = tool_text(&answer);
+    assert!(text.contains("notes "), "the local store's chip: {text}");
+    assert!(text.contains("pricing.md"), "{text}");
+    assert!(
+        text.contains("acme/platform (remote · acme"),
+        "the remote chip: {text}"
+    );
+    assert!(!text.contains("remote stores skipped"), "{text}");
+    assert_eq!(host.to("/v1/orgs/acme/search").len(), 1);
+
+    let portal = daemon.json("/api/search?query=order%20total");
+    let stores: Vec<&str> = portal["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|h| h["store"].as_str())
+        .collect();
+    assert!(
+        stores.contains(&"notes") && stores.contains(&"acme/platform"),
+        "{portal}"
+    );
+    drop(daemon);
+
+    // The host is gone: the local answer is unchanged but for the line.
+    for file in ["cloud.json", "registry.json"] {
+        let path = home.path().join(".semlith").join(file);
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace(&host.url, "http://127.0.0.1:9");
+        std::fs::write(&path, text).unwrap();
+    }
+    let daemon = Daemon::start_with(home.path(), &[("SEMLITH_MODEL_CACHE", cache.as_os_str())]);
+    let text = tool_text(&daemon.tool(
+        "semlith_search",
+        json!({ "query": "how is the order total computed", "k": 8 }),
+    ));
+    assert!(text.contains("pricing.md"), "{text}");
+    assert!(
+        text.contains("remote stores skipped: acme/docs, acme/platform ("),
+        "{text}"
     );
 }
