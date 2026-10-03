@@ -3,7 +3,8 @@
 Everything the README's Benchmarks section publishes is produced here. Each
 number is the median of three runs, with its spread beside it when it is not
 zero, and every run writes a `MANIFEST.json` naming its command, the semlith
-version, the machine and the SHA-256 of every result file.
+version, the measured binary's SHA-256 (and the commit it was built from, for a
+build of this repository), the machine and the SHA-256 of every result file.
 
 Nothing this harness downloads, clones, indexes or writes lives in the
 repository. It all goes under `SCORECARD_HOME`, `~/semlith-bench/scorecard` by
@@ -35,10 +36,10 @@ default, and none of `bench/` is part of the published crate.
 
 | Benchmark | Command | Time on an M1 Air |
 |---|---|---|
-| SWE-bench retrieval | `uv run --with pyarrow python bench/scorecard/swe.py walk` then `... swe.py score <run dir>` | many hours: every instance is checked out at its base commit and re-indexed incrementally |
+| SWE-bench retrieval | `uv run --with pyarrow python bench/scorecard/swe.py walk` then `... swe.py score <run dir>`; after the walk, `... swe.py check` compares a seeded three of its stores with `git ls-files` and a fresh index of the same checkout | many hours: every instance is checked out at its base commit and re-indexed incrementally |
 | CodeRAG-Bench | `uv run --with pyarrow python bench/scorecard/coderag.py run` then `... score <run dir>` | about an hour, mostly indexing the 34 003 library pages |
 | RepoBench-R | `uv run --with pyarrow python bench/scorecard/repobench.py run` then `... score <run dir>` | about 2 h for the default sample of 500 per configuration and level; `--sample 0` runs all 48 000 |
-| Competitors | `python3.11 bench/scorecard/competitors_swe.py walk` then `... score` | depends on the tools; each is stopped once its indexing passes four times semlith's |
+| Competitors | `python3.11 bench/scorecard/competitors_swe.py walk` then `... score`; to run the slow tools beside the fast ones, give them their own `--out DIR` with `--budget-from` the first walk's directory, and score with `--also DIR` | depends on the tools; each is stopped where its indexing passes four times semlith's cold index time |
 | Savings in real sessions | `python3 bench/scorecard/ledger_savings.py` | seconds; reads this machine's own ledger |
 | The README tables | `python3 bench/scorecard/report.py` | seconds |
 
@@ -68,6 +69,7 @@ returns it, so a budget means the same thing for every arm.
   scores above are unaffected — they rank what a tool returns, and no model is
   involved — but the agent round runs on questions generated from the code of
   a 70-repository corpus instead.
-- RepoBench-R and the competitor arms run on seeded samples, and every table
-  states its instance count.
+- RepoBench-R and the competitor arms run on seeded samples (the competitors on
+  the first 20 of the agent round's 50-instance Lite sample, seed 20261003), and
+  every table states its instance count.
 - Times are wall-clock on one loaded laptop and are not published as results.
