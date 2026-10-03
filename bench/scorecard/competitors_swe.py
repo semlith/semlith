@@ -22,7 +22,7 @@ from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import arms, swe
 from common import BUDGETS, HOME, REPOS, RUNS, median_spread, ranked_files, sh, tokens_at, write_manifest
-from competitors import ALL
+from competitors import ALL, _common
 
 OUT = os.path.join(HOME, "competitors")
 SAMPLE = os.path.join(HOME, "agent", "sample.json")
@@ -105,9 +105,12 @@ def serena_project(root):
                     timeout=_common.INDEX_TIMEOUT)
 
 
-def budget(rows, tool):
-    """(tool's cumulative index seconds, semlith's on the same instances)."""
+def budget(rows, tool, ref=None):
+    """(tool's cumulative index seconds, semlith's on the same instances). `ref` is another walk's semlith index
+    seconds by instance, preferred to this walk's own: semlith's vector cache makes a second walk's first index of
+    a repository a few seconds where the first walk paid the cold index, and the budget is against the cold one."""
     sem = {r["instance_id"]: r["index_s"] or 0 for r in rows if r["arm"] == "semlith" and r["run"] == 0}
+    sem.update(ref or {})
     mine = {r["instance_id"]: r["index_s"] or 0 for r in rows
             if r["arm"] == tool and r["run"] == 0 and r["index_s"] is not None}
     return sum(mine.values()), sum(sem.get(i, 0) for i in mine)
@@ -124,6 +127,9 @@ def walk(args):
         if why:
             print(f"{t}: unavailable, skipped: {why}", flush=True)
     tools = [t for t in tools if not ALL[t].available()]
+    def reference():  # re-read per instance: the other walk is usually still running
+        return {r["instance_id"]: r["index_s"] or 0 for r in load_rows(args.budget_from)
+                if r["arm"] == "semlith" and r["run"] == 0 and not r["error"]} if args.budget_from else {}
     stopped = set()
     insts = sample()
     f = open(os.path.join(out, "rows.jsonl"), "a")
@@ -168,6 +174,7 @@ def walk(args):
             if not need_sem and not need:
                 continue
             t0 = time.time()
+            ref = reference()
             swe.checkout(root, inst["base_commit"])
             if need_sem:
                 t = time.time()
@@ -194,6 +201,12 @@ def walk(args):
                 mod = ALL[tool]
                 work = os.path.join(out, "work", tool, repo.replace("/", "__"))
                 os.makedirs(work, exist_ok=True)
+                # The budget is a live limit, not only a check after the index: an index that would pass
+                # 4x semlith's cumulative seconds is stopped where it crosses them, not at the 2 h cap.
+                cum, sem = budget(rows, tool, ref)
+                sem += ref.get(iid, next((r["index_s"] or 0 for r in rows if r["instance_id"] == iid
+                                          and r["arm"] == "semlith" and r["run"] == 0), 0))
+                _common.INDEX_TIMEOUT = min(2 * 3600, max(INDEX_BUDGET * sem - cum, 120))
                 t = time.time()
                 try:
                     if tool == "serena":
@@ -218,7 +231,7 @@ def walk(args):
                         # spend another 2+ minutes each to time out again.
                         if isinstance(e, (TimeoutError, subprocess.TimeoutExpired)):
                             err = "search: not run, an earlier run timed out"
-                cum, sem = budget(rows, tool)
+                cum, sem = budget(rows, tool, ref)
                 if cum > INDEX_BUDGET * sem and cum > 60:  # ponytail: 60 s floor so a 0.1 s jitter on an index-free tool never trips it
                     stop(tool, cum, sem)
                 print(f"  {tool:9} idx {idx:7.1f}s cum {cum:7.0f}s/semlith {sem:6.0f}s {err or ''}"[:300], flush=True)
@@ -324,6 +337,7 @@ if __name__ == "__main__":
     ap.add_argument("--tools", default=",".join(FAST_FIRST))
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--repo", help="one repository, e.g. psf/requests")
+    ap.add_argument("--budget-from", help="walk: take semlith's index seconds from this walk's directory")
     ap.add_argument("--also", action="append", help="score: another walk's directory to merge, e.g. a slow-tools walk")
     a = ap.parse_args()
     walk(a) if a.cmd == "walk" else score(a)
