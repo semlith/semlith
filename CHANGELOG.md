@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Semlith::index_paths_under`, `Semlith::index_rest_under` and
+  `Semlith::undo_run`: a run under a control an embedder drives (pause, yield
+  and continue from `IndexReport::pending`, stop and undo every slice's
+  `written`), each taking the store's lock as `index_paths` does.
+
 ### Fixed
 
 - An MCP client reached over HTTP is labelled by the `Semlith-Host` header its

@@ -2410,6 +2410,51 @@ impl Semlith {
         self.index_within_held(roots, budget, on_file)
     }
 
+    /// [`Semlith::index_paths`] under a control another thread drives: asked
+    /// once per file, it may pause the run, yield it (stop and keep what is
+    /// done, reporting the rest in [`IndexReport::pending`]) or stop it. A
+    /// stopped slice still commits what it embedded and lists it in
+    /// [`IndexReport::written`]; one logical run is several slices, so the
+    /// undo is the caller's: [`Semlith::undo_run`] with every slice's
+    /// `written`, which leaves the store as it was before the run.
+    ///
+    /// Public for an embedder that schedules runs of its own — Semlith Cloud
+    /// pauses, stops and slices them — and takes the store's lock exactly as
+    /// `index_paths` does.
+    pub fn index_paths_under(
+        &mut self,
+        roots: &[PathBuf],
+        control: &dyn Fn() -> Flow,
+        on_file: impl FnMut(&Path, IndexProgress),
+    ) -> Result<IndexReport> {
+        let _lock = lock::StoreLock::acquire(&self.dir)?;
+        self.index_walk_under(roots, control, on_file)
+    }
+
+    /// Carry on a run that yielded, from the previous slice's
+    /// [`IndexReport::pending`], under the same kind of control. No walk, and
+    /// no time budget of its own: the control decides when it yields again.
+    pub fn index_rest_under(
+        &mut self,
+        files: Vec<PathBuf>,
+        control: &dyn Fn() -> Flow,
+        on_file: impl FnMut(&Path, IndexProgress),
+    ) -> Result<IndexReport> {
+        let _lock = lock::StoreLock::acquire(&self.dir)?;
+        // A century is "no budget" without the overflow `Duration::MAX` would
+        // risk when it is added to an `Instant`.
+        let unbounded = std::time::Duration::from_secs(100 * 365 * 24 * 3600);
+        self.index_rest_held_under(files, unbounded, None, control, on_file)
+    }
+
+    /// Take a stopped run's files back out of the store: every path its
+    /// slices listed in [`IndexReport::written`]. Takes the store's lock.
+    /// Returns how many files were taken out.
+    pub fn undo_run(&mut self, written: &[String]) -> Result<usize> {
+        let _lock = lock::StoreLock::acquire(&self.dir)?;
+        self.undo_held(written)
+    }
+
     /// [`Semlith::index_paths_within`] without taking the lock, for a caller
     /// that already holds it — `semlith start` holds it for the daemon's life,
     /// and its queue runs on the thread that holds it.
