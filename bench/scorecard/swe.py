@@ -46,6 +46,17 @@ def relativize(excerpts, root):
     return [e._replace(path=e.path[len(prefix):] if e.path.startswith(prefix) else e.path) for e in excerpts]
 
 
+def index(store, root):
+    """`semlith index`, waiting out another process that holds the store (an interrupted walk's child)."""
+    while True:
+        r = sh([arms.SEMLITH, "index", "--store", store, "-q", root], timeout=7200, check=False)
+        if r.returncode == 0:
+            return r.stdout.strip().splitlines()
+        if "is being indexed by pid" not in r.stderr:
+            raise RuntimeError(f"semlith index exited {r.returncode}: {r.stderr.strip()[-2000:]}")
+        time.sleep(15)
+
+
 ARMS = {
     # 100 chunks, so the file ranking reaches ten distinct files for Recall@10.
     "semlith": lambda q, root, store, files: relativize(arms.semlith(store, q, k=100), root),
@@ -80,7 +91,7 @@ def walk(args):
                 continue
             t0 = time.time()
             checkout(root, inst["base_commit"])
-            idx = sh([arms.SEMLITH, "index", "--store", store, "-q", root], timeout=7200).stdout.strip().splitlines()
+            idx = index(store, root)
             chunks, vectors = arms.embedded(store)
             # `semlith files` prints a path relative to the working directory when it can and
             # absolute otherwise; every arm and the gold speak root-relative paths.
