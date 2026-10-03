@@ -31,7 +31,7 @@ def cell(row, key, fmt=PCT):
 
 def command(directory):
     try:
-        return json.load(open(os.path.join(directory, "MANIFEST.json")))["command"]
+        return json.load(open(os.path.join(directory, "MANIFEST.json")))["command"].replace(os.path.expanduser("~"), "~")
     except (OSError, KeyError, ValueError):
         return "see bench/scorecard/README.md"
 
@@ -61,10 +61,16 @@ def swe(directory):
 
 def coderag(directory):
     rows = json.load(open(os.path.join(directory, "score.json")))
-    body = [[r["task"], ARM.get(r["arm"], r["arm"]), r["n"], cell(r, "ndcg@10", lambda x: f"{x:.3f}"),
-             cell(r, "recall@10", lambda x: f"{x:.3f}")] for r in rows]
+    by = {(r["task"], r["arm"]): r for r in rows}
+    f3 = lambda x: f"{x:.3f}"
+    body = []
+    for task in sorted({r["task"] for r in rows}):
+        b, m = by.get((task, "bm25"), {}), by.get((task, "semlith"), {})
+        body.append([task, (m or b).get("n", "—"), cell(b, "ndcg@10", f3), cell(m, "ndcg@10", f3),
+                     cell(b, "recall@10", f3), cell(m, "recall@10", f3)])
     return ("### CodeRAG-Bench, retrieval\n\nEach task's canonical corpus and gold documents.\n\n"
-            + table(["task", "arm", "queries", "NDCG@10", "Recall@10"], body) + f"\n\n`{command(directory)}`")
+            + table(["task", "queries", "NDCG@10 BM25", "NDCG@10 semlith", "Recall@10 BM25", "Recall@10 semlith"],
+                    body) + f"\n\n`{command(directory)}`")
 
 
 def repobench(directory):
@@ -74,14 +80,19 @@ def repobench(directory):
         manifest = json.load(open(os.path.join(directory, "MANIFEST.json")))
     except (OSError, ValueError):
         pass
-    body = [[r["config"].replace("_cff", " first").replace("_cfr", " random"), r["level"], r["keep"],
-             ARM.get(r["arm"], r["arm"]), r["n"], cell(r, "acc@1"), cell(r, "acc@3"), cell(r, "acc@5")] for r in rows]
+    by = {(r["config"], r["level"], r["keep"], r["arm"]): r for r in rows}
+    body = []
+    for config, level, keep in sorted({(r["config"], r["level"], r["keep"]) for r in rows}):
+        b, m = by.get((config, level, keep, "bm25"), {}), by.get((config, level, keep, "semlith"), {})
+        body.append([config.replace("_cff", " first").replace("_cfr", " random"), level, keep, (m or b).get("n", "—"),
+                     cell(b, "acc@1"), cell(m, "acc@1"), cell(b, "acc@5"), cell(m, "acc@5")])
     sample = manifest.get("sample_per_level")
     note = (f"A seeded sample of {sample} instances per configuration and level (seed {manifest.get('seed')}) of "
             "the 48 000-instance test split." if sample else "The whole test split.")
     return ("### RepoBench-R\n\nThe query is the last `keep` lines of the in-file code; the candidates are the "
             f"instance's own cross-file snippets. {note}\n\n"
-            + table(["setting", "level", "keep", "arm", "instances", "acc@1", "acc@3", "acc@5"], body)
+            + table(["setting", "level", "keep", "instances", "acc@1 BM25", "acc@1 semlith", "acc@5 BM25",
+                     "acc@5 semlith"], body)
             + f"\n\n`{command(directory)}`")
 
 
