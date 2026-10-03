@@ -60,3 +60,32 @@ fn stop_undoes_a_run_and_yield_then_rest_finishes_it() {
     assert_eq!(first.indexed + rest.indexed, N);
     assert_eq!(s.stats().unwrap().0, N as i64);
 }
+
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn an_undone_run_leaves_no_symbol_history_behind() {
+    // Code, so the run extracts definitions an undo could wrongly archive.
+    let files = tempfile::tempdir().unwrap();
+    for i in 0..6 {
+        std::fs::write(
+            files.path().join(format!("m{i}.rs")),
+            format!("pub fn total_{i}(items: &[u32]) -> u32 {{ items.iter().sum() }}\n"),
+        )
+        .unwrap();
+    }
+    let roots = vec![files.path().to_path_buf()];
+    let store = tempfile::tempdir().unwrap();
+    let mut s = Semlith::open(store.path(), None).unwrap();
+    s.quiet = true;
+    let stopped = s
+        .index_paths_under(&roots, &after(4, Flow::Stop), |_, _| {})
+        .unwrap();
+    assert!(stopped.stopped, "{stopped:?}");
+    s.undo_run(&stopped.written).unwrap();
+    drop(s);
+    let db = rusqlite::Connection::open(store.path().join("store.db")).unwrap();
+    let past: i64 = db
+        .query_row("SELECT count(*) FROM symbols_past", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(past, 0, "the run's own definitions are not history");
+}

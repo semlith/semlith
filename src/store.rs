@@ -864,6 +864,13 @@ pub fn all_hashes(db: &Connection) -> Result<std::collections::HashMap<String, S
 /// Drop a file and its chunks, returning the chunk ids so the caller can
 /// evict them from the vector index too.
 pub fn delete_file(db: &Connection, path: &str, now: i64) -> Result<Vec<u64>> {
+    retire_symbols(db, path, now)?;
+    delete_file_unretired(db, path)
+}
+
+/// [`delete_file`] without keeping the file's definitions as history: for a
+/// stopped run's undo, whose files were never the store's to remember.
+pub fn delete_file_unretired(db: &Connection, path: &str) -> Result<Vec<u64>> {
     let ids: Vec<u64> = {
         let mut stmt = db.prepare(
             "SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.path = ?1",
@@ -874,7 +881,6 @@ pub fn delete_file(db: &Connection, path: &str, now: i64) -> Result<Vec<u64>> {
             .map(|i| i as u64)
             .collect()
     };
-    retire_symbols(db, path, now)?;
     db.execute("DELETE FROM files WHERE path = ?1", params![path])?;
     Ok(ids)
 }

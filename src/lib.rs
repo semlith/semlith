@@ -4445,7 +4445,9 @@ impl Semlith {
     pub(crate) fn undo_held(&mut self, keys: &[String]) -> Result<usize> {
         self.writing(|me| {
             for key in keys {
-                me.evict(key)?;
+                // The run's files leave without becoming history: they were
+                // never the store's, so a later `history` must not list them.
+                me.evict_as(key, false)?;
             }
             me.save()?;
             Ok(keys.len())
@@ -4484,11 +4486,20 @@ impl Semlith {
     /// tree that gained a `.env` quadratic. `forget` saves straight away
     /// because it is the whole of what it was asked to do.
     fn evict(&mut self, key: &str) -> Result<(usize, usize)> {
+        self.evict_as(key, true)
+    }
+
+    /// [`Self::evict`], keeping the file's definitions as history or not.
+    fn evict_as(&mut self, key: &str, retire: bool) -> Result<(usize, usize)> {
         // Read before the delete: the cascade that removes the rows is what
         // makes their ids unreadable, and the vectors they address still have
         // to leave the image index.
         let images = store::image_ids_of(&self.db, key)?;
-        let ids = store::delete_file(&self.db, key, now())?;
+        let ids = if retire {
+            store::delete_file(&self.db, key, now())?
+        } else {
+            store::delete_file_unretired(&self.db, key)?
+        };
         for id in &ids {
             self.index.remove(*id)?;
         }
