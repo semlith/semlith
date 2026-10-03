@@ -1019,6 +1019,19 @@ enum CloudCommand {
     /// Take an org's remote stores off this machine. Nothing in the cloud
     /// changes.
     Disconnect { org: String },
+    /// Send a working tree to a store's uploads source: only the files whose
+    /// hashes changed, after semlith's own refusals (secrets, files over 1 MB,
+    /// vendored and generated trees, .gitignore).
+    Push {
+        /// The store, as <org>/<store>.
+        target: String,
+        dir: PathBuf,
+        /// Follow the indexing job until it is done.
+        #[arg(long)]
+        wait: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// The org, its plan, its stores and what they cost this month.
     Status {
         org: Option<String>,
@@ -5007,6 +5020,42 @@ fn run_cloud(what: CloudCommand, stores: &[PathBuf]) -> Result<()> {
                 println!(
                     "search, stats and every store picker now include them; nothing in them is written from here"
                 );
+            }
+        }
+        CloudCommand::Push {
+            target,
+            dir,
+            wait,
+            json,
+        } => {
+            let report = cloud::push(&target, &dir, wait, &mut |line| eprintln!("{line}"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                for (path, why) in &report.refused {
+                    println!("kept back  {path}  {why}");
+                }
+                println!(
+                    "{} files in the manifest · {} sent ({}) · {} removed{}",
+                    report.files,
+                    report.sent,
+                    semlith::human_bytes(report.bytes_sent as i64),
+                    report.removed,
+                    report
+                        .job
+                        .map(|j| format!(
+                            " · job {j}{}",
+                            report
+                                .state
+                                .as_deref()
+                                .map(|s| format!(" {s}"))
+                                .unwrap_or_default()
+                        ))
+                        .unwrap_or_default()
+                );
+            }
+            if report.state.as_deref() == Some("error") {
+                std::process::exit(1);
             }
         }
         CloudCommand::Disconnect { org } => {

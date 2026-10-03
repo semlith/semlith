@@ -6218,6 +6218,58 @@ fn sibling_exists(parent: &Path, manifest: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The files `semlith cloud push` may send from `root`, and every one it may
+/// not, with the reason.
+///
+/// The index pass's own rules, not a copy of them: the same walk (hidden
+/// files, `.gitignore`, `.semlithignore`, generated and vendored folders),
+/// the same boundary (the deny-list, credential names), the same secret scan
+/// — a file holding a live-looking value is refused, a declared dummy is not
+/// — and a size cap of the push's own. The cloud applies the list again;
+/// this is what keeps a file from leaving the machine in the first place.
+pub fn push_files(root: &Path, cap: u64) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
+    let walked = walk_allowing(&[root.to_path_buf()], &[], true);
+    let home = crate::home::user_home().ok().map(|h| canonical(&h));
+    let boundary = Boundary {
+        roots: None,
+        allow_secrets: false,
+    }
+    .resolved(home.as_deref());
+    let mut ok = Vec::new();
+    let mut refused: Vec<(PathBuf, String)> = walked.unreadable;
+    for path in walked.credentials {
+        refused.push((path, "a credential file by its name".to_string()));
+    }
+    for path in walked.files.into_iter().chain(walked.named) {
+        if let Some(refusal) = boundary.refuses(&path, true) {
+            refused.push((path, refusal.why));
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            refused.push((path, "could not be read".to_string()));
+            continue;
+        };
+        if bytes.len() as u64 > cap {
+            refused.push((path, format!("over {} MB", cap / (1 << 20))));
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        if let Some(live) = keyscan::scan(&path.to_string_lossy(), &text)
+            .into_iter()
+            .find(|m| m.dummy.is_none())
+        {
+            refused.push((
+                path,
+                format!("holds what looks like {} at line {}", live.kind, live.line),
+            ));
+            continue;
+        }
+        ok.push(path);
+    }
+    refused.sort();
+    (ok, refused)
+}
+
 #[cfg(test)]
 fn walk(roots: &[PathBuf]) -> Walked {
     walk_allowing(roots, &[], true)

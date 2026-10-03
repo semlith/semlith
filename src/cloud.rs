@@ -1270,6 +1270,313 @@ fn rpc_answer(body: &[u8]) -> Option<Value> {
         .rfind(|v| v.get("result").is_some() || v.get("error").is_some())
 }
 
+/// The largest file a push sends. The cloud refuses anything bigger again.
+pub const PUSH_FILE_CAP: u64 = 1 << 20;
+
+/// The most raw bytes one upload request carries; the contract's ceiling is
+/// 100 MB per request, and tar headers are counted against what is left.
+const UPLOAD_BATCH: u64 = 96 << 20;
+
+/// How long one upload request may take.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How often `--wait` asks how the job is doing.
+const JOB_POLL: Duration = Duration::from_secs(2);
+
+/// What a push did.
+#[derive(Debug, Default, Serialize)]
+pub struct PushReport {
+    /// Files in the manifest: everything the source holds after this push.
+    pub files: usize,
+    /// Files whose bytes were sent, because the source did not hold them.
+    pub sent: usize,
+    pub bytes_sent: u64,
+    /// Paths the source drops because they are no longer in the tree.
+    pub removed: usize,
+    /// What the binary's own rules kept back, with why.
+    pub refused: Vec<(String, String)>,
+    pub push: String,
+    pub job: Option<i64>,
+    pub position: Option<i64>,
+    pub estimate_minutes: Option<i64>,
+    /// The job's last state, when `--wait` followed it.
+    pub state: Option<String>,
+}
+
+/// `org/store` into its halves.
+pub fn split_target(target: &str) -> Result<(&str, &str)> {
+    match target.split_once('/') {
+        Some((org, store)) if !org.is_empty() && !store.is_empty() && !store.contains('/') => {
+            Ok((org, store))
+        }
+        _ => bail!("name the store as <org>/<store>, for example acme/platform"),
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `semlith cloud push <org>/<store> <dir>`: the manifest after the binary's
+/// own refusals, the files the store's upload source does not already hold
+/// in tar.gz requests of at most 100 MB, the commit, and with `wait` the job
+/// followed to its end.
+pub fn push(target: &str, dir: &Path, wait: bool, say: &mut dyn FnMut(&str)) -> Result<PushReport> {
+    let (org, store) = split_target(target)?;
+    let entry = entry_for(Some(org), None)?;
+    if !dir.is_dir() {
+        bail!("{} is not a directory", dir.display());
+    }
+    let root = crate::canonical(dir);
+    let (files, refused) = crate::push_files(&root, PUSH_FILE_CAP);
+    let rel = |p: &Path| -> String {
+        p.strip_prefix(&root)
+            .unwrap_or(p)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    let mut report = PushReport {
+        refused: refused
+            .iter()
+            .map(|(p, why)| (crate::plain(&rel(p)), why.clone()))
+            .collect(),
+        ..PushReport::default()
+    };
+    let mut manifest = Vec::with_capacity(files.len());
+    let mut by_path: std::collections::HashMap<String, (PathBuf, String)> = Default::default();
+    for path in &files {
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let name = rel(path);
+        let hash = sha256_hex(&bytes);
+        manifest.push(json!({ "path": name, "sha256": hash, "bytes": bytes.len() }));
+        by_path.insert(name, (path.clone(), hash));
+    }
+    report.files = manifest.len();
+    say(&format!(
+        "{} files to {target} from {}{}",
+        manifest.len(),
+        root.display(),
+        if refused.is_empty() {
+            String::new()
+        } else {
+            format!(" · {} kept back by semlith's own rules", refused.len())
+        }
+    ));
+    let mut body = json!({ "files": manifest });
+    if let Some(commit) = git_head(&root) {
+        body["commit"] = json!(commit);
+    }
+    let opened = call_as(
+        &entry,
+        "POST",
+        &format!("/v1/orgs/{}/stores/{}/pushes", seg(org), seg(store)),
+        Send {
+            json: Some(&body),
+            ..Send::default()
+        },
+    )?
+    .json()?;
+    report.push = opened["push"].as_str().unwrap_or_default().to_string();
+    if report.push.is_empty() {
+        bail!("{} opened no push", entry.host_name());
+    }
+    report.removed = opened["remove"].as_array().map_or(0, Vec::len);
+    report.estimate_minutes = opened["estimate_minutes"].as_i64();
+    let need: Vec<&str> = opened["need"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|p| by_path.contains_key(*p))
+        .collect();
+
+    // Only what the source does not hold, in batches under the ceiling.
+    let need_total = need.len();
+    let mut batch: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut batch_bytes = 0u64;
+    let mut send_batch =
+        |batch: &mut Vec<(String, Vec<u8>)>, report: &mut PushReport| -> Result<()> {
+            if batch.is_empty() {
+                return Ok(());
+            }
+            let raw: u64 = batch.iter().map(|(_, b)| b.len() as u64).sum();
+            let archive = tar_gz(batch)?;
+            call_as(
+                &entry,
+                "PUT",
+                &format!("/v1/orgs/{}/pushes/{}/files", seg(org), seg(&report.push)),
+                Send {
+                    bytes: Some(("application/x-tar", Some("gzip"), archive)),
+                    timeout: Some(UPLOAD_TIMEOUT),
+                    ..Send::default()
+                },
+            )?;
+            report.sent += batch.len();
+            report.bytes_sent += raw;
+            say(&format!(
+                "sent {} of {} changed files ({})",
+                report.sent,
+                need_total,
+                crate::human_bytes(report.bytes_sent as i64)
+            ));
+            batch.clear();
+            Ok(())
+        };
+    for name in &need {
+        let (path, hash) = &by_path[*name];
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        // The file changed between the manifest and now: send the bytes the
+        // manifest named or nothing, since the cloud refuses a mismatch.
+        if &sha256_hex(&bytes) != hash {
+            bail!(
+                "{} changed while it was being pushed; push again",
+                path.display()
+            );
+        }
+        let cost = bytes.len() as u64 + 1024;
+        if batch_bytes + cost > UPLOAD_BATCH {
+            send_batch(&mut batch, &mut report)?;
+            batch_bytes = 0;
+        }
+        batch_bytes += cost;
+        batch.push((name.to_string(), bytes));
+    }
+    send_batch(&mut batch, &mut report)?;
+    if need.is_empty() {
+        say("nothing changed since the last push; no file was sent");
+    }
+
+    let committed = call_as(
+        &entry,
+        "POST",
+        &format!("/v1/orgs/{}/pushes/{}/commit", seg(org), seg(&report.push)),
+        Send::default(),
+    )?
+    .json()?;
+    report.job = committed["job"].as_i64();
+    report.position = committed["position"].as_i64();
+    if let Some(job) = report.job {
+        say(&format!(
+            "job {job} queued{}",
+            report
+                .position
+                .map(|p| format!(", {p} ahead of it"))
+                .unwrap_or_default()
+        ));
+        if wait {
+            let mut last = String::new();
+            loop {
+                let state = call_as(
+                    &entry,
+                    "GET",
+                    &format!("/v1/orgs/{}/jobs/{job}", seg(org)),
+                    Send::default(),
+                )?
+                .json()?;
+                let now = state["state"].as_str().unwrap_or("unknown").to_string();
+                if now != last {
+                    say(&format!(
+                        "job {job}: {now}{}",
+                        state["chunks"]
+                            .as_i64()
+                            .map(|c| format!(" · {c} chunks"))
+                            .unwrap_or_default()
+                    ));
+                    last = now.clone();
+                }
+                if matches!(now.as_str(), "done" | "stopped" | "error") {
+                    if now == "error"
+                        && let Some(outcome) = state["outcome"].as_str()
+                    {
+                        say(outcome);
+                    }
+                    report.state = Some(now);
+                    break;
+                }
+                std::thread::sleep(JOB_POLL);
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// The commit a working tree is at, when it is a git checkout.
+fn git_head(dir: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "HEAD"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && head.len() >= 7).then_some(head)
+}
+
+/// A gzipped ustar archive of `files`. A path longer than the header's 100
+/// bytes travels in a PAX `path` record, which every tar reader honours.
+fn tar_gz(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>> {
+    use std::io::Write;
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    for (name, bytes) in files {
+        if name.len() > 100 {
+            let record = pax_record("path", name);
+            gz.write_all(&tar_header("PaxHeader", record.len() as u64, b'x'))?;
+            gz.write_all(&padded(record.as_bytes()))?;
+        }
+        gz.write_all(&tar_header(name, bytes.len() as u64, b'0'))?;
+        gz.write_all(&padded(bytes))?;
+    }
+    gz.write_all(&[0u8; 1024])?;
+    Ok(gz.finish()?)
+}
+
+/// `"<len> key=value\n"`, where the length counts itself.
+fn pax_record(key: &str, value: &str) -> String {
+    let body = format!(" {key}={value}\n");
+    let mut len = body.len() + 1;
+    while format!("{len}{body}").len() != len {
+        len += 1;
+    }
+    format!("{len}{body}")
+}
+
+fn padded(bytes: &[u8]) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    out.resize(bytes.len().div_ceil(512) * 512, 0);
+    out
+}
+
+fn tar_header(name: &str, size: u64, kind: u8) -> [u8; 512] {
+    let mut h = [0u8; 512];
+    let name = name.as_bytes();
+    let cut = name.len().min(100);
+    h[..cut].copy_from_slice(&name[..cut]);
+    let octal = |h: &mut [u8; 512], at: usize, width: usize, value: u64| {
+        let text = format!("{value:0w$o}", w = width - 1);
+        h[at..at + width - 1].copy_from_slice(text.as_bytes());
+    };
+    octal(&mut h, 100, 8, 0o644);
+    octal(&mut h, 108, 8, 0);
+    octal(&mut h, 116, 8, 0);
+    octal(&mut h, 124, 12, size);
+    octal(&mut h, 136, 12, 0);
+    h[148..156].copy_from_slice(b"        ");
+    h[156] = kind;
+    h[257..263].copy_from_slice(b"ustar\0");
+    h[263..265].copy_from_slice(b"00");
+    let sum: u32 = h.iter().map(|b| *b as u32).sum();
+    let text = format!("{sum:06o}\0 ");
+    h[148..156].copy_from_slice(text.as_bytes());
+    h
+}
+
 /// What the portal's Cloud section draws without asking the host anything:
 /// who this machine is signed in as, by prefix. Never the token.
 pub fn local_view() -> Value {
@@ -1365,6 +1672,60 @@ mod tests {
             "{}",
             reply.text
         );
+    }
+
+    /// The archive a push sends, read back the way a tar reader reads it.
+    #[test]
+    fn the_upload_is_a_tar_a_reader_can_unpack() {
+        use std::io::Read;
+        let long = format!("{}/deep.md", "d".repeat(120));
+        let files = vec![
+            ("docs/runbook.md".to_string(), b"hello".to_vec()),
+            (long.clone(), b"long".to_vec()),
+        ];
+        let mut raw = Vec::new();
+        flate2::read::GzDecoder::new(&tar_gz(&files).unwrap()[..])
+            .read_to_end(&mut raw)
+            .unwrap();
+        let mut at = 0;
+        let mut found = Vec::new();
+        let mut pax_path: Option<String> = None;
+        while at + 512 <= raw.len() && raw[at] != 0 {
+            let h = &raw[at..at + 512];
+            let stored: u32 = h
+                .iter()
+                .enumerate()
+                .map(|(i, b)| {
+                    if (148..156).contains(&i) {
+                        32
+                    } else {
+                        *b as u32
+                    }
+                })
+                .sum();
+            let said = u32::from_str_radix(std::str::from_utf8(&h[148..154]).unwrap(), 8).unwrap();
+            assert_eq!(stored, said, "header checksum");
+            let size = u64::from_str_radix(std::str::from_utf8(&h[124..135]).unwrap(), 8).unwrap()
+                as usize;
+            let name = String::from_utf8_lossy(&h[..100])
+                .trim_end_matches('\0')
+                .to_string();
+            let body = &raw[at + 512..at + 512 + size];
+            if h[156] == b'x' {
+                let text = String::from_utf8_lossy(body);
+                pax_path = text
+                    .split_once("path=")
+                    .map(|(_, p)| p.trim_end().to_string());
+                assert_eq!(
+                    text.split_once(' ').unwrap().0.parse::<usize>().unwrap(),
+                    text.len()
+                );
+            } else {
+                found.push((pax_path.take().unwrap_or(name), body.to_vec()));
+            }
+            at += 512 + size.div_ceil(512) * 512;
+        }
+        assert_eq!(found, files);
     }
 
     #[test]

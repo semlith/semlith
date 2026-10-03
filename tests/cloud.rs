@@ -956,3 +956,185 @@ fn a_local_and_a_remote_store_answer_as_one_list() {
         "{text}"
     );
 }
+
+// ------------------------------------------------------------------- push
+
+/// A host holding one upload source: it answers a manifest with the paths
+/// whose hashes it does not hold, and holds what a commit committed.
+fn upload_host() -> Stub {
+    let held: std::sync::Mutex<std::collections::HashMap<String, String>> = Default::default();
+    let pending: std::sync::Mutex<Vec<(String, String)>> = Default::default();
+    Stub::start(move |seen: &Seen| {
+        let path = seen.path.split('?').next().unwrap_or_default().to_string();
+        match (seen.method.as_str(), path.as_str()) {
+            (_, "/v1/whoami") => {
+                stub::json(200, json!({ "org": { "slug": "acme", "plan": "pro" } }))
+            }
+            ("POST", "/v1/orgs/acme/stores/infra/pushes") => {
+                let files = seen.json()["files"].as_array().cloned().unwrap_or_default();
+                let held = held.lock().unwrap();
+                let wanted: Vec<(String, String)> = files
+                    .iter()
+                    .map(|f| {
+                        (
+                            f["path"].as_str().unwrap().to_string(),
+                            f["sha256"].as_str().unwrap().to_string(),
+                        )
+                    })
+                    .collect();
+                let need: Vec<&String> = wanted
+                    .iter()
+                    .filter(|(p, h)| held.get(p) != Some(h))
+                    .map(|(p, _)| p)
+                    .collect();
+                let need = json!(need);
+                *pending.lock().unwrap() = wanted;
+                stub::json(
+                    201,
+                    json!({ "push": "p_1", "need": need, "remove": [], "estimate_minutes": 1 }),
+                )
+            }
+            ("PUT", "/v1/orgs/acme/pushes/p_1/files") => (204, vec![], vec![]),
+            ("POST", "/v1/orgs/acme/pushes/p_1/commit") => {
+                let mut held = held.lock().unwrap();
+                for (p, h) in pending.lock().unwrap().drain(..) {
+                    held.insert(p, h);
+                }
+                stub::json(202, json!({ "job": 48121, "position": 2 }))
+            }
+            ("GET", "/v1/orgs/acme/jobs/48121") => stub::json(
+                200,
+                json!({ "job": 48121, "kind": "push", "store": "infra", "state": "done", "position": 0, "chunks": 12 }),
+            ),
+            _ => stub::error(404, "not_found", "No such route."),
+        }
+    })
+}
+
+/// The names in a gzipped tar, in order.
+fn tar_names(gz: &[u8]) -> Vec<String> {
+    use std::io::Read;
+    let mut raw = Vec::new();
+    flate2::read::GzDecoder::new(gz)
+        .read_to_end(&mut raw)
+        .unwrap();
+    let mut names = Vec::new();
+    let mut at = 0;
+    while at + 512 <= raw.len() && raw[at] != 0 {
+        let h = &raw[at..at + 512];
+        let size = usize::from_str_radix(std::str::from_utf8(&h[124..135]).unwrap(), 8).unwrap();
+        names.push(
+            String::from_utf8_lossy(&h[..100])
+                .trim_end_matches('\0')
+                .to_string(),
+        );
+        at += 512 + size.div_ceil(512) * 512;
+    }
+    names
+}
+
+#[test]
+fn a_push_sends_only_what_changed_after_the_binarys_own_refusals() {
+    let home = tempfile::tempdir().unwrap();
+    let host = upload_host();
+    signed_in(home.path(), &host);
+    let tree = home.path().join("infra");
+    let write = |rel: &str, bytes: &[u8]| {
+        let p = tree.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, bytes).unwrap();
+    };
+    write("README.md", b"# infra\nHow the boxes are built.\n");
+    write("terraform/main.tf", b"resource \"null\" \"x\" {}\n");
+    write(".gitignore", b"*.log\n");
+    write("build.log", b"noise\n");
+    write(".env", b"TOKEN=1\n");
+    write("node_modules/left-pad/index.js", b"module.exports = 1;\n");
+    write("keys.txt", b"aws_access_key_id = AKIAZ7Q4M2P9X3K8L5N6\n");
+    write("big.bin", &vec![b'a'; 2 << 20]);
+
+    let o = semlith(
+        home.path(),
+        &[
+            "cloud",
+            "push",
+            "acme/infra",
+            tree.to_str().unwrap(),
+            "--wait",
+            "--json",
+        ],
+    );
+    assert!(o.status.success(), "{}", out(&o));
+    let report: Value = serde_json::from_slice(&o.stdout).unwrap();
+
+    let manifest = host.to("/v1/orgs/acme/stores/infra/pushes")[0].json();
+    let mut listed: Vec<&str> = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    listed.sort();
+    assert_eq!(listed, ["README.md", "terraform/main.tf"], "{}", out(&o));
+    let readme = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "README.md")
+        .unwrap();
+    assert_eq!(readme["bytes"], 33);
+    assert_eq!(readme["sha256"].as_str().unwrap().len(), 64);
+    let refused: Vec<&str> = report["refused"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r[0].as_str().unwrap())
+        .collect();
+    assert!(
+        refused.contains(&"keys.txt") && refused.contains(&"big.bin"),
+        "{refused:?}"
+    );
+
+    let puts = host.to("/v1/orgs/acme/pushes/p_1/files");
+    assert_eq!(puts.len(), 1);
+    assert_eq!(puts[0].header("content-type"), Some("application/x-tar"));
+    assert_eq!(puts[0].header("content-encoding"), Some("gzip"));
+    let mut sent = tar_names(&puts[0].body);
+    sent.sort();
+    assert_eq!(sent, ["README.md", "terraform/main.tf"]);
+    assert_eq!(report["job"], 48121);
+    assert_eq!(report["position"], 2);
+    assert_eq!(report["state"], "done");
+    assert_eq!(host.to("/v1/orgs/acme/jobs/48121").len(), 1);
+
+    // Nothing changed: a manifest, a commit, and no file at all.
+    let o = semlith(
+        home.path(),
+        &[
+            "cloud",
+            "push",
+            "acme/infra",
+            tree.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(o.status.success(), "{}", out(&o));
+    let second: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(second["sent"], 0);
+    assert_eq!(
+        host.to("/v1/orgs/acme/pushes/p_1/files").len(),
+        1,
+        "a second push sent files"
+    );
+
+    // One file changed: that file and nothing else.
+    write("README.md", b"# infra\nChanged.\n");
+    let o = semlith(
+        home.path(),
+        &["cloud", "push", "acme/infra", tree.to_str().unwrap()],
+    );
+    assert!(o.status.success(), "{}", out(&o));
+    let puts = host.to("/v1/orgs/acme/pushes/p_1/files");
+    assert_eq!(puts.len(), 2);
+    assert_eq!(tar_names(&puts[1].body), ["README.md"]);
+}
