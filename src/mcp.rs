@@ -125,6 +125,14 @@ pub struct Session {
     /// `clientInfo.version`, empty until the handshake gives one.
     pub version: String,
     pub id: String,
+    /// The app that started the client's `semlith mcp`, as `clientid` names
+    /// it, when something has said so: this process's own ancestry when it is
+    /// the stdio server, the proxy's `Semlith-Host` header when the call came
+    /// over HTTP, and nothing for an embedder that does not pass one. Never
+    /// the ancestry of a process that is only serving a request — a daemon
+    /// started from a terminal would file every HTTP client under that
+    /// terminal's app.
+    pub host: Option<String>,
 }
 
 impl Session {
@@ -133,6 +141,7 @@ impl Session {
             client: "mcp".to_string(),
             version: String::new(),
             id: id.into(),
+            host: None,
         }
     }
 
@@ -237,6 +246,9 @@ pub fn serve(
     // One connection is one conversation, so the id is made once here and every
     // row this client writes carries it.
     let mut session = Session::new(format!("stdio-{}", std::process::id()));
+    // This process is the stdio server, so the app that started it is the
+    // client's host.
+    session.host = crate::clientid::host().map(str::to_string);
 
     for line in input.lines() {
         let line = line?;
@@ -390,7 +402,7 @@ fn without_stores(
             let info = params.get("clientInfo");
             session.client = crate::clientid::label(
                 info.and_then(|c| c.get("name")).and_then(Value::as_str),
-                crate::clientid::host(),
+                session.host.as_deref(),
             );
             let name = info.and_then(|c| c.get("name")).and_then(Value::as_str);
             if let Some(version) = info
@@ -2466,6 +2478,33 @@ fn reply(id: &Value, result: Result<Value, Fail>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session served over HTTP or by an embedder is labelled by the host it
+    /// was handed, never by the ancestry of the process serving it: a daemon
+    /// started from a terminal used to file every client as that terminal's
+    /// app ("flow-test (Claude Code)").
+    #[test]
+    fn initialize_labels_by_the_host_it_was_handed_not_the_serving_process() {
+        let hello = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "clientInfo": { "name": "flow-test", "version": "1" } }
+        });
+        let mut fleet = Fleet::empty();
+        let mut session = Session::new("s");
+        answer(&mut fleet, None, &hello, &mut session).expect("an answer");
+        assert_eq!(
+            session.client,
+            crate::clientid::label(Some("flow-test"), None)
+        );
+
+        let mut proxied = Session::new("p");
+        proxied.host = Some("Claude Desktop".to_string());
+        answer(&mut fleet, None, &hello, &mut proxied).expect("an answer");
+        assert_eq!(
+            proxied.client,
+            crate::clientid::label(Some("flow-test"), Some("Claude Desktop"))
+        );
+    }
 
     /// The walk stop of 0.30.0 found 604 bytes with three roots: the budget
     /// held room for " and 1 more" but the tail says " and 1 more folder".

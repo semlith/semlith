@@ -5265,6 +5265,9 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     // ledger records comes from what was noted then. The transport's session id
     // is the conversation id, which is what it is for.
     let mut mcp_session = crate::mcp::Session::new(session.clone());
+    // The proxy's header, never this daemon's own ancestry: the daemon is
+    // serving the request, not hosting the client.
+    mcp_session.host = host.map(str::to_string);
     if let Some((named, version)) = state.client_name(&session, transport) {
         mcp_session.client = named;
         mcp_session.version = version;

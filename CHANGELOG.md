@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- An MCP client reached over HTTP is labelled by the `Semlith-Host` header its
+  stdio proxy sends, never by the ancestry of the daemon serving it. A daemon
+  started from a terminal filed every HTTP client under that terminal's app
+  ("flow-test (Claude Code)"); an embedder calling `semlith::mcp::answer` gets
+  no host unless it sets `Session::host`.
+
 ## [0.36.0] - 2026-10-02
 
 ### Search on a store of many repositories
