@@ -106,12 +106,16 @@ def index(root, work):
     _ensure_up()
     sha = _git("rev-parse", "HEAD", cwd=root)
     origin = _git("config", "remote.origin.url", cwd=root)
+    # A clone of a local clone names a filesystem path as its origin, which Sourcebot's URL parser rejects
+    # ("URL parsing failed") so the repository never indexes. Follow local origins up to the real remote.
+    while os.path.isdir(origin):
+        origin = _git("config", "remote.origin.url", cwd=origin)
     clone = os.path.join(work, "git")
     if not os.path.isdir(clone):
         os.makedirs(work, exist_ok=True)
         subprocess.run(["git", "clone", "-q", "--no-checkout", "--no-hardlinks", root, clone], check=True,
                        env=_host_env(), timeout=c.INDEX_TIMEOUT)
-        _git("config", "remote.origin.url", origin, cwd=clone)
+    _git("config", "remote.origin.url", origin, cwd=clone)
     _git("fetch", "-q", "--no-tags", root, "HEAD", cwd=clone)
     _git("update-ref", f"refs/heads/{BRANCH}", sha, cwd=clone)
     _git("symbolic-ref", "HEAD", f"refs/heads/{BRANCH}", cwd=clone)
