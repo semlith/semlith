@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Semlith Cloud, from this machine
+
+Nothing changes for anybody who never signs in: with no `~/.semlith/cloud.json`
+the binary makes no outbound connection and starts no thread for the cloud.
+
+- `semlith cloud login [<org>]` signs in by a code approved in the browser (the
+  device authorization grant), or with `--token` checked against the host
+  first. The token is kept owner-only in `~/.semlith/cloud.json`, one entry per
+  host and org, and is sent to that host and no other. `logout` forgets it;
+  `status [--json]` prints the org, its stores with each source's revision and
+  lag, and the month's usage.
+- `semlith cloud connect <org>` adds the org's stores as remote stores named
+  `<org>/<store>`, listed by `stats`, `files`, `semlith_stats`, the Stores page
+  and Search's picker with a `remote · <org>` badge, and refused by every write
+  path with a sentence saying why. `disconnect` takes them off and leaves
+  `registry.json` byte for byte as it was.
+- A search naming a remote store, or none, is one list: remote hits merged with
+  local ones by score under the same `k` and budget, each with its badge,
+  revision and lag. Other tools naming a remote store are forwarded to the org's
+  MCP endpoint. An unreachable or refusing host costs one line naming the stores
+  skipped; the local answer is whole.
+- `semlith cloud push <org>/<store> <dir> [--wait]` sends only the files whose
+  hashes changed, after semlith's own refusals.
+- `semlith cloud sync <store> on|off`: per store, off by default, the ledger's
+  rows (when, client, session, tool, tokens; never the query text) go to the
+  org's ledger once a minute, at most 1,000 at a time. A new `synced_at` column
+  records what was sent.
+- `semlith cloud report` and `semlith cloud replay`.
+- Settings › Cloud draws both states; the Ledger page says what is syncing, the
+  Privacy page what leaves the machine and when, the daemon card `· cloud:
+  <org>`, and `semlith doctor` has a cloud line.
+
 ### Added
 
 - `Semlith::index_paths_under`, `Semlith::index_rest_under` and

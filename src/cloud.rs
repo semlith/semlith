@@ -713,7 +713,10 @@ pub fn status(entry: &Entry) -> Result<(Value, Option<String>), Failure> {
         entry,
         "GET",
         &format!("/v1/orgs/{}/status", seg(&entry.org)),
-        Send::default(),
+        Send {
+            timeout: Some(FORWARD_TIMEOUT),
+            ..Send::default()
+        },
     )?;
     Ok((reply.json()?, reply.version))
 }
@@ -1028,14 +1031,16 @@ impl RemoteHit {
     }
 
     /// As a row of `/api/search`, with the remote fields beside the usual ones.
-    pub fn to_json(&self, query: &str, with_text: bool) -> Value {
+    pub fn to_json(&self, query: &str) -> Value {
         json!({
             "line": crate::mcp::line_for(&self.text, query),
             "score": self.score,
             "path": self.path,
             "start_line": self.start_line,
             "end_line": self.end_line,
-            "text": if with_text { self.text.clone() } else { String::new() },
+            // Always the text, whatever the format: the page opens a remote
+            // row from it rather than asking the host a second time.
+            "text": self.text,
             "store": self.name,
             "lists": self.lists,
             "image": null,
@@ -1899,6 +1904,63 @@ pub fn replay_sessions() -> Result<(PathBuf, crate::replay::Replay)> {
     let dir = crate::replay::transcripts_dir()?;
     let found = crate::replay::read(&dir, crate::replay::FILES)?;
     Ok((dir, found))
+}
+
+/// Settings › Cloud's live half: each signed-in org's status, and whether its
+/// host answered (`connected`), could not be reached (`unreachable`) or
+/// refused (`refused`), with the sentence that says why. Asked only when the
+/// section is opened, and only for a machine that signed in.
+pub fn status_view() -> Value {
+    let creds = Credentials::load().ok().flatten();
+    let orgs: Vec<Value> = creds
+        .iter()
+        .flat_map(|c| c.entries.iter())
+        .map(|e| match status(e) {
+            Ok((status, version)) => json!({
+                "org": e.org, "host": e.host, "reach": "connected",
+                "why": format!("{} answered just now", e.host_name()),
+                "version": version, "status": status,
+            }),
+            Err(f) => json!({
+                "org": e.org, "host": e.host, "reach": f.kind(),
+                "why": f.to_string(), "code": f.code(),
+            }),
+        })
+        .collect();
+    json!({ "orgs": orgs })
+}
+
+/// `semlith doctor`'s cloud line: signed in or not, and for each org whether
+/// its host answers `/v1/whoami`. Not signed in asks nothing.
+pub fn doctor() -> Vec<Value> {
+    let Some(creds) = Credentials::load().ok().flatten() else {
+        return Vec::new();
+    };
+    creds
+        .entries
+        .iter()
+        .map(|e| {
+            let asked = call_as(
+                e,
+                "GET",
+                "/v1/whoami",
+                Send {
+                    timeout: Some(FORWARD_TIMEOUT),
+                    ..Send::default()
+                },
+            );
+            match asked {
+                Ok(reply) => json!({
+                    "org": e.org, "host": e.host, "reach": "connected",
+                    "why": format!("{} answered with this token", e.host_name()),
+                    "version": reply.version,
+                }),
+                Err(f) => {
+                    json!({ "org": e.org, "host": e.host, "reach": f.kind(), "why": f.to_string() })
+                }
+            }
+        })
+        .collect()
 }
 
 /// What the portal's Cloud section draws without asking the host anything:

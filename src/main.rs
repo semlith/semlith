@@ -1216,10 +1216,13 @@ fn run() -> Result<()> {
                 return Ok(());
             }
 
+            // Only for a machine that signed in, and then one request per org.
+            let cloud = semlith::cloud::doctor();
             if json {
                 let out = serde_json::json!({
                     "clients": report,
                     "rules": rules,
+                    "cloud": { "signed_in": semlith::cloud::signed_in(), "orgs": cloud },
                     "service": semlith::service::status(),
                     "daemon": {
                         "version": running,
@@ -1251,6 +1254,25 @@ fn run() -> Result<()> {
                         "ok  ", "daemon version"
                     ),
                     (None, None) => {}
+                }
+                if cloud.is_empty() {
+                    println!(
+                        "  {:<4} {:<20} not signed in; semlith makes no cloud connection",
+                        "ok  ", "cloud"
+                    );
+                }
+                for org in &cloud {
+                    println!(
+                        "  {:<4} {:<20} {} — {}",
+                        if org["reach"] == "connected" {
+                            "ok  "
+                        } else {
+                            "WARN"
+                        },
+                        format!("cloud {}", org["org"].as_str().unwrap_or_default()),
+                        org["reach"].as_str().unwrap_or_default(),
+                        org["why"].as_str().unwrap_or_default()
+                    );
                 }
             }
 

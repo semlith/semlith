@@ -135,6 +135,9 @@ fn dispatch(state: &Arc<State>, request: &Request) -> Response {
         // Settings › Cloud: who this machine is signed in as. Answered from
         // `cloud.json` alone; nothing here reaches the host.
         (true, _, "/api/cloud") => Response::json(&crate::cloud::local_view()),
+        // Asks each signed-in org's host for its status: the one cloud read
+        // the page makes, and only when Settings › Cloud is open.
+        (true, _, "/api/cloud/status") => Response::json(&crate::cloud::status_view()),
         // Both verbs: a GET reports whether the toggle is on and, when it
         // is, what the transcripts say; a POST is the toggle itself.
         (_, _, "/api/ledger/replay") if get || post => replay(request),
@@ -197,6 +200,15 @@ fn dispatch(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/accel") => accel_change(request),
         (_, true, "/api/schedules") => schedule_write(state, request),
         (_, true, "/api/cloud/sync") => cloud_sync(state, request),
+        (
+            _,
+            true,
+            "/api/cloud/connect"
+            | "/api/cloud/disconnect"
+            | "/api/cloud/push"
+            | "/api/cloud/report"
+            | "/api/cloud/replay",
+        ) => cloud_write(request),
         (_, true, "/api/upgrade") => upgrade(request),
         (_, true, "/api/drop/resolve") => drop_resolve(state, request),
 
@@ -245,6 +257,79 @@ fn cloud_sync(state: &Arc<State>, request: &Request) -> Response {
             }
             Response::json(&json!({ "store": store, "sync": sync }))
         }
+        Err(e) => Response::error(400, &format!("{e:#}")),
+    }
+}
+
+/// Settings › Cloud's buttons: the portal's view of `cloud connect`,
+/// `disconnect` (which signs this machine out of the org too), `push`,
+/// `report` and `replay`. Each is one call the person pressed.
+fn cloud_write(request: &Request) -> Response {
+    use anyhow::Context as _;
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let text = |k: &str| body.get(k).and_then(Value::as_str);
+    let org = text("org");
+    let answer = (|| -> anyhow::Result<Value> {
+        Ok(match request.path.as_str() {
+            "/api/cloud/connect" => {
+                let entry = crate::cloud::entry_for(org, None)?;
+                json!({ "connected": crate::cloud::connect(&entry, &[])? })
+            }
+            "/api/cloud/disconnect" => {
+                let org = org.context("name the org")?;
+                let removed = crate::cloud::disconnect(org)?;
+                // Already signed out is not a failure of a disconnect.
+                let signed_out = crate::cloud::logout(Some(org), None).ok().map(|e| e.org);
+                json!({ "removed": removed, "signed_out": signed_out })
+            }
+            "/api/cloud/push" => {
+                let store = text("store").context("name the store as <org>/<store>")?;
+                let dir = text("dir").context("name the folder to push")?;
+                serde_json::to_value(crate::cloud::push(
+                    store,
+                    Path::new(dir),
+                    false,
+                    &mut |_| {},
+                )?)?
+            }
+            "/api/cloud/report" => {
+                let entry = crate::cloud::entry_for(org, None)?;
+                let format = text("format").unwrap_or("md");
+                if format == "pdf" {
+                    anyhow::bail!(
+                        "a PDF is written by `semlith cloud report --format pdf --out <file>`"
+                    );
+                }
+                let bytes = crate::cloud::report(
+                    &entry,
+                    &crate::cloud::ReportAsk {
+                        kind: text("kind").unwrap_or("savings"),
+                        format,
+                        window: text("window"),
+                        model: None,
+                        stores: &[],
+                    },
+                )?;
+                json!({ "text": String::from_utf8_lossy(&bytes) })
+            }
+            _ => {
+                let entry = crate::cloud::entry_for(org, None)?;
+                let id = text("session").context("pick a session")?;
+                let (dir, _) = crate::cloud::replay_sessions()?;
+                let chosen = crate::replay::session(&dir, id)?
+                    .with_context(|| format!("no transcript called {id}"))?;
+                json!({
+                    "sent": chosen.recent.len(),
+                    "accepted": crate::cloud::replay(&entry, &chosen)?,
+                })
+            }
+        })
+    })();
+    match answer {
+        Ok(value) => Response::json(&value),
         Err(e) => Response::error(400, &format!("{e:#}")),
     }
 }
@@ -351,11 +436,8 @@ fn with_remotes(state: &Arc<State>, request: &Request) -> Option<Response> {
             },
             &who,
         );
-        let with_text = !request
-            .query("format")
-            .is_some_and(|f| f.eq_ignore_ascii_case("locate"));
         let mut hits: Vec<Value> = answer["hits"].as_array().cloned().unwrap_or_default();
-        hits.extend(fetched.hits.iter().map(|h| h.to_json(query, with_text)));
+        hits.extend(fetched.hits.iter().map(|h| h.to_json(query)));
         hits.sort_by(|a, b| {
             let score = |v: &Value| v["score"].as_f64().unwrap_or(0.0);
             score(b).total_cmp(&score(a))
@@ -2207,6 +2289,9 @@ fn privacy(state: &Arc<State>) -> Response {
         // found with the GPU lane on, and the CUDA pack only after an explicit
         // turn-on; `--airgap` refuses all of them unless they were pre-seeded.
         "downloads": downloads(&cache),
+        // What this machine sends Semlith Cloud, if it signed in: the Privacy
+        // page's Cloud row reads it.
+        "cloud": crate::cloud::local_view(),
     }))
 }
 
@@ -2804,6 +2889,9 @@ fn about(state: &Arc<State>) -> Response {
         "graph_languages": crate::graph::languages(),
         "edge_kinds": crate::graph::KINDS,
         "stores": state.stores().len(),
+        // Who this machine is signed in to Semlith Cloud as, for the daemon
+        // card's `· cloud: <org>`. From `cloud.json` alone.
+        "cloud": crate::cloud::local_view(),
         // Background while idle, normal while embedding, and what the last
         // switch cost. Read by the About page and by the acceptance check that
         // times each transition.

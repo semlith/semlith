@@ -1316,13 +1316,37 @@ See [The two credentials](#the-two-credentials) for what each rotation does.
 
 ### Cloud
 
-What the hosted option is, without leaving the portal to find out. It describes a
-service and is not a client for one: the section says `not connected`, and that
-is not a state this build can leave. There is no `semlith cloud` command, no token
-store, and no code path that opens a socket to any host. It gives three reasons —
-one URL for cloud agents, the whole organisation in one index, a pull-request
-check — and two commands as text to copy, each saying what it will do when it
-exists.
+Semlith Cloud, from this machine's side. Two states.
+
+**Not signed in.** What the cloud adds — one URL for cloud agents, an org's stores
+beside the local ones, a pull-request check — and the two commands to copy,
+`semlith cloud login <org>` and `semlith cloud connect <org>`. No price. Nothing
+on this page or anywhere in the daemon reaches any host in this state: it reads
+the absence of `~/.semlith/cloud.json` and nothing else.
+
+**Signed in.** Per org, a header with its name, plan, the token's 13-character
+prefix (never the token) and **Disconnect**, which takes the org's remote stores
+off this machine and forgets its token here. Under it a reachability pill —
+`connected`, `unreachable` or `refused` — with the sentence that says why, read
+from `/api/cloud/status` when the section opens and on **Check again**; that is
+the one request the page makes to the host. Then a card per remote store: its
+state, files and chunks, each source with its revision, how far behind it is and
+a freshness dot, and a folder field with **Push** (`semlith cloud push`). An org
+with no store connected offers **Connect its stores** (`semlith cloud connect`).
+
+**Ledger sync** lists the local stores with a switch each (`semlith cloud sync
+<store> on|off`), off by default, and the last send. **What leaves this machine**
+lists every kind of request and what it carries. **Reports and replay** fetches
+one of the cloud's reports as text (`semlith cloud report`) and sends one
+transcript you pick (`semlith cloud replay`), after a confirmation.
+
+Remote stores also appear on the Stores page, in their own card, and in Search's
+store picker, each with its `remote · <org>` badge; a search naming one, or none,
+merges their hits into the list by score with the badge, revision and lag on each
+row, and a host that cannot be asked adds one line saying so. The Ledger page
+reads `syncing N of M stores · last sent …`, the Privacy page's Cloud card and
+download list say what goes to which host, and the sidebar's daemon card ends
+`· cloud: <org>`.
 
 ### About
 
