@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The public scorecard
+
+**`bench/scorecard/` reproduces every published number.** One entry point per
+benchmark, each printing its table and the command that produced it, every
+figure the median of three runs with its spread: SWE-bench Lite and Verified
+retrieval (each instance indexed at its own base commit), CodeRAG-Bench on its
+canonical corpora, a seeded sample of RepoBench-R's test split, nine competitor
+tools on SWE-bench Lite, an agent round with Opus and Haiku, and the savings in
+the ledger's real sessions. Data, clones and stores live under
+`~/semlith-bench/scorecard`, never in the repository, and nothing under
+`bench/` is in the crate.
+
+### Fixed
+
+- **A scope's first search no longer pays the whole filter resolution each time
+  the scope changes (#183).** A store kept one resolved filter, so an agent
+  moving between two repositories resolved each again on every call; it keeps
+  the eight most recent now. Allowlists are sorted once when built, so a sharded
+  index takes each shard's ids by binary search instead of testing every id
+  against every shard.
+- **A failed accelerator lane is tried again (#188).** One failed start of the
+  Neural Engine worker left the daemon embedding on the CPU, about a tenth of the
+  speed, until it was restarted — switching the lane off and on from the terminal
+  never reached it, and nothing was written to its log. A failed lane is tried
+  again on the first run ten minutes later, and the failure goes to the log.
+
 ## [0.36.0] - 2026-10-02
 
 ### Search on a store of many repositories
