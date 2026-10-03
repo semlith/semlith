@@ -1521,4 +1521,5 @@ fn replay_off_in_the_org_is_explained() {
     assert!(!o.status.success());
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(err.contains("Ledger › Session replay"), "{err}");
+    assert_eq!(err.matches("Session replay is off").count(), 1, "said once: {err}");
 }

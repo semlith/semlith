@@ -1893,10 +1893,10 @@ pub fn replay(entry: &Entry, session: &crate::replay::Session) -> Result<i64> {
     );
     match sent {
         Ok(reply) => Ok(reply.json()?["accepted"].as_i64().unwrap_or(0)),
-        Err(Failure::Refused { code, message, .. }) if code == "replay_off" => bail!(
-            "{} Session replay is off for {}: an owner turns it on in the cloud app under \
+        // The cloud's own sentence says the same thing; one is enough.
+        Err(Failure::Refused { code, .. }) if code == "replay_off" => bail!(
+            "Session replay is off for {}: an admin turns it on in the cloud app under \
              Ledger › Session replay. Nothing was kept.",
-            message.trim(),
             entry.org
         ),
         Err(other) => Err(other.into()),
