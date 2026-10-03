@@ -2567,58 +2567,6 @@ fn privacy_fix(state: &Arc<State>, request: &Request) -> Response {
 /// agreed to it.
 /// What a typical answer from each tool costs an agent, before it asks.
 ///
-/// Fixed estimates, in tokens, for a machine whose ledger has fewer than
-/// [`TYPICAL_MIN_ROWS`] rows for a tool: a locate search at its default
-/// budget, a brief at its default budget, a definition read whole, and the
-/// graph and housekeeping tools' short replies. Rough on purpose and labelled
-/// `estimate` beside every figure; the ledger's own median replaces each as
-/// soon as there are rows enough to take one from.
-const TYPICAL_ESTIMATES: &[(&str, &str, i64)] = &[
-    (
-        "semlith_search",
-        "where something is: one line per hit",
-        700,
-    ),
-    (
-        "semlith_brief",
-        "how something works: spans, text and callers",
-        1800,
-    ),
-    ("semlith_read", "one span or definition, whole", 900),
-    (
-        "semlith_pattern",
-        "every place one syntax shape occurs",
-        600,
-    ),
-    ("semlith_stats", "what is indexed, per store", 150),
-    (
-        "semlith_languages",
-        "which languages filter and carry a graph",
-        300,
-    ),
-    ("semlith_files", "what a folder holds", 450),
-    (
-        "semlith_index",
-        "a folder indexed, and what was skipped",
-        120,
-    ),
-    ("semlith_add", "one URL fetched and indexed", 80),
-    ("semlith_forget", "one file taken out", 40),
-    (
-        "semlith_symbol",
-        "where a name is defined and what touches it",
-        300,
-    ),
-    ("semlith_neighbors", "who calls it and what it calls", 350),
-    ("semlith_report", "one of the five reports", 1200),
-    ("semlith_impact", "every caller a change would reach", 450),
-    (
-        "semlith_trace",
-        "the chain from A to B, a line per hop",
-        400,
-    ),
-    ("semlith_path", "whether A reaches B, and how", 200),
-];
 
 /// The documented clients as `/api/agents` lists them, each with its id and
 /// whether its own file names semlith now.
@@ -2639,9 +2587,6 @@ fn client_rows() -> Vec<Value> {
         })
         .collect()
 }
-
-/// Ledger rows a tool needs before its median replaces the estimate.
-const TYPICAL_MIN_ROWS: usize = 5;
 
 fn tool_sizes(state: &Arc<State>) -> Vec<Value> {
     // The ledger's tool column holds the short name: `search`, not
@@ -2667,36 +2612,7 @@ fn tool_sizes(state: &Arc<State>) -> Vec<Value> {
             }
         }
     }
-    let listed = crate::mcp::listed_names();
-    crate::mcp::tool_list()
-        .into_iter()
-        .map(|(name, about)| {
-            let short = name.strip_prefix("semlith_").unwrap_or(&name).to_string();
-            let offered = listed.contains(&name);
-            let (answers, estimate) = TYPICAL_ESTIMATES
-                .iter()
-                .find(|(n, _, _)| *n == name)
-                .map(|(_, answers, tokens)| (answers.to_string(), *tokens))
-                .unwrap_or_else(|| (about.clone(), 300));
-            let (typical, source) = match seen.get_mut(&short) {
-                Some(rows) if rows.len() >= TYPICAL_MIN_ROWS => {
-                    rows.sort_unstable();
-                    (rows[rows.len() / 2], "ledger")
-                }
-                _ => (estimate, "estimate"),
-            };
-            json!({
-                "name": name,
-                "about": about,
-                "answers": answers,
-                "typical_tokens": typical,
-                "typical_source": source,
-                // Whether `tools/list` sends it. A client offers its agent
-                // only those; the rest are the CLI's and this portal's.
-                "listed": offered,
-            })
-        })
-        .collect()
+    crate::mcp::tool_catalog(&mut seen)
 }
 
 /// A client's id in a request: its name, lowercased, dashes for the rest
@@ -2929,28 +2845,13 @@ fn reveal(state: &Arc<State>) -> Response {
 /// charge for having semlith connected at all, and a user should be able to
 /// read it rather than capture traffic to discover it.
 fn tool_list_tokens(state: &Arc<State>) -> (i64, &'static str) {
-    // The listed tools only: their bytes are what `tool_list_bytes` counts,
-    // and a ratio of sixteen tools' prose to eight tools' bytes is neither.
-    let listed = crate::mcp::listed_names();
-    let text = crate::mcp::tool_list()
-        .into_iter()
-        .filter(|(name, _)| listed.contains(name))
-        .map(|(name, about)| format!("{name} {about}"))
-        .collect::<Vec<_>>()
-        .join(" ");
     let guard = state.fleet.lock().ok();
     let counter = guard
         .as_ref()
         .and_then(|f| f.as_ref())
         .map(|f| f.counter())
         .unwrap_or(crate::ledger::Counter::Chars4);
-    let count = counter.count(&text);
-    // The whole payload, not only the prose: the schemas are what an agent is
-    // sent. The prose is what a tokenizer can be run over honestly, so the
-    // count is scaled by the payload's share of it rather than estimated twice.
-    let bytes = crate::mcp::tool_list_bytes() as i64;
-    let prose = text.len().max(1) as i64;
-    (count * bytes / prose, counter.label())
+    (crate::mcp::tool_list_tokens(&counter), counter.label())
 }
 
 /// The live connections, one row per app and transport. Every Claude Code
