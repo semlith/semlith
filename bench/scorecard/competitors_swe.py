@@ -263,7 +263,33 @@ COLS = ("any@1", "any@5", "any@10", "all@10", "tok2000", "tok4000", "tok8000")
 
 
 def score(args):
-    rows = load_rows(args.out)
+    """One table over --out and every --also directory: a second walk run beside the first (the slow tools in
+    their own directory, so the two walks never share rows.jsonl) scores its tools against its own semlith rows."""
+    table, allsem = tabulate(load_rows(args.out))
+    for d in args.also or []:
+        more, _ = tabulate(load_rows(d))
+        table += [t for t in more if t["tool"] not in {x["tool"] for x in table}]
+    table.sort(key=lambda t: FAST_FIRST.index(t["tool"]))
+    insts = [i["instance_id"] for i in sample()]
+    with open(os.path.join(args.out, "score.json"), "w") as f:
+        json.dump({"tools": table, "semlith_all": allsem, "runs": RUNS, "budgets": BUDGETS}, f, indent=1)
+
+    def fmt(m):
+        if not m:
+            return " ".join(f"{'-':>6}" for _ in COLS) + f" {'-':>6}"
+        return " ".join(f"{m.get(c, 0):6.2f}" for c in COLS) + f" {str(m.get('tok_median')):>6}"
+    head = " ".join(f"{c:>6}" for c in COLS) + f" {'tokmed':>6}"
+    print(f"{'tool':10} {'n':>5} {'arm':8} {head}  idx_s  not run / partial")
+    for t in table:
+        nr = "; ".join(f"{v} {k}" for k, v in t["not_run"].items()) or "-"
+        print(f"{t['tool']:10} {t['completed']:2}/{t['of']:2} {'tool':8} {fmt(t['tool_metrics'])} {t['index_s_total']:7.0f}  {nr}")
+        print(f"{'':10} {'':5} {'semlith':8} {fmt(t['semlith_metrics'])} {t['semlith_index_s_total']:7.0f}")
+    if allsem:
+        print(f"{'semlith':10} {allsem['n']:2}/{len(insts):2} {'all':8} {fmt(allsem)}")
+    return table
+
+
+def tabulate(rows):
     insts = [i["instance_id"] for i in sample()]
     table = []
     for tool in [t for t in FAST_FIRST if any(r["arm"] == t for r in rows)]:
@@ -289,23 +315,7 @@ def score(args):
                       "semlith_search_ms_median": sms[len(sms) // 2] if sms else None,
                       "tool_metrics": summarise(rows, tool, ok) if ok else None,
                       "semlith_metrics": summarise(rows, "semlith", ok) if ok else None})
-    allsem = summarise(rows, "semlith", set(insts))
-    with open(os.path.join(args.out, "score.json"), "w") as f:
-        json.dump({"tools": table, "semlith_all": allsem, "runs": RUNS, "budgets": BUDGETS}, f, indent=1)
-
-    def fmt(m):
-        if not m:
-            return " ".join(f"{'-':>6}" for _ in COLS) + f" {'-':>6}"
-        return " ".join(f"{m.get(c, 0):6.2f}" for c in COLS) + f" {str(m.get('tok_median')):>6}"
-    head = " ".join(f"{c:>6}" for c in COLS) + f" {'tokmed':>6}"
-    print(f"{'tool':10} {'n':>5} {'arm':8} {head}  idx_s  not run / partial")
-    for t in table:
-        nr = "; ".join(f"{v} {k}" for k, v in t["not_run"].items()) or "-"
-        print(f"{t['tool']:10} {t['completed']:2}/{t['of']:2} {'tool':8} {fmt(t['tool_metrics'])} {t['index_s_total']:7.0f}  {nr}")
-        print(f"{'':10} {'':5} {'semlith':8} {fmt(t['semlith_metrics'])} {t['semlith_index_s_total']:7.0f}")
-    if allsem:
-        print(f"{'semlith':10} {allsem['n']:2}/{len(insts):2} {'all':8} {fmt(allsem)}")
-    return table
+    return table, summarise(rows, "semlith", set(insts))
 
 
 if __name__ == "__main__":
@@ -314,5 +324,6 @@ if __name__ == "__main__":
     ap.add_argument("--tools", default=",".join(FAST_FIRST))
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--repo", help="one repository, e.g. psf/requests")
+    ap.add_argument("--also", action="append", help="score: another walk's directory to merge, e.g. a slow-tools walk")
     a = ap.parse_args()
     walk(a) if a.cmd == "walk" else score(a)
