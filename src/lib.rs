@@ -747,6 +747,9 @@ fn checkpoint_files() -> usize {
 
 /// One resolved filter: what it was, the store state it was resolved
 /// against, and what it resolved to.
+/// How many resolved filters a store keeps (#183).
+const FILTER_MEMOS: usize = 8;
+
 struct FilterMemo {
     groups: Vec<Vec<String>>,
     generation: u64,
@@ -1614,11 +1617,12 @@ pub struct Semlith {
     /// The index generation this process has loaded. Compared against the
     /// store's on every search to notice another process's writes.
     generation: u64,
-    /// The last filter this store resolved, kept until the store changes. An
-    /// agent scoped to one repository asks with the same `path` call after
-    /// call, and resolving it again was the largest cost left in a scoped
-    /// search (#170).
-    filter_memo: Option<FilterMemo>,
+    /// The filters this store resolved most recently, newest first, each kept
+    /// until the store changes. An agent scoped to one repository asks with
+    /// the same `path` call after call, and resolving it again was the largest
+    /// cost left in a scoped search (#170); an agent moving between a few
+    /// repositories missed a one-entry memo on every call (#183).
+    filter_memo: std::collections::VecDeque<FilterMemo>,
     /// Print model-download progress to stderr. Off for the MCP server, where
     /// stdout/stderr are a protocol channel.
     pub quiet: bool,
@@ -1729,7 +1733,7 @@ impl Semlith {
             tokenizer: None,
             clip: image::Clip::default(),
             generation,
-            filter_memo: None,
+            filter_memo: std::collections::VecDeque::new(),
             quiet: false,
             boundary: Boundary::default(),
             gitignore: true,
@@ -4593,12 +4597,14 @@ impl Semlith {
         // and the newest chunk id, which a row written ahead of its vectors
         // moves before the generation does.
         let newest_chunk = store::newest_chunk(&self.db)?;
-        if let Some(memo) = &self.filter_memo
-            && memo.groups == filter.groups()
-            && memo.generation == self.generation
-            && memo.newest_chunk == newest_chunk
-        {
-            return Ok((memo.allowlist.clone(), Some(memo.selected.clone())));
+        let (generation, groups) = (self.generation, filter.groups());
+        self.filter_memo
+            .retain(|m| m.generation == generation && m.newest_chunk == newest_chunk);
+        if let Some(at) = self.filter_memo.iter().position(|m| m.groups == groups) {
+            let memo = self.filter_memo.remove(at).expect("position is in range");
+            let out = (memo.allowlist.clone(), Some(memo.selected.clone()));
+            self.filter_memo.push_front(memo);
+            return Ok(out);
         }
         let candidates = store::filtered_chunk_ids(&self.db, filter.groups())?;
         let mut ids = Vec::with_capacity(candidates.len());
@@ -4618,16 +4624,20 @@ impl Semlith {
             // the whole index for no benefit.
             Allowlist::All
         } else {
-            Allowlist::Subset(ids)
+            Allowlist::subset(ids)
         };
         let selected = std::sync::Arc::new(candidates.into_iter().collect());
-        self.filter_memo = Some(FilterMemo {
+        self.filter_memo.push_front(FilterMemo {
             groups: filter.groups().to_vec(),
             generation: self.generation,
             newest_chunk,
             allowlist: allowlist.clone(),
             selected: std::sync::Arc::clone(&selected),
         });
+        // ponytail: a fixed count, not bytes; a memo of a whole-store-sized
+        // subset holds about 9 bytes per chunk, so eight stay small next to
+        // the index itself.
+        self.filter_memo.truncate(FILTER_MEMOS);
         Ok((allowlist, Some(selected)))
     }
 
@@ -5550,7 +5560,7 @@ impl Semlith {
             if ids.is_empty() {
                 return Ok(Vec::new());
             }
-            index::Allowlist::Subset(ids)
+            index::Allowlist::subset(ids)
         };
 
         let mut vector = self.clip.embed_query(query, self.quiet)?;
