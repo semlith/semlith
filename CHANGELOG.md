@@ -14,13 +14,19 @@ benchmark, each printing its table and the command that produced it, every
 figure the median of three runs with its spread: SWE-bench Lite and Verified
 retrieval (each instance indexed at its own base commit), CodeRAG-Bench on its
 canonical corpora, a seeded sample of RepoBench-R's test split, nine competitor
-tools on SWE-bench Lite, an agent round with Opus and Haiku, and the savings in
+tools on a seeded 20 of SWE-bench Lite, an agent round with Opus and Haiku, and the savings in
 the ledger's real sessions. Data, clones and stores live under
 `~/semlith-bench/scorecard`, never in the repository, and nothing under
 `bench/` is in the crate.
 
 ### Fixed
 
+- **A file emptied on disk is evicted from the store.** The index pass skipped an
+  empty file without removing what it used to hold, so its old chunks went on
+  answering searches for text no longer on disk; the same held for a file that
+  grew past the size cap or became unreadable. Found by the scorecard's
+  base-commit check on the SWE-bench walk, where a commit emptied two astropy
+  files.
 - **A scope's first search no longer pays the whole filter resolution each time
   the scope changes (#183).** A store kept one resolved filter, so an agent
   moving between two repositories resolved each again on every call; it keeps
