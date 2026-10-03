@@ -796,6 +796,113 @@ pub fn render_status(entry: &Entry, status: &Value, version: Option<&str>) -> St
     out.trim_end().to_string()
 }
 
+/// The MCP URL to keep for an org: the host's own when it is on the same
+/// origin, else the documented path on the entry's host. A URL a reply named
+/// on another origin is never one a token is sent to.
+pub fn mcp_url_for(entry: &Entry, reported: Option<&str>) -> String {
+    match reported {
+        Some(url) if url.starts_with(&format!("{}/", entry.host)) => url.to_string(),
+        _ => format!("{}/{}/mcp", entry.host, seg(&entry.org)),
+    }
+}
+
+/// `semlith cloud connect`: one remote store per store the status lists (or
+/// per name in `only`), named `<org>/<store>`. Returns the names written.
+pub fn connect(entry: &Entry, only: &[String]) -> Result<Vec<String>> {
+    let (status, _) = status(entry)?;
+    let listed: Vec<String> = status["stores"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s["name"].as_str().map(str::to_string))
+        .collect();
+    for name in only {
+        if !listed.contains(name) {
+            bail!(
+                "{} has no store called {name} that this token can reach; it can reach: {}",
+                entry.org,
+                if listed.is_empty() {
+                    "none".to_string()
+                } else {
+                    listed.join(", ")
+                }
+            );
+        }
+    }
+    let mcp_url = mcp_url_for(entry, status["mcp_url"].as_str());
+    let mut registry = crate::home::Registry::load()?;
+    let mut written = Vec::new();
+    for store in listed
+        .iter()
+        .filter(|s| only.is_empty() || only.contains(s))
+    {
+        let name = format!("{}/{store}", entry.org);
+        registry.remote.insert(
+            name.clone(),
+            crate::home::Remote {
+                host: entry.host.clone(),
+                org: entry.org.clone(),
+                store: store.clone(),
+                mcp_url: mcp_url.clone(),
+            },
+        );
+        written.push(name);
+    }
+    registry.save()?;
+    Ok(written)
+}
+
+/// `semlith cloud disconnect`: take exactly that org's remote stores out of
+/// the registry. Returns the names removed.
+pub fn disconnect(org: &str) -> Result<Vec<String>> {
+    let mut registry = crate::home::Registry::load()?;
+    let gone: Vec<String> = registry
+        .remote
+        .iter()
+        .filter(|(_, r)| r.org == org)
+        .map(|(name, _)| name.clone())
+        .collect();
+    if gone.is_empty() {
+        return Ok(gone);
+    }
+    for name in &gone {
+        registry.remote.remove(name);
+    }
+    registry.save()?;
+    Ok(gone)
+}
+
+/// Every remote store, by local name. Empty — and no more than one file read
+/// — for anybody who never connected one.
+pub fn remote_stores() -> Vec<(String, crate::home::Remote)> {
+    crate::home::Registry::load()
+        .map(|r| r.remote.into_iter().collect())
+        .unwrap_or_default()
+}
+
+/// `remote · acme`, the badge a remote store carries everywhere it is listed.
+pub fn badge(remote: &crate::home::Remote) -> String {
+    format!("remote · {}", remote.org)
+}
+
+/// The rows the Stores page and every picker list beside the local stores.
+pub fn remote_rows() -> Vec<Value> {
+    remote_stores()
+        .into_iter()
+        .map(|(name, r)| {
+            json!({
+                "name": name,
+                "org": r.org,
+                "store": r.store,
+                "host": r.host,
+                "host_name": host_name(&r.host),
+                "mcp_url": r.mcp_url,
+                "badge": badge(&r),
+            })
+        })
+        .collect()
+}
+
 /// What the portal's Cloud section draws without asking the host anything:
 /// who this machine is signed in as, by prefix. Never the token.
 pub fn local_view() -> Value {
@@ -813,7 +920,7 @@ pub fn local_view() -> Value {
             })
         })
         .collect();
-    json!({ "signed_in": !orgs.is_empty(), "orgs": orgs })
+    json!({ "signed_in": !orgs.is_empty(), "orgs": orgs, "remote": remote_rows() })
 }
 
 #[cfg(test)]

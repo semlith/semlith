@@ -1012,6 +1012,13 @@ enum CloudCommand {
         #[arg(long)]
         host: Option<String>,
     },
+    /// Add an org's stores beside the local ones, named <org>/<store>, read
+    /// through the cloud and never written by this machine. `--store <name>`
+    /// (repeatable) takes only those.
+    Connect { org: String },
+    /// Take an org's remote stores off this machine. Nothing in the cloud
+    /// changes.
+    Disconnect { org: String },
     /// The org, its plan, its stores and what they cost this month.
     Status {
         org: Option<String>,
@@ -2665,7 +2672,21 @@ fn run() -> Result<()> {
         }
 
         Command::Stats => {
-            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            // Remote stores are listed when no `--store` narrowed the
+            // command, and are the whole answer on a machine with no local one.
+            let remote = if cli.store.is_empty() {
+                semlith::cloud::remote_stores()
+            } else {
+                Vec::new()
+            };
+            let fleet = match read_fleet(&cli.store, &cwd, false) {
+                Ok(fleet) => fleet,
+                Err(_) if !remote.is_empty() => {
+                    print_remote(&remote);
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
             let many = fleet.len() > 1;
             let mut totals = (0, 0, 0);
             for (label, store) in fleet.each() {
@@ -2851,6 +2872,7 @@ fn run() -> Result<()> {
                     semlith::human_bytes(totals.2),
                 );
             }
+            print_remote(&remote);
         }
 
         Command::Files {
@@ -2859,7 +2881,19 @@ fn run() -> Result<()> {
             sort,
             path,
         } => {
-            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let remote = if cli.store.is_empty() {
+                semlith::cloud::remote_stores()
+            } else {
+                Vec::new()
+            };
+            let fleet = match read_fleet(&cli.store, &cwd, false) {
+                Ok(fleet) => fleet,
+                Err(_) if !remote.is_empty() => {
+                    print_remote(&remote);
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
             if tree {
                 let filter = Filter::new(&path, &[], &[])?;
                 let sort = semlith::tree::Sort::parse(&sort)?;
@@ -2881,6 +2915,7 @@ fn run() -> Result<()> {
                     println!();
                 }
             }
+            print_remote(&remote);
         }
 
         Command::Add { url, name, airgap } => {
@@ -3158,6 +3193,7 @@ fn run() -> Result<()> {
         }
 
         Command::Drop { name: store, yes } => {
+            semlith::home::refuse_remote(&store)?;
             let dir = semlith::home::Registry::dir_of(&store)?;
             if !semlith::home::Registry::load()?.stores.contains_key(&store) {
                 anyhow::bail!("no registered store called {store}");
@@ -4948,9 +4984,39 @@ fn plural(n: u64, unit: &str) -> String {
 }
 
 /// `semlith cloud …`, out of `run` for the stack frame's sake (see `main`).
-fn run_cloud(what: CloudCommand, _stores: &[PathBuf]) -> Result<()> {
+fn run_cloud(what: CloudCommand, stores: &[PathBuf]) -> Result<()> {
     use semlith::cloud;
     match what {
+        CloudCommand::Connect { org } => {
+            // `--store` is the global flag, read here as store names.
+            let only: Vec<String> = stores
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect();
+            let entry = cloud::entry_for(Some(&org), None)?;
+            let names = cloud::connect(&entry, &only)?;
+            if names.is_empty() {
+                println!(
+                    "{org} has no store this token can reach yet; create one in the cloud app"
+                );
+            }
+            for name in &names {
+                println!("{name}  remote · {org}");
+            }
+            if !names.is_empty() {
+                println!(
+                    "search, stats and every store picker now include them; nothing in them is written from here"
+                );
+            }
+        }
+        CloudCommand::Disconnect { org } => {
+            let gone = cloud::disconnect(&org)?;
+            if gone.is_empty() {
+                println!("no remote store of {org} was connected");
+            } else {
+                println!("took {} off this machine: {}", gone.len(), gone.join(", "));
+            }
+        }
         CloudCommand::Login { org, host, token } => {
             let entry = cloud::login(
                 org.as_deref(),
@@ -4995,4 +5061,20 @@ fn run_cloud(what: CloudCommand, _stores: &[PathBuf]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The remote stores, one line each, after the local ones.
+fn print_remote(remote: &[(String, semlith::home::Remote)]) {
+    if remote.is_empty() {
+        return;
+    }
+    println!();
+    for (name, r) in remote {
+        println!(
+            "{name}  {}  answered by {}; `semlith cloud status {}` has its files and revisions",
+            semlith::cloud::badge(r),
+            semlith::cloud::host_name(&r.host),
+            r.org
+        );
+    }
 }

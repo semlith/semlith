@@ -66,6 +66,27 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         return Response::asset(kind, bytes);
     }
 
+    // A write naming a remote store is refused here, once, with the sentence
+    // that says why, rather than by each route finding no such store open.
+    if post
+        && matches!(
+            path,
+            "/api/index"
+                | "/api/add"
+                | "/api/forget"
+                | "/api/root"
+                | "/api/refused/decide"
+                | "/api/store/delete"
+                | "/api/store/settings"
+                | "/api/store/compact"
+        )
+        && let Ok(body) = request.json()
+        && let Some(name) = body.get("store").and_then(Value::as_str)
+        && let Err(e) = home::refuse_remote(name)
+    {
+        return Response::error(400, &e.to_string());
+    }
+
     match (get, post, path) {
         (true, _, "/") => crate::portal::page(),
 
@@ -663,6 +684,13 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
     let mut answer = json!({ "stores": out });
     if !failed.is_empty() {
         answer["failed"] = json!(failed);
+    }
+    // Semlith Cloud stores this machine reads, beside the local ones rather
+    // than among them: every page that totals, opens or writes a store reads
+    // `stores`, and none of that applies to one. Absent when there are none.
+    let remote = crate::cloud::remote_rows();
+    if !remote.is_empty() {
+        answer["remote"] = json!(remote);
     }
     Response::json(&answer)
 }
@@ -5248,7 +5276,9 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     // whether or not anything is indexed: an agent connecting to a fresh
     // install should be told which tools exist, not that the daemon is broken.
     let corpus_free = matches!(method, "initialize" | "tools/list" | "ping")
-        || method.starts_with("notifications/");
+        || method.starts_with("notifications/")
+        // A machine whose only stores are remote still answers from them.
+        || !crate::cloud::remote_stores().is_empty();
     if let Err(e) = state.open_mcp_fleet()
         && !corpus_free
     {

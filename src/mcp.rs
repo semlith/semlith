@@ -825,6 +825,16 @@ fn call_tool(
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
     let started = std::time::Instant::now();
 
+    // A write tool naming a remote store gets the sentence that says why,
+    // not "no store called …".
+    if matches!(name, "semlith_index" | "semlith_forget" | "semlith_add") {
+        for store in strings(&args, "store") {
+            if let Err(e) = crate::home::refuse_remote(&store) {
+                return Ok(tool_error(&e.to_string()));
+            }
+        }
+    }
+
     let body = match name {
         "semlith_search" => {
             let Some(query) = args.get("query").and_then(Value::as_str) else {
@@ -1221,6 +1231,15 @@ fn call_tool(
                 } else {
                     body
                 });
+            }
+            // Remote stores, by name and badge: what they hold is the cloud's
+            // to say, through `semlith_files` or a search naming them.
+            for (store, remote) in crate::cloud::remote_stores() {
+                lines.push(format!(
+                    "{store}: {}, answered by {}",
+                    crate::cloud::badge(&remote),
+                    crate::cloud::host_name(&remote.host)
+                ));
             }
             // The lanes that embed, once for the whole answer, experimental
             // ones said so.

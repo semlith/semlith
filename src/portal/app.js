@@ -1494,6 +1494,10 @@ const state = {
 
 const store = (name) => (data.stores?.stores || []).find((s) => s.name === name);
 const liveStores = () => (data.stores?.stores || []).filter((s) => !s.missing && !s.unopened);
+// Semlith Cloud stores this machine reads and never writes: listed beside the
+// local ones with their badge, never among them, since nothing that totals,
+// opens or writes a store applies to one.
+const remoteStores = () => data.stores?.remote || [];
 
 // ---------------------------------------------------------------- data cache
 
@@ -4789,6 +4793,22 @@ function storesList() {
         pager(view, pages, changed),
       ),
     ),
+    remoteStores().length
+      ? el(
+          "div",
+          { class: "card" },
+          el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Remote stores" }), meta("read through Semlith Cloud · never written from here")),
+          remoteStores().map((r) =>
+            el(
+              "div",
+              { class: "dl-row" },
+              el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: r.name }), el("span", { class: "muted t-xs", text: `${r.host_name} · searched with the local stores; change it in the cloud app` })),
+              pill(r.badge, "blue", { dot: false }),
+            ),
+          ),
+          el("div", { class: "card-foot" }, el("span", { class: "grow", text: "Settings › Cloud has their sources, revisions and lag" }), btn({ class: "btn xs", onclick: () => go("settings", "cloud") }, "Open Cloud")),
+        )
+      : null,
   );
 }
 
@@ -5914,6 +5934,7 @@ VIEWS.search = {
     const scopeItems = () => [
       { label: "All stores", hint: plural(liveStores().length, "store"), checked: !sr.store, onclick: () => ((sr.store = ""), repaint(), sr.query && runSearch()) },
       ...liveStores().map((s) => ({ label: s.name, hint: s.files ? `${n(s.files)} files` : "empty", checked: sr.store === s.name, onclick: () => ((sr.store = s.name), (sr.prefer = s.lean || sr.prefer), repaint(), sr.query && runSearch()) })),
+      ...remoteStores().map((r) => ({ label: r.name, hint: r.badge, checked: sr.store === r.name, onclick: () => ((sr.store = r.name), repaint(), sr.query && runSearch()) })),
     ];
     setTimeout(() => input.focus(), 0);
     const langs = (data.languages?.languages || []).map((l) => l.name);
