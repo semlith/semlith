@@ -3,7 +3,7 @@
 Everything the harness downloads, clones, indexes or writes lives under
 SCORECARD_HOME (default ~/semlith-bench/scorecard), never in this repository.
 """
-import hashlib, json, os, platform, subprocess, sys, time
+import hashlib, shutil, json, os, platform, subprocess, sys, time
 from collections import namedtuple
 
 HOME = os.environ.get("SCORECARD_HOME", os.path.expanduser("~/semlith-bench/scorecard"))
@@ -58,6 +58,19 @@ def semlith_version():
     return sh([SEMLITH, "--version"]).stdout.strip()
 
 
+def semlith_binary():
+    """Which binary measured: its path and SHA-256, and the commit it was built from when it is a build of the
+    repository this harness sits in. A branch build reports the last released version until its release commit,
+    so the version string alone cannot tell two of them apart."""
+    path = shutil.which(SEMLITH) or SEMLITH
+    with open(path, "rb") as f:
+        out = {"path": path, "sha256": hashlib.sha256(f.read()).hexdigest()}
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if os.path.realpath(path).startswith(os.path.join(repo, "target") + os.sep):
+        out["commit"] = sh(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip()
+    return out
+
+
 def command_line():
     return "uv run --with pyarrow python " + " ".join([os.path.relpath(sys.argv[0])] + sys.argv[1:])
 
@@ -75,7 +88,7 @@ def write_manifest(directory, extra):
         if os.path.isfile(p) and name != "MANIFEST.json":
             with open(p, "rb") as f:
                 files[name] = hashlib.sha256(f.read()).hexdigest()
-    doc = {"command": command_line(), "semlith": semlith_version(), "machine": platform.platform(),
+    doc = {"command": command_line(), "semlith": semlith_version(), "semlith_binary": semlith_binary(), "machine": platform.platform(),
            "python": platform.python_version(), "written": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "files": files}
     doc.update(extra)
     with open(os.path.join(directory, "MANIFEST.json"), "w") as f:
