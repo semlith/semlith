@@ -1201,6 +1201,17 @@ pub fn merge(
     all
 }
 
+/// [`merge`] for an answer in JSON: local rows as they are, remote hits as
+/// [`RemoteHit::to_json`] rows with their remote fields, by score, cut to `k`.
+pub fn merge_rows(local: Vec<Value>, remote: &[RemoteHit], query: &str, k: usize) -> Vec<Value> {
+    let mut all = local;
+    all.extend(remote.iter().map(|h| h.to_json(query)));
+    let score = |v: &Value| v["score"].as_f64().unwrap_or(0.0);
+    all.sort_by(|a, b| score(b).total_cmp(&score(a)));
+    all.truncate(k);
+    all
+}
+
 /// Forward one tool call to a remote store's MCP endpoint and return its
 /// text, or why it could not be asked.
 pub fn forward_tool(

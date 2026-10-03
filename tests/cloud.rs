@@ -957,6 +957,228 @@ fn a_local_and_a_remote_store_answer_as_one_list() {
     );
 }
 
+// --------------------------------------------------------- command line
+
+/// `semlith` with the owner's model cache, for a run that loads the model.
+fn semlith_model(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(args)
+        .env("HOME", home)
+        .env("SEMLITH_HOME", home.join(".semlith"))
+        .env("SEMLITH_MODEL_CACHE", model_cache())
+        .env_remove("SEMLITH_STORE")
+        .env_remove("SEMLITH_AIRGAP")
+        .current_dir(home)
+        .output()
+        .expect("semlith runs")
+}
+
+fn stdout(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+fn stderr(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+/// Re-point the credentials and the registry at a port nothing listens on.
+fn host_gone(home: &Path, host: &Stub) {
+    let dead = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}", listener.local_addr().unwrap())
+    };
+    for file in ["cloud.json", "registry.json"] {
+        let path = home.join(".semlith").join(file);
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace(&host.url, &dead);
+        std::fs::write(&path, text).unwrap();
+    }
+}
+
+/// Only remote stores, no local one: the command line answers from them,
+/// labelled with where each hit came from, and loads no model to do it.
+#[test]
+fn the_cli_searches_remote_stores_with_no_local_one() {
+    let home = tempfile::tempdir().unwrap();
+    let host = connected(home.path());
+    let o = semlith(home.path(), &["search", "-k", "2", "order total"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let text = stdout(&o);
+    let total = text.find("api/src/total.rs").expect(&text);
+    let runbook = text.find("runbook.md").expect(&text);
+    assert!(total < runbook, "by score: {text}");
+    assert!(
+        !text.contains("low.rs") && !text.contains("not/asked.rs"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[acme/platform (remote · acme · a41c9e2 · 38 s behind)]"),
+        "{text}"
+    );
+    let asked = host.to("/v1/orgs/acme/search");
+    assert_eq!(asked.len(), 1, "one request per org");
+    assert_eq!(asked[0].header("semlith-client"), Some("cli"));
+
+    // `--json` rows carry the remote fields `/api/search` adds.
+    let o = semlith(home.path(), &["search", "--json", "-k", "2", "order total"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let rows: Value =
+        serde_json::from_str(&stdout(&o)).unwrap_or_else(|e| panic!("{e}: {}", out(&o)));
+    assert_eq!(rows[0]["path"], "api/src/total.rs", "{rows}");
+    assert_eq!(rows[0]["store"], "acme/platform");
+    assert_eq!(rows[0]["remote"], "acme");
+    assert_eq!(rows[0]["badge"], "remote · acme");
+    assert_eq!(rows[0]["revision"], "a41c9e2");
+    assert_eq!(rows[0]["behind_seconds"], 38);
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+}
+
+/// `-s <org>/<store>` names that remote store and asks for it alone.
+#[test]
+fn the_cli_store_flag_names_a_remote_store() {
+    let home = tempfile::tempdir().unwrap();
+    let host = connected(home.path());
+    let o = semlith(
+        home.path(),
+        &["search", "-s", "acme/platform", "order total"],
+    );
+    assert!(o.status.success(), "{}", out(&o));
+    let text = stdout(&o);
+    assert!(text.contains("api/src/total.rs"), "{text}");
+    assert!(!text.contains("runbook.md"), "docs was not asked: {text}");
+    let asked = host.to("/v1/orgs/acme/search");
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].json()["stores"], json!(["platform"]));
+
+    // `stats` and `files` say what a remote store is rather than erroring.
+    for command in ["stats", "files"] {
+        let o = semlith(home.path(), &[command, "-s", "acme/platform"]);
+        assert!(o.status.success(), "{command}: {}", out(&o));
+        let text = stdout(&o);
+        assert!(
+            text.contains("acme/platform  remote · acme"),
+            "{command}: {text}"
+        );
+        assert!(!text.contains("acme/docs"), "{command}: {text}");
+    }
+}
+
+/// The host goes away: one line says which stores were skipped and why, and
+/// the command still answers.
+#[test]
+fn the_cli_skips_an_unreachable_host_in_one_line() {
+    let home = tempfile::tempdir().unwrap();
+    let host = connected(home.path());
+    host_gone(home.path(), &host);
+    let o = semlith(home.path(), &["search", "order total"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let err = stderr(&o);
+    assert!(
+        err.contains("remote stores skipped: acme/docs, acme/platform ("),
+        "{err}"
+    );
+    assert!(err.contains("could not be reached"), "{err}");
+    assert_eq!(err.matches("remote stores skipped").count(), 1, "{err}");
+    assert!(err.contains("No match in the remote stores."), "{err}");
+}
+
+fn index_notes(home: &Path) {
+    let corpus = home.join("notes");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(
+        corpus.join("pricing.md"),
+        "The order total is the sum of the line totals, then tax.",
+    )
+    .unwrap();
+    let o = semlith_model(
+        home,
+        &["index", "--name", "notes", corpus.to_str().unwrap()],
+    );
+    assert!(o.status.success(), "{}", out(&o));
+}
+
+/// A local and a remote store from the command line: one list by score
+/// under one `k`; the host going away leaves the local answer whole; and a
+/// machine with no remote store prints the same `--json` bytes it always did.
+#[test]
+#[ignore = "indexes a local store, so it needs the embedding model"]
+fn the_cli_merges_local_and_remote_hits_by_score() {
+    let home = tempfile::tempdir().unwrap();
+    index_notes(home.path());
+    let query = "how is the order total computed";
+    let before = semlith_model(home.path(), &["search", "--json", query]);
+    assert!(before.status.success(), "{}", out(&before));
+
+    let host = connected(home.path());
+    let o = semlith_model(home.path(), &["search", "--json", "-k", "3", query]);
+    assert!(o.status.success(), "{}", out(&o));
+    let rows: Value =
+        serde_json::from_str(&stdout(&o)).unwrap_or_else(|e| panic!("{e}: {}", out(&o)));
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    let scores: Vec<f64> = rows.iter().map(|r| r["score"].as_f64().unwrap()).collect();
+    assert!(
+        scores.windows(2).all(|w| w[0] >= w[1]),
+        "by score: {scores:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r["path"].as_str().unwrap().ends_with("pricing.md")),
+        "{rows:?}"
+    );
+    assert!(rows.iter().any(|r| r["remote"] == "acme"), "{rows:?}");
+
+    let o = semlith_model(home.path(), &["search", "-k", "8", query]);
+    assert!(o.status.success(), "{}", out(&o));
+    let text = stdout(&o);
+    assert!(text.contains("[notes] "), "the local store's label: {text}");
+    assert!(text.contains("pricing.md"), "{text}");
+    assert!(text.contains("[acme/platform (remote · acme"), "{text}");
+    assert!(stderr(&o).contains("across 3 stores"), "{}", out(&o));
+
+    // `-s` names a local and a remote store side by side.
+    let notes = home.path().join(".semlith/stores/notes");
+    let o = semlith_model(
+        home.path(),
+        &[
+            "search",
+            "-s",
+            notes.to_str().unwrap(),
+            "-s",
+            "acme/docs",
+            query,
+        ],
+    );
+    assert!(o.status.success(), "{}", out(&o));
+    let text = stdout(&o);
+    assert!(
+        text.contains("pricing.md") && text.contains("runbook.md"),
+        "{text}"
+    );
+    assert!(!text.contains("api/src/total.rs"), "{text}");
+
+    host_gone(home.path(), &host);
+    let o = semlith_model(home.path(), &["search", query]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(stdout(&o).contains("pricing.md"), "{}", out(&o));
+    assert!(
+        stderr(&o).contains("remote stores skipped: acme/docs, acme/platform ("),
+        "{}",
+        out(&o)
+    );
+
+    let o = semlith(home.path(), &["cloud", "disconnect", "acme"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let after = semlith_model(home.path(), &["search", "--json", query]);
+    assert!(after.status.success(), "{}", out(&after));
+    assert_eq!(
+        stdout(&before),
+        stdout(&after),
+        "no remote store, same bytes"
+    );
+}
+
 // ------------------------------------------------------------------- push
 
 /// A host holding one upload source: it answers a manifest with the paths

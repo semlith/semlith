@@ -1913,7 +1913,22 @@ fn run() -> Result<()> {
             // Built before any store is opened, so an unknown language name
             // fails immediately rather than after a model load.
             let filter = Filter::new(&path, &ext, &lang)?;
+            // Remote stores join a search the way they join MCP's: every one
+            // when no `--store` narrowed it, else the ones named. A machine
+            // that never connected one reads exactly as it always did.
+            let (targets, local_flags) = store_flags(&cli.store);
             if exact {
+                if !cli.store.is_empty() && !targets.is_empty() {
+                    bail!(
+                        "--exact reads local stores only, and {} is remote; \
+                         drop --exact to search it",
+                        targets
+                            .iter()
+                            .map(|(n, _)| n.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
                 // No model: a grep reads the stored text and nothing else.
                 let fleet = read_fleet(&cli.store, &cwd, false)?;
                 let found = fleet.grep_in(None, &query, &filter, offset)?;
@@ -1937,18 +1952,31 @@ fn run() -> Result<()> {
             // argument costs nothing.
             let prefer = semlith::Prefer::parse(&prefer)?;
 
-            let mut fleet = read_fleet(&cli.store, &cwd, false)?;
-            fleet.quiet = json;
+            let skip_local = !cli.store.is_empty() && local_flags.is_empty();
+            let mut fleet = if targets.is_empty() {
+                Some(read_fleet(&cli.store, &cwd, false)?)
+            } else if skip_local {
+                None
+            } else {
+                // Remote stores and no local one is an answer, not an error.
+                let dirs = home::read_dirs(&local_flags, &cwd)?;
+                (!dirs.is_empty()).then(|| Fleet::open(&dirs)).transpose()?
+            };
+            if let Some(fleet) = fleet.as_mut() {
+                fleet.quiet = json;
+            }
 
             // A glob that selects nothing is a different answer from a corpus
             // that does not discuss the query, and only one of them is the
             // user's typo. Across several stores this is one question about the
             // whole selection: a filter that matches nothing in one store but
-            // something in another has not selected nothing.
-            let selected = (!filter.is_empty())
-                .then(|| fleet.matching_files(&filter))
-                .transpose()?;
-            if selected == Some(0) {
+            // something in another has not selected nothing. Remote stores
+            // apply the filter themselves, so with them it is not the answer.
+            let selected = match &fleet {
+                Some(fleet) if !filter.is_empty() => Some(fleet.matching_files(&filter)?),
+                _ => None,
+            };
+            if let (Some(0), true, Some(fleet)) = (selected, targets.is_empty(), &fleet) {
                 if json {
                     println!("[]");
                 } else {
@@ -1958,21 +1986,75 @@ fn run() -> Result<()> {
             }
 
             let started = Instant::now();
-            let hits = fleet.search_preferring(None, &query, k, &filter, prefer)?;
-            let elapsed = started.elapsed();
-            // The command line is a client like any other, and its retrievals
-            // count for exactly as much as an agent's. Recorded under `cli`, in
-            // the same table, through the same path.
-            semlith::ledger::search(&fleet, &CLI_LEDGER, &query, &hits, elapsed);
-            // Said on stderr, so `--json` and a pipe read the hits alone.
-            if let Some(note) = fleet.pending_note() {
-                eprintln!("{note}");
+            let mut hits = match fleet.as_mut() {
+                Some(fleet) if selected != Some(0) => {
+                    fleet.search_preferring(None, &query, k, &filter, prefer)?
+                }
+                _ => Vec::new(),
+            };
+            if let Some(fleet) = &fleet {
+                // The command line is a client like any other, and its
+                // retrievals count for exactly as much as an agent's. Recorded
+                // under `cli`, in the same table, through the same path.
+                semlith::ledger::search(fleet, &CLI_LEDGER, &query, &hits, started.elapsed());
+                // Said on stderr, so `--json` and a pipe read the hits alone.
+                if let Some(note) = fleet.pending_note() {
+                    eprintln!("{note}");
+                }
             }
+            // Asked with the same arguments, through the same call MCP and
+            // the portal use; a store that cannot be asked costs one line.
+            let fetched = (!targets.is_empty()).then(|| {
+                semlith::cloud::search(
+                    &targets,
+                    &semlith::cloud::Query {
+                        query: &query,
+                        k: k.clamp(1, 50),
+                        path: &path,
+                        ext: &ext,
+                        lang: &lang,
+                        prefer: (prefer != semlith::Prefer::Any).then(|| prefer.as_str()),
+                    },
+                    &semlith::cloud::Who {
+                        client: "cli",
+                        session: "cli",
+                    },
+                )
+            });
+            let elapsed = started.elapsed();
+            let skipped = fetched
+                .as_ref()
+                .and_then(|f| semlith::cloud::skipped_line(&f.skipped));
 
             if json {
-                println!("{}", serde_json::to_string_pretty(&hits)?);
-            } else if hits.is_empty() {
-                eprintln!("{}", fleet.no_match_reason(&filter));
+                match &fetched {
+                    None => println!("{}", serde_json::to_string_pretty(&hits)?),
+                    Some(f) => {
+                        let local = hits
+                            .iter()
+                            .map(serde_json::to_value)
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let rows = semlith::cloud::merge_rows(local, &f.hits, &query, k);
+                        println!("{}", serde_json::to_string_pretty(&rows)?);
+                    }
+                }
+                if let Some(line) = skipped {
+                    eprintln!("{line}");
+                }
+                return Ok(());
+            }
+            if let Some(f) = &fetched {
+                let label = fleet
+                    .as_ref()
+                    .filter(|fleet| fleet.len() == 1)
+                    .and_then(|fleet| fleet.labels().first().map(|l| l.to_string()));
+                hits = semlith::cloud::merge(hits, label.as_deref(), &f.hits, k);
+            }
+            if hits.is_empty() {
+                match &fleet {
+                    Some(fleet) => eprintln!("{}", fleet.no_match_reason(&filter)),
+                    None => eprintln!("No match in the remote stores."),
+                }
             } else {
                 let mut out = std::io::stdout().lock();
                 for (i, h) in hits.iter().enumerate() {
@@ -2016,33 +2098,42 @@ fn run() -> Result<()> {
                     }
                     writeln!(out)?;
                 }
-                let across = if fleet.len() > 1 {
-                    // A store that contributed nothing is worth seeing: it is
-                    // otherwise indistinguishable from one that was never
-                    // opened.
-                    let breakdown: Vec<String> = fleet
-                        .labels()
+                // A store that contributed nothing is worth seeing: it is
+                // otherwise indistinguishable from one that was never opened.
+                // A remote hit's label is its name and then its provenance.
+                let mut breakdown: Vec<String> = Vec::new();
+                for label in fleet.iter().flat_map(|fleet| fleet.labels()) {
+                    let n = hits
                         .iter()
-                        .map(|label| {
-                            let n = hits
-                                .iter()
-                                .filter(|h| h.store.as_deref() == Some(*label))
-                                .count();
-                            format!("{label} {n}")
-                        })
-                        .collect();
-                    format!(" across {} stores: {}", fleet.len(), breakdown.join(", "))
+                        .filter(|h| h.store.as_deref() == Some(label))
+                        .count();
+                    breakdown.push(format!("{label} {n}"));
+                }
+                for (name, _) in &targets {
+                    let tag = format!("{name} (");
+                    let n = hits
+                        .iter()
+                        .filter(|h| h.store.as_deref().is_some_and(|s| s.starts_with(&tag)))
+                        .count();
+                    breakdown.push(format!("{name} {n}"));
+                }
+                let across = if breakdown.len() > 1 {
+                    format!(
+                        " across {} stores: {}",
+                        breakdown.len(),
+                        breakdown.join(", ")
+                    )
                 } else {
                     String::new()
                 };
-                match selected {
-                    Some(n) => eprintln!(
+                match (selected, &fleet) {
+                    (Some(n), Some(fleet)) => eprintln!(
                         "{} hits in {:?} (filter selected {n} of {} files){across}",
                         hits.len(),
                         elapsed,
                         fleet.files()?,
                     ),
-                    None => eprintln!("{} hits in {:?}{across}", hits.len(), elapsed),
+                    _ => eprintln!("{} hits in {:?}{across}", hits.len(), elapsed),
                 }
                 // How the query was read, and what that did. Printed on every
                 // answer rather than only when it was surprising: a caller can
@@ -2062,7 +2153,10 @@ fn run() -> Result<()> {
                 // Only when it happened. A store inside its budget never sees
                 // this line, and a store past it should not have to guess why
                 // its queries got slower.
-                let evicted: u64 = fleet.each().map(|(_, s)| s.evictions()).sum();
+                let evicted: u64 = fleet
+                    .iter()
+                    .flat_map(|fleet| fleet.each().map(|(_, s)| s.evictions()))
+                    .sum();
                 if evicted > 0 {
                     eprintln!(
                         "semlith: put down {evicted} shard(s) to stay inside the {} MB index \
@@ -2071,6 +2165,9 @@ fn run() -> Result<()> {
                         semlith::index::INDEX_MEMORY_ENV,
                     );
                 }
+            }
+            if let Some(line) = skipped {
+                eprintln!("{line}");
             }
         }
 
@@ -2750,13 +2847,15 @@ fn run() -> Result<()> {
 
         Command::Stats => {
             // Remote stores are listed when no `--store` narrowed the
-            // command, and are the whole answer on a machine with no local one.
-            let remote = if cli.store.is_empty() {
-                semlith::cloud::remote_stores()
-            } else {
-                Vec::new()
-            };
-            let fleet = match read_fleet(&cli.store, &cwd, false) {
+            // command or one named them, and are the whole answer on a
+            // machine with no local one.
+            let (remote, local) = store_flags(&cli.store);
+            // Only remote stores named: they are the whole answer.
+            if !cli.store.is_empty() && local.is_empty() {
+                print_remote(&remote);
+                return Ok(());
+            }
+            let fleet = match read_fleet(&local, &cwd, false) {
                 Ok(fleet) => fleet,
                 Err(_) if !remote.is_empty() => {
                     print_remote(&remote);
@@ -2958,12 +3057,13 @@ fn run() -> Result<()> {
             sort,
             path,
         } => {
-            let remote = if cli.store.is_empty() {
-                semlith::cloud::remote_stores()
-            } else {
-                Vec::new()
-            };
-            let fleet = match read_fleet(&cli.store, &cwd, false) {
+            let (remote, local) = store_flags(&cli.store);
+            // Only remote stores named: they are the whole answer.
+            if !cli.store.is_empty() && local.is_empty() {
+                print_remote(&remote);
+                return Ok(());
+            }
+            let fleet = match read_fleet(&local, &cwd, false) {
                 Ok(fleet) => fleet,
                 Err(_) if !remote.is_empty() => {
                     print_remote(&remote);
@@ -5276,6 +5376,20 @@ fn run_cloud(what: CloudCommand, stores: &[PathBuf]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `--store` flags split into the remote stores they name (`<org>/<store>`)
+/// and the local ones left. With no flags, every remote store, as on MCP.
+fn store_flags(flags: &[PathBuf]) -> (Vec<semlith::cloud::Named>, Vec<PathBuf>) {
+    let remotes = semlith::cloud::remote_stores();
+    let is_remote = |p: &PathBuf| remotes.iter().any(|(n, _)| Path::new(n) == p);
+    let local = flags.iter().filter(|p| !is_remote(p)).cloned().collect();
+    let named = remotes
+        .iter()
+        .filter(|(n, _)| flags.is_empty() || flags.iter().any(|p| Path::new(n) == p))
+        .cloned()
+        .collect();
+    (named, local)
 }
 
 /// The remote stores, one line each, after the local ones.
