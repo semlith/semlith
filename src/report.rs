@@ -57,6 +57,11 @@ pub struct Report {
     /// denominator this module exists to refuse.
     pub window: String,
     pub blocks: Vec<Block>,
+    /// Where it was generated, when not on this machine: an embedder that
+    /// keeps the data elsewhere (Semlith Cloud) says so, and the local line's
+    /// "nothing left it" is not claimed for it. Absent from JSON when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// How far back a report looks.
@@ -444,6 +449,7 @@ pub fn generate_with(
         // and says so about the other.
         window: window.note(matches!(kind, "access" | "change" | "savings" | "gaps")),
         blocks,
+        origin: None,
     })
 }
 
@@ -1260,16 +1266,21 @@ impl Report {
     /// implied, because a narrowed report that does not say it is narrowed is
     /// a figure whose subject the reader has to guess.
     fn meta(&self) -> String {
-        format!(
-            "Generated {} on this machine, over {}, covering {}. Nothing left it.",
-            self.generated,
-            if self.stores.is_empty() {
-                "no open store".to_string()
-            } else {
-                self.stores.join(", ")
-            },
-            self.window,
-        )
+        let over = if self.stores.is_empty() {
+            "no open store".to_string()
+        } else {
+            self.stores.join(", ")
+        };
+        match &self.origin {
+            None => format!(
+                "Generated {} on this machine, over {over}, covering {}. Nothing left it.",
+                self.generated, self.window,
+            ),
+            Some(origin) => format!(
+                "Generated {} in {origin}, over {over}, covering {}.",
+                self.generated, self.window,
+            ),
+        }
     }
 
     fn markdown(&self) -> String {
@@ -1471,6 +1482,7 @@ mod tests {
                     rows: vec![vec!["one".into(), "two, with a comma".into()]],
                 },
             ],
+            origin: None,
         }
     }
 
