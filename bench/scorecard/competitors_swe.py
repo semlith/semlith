@@ -1,5 +1,5 @@
-"""Competitor arms (competitors/ALL) on the 50-instance SWE-bench Lite sample, retrieval only, beside semlith on
-the same checkouts.
+"""Competitor arms (competitors/ALL) on the first SAMPLE_N instances of the seeded 50-instance SWE-bench Lite
+sample, retrieval only, beside semlith on the same checkouts.
 
     cd bench/scorecard && python3.11 competitors_swe.py walk [--tools rg,ugrep,...] [--out DIR]
     cd bench/scorecard && python3.11 competitors_swe.py score [--out DIR]
@@ -26,12 +26,15 @@ from competitors import ALL
 
 OUT = os.path.join(HOME, "competitors")
 SAMPLE = os.path.join(HOME, "agent", "sample.json")
+# The sample is a seeded shuffle, so its prefix is still a random sample. 20 since US-SEMLITH-0.38.0-I01: the slow four
+# would not finish 50 in the release's wall clock.
+SAMPLE_N = 20
 INDEX_BUDGET = 4  # x semlith's cumulative index seconds on the same instances
 FAST_FIRST = ["rg", "ugrep", "semble", "graphify", "serena", "sourcebot", "grepai", "colgrep", "ck"]
 
 
 def sample():
-    ids = [i["instance_id"] for i in json.load(open(SAMPLE))]
+    ids = [i["instance_id"] for i in json.load(open(SAMPLE))][:SAMPLE_N]
     lite = swe.instances(["lite"])
     return [lite[i] for i in ids]
 
@@ -222,7 +225,7 @@ def walk(args):
             print(f"{repo} {n + 1}/{len(todo)} {iid} {time.time() - t0:.0f}s (walk {time.time() - t_walk:.0f}s)",
                   flush=True)
     f.close()
-    write_manifest(out, {"bench": "swe-competitors", "sample": SAMPLE, "tools": tools, "runs": RUNS,
+    write_manifest(out, {"bench": "swe-competitors", "sample": SAMPLE, "sample_n": SAMPLE_N, "tools": tools, "runs": RUNS,
                          "index_budget_x": INDEX_BUDGET,
                          "versions": {t: ALL[t].version() for t in tools}})
 
@@ -261,7 +264,7 @@ COLS = ("any@1", "any@5", "any@10", "all@10", "tok2000", "tok4000", "tok8000")
 
 def score(args):
     rows = load_rows(args.out)
-    insts = [i["instance_id"] for i in json.load(open(SAMPLE))]
+    insts = [i["instance_id"] for i in sample()]
     table = []
     for tool in [t for t in FAST_FIRST if any(r["arm"] == t for r in rows)]:
         ok, why = set(), Counter()
