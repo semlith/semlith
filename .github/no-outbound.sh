@@ -24,16 +24,14 @@ uid=$(id -u "$user")
 corpus=/home/$user/corpus
 
 as mkdir -p "$corpus"
-# The model cache, private before anything writes into it: semlith refuses
-# weights from a directory other users can write.
-as mkdir -p -m 700 "/home/$user/.cache" "/home/$user/.cache/semlith" "/home/$user/.cache/semlith/models"
-as chmod 700 "/home/$user/.cache" "/home/$user/.cache/semlith" "/home/$user/.cache/semlith/models"
-sudo stat -c '%a %n' "/home/$user/.cache/semlith/models"
+
 as sh -c "printf 'pub fn total(items: &[u32]) -> u32 { items.iter().sum() }\n' > $corpus/lib.rs"
 as sh -c "printf '# Notes\n\nThe order total is the sum of its items.\n' > $corpus/notes.md"
 # The model is fetched here, before the capture: fetching it is the one
 # download a first run makes, and it is not what this check is about.
 as semlith-under-test index "$corpus" > /dev/null
+# semlith made its model cache private itself, whatever the umask.
+sudo stat -c '%a %n' "/home/$user/.cache/semlith/models"
 
 capture() {
   sudo iptables -I OUTPUT -m owner --uid-owner "$uid" ! -o lo -j NFLOG --nflog-group 7

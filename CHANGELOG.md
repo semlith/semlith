@@ -60,6 +60,10 @@ the binary makes no outbound connection and starts no thread for the cloud.
   tool and the portal.
 - `semlith cloud replay` says once, not twice, that session replay is off for
   the org.
+- The model cache is created private (0700) when it does not exist yet. Left
+  to the download it took the umask, and on Ubuntu, whose default is 002, the
+  first run downloaded the model and every later run refused the
+  group-writable directory.
 
 ## [0.36.0] - 2026-10-02
 
