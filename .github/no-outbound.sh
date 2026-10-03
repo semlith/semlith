@@ -65,10 +65,15 @@ as sh -c "printf 'Totals round half up.\n' >> $corpus/notes.md"
 timeout 300 sudo -u "$user" -H env HOME="/home/$user" SEMLITH_NO_SERVICE=1 sh -c 'umask 077; exec "$@"' sh semlith-under-test index "$corpus" > /dev/null
 step "search"
 timeout 120 sudo -u "$user" -H env HOME="/home/$user" sh -c "umask 077; cd $corpus && exec semlith-under-test search 'where is the order total'" > /dev/null
-# The daemon in the background with sudo -b: a backgrounded child under a
-# plain sudo keeps the terminal, and sudo waits on it for ever.
+# The daemon as a transient systemd service: started detached, holding no
+# terminal (a daemon backgrounded under sudo kept sudo waiting until the
+# job's limit), and still running as the capture user.
 step "the daemon and its portal"
-sudo -b -u "$user" -H env HOME="/home/$user" SEMLITH_NO_SERVICE=1 sh -c "umask 077; exec semlith-under-test start --port $port --no-service > /home/$user/daemon.out 2>&1 < /dev/null"
+sudo systemd-run --quiet --unit=semlith-nocap --uid="$user" --gid="$user" \
+  --property=UMask=0077 --working-directory="/home/$user" \
+  --setenv=HOME="/home/$user" --setenv=SEMLITH_NO_SERVICE=1 \
+  --property=StandardOutput="file:/home/$user/daemon.out" --property=StandardError="file:/home/$user/daemon.out" \
+  /usr/local/bin/semlith-under-test start --port "$port" --no-service
 for _ in $(seq 1 90); do sudo grep -q 'token=' "/home/$user/daemon.out" 2> /dev/null && break; sleep 1; done
 token=$(sudo grep -oE 'token=[0-9a-f]+' "/home/$user/daemon.out" | head -1 | cut -d= -f2)
 [ -n "$token" ] || { echo "the daemon printed no token:"; sudo cat "/home/$user/daemon.out"; exit 1; }
@@ -76,6 +81,7 @@ curl -fsS -m 30 -o /dev/null "http://127.0.0.1:$port/"
 curl -fsS -m 30 -H "Semlith-Token: $token" "http://127.0.0.1:$port/api/privacy" > privacy.json
 curl -fsS -m 60 -H "Semlith-Token: $token" "http://127.0.0.1:$port/api/search?q=order%20total" > /dev/null
 step "stop"
+sudo systemctl stop semlith-nocap 2> /dev/null || true
 sudo pkill -u "$user" -f semlith-under-test || true
 release
 session=$(packets session.pcap)
