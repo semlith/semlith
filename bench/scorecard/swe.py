@@ -3,14 +3,17 @@ patch edits.
 
     uv run --with pyarrow python bench/scorecard/swe.py walk [--sets lite,verified] [--arms semlith,r0] [--repo R]
     uv run --with pyarrow python bench/scorecard/swe.py score <run dir>
+    uv run --with pyarrow python bench/scorecard/swe.py check [--repo R]
 
 `walk` checks out each instance's base commit (instances of one repository in commit order), re-indexes the
 repository's store incrementally -- only the files that changed re-embed -- and runs every arm RUNS times.
 Results append to <run dir>/rows.jsonl, one line per (instance, arm, run), so a walk that stops resumes where
 it left off. `score` prints file Recall@1/5/10 (any gold file, and all gold files) and the share of instances
-whose first gold file arrives within 2k/4k/8k tokens, median of the runs with the spread.
+whose first gold file arrives within 2k/4k/8k tokens, median of the runs with the spread. `check` takes a walked
+store at the commit the walk left it on and asserts that its file list holds nothing `git ls-files` does not, and
+equals a fresh index of the same checkout -- so the incremental walk indexed each instance at its own commit.
 """
-import argparse, json, os, re, sys, time
+import argparse, json, os, random, re, shutil, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import arms
@@ -64,6 +67,41 @@ ARMS = {
 }
 
 
+def rel_files(store, root):
+    """`semlith files` prints a path relative to the working directory when it can and absolute otherwise; every
+    arm and the gold speak root-relative paths."""
+    return [os.path.relpath(f if os.path.isabs(f) else os.path.join(os.getcwd(), f), root) for f in arms.store_files(store)]
+
+
+def check(args):
+    """Walked store against `git ls-files` and against a fresh index of the same checkout, for a seeded three
+    repositories (or --repo). Run it after a walk, never beside one: it reads the walk's stores."""
+    repos = sorted({i["repo"] for i in instances(["lite", "verified"]).values()})
+    repos = [args.repo] if args.repo else sorted(random.Random(20261003).sample(repos, 3))
+    bad = 0
+    for repo in repos:
+        name = repo.replace("/", "__")
+        root, store = os.path.join(REPOS, name), os.path.join(STORES, "swe-" + name)
+        head = sh(["git", "rev-parse", "HEAD"], cwd=root).stdout.strip()
+        index(store, root)  # a no-op after a walk by the same binary; a newer binary brings the store to its rules
+        walked = set(rel_files(store, root))
+        tracked = set(sh(["git", "ls-files"], cwd=root).stdout.splitlines())
+        fresh_store = os.path.join(STORES, "check-" + name)
+        shutil.rmtree(fresh_store, ignore_errors=True)
+        try:
+            index(fresh_store, root)
+            fresh = set(rel_files(fresh_store, root))
+        finally:
+            shutil.rmtree(fresh_store, ignore_errors=True)
+        untracked, only_walked, only_fresh = walked - tracked, walked - fresh, fresh - walked
+        ok = not (untracked or only_walked or only_fresh)
+        bad += not ok
+        print(f"{repo} @ {head[:12]}: {len(walked)} files walked, {len(fresh)} fresh, {len(tracked)} tracked; "
+              f"not tracked {len(untracked)}, only walked {len(only_walked)}, only fresh {len(only_fresh)} "
+              f"{'ok' if ok else 'MISMATCH ' + str(sorted(untracked | only_walked | only_fresh)[:10])}", flush=True)
+    return bad
+
+
 def walk(args):
     out = args.out or run_dir("swe")
     os.makedirs(out, exist_ok=True)
@@ -93,10 +131,7 @@ def walk(args):
             checkout(root, inst["base_commit"])
             idx = index(store, root)
             chunks, vectors = arms.embedded(store)
-            # `semlith files` prints a path relative to the working directory when it can and
-            # absolute otherwise; every arm and the gold speak root-relative paths.
-            files = [os.path.relpath(f if os.path.isabs(f) else os.path.join(os.getcwd(), f), root)
-                     for f in arms.store_files(store)]
+            files = rel_files(store, root)
             present = [g for g in inst["gold"] if os.path.exists(os.path.join(root, g))]
             missing = [g for g in present if g not in set(files)]
             with open(rows_path, "a") as f:
@@ -152,7 +187,7 @@ def score(directory, sets=("lite", "verified")):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["walk", "score"])
+    ap.add_argument("cmd", choices=["walk", "score", "check"])
     ap.add_argument("dir", nargs="?")
     ap.add_argument("--sets", default="lite,verified")
     ap.add_argument("--arms", default="semlith,r0")
@@ -161,5 +196,7 @@ if __name__ == "__main__":
     a = ap.parse_args()
     if a.cmd == "walk":
         print(walk(a))
+    elif a.cmd == "check":
+        sys.exit(1 if check(a) else 0)
     else:
         score(a.dir)
