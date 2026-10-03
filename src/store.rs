@@ -313,6 +313,7 @@ fn open_once(path: &Path) -> Result<Connection> {
     db.pragma_update(None, "secure_delete", "ON")?;
     defensive(&db)?;
     db.execute_batch(SCHEMA)?;
+    db.execute_batch(GLOB_INDEX)?;
     add_columns(&db)?;
     check_format(&db)?;
     backfill_fts(&db)?;
@@ -619,13 +620,26 @@ fn glob_predicate(groups: &[Vec<String>]) -> (String, Vec<String>) {
         let (excluded, included): (Vec<&String>, Vec<&String>) =
             group.iter().partition(|p| p.starts_with('!'));
         let placeholder = format!("{GLOB_PATH} GLOB ?");
-        let ors = vec![placeholder.clone(); included.len()].join(" OR ");
-        let nots = vec![placeholder; excluded.len()].join(" OR ");
-
         // Binds are positional, so they are pushed in the order the clause
         // below writes their placeholders — inclusions first — rather than in
         // the order the user typed them.
-        binds.extend(included.into_iter().cloned());
+        let ors = included
+            .into_iter()
+            .map(|p| match literal_dir(p) {
+                // The range is what the index answers; the GLOB stays, so the
+                // rows are exactly the pattern's.
+                Some((from, to)) => {
+                    binds.extend([from, to, p.clone()]);
+                    format!("({GLOB_PATH} >= ? AND {GLOB_PATH} < ? AND {placeholder})")
+                }
+                None => {
+                    binds.push(p.clone());
+                    placeholder.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let nots = vec![placeholder; excluded.len()].join(" OR ");
         binds.extend(excluded.into_iter().map(|p| p[1..].to_string()));
 
         clauses.push(match (ors.is_empty(), nots.is_empty()) {
@@ -1270,6 +1284,28 @@ const PATH_AS_TYPED: &str = "path";
 const GLOB_PATH: &str = r#"replace(lower(f.path), '\', '/')"#;
 #[cfg(not(windows))]
 const GLOB_PATH: &str = "lower(f.path)";
+
+/// An index on exactly [`GLOB_PATH`]'s expression, so a pattern with a literal
+/// directory in front -- `<root>/**`, how a scope to one repository is written
+/// -- is a range scan of it rather than a GLOB over every path (#183). Additive:
+/// a binary that predates it never names it and SQLite keeps it current.
+#[cfg(windows)]
+const GLOB_INDEX: &str =
+    r#"CREATE INDEX IF NOT EXISTS files_glob_path ON files(replace(lower(path), '\', '/'));"#;
+#[cfg(not(windows))]
+const GLOB_INDEX: &str = "CREATE INDEX IF NOT EXISTS files_glob_path ON files(lower(path));";
+
+/// The literal directory an absolute pattern starts with, `/` included, and the
+/// bound just past every path under it: `/` is followed by `0` in byte order.
+/// `None` for a pattern that starts with a wildcard or names no directory.
+fn literal_dir(pattern: &str) -> Option<(String, String)> {
+    let wild = pattern.find(['*', '?', '['])?;
+    let dir = &pattern[..pattern[..wild].rfind('/')? + 1];
+    if dir.len() < 2 || !(dir.starts_with('/') || dir.as_bytes().get(1) == Some(&b':')) {
+        return None;
+    }
+    Some((dir.to_string(), format!("{}0", &dir[..dir.len() - 1])))
+}
 
 /// Every chunk of one file whose lines overlap `start..=end`, in file order.
 ///
@@ -5120,6 +5156,7 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "foreign_keys", "ON").unwrap();
         db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(GLOB_INDEX).unwrap();
         for path in [
             "/proj/src/lib.rs",
             "/proj/src/notes.md",
@@ -5165,6 +5202,54 @@ mod tests {
         assert_eq!(
             paths_of(&db, &ids),
             [native("/proj/src/lib.rs"), native("/proj/src/notes.md")]
+        );
+    }
+
+    /// A scope to one root is a range of the path index, not a GLOB over every
+    /// path (#183): the plan searches `files_glob_path` and scans no table.
+    #[test]
+    fn a_root_scope_is_a_range_of_the_path_index() {
+        let db = mixed();
+        let groups = filter(&["/proj/src/**"], &[], &[]);
+        let (predicate, binds) = glob_predicate(&groups);
+        let sql = format!("EXPLAIN QUERY PLAN SELECT f.id FROM files f WHERE {predicate}");
+        let plan: Vec<String> = db
+            .prepare(&sql)
+            .unwrap()
+            .query_map(rusqlite::params_from_iter(binds.iter()), |r| r.get(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            plan.iter()
+                .any(|p| p.contains("INDEX files_glob_path (<expr>>? AND <expr><?)")),
+            "the scope did not use the path index: {plan:?}"
+        );
+        assert!(!plan.iter().any(|p| p.starts_with("SCAN")), "{plan:?}");
+        // And the range changes no answer.
+        let ids = filtered_chunk_ids(&db, &groups).unwrap();
+        assert_eq!(
+            paths_of(&db, &ids),
+            [native("/proj/src/lib.rs"), native("/proj/src/notes.md")]
+        );
+    }
+
+    #[test]
+    fn only_a_literal_directory_in_front_is_a_range() {
+        assert_eq!(
+            literal_dir("/proj/src/**"),
+            Some(("/proj/src/".into(), "/proj/src0".into()))
+        );
+        assert_eq!(
+            literal_dir("/proj/src/*.rs"),
+            Some(("/proj/src/".into(), "/proj/src0".into()))
+        );
+        assert_eq!(literal_dir("*/src/**"), None, "a leading wildcard");
+        assert_eq!(literal_dir("/*"), None, "the whole disk is no range");
+        assert_eq!(
+            literal_dir("/proj/readme.md"),
+            None,
+            "no wildcard, no GLOB to narrow"
         );
     }
 
