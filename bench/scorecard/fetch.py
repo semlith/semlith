@@ -5,7 +5,7 @@
 Sizes as of 2026-10-03: SWE-bench Lite 1.2 MB and Verified 2.1 MB (parquet);
 the 12 SWE-bench repositories about 3 GB of full clones (history is needed to
 check out each instance's base commit); CodeRAG-Bench's five task sets and two
-corpora about 16 MB; RepoBench-R's test splits about 0.5 GB. Nothing is
+corpora about 16 MB, RepoEval's tasks and repositories about 0.2 GB; RepoBench-R's test splits about 0.5 GB. Nothing is
 downloaded twice.
 """
 import os, shutil, sys, urllib.request
@@ -57,9 +57,25 @@ def swe():
             os.replace(part, dest)
 
 
+# RepoEval's function-level tasks and repositories, from the same places CodeRAG-Bench's own
+# retrieval/create/repoeval.py takes them (RepoCoder's datasets, and its corrected repositories).
+REPOEVAL = {
+    "datasets": "https://github.com/microsoft/CodeT/raw/main/RepoCoder/datasets/datasets.zip",
+    "function_level": "https://github.com/Veronicium/repoeval_debug/raw/main/function_level.zip",
+}
+
+
 def coderag():
     for name in CODERAG:
         get(f"{HF}/code-rag-bench/{name}/parquet/default/train/0.parquet", os.path.join(DATA, "coderag", f"{name}.parquet"))
+    import zipfile
+    for name, url in REPOEVAL.items():
+        dest = os.path.join(DATA, "repoeval", name)
+        if not os.path.exists(dest):
+            z = get(url, dest + ".zip")
+            with zipfile.ZipFile(z) as f:
+                f.extractall(dest + ".part")
+            os.replace(dest + ".part", dest)
 
 
 def repobench():

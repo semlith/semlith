@@ -100,3 +100,64 @@ def r0(query, root, files, max_files=20):
 
 def store_files(store):
     return [l for l in sh([SEMLITH, "files", "--store", store]).stdout.splitlines() if l.strip()]
+
+
+class SemlithMCP:
+    """`semlith_search` through one long-lived `semlith mcp --store` process, as an agent calls it.
+
+    The CLI loads the model on every call (about 0.6 s); this pays it once, so a benchmark of tens
+    of thousands of queries is minutes, not a day. Returns [Excerpt] with offsets into the tool's
+    own text answer.
+    """
+
+    def __init__(self, store):
+        self.proc = subprocess.Popen([SEMLITH, "mcp", "--store", store], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        self.next = 0
+        self._rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                 "clientInfo": {"name": "semlith-scorecard", "version": "1"}})
+        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def _send(self, msg):
+        self.proc.stdin.write(json.dumps(msg) + "\n")
+        self.proc.stdin.flush()
+
+    def _rpc(self, method, params):
+        self.next += 1
+        self._send({"jsonrpc": "2.0", "id": self.next, "method": method, "params": params})
+        while True:
+            line = self.proc.stdout.readline()
+            if not line:
+                raise RuntimeError("semlith mcp exited")
+            msg = json.loads(line)
+            if msg.get("id") == self.next:
+                if "error" in msg:
+                    raise RuntimeError(msg["error"])
+                return msg["result"]
+
+    def search(self, query, k=50, paths=()):
+        args = {"query": query, "k": k}
+        if paths:
+            args["path"] = list(paths)
+        result = self._rpc("tools/call", {"name": "semlith_search", "arguments": args})
+        raw = "".join(c.get("text", "") for c in result.get("content", []))
+        return parse_search(raw)
+
+    def close(self):
+        self.proc.kill()
+
+
+SPAN = re.compile(r"^\s+(\d+)-(\d+)\s")
+
+
+def parse_search(raw):
+    """semlith_search's text answer: a path line, then its indented `start-end` span lines."""
+    out, path, offset = [], None, 0
+    for line in raw.splitlines(keepends=True):
+        m = SPAN.match(line)
+        if m and path:
+            out.append(Excerpt(path, int(m.group(1)), int(m.group(2)), line.strip(), offset))
+        elif line.strip() and not line.startswith(" ") and ("/" in line or os.sep in line) and " · " not in line:
+            path = line.strip()
+        offset += len(line.encode("utf-8"))
+    return out
