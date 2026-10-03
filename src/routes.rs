@@ -1182,6 +1182,15 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
 /// as the tool serialises it, so the page cannot drift into showing something
 /// the agent surface does not return.
 fn brief(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(
+        state,
+        request,
+        json!({ "spans": [], "symbols": [] }),
+        brief_on,
+    )
+}
+
+fn brief_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let Some(question) = request.query("question").filter(|q| !q.trim().is_empty()) else {
         return Response::error(400, "missing question");
     };
@@ -1205,14 +1214,6 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
         .query("store")
         .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
-
-    if let Err(e) = state.open_fleet() {
-        return Response::error(500, &e.to_string());
-    }
-    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(fleet) = fleet.as_mut() else {
-        return Response::json(&json!({ "spans": [], "symbols": [] }));
-    };
 
     let started = std::time::Instant::now();
     let only = (!only.is_empty()).then_some(only);
@@ -1272,6 +1273,15 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn search(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(
+        state,
+        request,
+        json!({ "hits": [], "selected": 0 }),
+        search_on,
+    )
+}
+
+fn search_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let Some(query) = request.query("query").filter(|q| !q.trim().is_empty()) else {
         return Response::error(400, "missing query");
     };
@@ -1296,8 +1306,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
             .query("offset")
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(0);
-        let empty = json!({ "matches": [], "files": 0, "truncated": false });
-        return with_fleet(state, empty, move |fleet| {
+        return answer_with(fleet, move |fleet| {
             let only = (!only.is_empty()).then_some(only);
             Ok(serde_json::to_value(fleet.grep_in(
                 only.as_deref(),
@@ -1323,14 +1332,6 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
             &format!("offset must be between 0 and {FILE_OFFSET_MAX}"),
         );
     }
-
-    if let Err(e) = state.open_fleet() {
-        return Response::error(500, &e.to_string());
-    }
-    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(fleet) = fleet.as_mut() else {
-        return Response::json(&json!({ "hits": [], "selected": 0 }));
-    };
 
     // Asked before the search, exactly as the CLI asks it: a filter that
     // selects nothing is a different answer from a corpus that does not
@@ -3035,6 +3036,70 @@ fn with_fleet(
     }
 }
 
+/// A read route over the daemon's open stores. With none open, the route still
+/// runs over an empty fleet, so a malformed request is refused as it always
+/// was; anything else answers `empty`.
+fn on_fleet(
+    state: &Arc<State>,
+    request: &Request,
+    empty: Value,
+    route: fn(&mut crate::fleet::Fleet, &Request) -> Response,
+) -> Response {
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &e.to_string());
+    }
+    let mut guard = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_mut() {
+        Some(fleet) => route(fleet, request),
+        None => {
+            let refused = route(&mut crate::fleet::Fleet::empty(), request);
+            if (400..500).contains(&refused.status()) {
+                refused
+            } else {
+                Response::json(&empty)
+            }
+        }
+    }
+}
+
+/// [`with_fleet`]'s answer for a route already holding the fleet.
+fn answer_with(
+    fleet: &crate::fleet::Fleet,
+    read: impl FnOnce(&crate::fleet::Fleet) -> anyhow::Result<Value>,
+) -> Response {
+    match read(fleet) {
+        Ok(mut value) => {
+            failures_beside(fleet, &mut value);
+            Response::json(&value)
+        }
+        Err(e) => Response::error(500, &format!("{e:#}")),
+    }
+}
+
+/// The portal's read routes over a fleet the caller holds: Search (ranked,
+/// brief, exact, read), patterns, and the Graph page's symbol, neighbours,
+/// path, impact, trace, map and drawing. `None` for any other path.
+///
+/// Public for an embedder that keeps its own stores — Semlith Cloud draws the
+/// same Search and Graph pages over an organisation's stores and answers them
+/// with the very routes the local portal uses.
+pub fn portal_read(fleet: &mut crate::fleet::Fleet, request: &Request) -> Option<Response> {
+    Some(match request.path.as_str() {
+        "/api/search" => search_on(fleet, request),
+        "/api/brief" => brief_on(fleet, request),
+        "/api/pattern" => pattern_on(fleet, request),
+        "/api/read" => read_on(fleet, request),
+        "/api/symbol" => symbol_on(fleet, request),
+        "/api/neighbors" => neighbors_on(fleet, request),
+        "/api/path" => shortest_path_on(fleet, request),
+        "/api/impact" => impact_on(fleet, request),
+        "/api/trace" => trace_on(fleet, request),
+        "/api/map" => map_on(fleet, request),
+        "/api/graph" => graph_on(fleet, request),
+        _ => return None,
+    })
+}
+
 /// Say which stores an answer could not reach, beside the answer.
 ///
 /// Additive by construction: the key is absent when every store answered, so a
@@ -3053,6 +3118,15 @@ fn failures_beside(fleet: &crate::fleet::Fleet, value: &mut Value) {
 
 /// A tree-sitter structural pattern over the indexed files of one language.
 fn pattern(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(
+        state,
+        request,
+        json!({ "matches": [], "files": 0, "truncated": false }),
+        pattern_on,
+    )
+}
+
+fn pattern_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let Some(query) = request.query("query").filter(|q| !q.trim().is_empty()) else {
         return Response::error(400, "missing query");
     };
@@ -3070,8 +3144,7 @@ fn pattern(state: &Arc<State>, request: &Request) -> Response {
         .query("offset")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
-    let empty = json!({ "language": lang, "matches": [], "files": 0, "truncated": false });
-    with_fleet(state, empty, move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         // A bad pattern or an unknown language is the caller's to correct, and
         // comes back as the parser's own words rather than an empty list.
@@ -3092,12 +3165,16 @@ fn pattern(state: &Arc<State>, request: &Request) -> Response {
 /// stage: the list costs about 150 bytes a hit and this is what turns one of
 /// them into the text.
 fn read(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(state, request, json!({ "span": null }), read_on)
+}
+
+fn read_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let Some(raw) = request.query("target").filter(|t| !t.trim().is_empty()) else {
         return Response::error(400, "missing target");
     };
     let target = crate::Target::parse(raw);
     let only = request.query_all("store");
-    with_fleet(state, json!({ "span": null }), move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         match fleet.read_in(only.as_deref(), &target, &crate::filter::Filter::default())? {
             None => Ok(json!({ "span": null, "definitions": [] })),
@@ -3108,6 +3185,10 @@ fn read(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn symbol(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(state, request, json!({ "symbols": [] }), symbol_on)
+}
+
+fn symbol_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let filter = match filter_of(request) {
         Ok(f) => f,
         Err(e) => return Response::error(400, &e),
@@ -3122,7 +3203,7 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
             .take(crate::graph::NAMES_LIMIT)
             .collect();
         let only = request.query_all("store");
-        return with_fleet(state, json!({ "table": [] }), move |fleet| {
+        return answer_with(fleet, move |fleet| {
             let only = (!only.is_empty()).then_some(only);
             Ok(json!({ "table": fleet.signatures_in(only.as_deref(), &names, &filter)? }))
         });
@@ -3137,7 +3218,7 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
         .unwrap_or(20)
         .clamp(1, 200);
     let only = request.query_all("store");
-    with_fleet(state, json!({ "symbols": [] }), move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         let found = fleet.evidence_in(
             only.as_deref(),
@@ -3166,6 +3247,15 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn neighbors(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(
+        state,
+        request,
+        json!({ "callers": [], "callees": [] }),
+        neighbors_on,
+    )
+}
+
+fn neighbors_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let filter = match filter_of(request) {
         Ok(f) => f,
         Err(e) => return Response::error(400, &e),
@@ -3185,8 +3275,7 @@ fn neighbors(state: &Arc<State>, request: &Request) -> Response {
     let all = request
         .query("all")
         .is_some_and(|v| v == "1" || v == "true");
-    let empty = json!({ "callers": [], "callees": [] });
-    with_fleet(state, empty, move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         Ok(json!(fleet.neighbours_in(
             only.as_deref(),
@@ -3199,6 +3288,10 @@ fn neighbors(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(state, request, json!({ "path": null }), shortest_path_on)
+}
+
+fn shortest_path_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let (Some(from), Some(to)) = (request.query("from"), request.query("to")) else {
         return Response::error(400, "missing from or to");
     };
@@ -3215,7 +3308,7 @@ fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
     let all_edges = request
         .query("all_edges")
         .is_some_and(|v| v == "1" || v == "true");
-    with_fleet(state, json!({ "path": null }), move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         let chain = fleet.path_in(only.as_deref(), &from, &to, depth, all_edges)?;
         // `path` keeps its name and its shape — an array of steps or null —
@@ -3235,6 +3328,10 @@ fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
 /// reason: a caller that crosses a name with several definitions is a guess,
 /// so the default refuses and the page says so when it asks anyway.
 fn impact(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(state, request, json!({ "impact": null }), impact_on)
+}
+
+fn impact_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let filter = match filter_of(request) {
         Ok(f) => f,
         Err(e) => return Response::error(400, &e),
@@ -3253,7 +3350,7 @@ fn impact(state: &Arc<State>, request: &Request) -> Response {
     let all_edges = request
         .query("all_edges")
         .is_some_and(|v| v == "1" || v == "true");
-    with_fleet(state, json!({ "impact": null }), move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         let impact = fleet.impact_in(only.as_deref(), &name, &kinds, depth, all_edges, &filter)?;
         Ok(json!({
@@ -3270,6 +3367,10 @@ fn impact(state: &Arc<State>, request: &Request) -> Response {
 /// hop, so the panel quotes the store rather than the file on disk — the same
 /// rule `semlith read` follows and for the same reason.
 fn trace(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(state, request, json!({ "trace": null }), trace_on)
+}
+
+fn trace_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let (Some(from), Some(to)) = (request.query("from"), request.query("to")) else {
         return Response::error(400, "missing from or to");
     };
@@ -3283,7 +3384,7 @@ fn trace(state: &Arc<State>, request: &Request) -> Response {
     let all_edges = request
         .query("all_edges")
         .is_some_and(|v| v == "1" || v == "true");
-    with_fleet(state, json!({ "trace": null }), move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         let trace = fleet.trace_in(only.as_deref(), &from, &to, depth, all_edges, &crate::plain)?;
         Ok(json!({
@@ -3299,13 +3400,17 @@ fn trace(state: &Arc<State>, request: &Request) -> Response {
 /// and what a reader wants from it is which subsystems exist and what joins
 /// them, which reads better as rows.
 fn map(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(state, request, json!({ "communities": [] }), map_on)
+}
+
+fn map_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let only = request.query_all("store");
     let shown = request
         .query("shown")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(crate::graph::COMMUNITIES_SHOWN)
         .clamp(1, 50);
-    with_fleet(state, json!({ "communities": [] }), move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         let (communities, total, edges) = fleet.communities_in(only.as_deref(), shown)?;
         Ok(json!({
@@ -3592,6 +3697,15 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
 const GRAPH_LIMIT: std::time::Duration = std::time::Duration::from_secs(15);
 
 fn graph(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(
+        state,
+        request,
+        json!({ "nodes": [], "edges": [], "total": 0, "shown": 0 }),
+        graph_on,
+    )
+}
+
+fn graph_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let focus = request.query("name").map(str::to_string);
     let prefix = request.query("path").map(str::to_string);
     let limit = request
@@ -3603,7 +3717,6 @@ fn graph(state: &Arc<State>, request: &Request) -> Response {
         .unwrap_or(70)
         .clamp(1, crate::graph::MAX_NODES);
     let only = request.query_all("store");
-    let empty = json!({ "nodes": [], "edges": [], "total": 0, "shown": 0 });
 
     // The fleet's lock is held only to choose the stores: through the fleet,
     // so a store that cannot be read is left out and reported beside the
@@ -3612,14 +3725,7 @@ fn graph(state: &Arc<State>, request: &Request) -> Response {
     // of its own, so a large store's graph never holds Search, Home or any
     // other route behind it (0.35.0: on the 879k-chunk corpus it held them
     // for minutes).
-    if let Err(e) = state.open_fleet() {
-        return Response::error(500, &e.to_string());
-    }
     let (picked, many, failed) = {
-        let fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(fleet) = fleet.as_ref() else {
-            return Response::json(&empty);
-        };
         let only = (!only.is_empty()).then_some(only);
         let chosen = match fleet.selected(only.as_deref()) {
             Ok(c) => c,
