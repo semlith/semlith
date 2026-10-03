@@ -200,6 +200,40 @@ fn a_query_about_the_text_still_ranks_the_text_first() {
     );
 }
 
+/// A query longer than CLIP's 77-token context is compared by its opening
+/// words alone, so a confident cosine says nothing about the rest of it. The
+/// scorecard's SWE-bench walk put a documentation screenshot first for 57 of
+/// 102 issue texts this way, above the code they were about.
+#[test]
+#[ignore = "downloads CLIP and an embedding model on first run"]
+fn a_query_past_clips_context_does_not_lift_an_image() {
+    let corpus = corpus();
+    let store = tempfile::tempdir().unwrap();
+    let mut s = open(store.path());
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+
+    // CLIP reads only the opening, which is about the circle; the rest, which
+    // it never sees, is the question.
+    let query = format!(
+        "{} Where are sharded vector indexes, quantisation and the write-ahead log described?",
+        "a red circle,".repeat(30)
+    );
+    let hits = s.search(&query, 5).unwrap();
+    let top = hits.first().expect("the text is there");
+    assert!(
+        top.image.is_none(),
+        "a truncated query put an image first: {:?}",
+        hits.iter().map(|h| h.path.as_str()).collect::<Vec<_>>()
+    );
+    // The same opening, short enough for CLIP to read whole, still finds it.
+    let top = s.search("a red circle", 5).unwrap();
+    assert!(
+        top.first()
+            .is_some_and(|h| h.path.ends_with("red-circle.png"))
+    );
+}
+
 /// Forgetting an image takes its row and its vector, and leaves every other
 /// image where it was.
 #[test]

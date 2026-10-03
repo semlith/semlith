@@ -35,6 +35,10 @@ pub const DIM: usize = 512;
 /// What the About page and `semlith models` call it.
 pub const MODEL_NAME: &str = "Qdrant/clip-ViT-B-32";
 
+/// How many tokens CLIP's text encoder reads, its start and end markers
+/// included. The rest of a longer query is cut off before it is embedded.
+pub const CLIP_CONTEXT: usize = 77;
+
 /// The two Hugging Face repositories it is actually two of. Named separately
 /// because the airgap check asks whether *that* model is cached, and a machine
 /// can hold one of them and not the other.
@@ -221,7 +225,9 @@ impl Clip {
     /// and a CLIP vector are numbers of different lengths about different
     /// things, and comparing them would return whatever the arithmetic
     /// happened to produce.
-    pub fn embed_query(&mut self, query: &str, quiet: bool) -> Result<Vec<f32>> {
+    /// The query in CLIP's text space, and whether it ran past the encoder's
+    /// [`CLIP_CONTEXT`]: a longer query is compared by its opening words alone.
+    pub fn embed_query(&mut self, query: &str, quiet: bool) -> Result<(Vec<f32>, bool)> {
         let text = match self.text.as_mut() {
             Some(model) => model,
             None => {
@@ -240,10 +246,15 @@ impl Clip {
                 self.text.insert(model)
             }
         };
+        let truncated = text
+            .tokenizer
+            .encode(query, true)
+            .map(|e| !e.get_overflowing().is_empty() || e.len() > CLIP_CONTEXT)
+            .unwrap_or(false);
         let mut out = text
             .embed(vec![query], None)
             .map_err(|e| anyhow::anyhow!("embedding the query for the image index: {e}"))?;
-        Ok(out.remove(0))
+        Ok((out.remove(0), truncated))
     }
 }
 
