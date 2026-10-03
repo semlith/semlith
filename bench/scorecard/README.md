@@ -3,8 +3,8 @@
 Everything the README's Benchmarks section publishes is produced here. Each
 number is the median of three runs, with its spread beside it when it is not
 zero, and every run writes a `MANIFEST.json` naming its command, the semlith
-version, the measured binary's SHA-256 (and the commit it was built from, for a
-build of this repository), the machine and the SHA-256 of every result file.
+version, the measured binary's SHA-256 (and, when `SEMLITH_BIN_COMMIT` names it,
+the commit it was built from), the machine and the SHA-256 of every result file.
 
 Nothing this harness downloads, clones, indexes or writes lives in the
 repository. It all goes under `SCORECARD_HOME`, `~/semlith-bench/scorecard` by

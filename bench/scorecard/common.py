@@ -59,15 +59,15 @@ def semlith_version():
 
 
 def semlith_binary():
-    """Which binary measured: its path and SHA-256, and the commit it was built from when it is a build of the
-    repository this harness sits in. A branch build reports the last released version until its release commit,
-    so the version string alone cannot tell two of them apart."""
+    """Which binary measured: its path and SHA-256, and the commit it was built from when SEMLITH_BIN_COMMIT says
+    so. A branch build reports the last released version until its release commit, so the version string alone
+    cannot tell two of them apart, and the repository's HEAD at the end of a run is not the commit a binary built
+    at its start came from."""
     path = shutil.which(SEMLITH) or SEMLITH
     with open(path, "rb") as f:
         out = {"path": path, "sha256": hashlib.sha256(f.read()).hexdigest()}
-    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if os.path.realpath(path).startswith(os.path.join(repo, "target") + os.sep):
-        out["commit"] = sh(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip()
+    if os.environ.get("SEMLITH_BIN_COMMIT"):
+        out["commit"] = os.environ["SEMLITH_BIN_COMMIT"]
     return out
 
 
