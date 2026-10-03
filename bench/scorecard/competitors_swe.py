@@ -279,9 +279,13 @@ def score(args):
     """One table over --out and every --also directory: a second walk run beside the first (the slow tools in
     their own directory, so the two walks never share rows.jsonl) scores its tools against its own semlith rows."""
     table, allsem = tabulate(load_rows(args.out))
-    for d in args.also or []:
+    for spec in args.also or []:
+        # DIR or DIR=tool,tool: a later directory's tools replace an earlier one's, so a second attempt at a
+        # tool is named with the directory it ran in.
+        d, _, only = spec.partition("=")
         more, _ = tabulate(load_rows(d))
-        table += [t for t in more if t["tool"] not in {x["tool"] for x in table}]
+        more = [t for t in more if not only or t["tool"] in only.split(",")]
+        table = [t for t in table if t["tool"] not in {m["tool"] for m in more}] + more
     table.sort(key=lambda t: FAST_FIRST.index(t["tool"]))
     insts = [i["instance_id"] for i in sample()]
     with open(os.path.join(args.out, "score.json"), "w") as f:
@@ -338,6 +342,6 @@ if __name__ == "__main__":
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--repo", help="one repository, e.g. psf/requests")
     ap.add_argument("--budget-from", help="walk: take semlith's index seconds from this walk's directory")
-    ap.add_argument("--also", action="append", help="score: another walk's directory to merge, e.g. a slow-tools walk")
+    ap.add_argument("--also", action="append", help="score: another walk's directory to merge, DIR or DIR=tool,tool; later ones win")
     a = ap.parse_args()
     walk(a) if a.cmd == "walk" else score(a)
