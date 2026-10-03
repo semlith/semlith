@@ -53,6 +53,13 @@ the binary makes no outbound connection and starts no thread for the cloud.
   started from a terminal filed every HTTP client under that terminal's app
   ("flow-test (Claude Code)"); an embedder calling `semlith::mcp::answer` gets
   no host unless it sets `Session::host`.
+- A stopped run's undo no longer archives the run's own definitions as symbol
+  history. Undoing a 400-file run left 600 rows in `symbols_past` for code the
+  store never held; `forget` and re-indexing keep their history as before.
+- `semlith search` answers from connected remote stores too, not only the MCP
+  tool and the portal.
+- `semlith cloud replay` says once, not twice, that session replay is off for
+  the org.
 
 ## [0.36.0] - 2026-10-02
 
