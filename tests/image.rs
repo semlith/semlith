@@ -259,6 +259,31 @@ fn forgetting_an_image_removes_its_row_and_its_vector() {
     assert!(hits.iter().any(|h| h.path.ends_with("blue-square.jpg")));
 }
 
+/// An image emptied on disk leaves with its vector, as a forgotten one does:
+/// the pass evicts it, and the image index holds nothing its rows no longer
+/// name.
+#[test]
+#[ignore = "downloads CLIP and an embedding model on first run"]
+fn an_emptied_image_leaves_with_its_vector() {
+    let corpus = corpus();
+    let store = tempfile::tempdir().unwrap();
+    let mut s = open(store.path());
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+
+    std::fs::write(corpus.path().join("red-circle.png"), b"").unwrap();
+    let report = s
+        .index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    assert_eq!(report.removed, 1, "the emptied image was not evicted");
+    assert_eq!(s.image_count().unwrap(), 2);
+    let hits = s.search("a red circle", 5).unwrap();
+    assert!(
+        !hits.iter().any(|h| h.path.ends_with("red-circle.png")),
+        "the emptied image is still searchable"
+    );
+}
+
 /// Re-indexing an edited image replaces its vector rather than adding a second.
 #[test]
 #[ignore = "downloads CLIP and an embedding model on first run"]

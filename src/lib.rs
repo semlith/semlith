@@ -3095,11 +3095,10 @@ impl Semlith {
                         // there but no longer usable -- emptied, grown past the
                         // cap, unreadable -- is evicted too: its old chunks
                         // would go on answering for text no longer on disk.
-                        let ids = store::delete_file(&self.db, &key, now())?;
-                        if !ids.is_empty() {
-                            for id in ids {
-                                self.index.remove(id)?;
-                            }
+                        // Through `evict`, so an image's vectors leave the
+                        // image index with its rows.
+                        let (chunks, images) = self.evict(&key)?;
+                        if chunks > 0 || images > 0 {
                             report.removed += 1;
                             if gone {
                                 say_file(
