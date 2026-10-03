@@ -1516,6 +1516,7 @@ const SOURCES = {
   prices: "/api/prices",
   replay: "/api/ledger/replay",
   languages: "/api/languages",
+  cloud: "/api/cloud",
   graphpeek: () => `/api/graph?${new URLSearchParams({ store: (graphPeekFor = graphStore()), limit: "12" })}`,
   graphmap: () => `/api/map?${new URLSearchParams({ store: (graphMapFor = graphStore()), shown: "12" })}`,
   coverage: "/api/stores?coverage=1",
@@ -8631,7 +8632,7 @@ async function fixRule(id) {
 VIEWS.settings = {
   needs: (route) => {
     const sec = route.parts[0] || "perf";
-    return sec === "perf" ? ["runs", "accel"] : sec === "access" ? ["about", "agents", "privacy"] : sec === "about" ? ["about", "languages", "prices"] : ["about"];
+    return sec === "perf" ? ["runs", "accel"] : sec === "access" ? ["about", "agents", "privacy"] : sec === "about" ? ["about", "languages", "prices"] : sec === "cloud" ? ["about", "cloud"] : ["about"];
   },
   live: ["runs"],
   morph: (route) => (route.parts[0] || "perf") === "perf",

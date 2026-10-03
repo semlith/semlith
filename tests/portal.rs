@@ -153,6 +153,9 @@ const VIEWS: &[(&str, &str)] = &[
     // Settings › Performance, "Where embedding runs": a switch per lane with
     // its device, state and share.
     ("accel", "/api/accel"),
+    // Settings › Cloud: who this machine is signed in as, its remote stores,
+    // ledger sync per store, and what leaves the machine.
+    ("cloud", "/api/cloud"),
 ];
 
 /// And the same for the MCP tool surface.
@@ -1664,30 +1667,21 @@ fn the_agents_page_marks_no_tool_as_paid_and_measures_the_list() {
 /// It was a page of its own until 0.35.0; v6 makes it a Settings section. The
 /// guarantee is unchanged: no connected state until the cloud client (0.38.0),
 /// and no command behind it.
+/// 0.37.0 ships `semlith cloud`, so the Cloud section is no longer only text
+/// to copy: it reads `/api/cloud`, and the command has that as its view.
 #[test]
-fn the_cloud_section_is_the_not_connected_state_and_has_no_client() {
+fn the_cloud_section_reads_the_cloud_route() {
     assert!(
         APP_JS.contains("function seCloud()"),
         "no Cloud section in Settings"
     );
     assert!(
-        APP_JS.contains("One hosted store for a whole organisation"),
-        "the Cloud section lost its lead copy"
+        APP_JS.contains("cloud: \"/api/cloud\""),
+        "the Cloud section does not load /api/cloud"
     );
     assert!(
-        APP_JS.contains("pill(\"not connected\""),
-        "the Cloud section does not say it is not connected"
-    );
-    // No connected state in this release: `cloudConnected` would be the flag
-    // that draws one, and there is none.
-    assert!(
-        !APP_JS.contains("cloudConnected"),
-        "a connected state exists"
-    );
-    // And no command behind it. The blocks on the page are text to copy.
-    assert!(
-        !subcommands().iter().any(|name| name == "cloud"),
-        "`semlith cloud` exists, which this release says it does not"
+        subcommands().iter().any(|name| name == "cloud"),
+        "`semlith cloud` is missing"
     );
 }
 

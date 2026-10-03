@@ -98,6 +98,9 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/map") => map(state, request),
         (true, _, "/api/report") => report(state, request),
         (true, _, "/api/schedules") => schedules(state),
+        // Settings › Cloud: who this machine is signed in as. Answered from
+        // `cloud.json` alone; nothing here reaches the host.
+        (true, _, "/api/cloud") => Response::json(&crate::cloud::local_view()),
         // Both verbs: a GET reports whether the toggle is on and, when it
         // is, what the transcripts say; a POST is the toggle itself.
         (_, _, "/api/ledger/replay") if get || post => replay(request),

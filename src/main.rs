@@ -915,6 +915,17 @@ enum Command {
         what: ScheduleCommand,
     },
 
+    /// Sign in to Semlith Cloud, read its stores beside the local ones, and
+    /// send it what you choose.
+    ///
+    /// Nothing here runs, and nothing reaches the network, until `semlith
+    /// cloud login`. The token is kept in ~/.semlith/cloud.json, owner-only,
+    /// and is sent to the host that issued it and to no other.
+    Cloud {
+        #[command(subcommand)]
+        what: CloudCommand,
+    },
+
     /// Show the shortest chain of edges between two symbols.
     Path {
         /// The symbol the chain starts at.
@@ -976,6 +987,39 @@ enum RefusedCommand {
         path: PathBuf,
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CloudCommand {
+    /// Sign in to an org: a code to approve in the browser, or a token made
+    /// on the cloud's Agents page with --token.
+    Login {
+        /// The org to sign in to. With the browser flow you pick it on the
+        /// approval page; this only checks you picked the one you meant.
+        org: Option<String>,
+        /// The cloud to sign in to. Default: https://cloud.semlith.com.
+        #[arg(long)]
+        host: Option<String>,
+        /// An org token (sml_live_…) for a machine with no browser. Checked
+        /// with the host before it is saved.
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Forget this machine's token for an org. Revoke it in the cloud too.
+    Logout {
+        org: Option<String>,
+        #[arg(long)]
+        host: Option<String>,
+    },
+    /// The org, its plan, its stores and what they cost this month.
+    Status {
+        org: Option<String>,
+        #[arg(long)]
+        host: Option<String>,
+        /// The host's answer as JSON, for a script.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2547,6 +2591,8 @@ fn run() -> Result<()> {
         }
 
         Command::Schedule { what } => run_schedule(what)?,
+
+        Command::Cloud { what } => run_cloud(what, &cli.store)?,
 
         Command::Path {
             from,
@@ -4899,4 +4945,54 @@ fn plural(n: u64, unit: &str) -> String {
     } else {
         format!("{n} {unit}s")
     }
+}
+
+/// `semlith cloud …`, out of `run` for the stack frame's sake (see `main`).
+fn run_cloud(what: CloudCommand, _stores: &[PathBuf]) -> Result<()> {
+    use semlith::cloud;
+    match what {
+        CloudCommand::Login { org, host, token } => {
+            let entry = cloud::login(
+                org.as_deref(),
+                host.as_deref(),
+                token.as_deref(),
+                &mut |line| eprintln!("{line}"),
+            )?;
+            println!(
+                "signed in to {} at {} · token {}… saved in {}",
+                entry.org,
+                entry.host_name(),
+                entry.prefix(),
+                cloud::credentials_path()?.display()
+            );
+            println!(
+                "next: `semlith cloud connect {}` adds its stores beside the local ones",
+                entry.org
+            );
+        }
+        CloudCommand::Logout { org, host } => {
+            let gone = cloud::logout(org.as_deref(), host.as_deref())?;
+            println!(
+                "forgot the token {}… for {} at {}. It still works until it is revoked on the cloud's Agents page.",
+                gone.prefix(),
+                gone.org,
+                gone.host_name()
+            );
+        }
+        CloudCommand::Status { org, host, json } => {
+            let entry = cloud::entry_for(org.as_deref(), host.as_deref())?;
+            let (status, version) = cloud::status(&entry)?;
+            if json {
+                let mut out = status;
+                out["cloud_version"] = serde_json::json!(version);
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                println!(
+                    "{}",
+                    cloud::render_status(&entry, &status, version.as_deref())
+                );
+            }
+        }
+    }
+    Ok(())
 }

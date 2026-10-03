@@ -25,6 +25,7 @@ pub mod clientfile;
 pub mod clientid;
 pub mod clients;
 pub mod clock;
+pub mod cloud;
 pub mod compact;
 pub mod coreml;
 pub mod cuda;

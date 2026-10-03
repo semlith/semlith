@@ -341,7 +341,7 @@ impl Settings {
 /// using. The pid alone was shared by every thread of a daemon, so two routes
 /// saving at once wrote one temporary file and renamed each other's half
 /// (issue #132).
-fn unique_temp_suffix() -> String {
+pub(crate) fn unique_temp_suffix() -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     format!(
         "json.{}.{}.new",
