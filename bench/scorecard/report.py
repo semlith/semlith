@@ -1,12 +1,12 @@
 """The README's Benchmarks tables, from the runs' own score files.
 
     python bench/scorecard/report.py [--swe DIR] [--coderag DIR] [--repobench DIR] [--competitors FILE]
-                                     [--agent FILE] [--ledger DIR]
+                                     [--agent FILE] [--ledger DIR] [--readme README.md]
 
 Each option defaults to the newest run under SCORECARD_HOME/results (the competitor and agent files to
-their fixed paths). Prints Markdown: one table per benchmark, each with its instance count, runs and
-the command that reproduces it. A number is the median of the runs; a spread other than zero is printed
-beside it.
+their fixed paths). Prints Markdown -- or, with --readme, writes it between that file's scorecard markers:
+one table per benchmark, each with its instance count, runs and the command that reproduces it. A number is
+the median of the runs; a spread other than zero is printed beside it.
 """
 import argparse, glob, json, os, sys
 
@@ -162,6 +162,7 @@ def main():
     ap.add_argument("--agent", default=os.path.join(HOME, "agent", "corpus-round.json"))
     ap.add_argument("--ledger", default=os.path.dirname(sorted(glob.glob(os.path.join(RESULTS, "ledger", "*", "savings.json")))[-1])
                     if glob.glob(os.path.join(RESULTS, "ledger", "*", "savings.json")) else None)
+    ap.add_argument("--readme", help="write the tables between this file's scorecard:begin/end markers")
     a = ap.parse_args()
     parts = []
     for fn, arg in ((swe, a.swe), (coderag, a.coderag), (repobench, a.repobench), (competitors, a.competitors),
@@ -170,7 +171,16 @@ def main():
             parts.append(fn(arg))
         else:
             parts.append(f"<!-- {fn.__name__}: no run found -->")
-    print("\n\n".join(parts))
+    out = "\n\n".join(parts)
+    if not a.readme:
+        print(out)
+        return
+    begin, end = "<!-- scorecard:begin -->", "<!-- scorecard:end -->"
+    text = open(a.readme).read()
+    head, rest = text.split(begin, 1)
+    _, tail = rest.split(end, 1)
+    with open(a.readme, "w") as f:
+        f.write(head + begin + "\n" + out + "\n" + end + tail)
 
 
 if __name__ == "__main__":
