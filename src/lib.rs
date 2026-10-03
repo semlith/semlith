@@ -3091,14 +3091,17 @@ impl Semlith {
                         self.tx_begin()?;
                         // A batch of events can name a file that has just been
                         // deleted or renamed away. Evicting it here is what makes
-                        // a deletion visible without a full sweep.
-                        if gone {
-                            let ids = store::delete_file(&self.db, &key, now())?;
-                            if !ids.is_empty() {
-                                for id in ids {
-                                    self.index.remove(id)?;
-                                }
-                                report.removed += 1;
+                        // a deletion visible without a full sweep. A file still
+                        // there but no longer usable -- emptied, grown past the
+                        // cap, unreadable -- is evicted too: its old chunks
+                        // would go on answering for text no longer on disk.
+                        let ids = store::delete_file(&self.db, &key, now())?;
+                        if !ids.is_empty() {
+                            for id in ids {
+                                self.index.remove(id)?;
+                            }
+                            report.removed += 1;
+                            if gone {
                                 say_file(
                                     &mut on_file,
                                     &report,
