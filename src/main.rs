@@ -1032,6 +1032,19 @@ enum CloudCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Send a local store's ledger rows to the org's ledger, or stop: when,
+    /// which client and session, which tool, how many tokens. Never the
+    /// query text. Off until you turn it on, per store.
+    Sync {
+        /// The local store.
+        #[arg(value_name = "STORE")]
+        name: String,
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+        /// The org to send to, when this machine is signed in to several.
+        #[arg(long)]
+        org: Option<String>,
+    },
     /// The org, its plan, its stores and what they cost this month.
     Status {
         org: Option<String>,
@@ -5056,6 +5069,40 @@ fn run_cloud(what: CloudCommand, stores: &[PathBuf]) -> Result<()> {
             }
             if report.state.as_deref() == Some("error") {
                 std::process::exit(1);
+            }
+        }
+        CloudCommand::Sync {
+            name: store,
+            state,
+            org,
+        } => {
+            let on = state == "on";
+            // Through a running daemon when there is one, so its sync thread
+            // starts; otherwise the setting is recorded for the next start.
+            let dirs = home::all_dirs(&[], Path::new(".")).unwrap_or_default();
+            let through = semlith::proxy::find(&dirs).and_then(|daemon| {
+                daemon
+                    .post(
+                        "/api/cloud/sync",
+                        &serde_json::json!({ "store": store, "on": on, "org": org }),
+                    )
+                    .ok()
+            });
+            let sync = match through {
+                Some(answer) => {
+                    let answer: serde_json::Value = serde_json::from_str(&answer)?;
+                    if let Some(e) = answer["error"].as_str() {
+                        bail!("{e}");
+                    }
+                    answer["sync"]["org"].as_str().map(str::to_string)
+                }
+                None => cloud::set_sync(&store, on, org.as_deref())?.map(|s| s.org),
+            };
+            match sync {
+                Some(org) => println!(
+                    "{store}: ledger rows from now on go to {org} each minute while the daemon runs — when, client, session, tool, tokens; never the query text"
+                ),
+                None => println!("{store}: ledger sync off; nothing more is sent"),
             }
         }
         CloudCommand::Disconnect { org } => {

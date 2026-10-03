@@ -196,6 +196,7 @@ fn dispatch(state: &Arc<State>, request: &Request) -> Response {
         })),
         (_, true, "/api/accel") => accel_change(request),
         (_, true, "/api/schedules") => schedule_write(state, request),
+        (_, true, "/api/cloud/sync") => cloud_sync(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
         (_, true, "/api/drop/resolve") => drop_resolve(state, request),
 
@@ -220,6 +221,31 @@ fn dispatch(state: &Arc<State>, request: &Request) -> Response {
             | "/api/agents/register",
         ) => Response::error(405, "wrong method for this route"),
         _ => Response::error(404, "no such route"),
+    }
+}
+
+/// Settings › Cloud's per-store ledger sync switch, and `semlith cloud sync`
+/// when a daemon is running. Turning one on starts the sync thread if this
+/// daemon has none yet.
+fn cloud_sync(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let (Some(store), Some(on)) = (
+        body.get("store").and_then(Value::as_str),
+        body.get("on").and_then(Value::as_bool),
+    ) else {
+        return Response::error(400, "missing store or on");
+    };
+    match crate::cloud::set_sync(store, on, body.get("org").and_then(Value::as_str)) {
+        Ok(sync) => {
+            if sync.is_some() {
+                crate::cloud::spawn_sync(Arc::clone(state));
+            }
+            Response::json(&json!({ "store": store, "sync": sync }))
+        }
+        Err(e) => Response::error(400, &format!("{e:#}")),
     }
 }
 

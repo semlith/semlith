@@ -616,6 +616,21 @@ pub struct StoreSettings {
     /// gitignore. The deny-list, the hidden-file rule, `.semlithignore` and
     /// the credential scan apply either way.
     pub gitignore: bool,
+    /// Ledger sync to Semlith Cloud (0.37.0): the org this store's ledger rows
+    /// go to, and from when. Absent is off, which is the default, and is
+    /// left out of the file so a store that never turned it on reads as it
+    /// always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_sync: Option<CloudSync>,
+}
+
+/// Where a store's ledger rows are sent, and the first second they count
+/// from: turning sync on sends what is retrieved from then on, not the
+/// store's history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudSync {
+    pub org: String,
+    pub since: i64,
 }
 
 impl Default for StoreSettings {
@@ -626,6 +641,7 @@ impl Default for StoreSettings {
             watch: true,
             record: true,
             gitignore: true,
+            cloud_sync: None,
         }
     }
 }

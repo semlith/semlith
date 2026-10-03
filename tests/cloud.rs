@@ -1138,3 +1138,42 @@ fn a_push_sends_only_what_changed_after_the_binarys_own_refusals() {
     assert_eq!(puts.len(), 2);
     assert_eq!(tar_names(&puts[1].body), ["README.md"]);
 }
+
+// ------------------------------------------------------------ ledger sync
+
+#[test]
+fn ledger_sync_is_a_per_store_switch_that_starts_off() {
+    let home = tempfile::tempdir().unwrap();
+    let host = org_host(None);
+    signed_in(home.path(), &host);
+    let path = home.path().join(".semlith/registry.json");
+    std::fs::write(&path, LOCAL_REGISTRY).unwrap();
+    assert!(
+        semlith(home.path(), &["cloud", "connect", "acme"])
+            .status
+            .success()
+    );
+
+    let o = semlith(home.path(), &["cloud", "sync", "notes", "on"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let sync = &registry(home.path())["stores"]["notes"]["cloud_sync"];
+    assert_eq!(sync["org"], "acme");
+    assert!(sync["since"].as_i64().unwrap() > 0);
+
+    let o = semlith(home.path(), &["cloud", "sync", "acme/platform", "on"]);
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("is a remote store"),
+        "{}",
+        out(&o)
+    );
+
+    let o = semlith(home.path(), &["cloud", "sync", "notes", "off"]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(
+        semlith(home.path(), &["cloud", "disconnect", "acme"])
+            .status
+            .success()
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), LOCAL_REGISTRY);
+}

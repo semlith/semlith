@@ -1577,6 +1577,226 @@ fn tar_header(name: &str, size: u64, kind: u8) -> [u8; 512] {
     h
 }
 
+/// The most rows one ledger request carries.
+pub const SYNC_BATCH: usize = 1000;
+
+/// One request a minute per machine, at most.
+pub const SYNC_EVERY: Duration = Duration::from_secs(60);
+
+/// `POST /v1/orgs/<org>/ledger`'s body: what was retrieved, never the text.
+///
+/// `bytes` is null: the local ledger counts what an answer cost in tokens
+/// (`excerpt_tokens`, sent as `tokens`), and a byte count made up from it
+/// would be a number nobody measured.
+pub fn sync_body(machine: &str, store: &str, rows: &[crate::store::SyncRow]) -> Value {
+    json!({
+        "machine": machine,
+        "store": store,
+        "rows": rows.iter().map(|r| json!({
+            "local_id": r.id,
+            "at": crate::clock::utc_rfc3339(r.at),
+            "client": r.client,
+            "session": r.session,
+            "tool": r.tool,
+            "bytes": null,
+            "tokens": r.excerpt_tokens,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Send one batch of `rows` for `store`. The caller marks them sent only when
+/// this succeeds, and a resend after a failure is safe: the cloud keys rows
+/// on (org, machine, local_id).
+pub fn send_rows(
+    entry: &Entry,
+    machine: &str,
+    store: &str,
+    rows: &[crate::store::SyncRow],
+) -> Result<Value, Failure> {
+    call_as(
+        entry,
+        "POST",
+        &format!("/v1/orgs/{}/ledger", seg(&entry.org)),
+        Send {
+            json: Some(&sync_body(machine, store, rows)),
+            timeout: Some(FORWARD_TIMEOUT),
+            ..Send::default()
+        },
+    )?
+    .json()
+}
+
+/// One store's next batch, start to finish: read, send, mark. `Ok(0)` when
+/// there was nothing to send, in which case no request was made.
+pub fn sync_store(
+    entry: &Entry,
+    machine: &str,
+    store: &str,
+    db: &rusqlite::Connection,
+    since: i64,
+) -> Result<usize> {
+    let rows = crate::store::unsynced(db, since, SYNC_BATCH)?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    send_rows(entry, machine, store, &rows)?;
+    let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    crate::store::mark_synced(db, &ids, unix_now() as i64)?;
+    Ok(rows.len())
+}
+
+/// What the sync thread last did, for the Ledger page's line.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SyncState {
+    pub last_sent: Option<u64>,
+    pub last_store: Option<String>,
+    pub last_rows: usize,
+    pub last_error: Option<String>,
+}
+
+static SYNC: std::sync::Mutex<Option<SyncState>> = std::sync::Mutex::new(None);
+static SYNCING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn note_sync(change: impl FnOnce(&mut SyncState)) {
+    let mut state = SYNC.lock().unwrap_or_else(|e| e.into_inner());
+    change(state.get_or_insert_with(SyncState::default));
+}
+
+/// Start the daemon's sync thread, once. Called at start only when this
+/// machine has signed in, and by the switch that turns sync on, so a daemon
+/// nobody signed in to never runs it.
+///
+/// Each minute it sends at most one batch, from the first store with rows
+/// waiting: one request a minute per machine is the contract's ceiling. The
+/// fleet's lock is held to read and to mark, never across the request.
+pub fn spawn_sync(state: std::sync::Arc<crate::daemon::State>) {
+    use std::sync::atomic::Ordering;
+    if SYNCING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        while !crate::watch::STOP.load(Ordering::Relaxed) {
+            let started = std::time::Instant::now();
+            while started.elapsed() < SYNC_EVERY {
+                if crate::watch::STOP.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            sync_pass(&state);
+        }
+    });
+}
+
+/// One minute's work: the first store with rows waiting sends one batch.
+fn sync_pass(state: &crate::daemon::State) {
+    let Ok(Some(creds)) = Credentials::load() else {
+        return;
+    };
+    let Ok(registry) = crate::home::Registry::load() else {
+        return;
+    };
+    for (name, entry) in &registry.stores {
+        let Some(sync) = &entry.settings.cloud_sync else {
+            continue;
+        };
+        let Some(cred) = creds.entries.iter().find(|e| e.org == sync.org) else {
+            note_sync(|s| s.last_error = Some(format!("not signed in to {}", sync.org)));
+            continue;
+        };
+        if state.open_fleet().is_err() {
+            return;
+        }
+        let rows = {
+            let fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(store) = fleet
+                .as_ref()
+                .and_then(|f| f.each().find(|(l, _)| l == name).map(|(_, s)| s))
+            else {
+                continue;
+            };
+            crate::store::unsynced(store.db(), sync.since, SYNC_BATCH).unwrap_or_default()
+        };
+        if rows.is_empty() {
+            continue;
+        }
+        match send_rows(cred, &creds.machine_id(), name, &rows) {
+            Ok(_) => {
+                let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+                let fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(store) = fleet
+                    .as_ref()
+                    .and_then(|f| f.each().find(|(l, _)| l == name).map(|(_, s)| s))
+                {
+                    let _ = crate::store::mark_synced(store.db(), &ids, unix_now() as i64);
+                }
+                note_sync(|s| {
+                    s.last_sent = Some(unix_now());
+                    s.last_store = Some(name.clone());
+                    s.last_rows = rows.len();
+                    s.last_error = None;
+                });
+            }
+            Err(e) => note_sync(|s| s.last_error = Some(e.to_string())),
+        }
+        // One request a minute, whatever it answered.
+        return;
+    }
+}
+
+/// `semlith cloud sync <store> on|off`: record the switch. Returns what is
+/// now recorded.
+pub fn set_sync(
+    store: &str,
+    on: bool,
+    org: Option<&str>,
+) -> Result<Option<crate::home::CloudSync>> {
+    crate::home::refuse_remote(store)?;
+    let sync = if on {
+        let entry = entry_for(org, None)?;
+        Some(crate::home::CloudSync {
+            org: entry.org,
+            since: unix_now() as i64,
+        })
+    } else {
+        None
+    };
+    crate::home::update_store_settings(store, move |s| match (&s.cloud_sync, sync) {
+        // Turning on what is already on, for the same org, keeps its `since`.
+        (Some(old), Some(new)) if old.org == new.org => {}
+        (_, sync) => s.cloud_sync = sync,
+    })
+    .map(|s| s.cloud_sync)
+}
+
+/// Which local stores sync, of how many, and what the thread last did.
+pub fn sync_view() -> Value {
+    let registry = crate::home::Registry::load().unwrap_or_default();
+    let on: Vec<Value> = registry
+        .stores
+        .iter()
+        .filter_map(|(name, e)| {
+            e.settings
+                .cloud_sync
+                .as_ref()
+                .map(|s| json!({ "store": name, "org": s.org, "since": s.since }))
+        })
+        .collect();
+    let last = SYNC
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default();
+    json!({
+        "on": on,
+        "stores": registry.stores.len(),
+        "last_sent": last.last_sent,
+        "last_store": last.last_store,
+        "last_rows": last.last_rows,
+        "last_error": last.last_error,
+    })
+}
+
 /// What the portal's Cloud section draws without asking the host anything:
 /// who this machine is signed in as, by prefix. Never the token.
 pub fn local_view() -> Value {
@@ -1594,7 +1814,12 @@ pub fn local_view() -> Value {
             })
         })
         .collect();
-    json!({ "signed_in": !orgs.is_empty(), "orgs": orgs, "remote": remote_rows() })
+    json!({
+        "signed_in": !orgs.is_empty(),
+        "orgs": orgs,
+        "remote": remote_rows(),
+        "sync": sync_view(),
+    })
 }
 
 #[cfg(test)]
@@ -1726,6 +1951,99 @@ mod tests {
             at += 512 + size.div_ceil(512) * 512;
         }
         assert_eq!(found, files);
+    }
+
+    /// A store database holding `n` ledger rows, each with query text that
+    /// must never leave the machine.
+    fn ledger(n: usize) -> (tempfile::TempDir, rusqlite::Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::store::open(&dir.path().join("store.db")).unwrap();
+        let _w = crate::store::Writing::begin(&db).unwrap();
+        for i in 0..n {
+            db.execute(
+                "INSERT INTO retrievals (at, client, query, hits, micros, excerpt_tokens,
+                 whole_file_tokens, prev, hash, session, tool)
+                 VALUES (?1, 'claude-code', ?2, 3, 10, 120, 900, '', '', 's-1', 'semlith_search')",
+                rusqlite::params![1_000 + i as i64, format!("PRIVATE QUERY TEXT {i}")],
+            )
+            .unwrap();
+        }
+        drop(_w);
+        (dir, db)
+    }
+
+    fn entry_at(url: &str) -> Entry {
+        Entry {
+            host: url.to_string(),
+            org: "acme".into(),
+            token: format!("{TOKEN_PREFIX}test"),
+            plan: None,
+            added: 0,
+        }
+    }
+
+    /// Batches of at most 1,000, nothing sent twice once accepted, a resend
+    /// after a failure carrying the same local ids, and no query text in any
+    /// body.
+    #[test]
+    fn ledger_sync_batches_resends_idempotently_and_never_sends_text() {
+        let fail_first = std::sync::atomic::AtomicBool::new(true);
+        let host = stub::Stub::start(move |seen| {
+            assert_eq!(seen.path, "/v1/orgs/acme/ledger");
+            if fail_first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                stub::error(503, "unavailable", "Postgres is away.")
+            } else {
+                stub::json(200, json!({ "accepted": 1, "duplicates": 0 }))
+            }
+        });
+        let (_dir, db) = ledger(1_500);
+        let entry = entry_at(&host.url);
+
+        // Failed: nothing marked, so the same rows go again.
+        assert!(sync_store(&entry, "m_1", "notes", &db, 0).is_err());
+        assert_eq!(crate::store::unsynced_count(&db, 0).unwrap(), 1_500);
+        assert_eq!(
+            sync_store(&entry, "m_1", "notes", &db, 0).unwrap(),
+            SYNC_BATCH
+        );
+        assert_eq!(sync_store(&entry, "m_1", "notes", &db, 0).unwrap(), 500);
+        assert_eq!(sync_store(&entry, "m_1", "notes", &db, 0).unwrap(), 0);
+
+        let seen = host.seen();
+        assert_eq!(seen.len(), 3, "an empty batch is no request");
+        let ids = |i: usize| -> Vec<i64> {
+            seen[i].json()["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["local_id"].as_i64().unwrap())
+                .collect()
+        };
+        assert_eq!(ids(0), ids(1), "the resend carries the same rows");
+        assert_eq!(ids(1).len(), 1_000);
+        assert_eq!(ids(2).len(), 500);
+        assert_eq!(seen[0].json()["rows"][0]["at"], "1970-01-01T00:16:40Z");
+        for s in &seen {
+            assert!(
+                !s.text().contains("PRIVATE QUERY TEXT"),
+                "query text left the machine"
+            );
+            assert!(
+                !s.text().contains("query"),
+                "a query field left the machine"
+            );
+            let body = s.json();
+            assert_eq!(body["machine"], "m_1");
+            assert_eq!(body["store"], "notes");
+            assert_eq!(body["rows"][0]["tool"], "semlith_search");
+        }
+    }
+
+    /// Turning sync on sends what is retrieved from then on, not the history.
+    #[test]
+    fn ledger_sync_starts_from_when_it_was_turned_on() {
+        let (_dir, db) = ledger(10);
+        assert_eq!(crate::store::unsynced(&db, 1_005, 1_000).unwrap().len(), 5);
     }
 
     #[test]

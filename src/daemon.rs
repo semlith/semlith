@@ -3747,6 +3747,11 @@ pub fn run(
         Err(e) => report_line(&format!("schedules: {e:#}")),
     }
     crate::schedule::Runner::spawn(Arc::clone(&state));
+    // Ledger sync, only for a machine that has signed in to Semlith Cloud: a
+    // daemon nobody signed in to starts no thread for it and reaches nothing.
+    if crate::cloud::signed_in() {
+        crate::cloud::spawn_sync(Arc::clone(&state));
+    }
 
     // Installed before the first thread starts: the signal is how this process
     // ends, so the ordinary exit has to be the safe one.
