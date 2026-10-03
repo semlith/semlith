@@ -81,6 +81,7 @@ def walk(args):
             t0 = time.time()
             checkout(root, inst["base_commit"])
             idx = sh([arms.SEMLITH, "index", "--store", store, "-q", root], timeout=7200).stdout.strip().splitlines()
+            chunks, vectors = arms.embedded(store)
             # `semlith files` prints a path relative to the working directory when it can and
             # absolute otherwise; every arm and the gold speak root-relative paths.
             files = [os.path.relpath(f if os.path.isabs(f) else os.path.join(os.getcwd(), f), root)
@@ -96,7 +97,8 @@ def walk(args):
                                         "arm": a, "run": r, "ms": round(ms, 1), "gold": inst["gold"],
                                         "gold_not_indexed": missing, "files": ranked_files(ex)[:50],
                                         "first_gold_offset": next((e.offset for e in ex if e.path in inst["gold"]), None),
-                                        "returned_bytes": ex[-1].offset if ex else 0, "index": idx[:1]}) + "\n")
+                                        "returned_bytes": ex[-1].offset if ex else 0, "index": idx[:1],
+                                        "chunks": chunks, "vectors": vectors}) + "\n")
             print(f"{repo} {n + 1}/{len(todo)} {inst['instance_id']} {time.time() - t0:.0f}s {idx[:1]}", flush=True)
     write_manifest(out, {"bench": "swe", "sets": args.sets, "arms": arm_names})
     return out

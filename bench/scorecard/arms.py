@@ -161,3 +161,19 @@ def parse_search(raw):
             path = line.strip()
         offset += len(line.encode("utf-8"))
     return out
+
+
+def embedded(store, wait_s=1800):
+    """Wait until every chunk has its vector, so no arm searches a store still being embedded.
+
+    Returns (chunks, vectors) as last read; the caller records it beside the row.
+    """
+    import time
+    deadline = time.time() + wait_s
+    while True:
+        out = sh([SEMLITH, "stats", "--store", store]).stdout
+        nums = {k: int(v) for k, v in re.findall(r"^(chunks|vectors)\s+(\d+)", out, re.M)}
+        chunks, vectors = nums.get("chunks", 0), nums.get("vectors", 0)
+        if vectors >= chunks or time.time() > deadline:
+            return chunks, vectors
+        time.sleep(5)
