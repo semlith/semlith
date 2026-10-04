@@ -9086,12 +9086,12 @@ function cloudOrgCard(o, C) {
       ),
     ),
     remote.length
-      ? remote.map((r) => remoteStoreBlock(r, listed.find((x) => x.name === r.store)))
+      ? remote.map((r) => remoteStoreBlock(r, listed.find((x) => x.name === r.store), reach === "connected" ? o.org : null))
       : el("div", { class: "card-b col gap6" }, el("span", { class: "muted t-sm", text: "No store of this org is connected on this machine." }), el("div", { class: "row" }, btn({ class: "btn sm", onclick: () => connectCloud(o) }, "Connect its stores"))),
   );
 }
 
-function remoteStoreBlock(r, s) {
+function remoteStoreBlock(r, s, answeredBy) {
   const freshDot = (state) => ({ fresh: "green", indexing: "amber", queued: "amber", paused: "", error: "red" })[state] || "";
   const input = el("input", {
     value: cloudUi.dirs[r.name] || "",
@@ -9103,7 +9103,7 @@ function remoteStoreBlock(r, s) {
   return el(
     "div",
     { class: "card-b col gap6" },
-    el("div", { class: "row gap8" }, el("span", { class: "t-m t13", text: r.name }), pill(r.badge, "blue", { dot: false, sm: true }), el("span", { class: "muted t-xs grow", text: s ? `${s.state} · ${n(s.files || 0)} files · ${n(s.chunks || 0)} chunks` : "not in the host's answer yet" })),
+    el("div", { class: "row gap8" }, el("span", { class: "t-m t13", text: r.name }), pill(r.badge, "blue", { dot: false, sm: true }), el("span", { class: "muted t-xs grow", text: s ? `${s.state} · ${n(s.files || 0)} files · ${n(s.chunks || 0)} chunks` : answeredBy ? `${answeredBy} no longer offers this store: deleted, renamed, or out of this token's reach` : "not in the host's answer yet" })),
     (s?.sources || []).map((src) =>
       el(
         "div",
