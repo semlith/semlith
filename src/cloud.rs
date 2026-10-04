@@ -1062,6 +1062,9 @@ pub struct Fetched {
     pub hits: Vec<RemoteHit>,
     /// One phrase per group of stores skipped, naming them and why.
     pub skipped: Vec<String>,
+    /// The stores behind those phrases, so a count can say "skipped" for
+    /// them rather than 0.
+    pub skipped_names: Vec<String>,
 }
 
 /// The search a remote store is asked: the same arguments the local one got.
@@ -1125,6 +1128,8 @@ pub fn search(targets: &[Named], q: &Query<'_>, who: &Who<'_>) -> Fetched {
             Ok(e) => e,
             Err(why) => {
                 out.skipped.push(format!("{} ({why})", names(&list)));
+                out.skipped_names
+                    .extend(list.iter().map(|(n, _)| n.clone()));
                 continue;
             }
         };
@@ -1168,7 +1173,11 @@ pub fn search(targets: &[Named], q: &Query<'_>, who: &Who<'_>) -> Fetched {
                     out.hits.push(hit);
                 }
             }
-            Err(failure) => out.skipped.push(format!("{} ({failure})", names(&list))),
+            Err(failure) => {
+                out.skipped.push(format!("{} ({failure})", names(&list)));
+                out.skipped_names
+                    .extend(list.iter().map(|(n, _)| n.clone()));
+            }
         }
     }
     out

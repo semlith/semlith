@@ -2115,6 +2115,13 @@ fn run() -> Result<()> {
                     breakdown.push(format!("{label} {n}"));
                 }
                 for (name, _) in &targets {
+                    if fetched
+                        .as_ref()
+                        .is_some_and(|f| f.skipped_names.contains(name))
+                    {
+                        breakdown.push(format!("{name} skipped"));
+                        continue;
+                    }
                     let tag = format!("{name} (");
                     let n = hits
                         .iter()
