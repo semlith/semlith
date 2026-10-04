@@ -36,7 +36,9 @@ sudo stat -c '%a %n' "/home/$user/.cache/semlith/models"
 capture() {
   sudo iptables -I OUTPUT -m owner --uid-owner "$uid" ! -o lo -j NFLOG --nflog-group 7
   sudo ip6tables -I OUTPUT -m owner --uid-owner "$uid" ! -o lo -j NFLOG --nflog-group 7
-  sudo tcpdump -i nflog:7 -nn -U -w "$1" 2> /dev/null &
+  # Never on the job's stdout: a background holding the step's pipe kept the
+  # step waiting until its limit after the script itself had exited.
+  sudo tcpdump -i nflog:7 -nn -U -w "$1" > /dev/null 2>&1 &
   tcpdump_pid=$!
   sleep 2
 }
@@ -66,33 +68,21 @@ timeout 300 sudo -u "$user" -H env HOME="/home/$user" SEMLITH_NO_SERVICE=1 sh -c
 step "search"
 timeout 120 sudo -u "$user" -H env HOME="/home/$user" sh -c "umask 077; cd $corpus && exec semlith-under-test search 'where is the order total'" > /dev/null
 # The daemon as a transient systemd service: started detached, holding no
-# terminal (a daemon backgrounded under sudo kept sudo waiting until the
-# job's limit), and still running as the capture user.
+# terminal, and still running as the capture user. Plain `start`:
+# `start --no-service` removes the login service and exits without serving,
+# and SEMLITH_NO_SERVICE=1 already keeps a service from being installed.
 step "the daemon and its portal"
-# Three ways of starting the daemon have each left the job waiting here until
-# its limit with nothing printed; trace this part, and if it is still going
-# after two minutes print what every process is doing.
-PS4='+ $(date +%T) '
-set -x
-( sleep 120
-  echo "== still in the daemon step after 120 s =="
-  ps -eo pid,ppid,user,stat,etime,wchan:20,args --forest | grep -vE '\[.*\]$' | tail -60
-  sudo systemctl status semlith-nocap --no-pager 2>&1 | head -20
-  sudo cat "/home/$user/daemon.out" 2>&1 | tail -40 ) &
-watchdog=$!
 sudo systemd-run --quiet --unit=semlith-nocap --uid="$user" --gid="$user" \
   --property=UMask=0077 --working-directory="/home/$user" \
   --setenv=HOME="/home/$user" --setenv=SEMLITH_NO_SERVICE=1 \
   --property=StandardOutput="file:/home/$user/daemon.out" --property=StandardError="file:/home/$user/daemon.out" \
-  /usr/local/bin/semlith-under-test start --port "$port" --no-service
+  /usr/local/bin/semlith-under-test start --port "$port"
 for _ in $(seq 1 90); do sudo grep -q 'token=' "/home/$user/daemon.out" 2> /dev/null && break; sleep 1; done
-token=$(sudo grep -oE 'token=[0-9a-f]+' "/home/$user/daemon.out" | head -1 | cut -d= -f2)
+token=$(sudo grep -oE 'token=[0-9a-f]+' "/home/$user/daemon.out" | head -1 | cut -d= -f2 || true)
 [ -n "$token" ] || { echo "the daemon printed no token:"; sudo cat "/home/$user/daemon.out"; exit 1; }
 curl -fsS -m 30 -o /dev/null "http://127.0.0.1:$port/"
 curl -fsS -m 30 -H "Semlith-Token: $token" "http://127.0.0.1:$port/api/privacy" > privacy.json
 curl -fsS -m 60 -H "Semlith-Token: $token" "http://127.0.0.1:$port/api/search?q=order%20total" > /dev/null
-kill "$watchdog" 2> /dev/null || true
-set +x
 step "stop"
 sudo systemctl stop semlith-nocap 2> /dev/null || true
 sudo pkill -u "$user" -f semlith-under-test || true
