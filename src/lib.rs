@@ -3248,7 +3248,7 @@ impl Semlith {
                         // exactly as it found it and the next file is embedded.
                         // Everything after this line is the store's, and a
                         // failure there is the run's.
-                        let vector = match self.clip.embed_image(&path, self.quiet) {
+                        let vector = match self.clip.embed_image(&path, &bytes, self.quiet) {
                             Ok(vector) => vector,
                             Err(e) => {
                                 failed(&mut report, &path, &e);
