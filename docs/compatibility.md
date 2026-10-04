@@ -1414,6 +1414,23 @@ what was there, except the three marked as a change of shape.
 | `GET /api/corpus` | A store over 20 000 chunks may answer `{store, measuring: true}` while it is measured off the request; the measure is kept until the store changes. |
 | Release assets | Each release carries `install.sh` and `install.ps1`, and every asset has a GitHub artifact attestation. The installers verify the archive's with `gh attestation verify` when `gh` is installed and logged in, and refuse one that fails; a tag before `v0.36.0` has none and is installed as before. |
 
+## 0.37.0
+
+Semlith Cloud's client. Nothing below is reached by a machine that never ran
+`semlith cloud login`.
+
+| Surface | Change |
+|---|---|
+| CLI commands added | `cloud login [<org>] [--host] [--token]`, `logout`, `status [--json]`, `connect <org> [--store <name>…]`, `disconnect <org>`, `push <org>/<store> <dir> [--wait] [--json]`, `sync <store> on\|off [--org]`, `report <org> <kind> [--format] [--window] [--model] [--stores] [--out]`, `replay [<session>] [--org]`. Against `infra/docs/cloud-api.md`'s `/v1` routes. |
+| `~/.semlith/cloud.json` | New, owner-only: `{machine, entries: [{host, org, token, plan?, added}]}`. Tool-written state, not a configuration file. A token is sent only to the `host` it is stored with. |
+| `registry.json` | A top-level `remote` map, `<org>/<store>` → `{host, org, store, mcp_url}`, absent while empty. Not entries in `stores`: an older binary walks those as directories. An older binary ignores the map and drops it on its next write; `semlith cloud connect` puts it back. Store entries gain `cloud_sync: {org, since}`, absent while off. |
+| The ledger | `retrievals` gains `synced_at`, additive and outside the chain; `FORMAT_VERSION` does not move. |
+| MCP and the read routes | A search naming a remote store, or none while remote stores are connected, merges remote hits by score; any other tool naming one forwards it. Unchanged for a machine with no remote store. `/api/search` rows from a remote store carry `remote`, `badge`, `source`, `revision` and `behind_seconds`; other read routes add `remote: [{store, badge, text}]`; either may add `remote_skipped`. |
+| Writes naming a remote store | Refused with a sentence on every path: the CLI, the write routes (400) and the MCP write tools. |
+| Routes added | `GET /api/cloud`, `GET /api/cloud/status`, `POST /api/cloud/sync`, `/api/cloud/connect`, `/api/cloud/disconnect`, `/api/cloud/push`, `/api/cloud/report`, `/api/cloud/replay`. `/api/stores` gains `remote`, `/api/about` and `/api/privacy` gain `cloud`. |
+| `semlith doctor` | A cloud line, and `cloud: {signed_in, orgs}` in `--json`. |
+| Library | `Semlith::index_paths_under`, `index_rest_under` and `undo_run`; `mcp::Session` gains `host`. |
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:

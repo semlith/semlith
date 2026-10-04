@@ -462,12 +462,70 @@ pub fn heading_path(text: &str, line: u32) -> String {
         }
         let hashes = raw.len() - raw.trim_start_matches('#').len();
         path.retain(|(level, _)| *level < hashes);
-        path.push((hashes, raw[hashes..].trim().to_string()));
+        path.push((hashes, heading_title(&raw[hashes..])));
     }
     path.into_iter()
         .map(|(_, title)| title)
         .collect::<Vec<_>>()
         .join(" > ")
+}
+
+/// A heading's text as a reader sees it: `## **Making purposeful content**`
+/// is `Making purposeful content`, not a name with asterisks in it.
+///
+/// Drops a closing `#` run, backticks, `*` emphasis wherever it flanks text
+/// (a lone ` * ` stays), link syntax down to its text, and `_`/`__` only when
+/// they wrap the whole title, so `snake_case_name` is left alone. The graph's
+/// heading symbols and [`heading_path`] both go through here.
+pub fn heading_title(raw: &str) -> String {
+    let mut s = raw.trim();
+    let open = s.trim_end_matches('#');
+    if open.len() < s.len() && (open.is_empty() || open.ends_with([' ', '\t'])) {
+        s = open.trim_end();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut code = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '`' {
+            code = !code;
+        } else if code {
+            out.push(c);
+        } else if c == '*' {
+            let end = (i..chars.len())
+                .find(|&k| chars[k] != '*')
+                .unwrap_or(chars.len());
+            let space = |c: Option<&char>| c.is_none_or(|c| c.is_whitespace());
+            if space(i.checked_sub(1).map(|j| &chars[j])) && space(chars.get(end)) {
+                out.extend(&chars[i..end]);
+            }
+            i = end;
+            continue;
+        } else if c == ']' && chars.get(i + 1) == Some(&'(') {
+            // `[text](url)`: the text is already out, the url is skipped.
+            match (i + 2..chars.len()).find(|&k| chars[k] == ')') {
+                Some(close) => i = close,
+                None => out.push(c),
+            }
+        } else if c != '[' || !s.contains("](") {
+            out.push(c);
+        }
+        i += 1;
+    }
+    let mut t = out.trim();
+    for wrap in ["__", "_"] {
+        if t.len() > 2 * wrap.len() && t.starts_with(wrap) && t.ends_with(wrap) {
+            t = t[wrap.len()..t.len() - wrap.len()].trim();
+            break;
+        }
+    }
+    if t.is_empty() {
+        s.to_string()
+    } else {
+        t.to_string()
+    }
 }
 
 fn split_chars(s: &str, n: usize) -> Vec<String> {
@@ -618,6 +676,30 @@ Text after the fence.
             .unwrap() as u32
             + 1;
         assert_eq!(heading_path(text, after), "Install");
+    }
+
+    /// A Confluence export bolds its headings; the name is the words, not the
+    /// Markdown around them.
+    #[test]
+    fn a_heading_title_drops_its_inline_markdown() {
+        for (raw, want) in [
+            (
+                "## **Making purposeful content**",
+                "Making purposeful content",
+            ),
+            ("### `Store::open` and *friends*", "Store::open and friends"),
+            ("# Title ##", "Title"),
+            ("## snake_case_name", "snake_case_name"),
+            ("## __Wrapped__", "Wrapped"),
+            ("## See [the docs](https://x.invalid/a)", "See the docs"),
+            ("## C#", "C#"),
+            ("## a * b", "a * b"),
+        ] {
+            let hashes = raw.len() - raw.trim_start_matches('#').len();
+            assert_eq!(heading_title(&raw[hashes..]), want, "{raw}");
+        }
+        let text = "# **Guide** #\n\n## `Store::open`\n\nBody.\n";
+        assert_eq!(heading_path(text, 5), "Guide > Store::open");
     }
 
     #[test]

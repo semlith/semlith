@@ -341,7 +341,7 @@ impl Settings {
 /// using. The pid alone was shared by every thread of a daemon, so two routes
 /// saving at once wrote one temporary file and renamed each other's half
 /// (issue #132).
-fn unique_temp_suffix() -> String {
+pub(crate) fn unique_temp_suffix() -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     format!(
         "json.{}.{}.new",
@@ -616,6 +616,21 @@ pub struct StoreSettings {
     /// gitignore. The deny-list, the hidden-file rule, `.semlithignore` and
     /// the credential scan apply either way.
     pub gitignore: bool,
+    /// Ledger sync to Semlith Cloud (0.37.0): the org this store's ledger rows
+    /// go to, and from when. Absent is off, which is the default, and is
+    /// left out of the file so a store that never turned it on reads as it
+    /// always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_sync: Option<CloudSync>,
+}
+
+/// Where a store's ledger rows are sent, and the first second they count
+/// from: turning sync on sends what is retrieved from then on, not the
+/// store's history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudSync {
+    pub org: String,
+    pub since: i64,
 }
 
 impl Default for StoreSettings {
@@ -626,6 +641,7 @@ impl Default for StoreSettings {
             watch: true,
             record: true,
             gitignore: true,
+            cloud_sync: None,
         }
     }
 }
@@ -655,6 +671,7 @@ fn taken_message(name: &str) -> String {
 /// format row written. No roots yet; the first folder indexed into it
 /// becomes one.
 pub fn create_store(name: &str, kind: &str) -> Result<PathBuf> {
+    refuse_remote(name)?;
     check_store_name(name)?;
     let mut registry = Registry::load()?;
     let dir = Registry::dir_of(name)?;
@@ -688,6 +705,7 @@ pub fn create_store(name: &str, kind: &str) -> Result<PathBuf> {
 /// all of them. The caller must have closed the store first: the daemon stops
 /// its writer and drops its readers before calling this.
 pub fn rename_store(old: &str, new: &str) -> Result<PathBuf> {
+    refuse_remote(old)?;
     check_store_name(new)?;
     let mut registry = Registry::load()?;
     let Some(entry) = registry.stores.get(old).cloned() else {
@@ -723,6 +741,7 @@ pub fn update_store_settings(
     name: &str,
     change: impl FnOnce(&mut StoreSettings),
 ) -> Result<StoreSettings> {
+    refuse_remote(name)?;
     let mut registry = Registry::load()?;
     let Some(entry) = registry.stores.get_mut(name) else {
         bail!("no registered store called {name}");
@@ -765,6 +784,58 @@ pub struct Registry {
     /// empty list, which is why the first interactive run offers to fill it.
     #[serde(default)]
     pub trusted: Vec<PathBuf>,
+    /// Semlith Cloud stores this machine reads and never writes, named
+    /// `<org>/<store>` (0.37.0).
+    ///
+    /// A map of its own beside `stores` rather than entries in it, on purpose:
+    /// every older binary walks `stores` as directories under the store home,
+    /// so a remote entry there would be reported as a missing store, offered
+    /// a re-point and counted in every listing. Here an older binary ignores
+    /// it, and drops it on its next write, which costs a `semlith cloud
+    /// connect` and nothing else. Absent from the file while empty, so a
+    /// connect followed by a disconnect leaves it byte for byte as it was.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub remote: BTreeMap<String, Remote>,
+}
+
+/// Where a remote store is answered: the cloud host, the org, the store's
+/// own name there, and the MCP URL its tools are reached through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Remote {
+    pub host: String,
+    pub org: String,
+    pub store: String,
+    pub mcp_url: String,
+}
+
+/// Refuse a write to a remote store, with the sentence that says why.
+///
+/// Called by every path that writes to a store by name — the CLI's `index
+/// --name` and `drop`, the daemon's write routes and MCP's write tools — so
+/// the answer is one sentence everywhere rather than "no store called …",
+/// which would read as the store being missing.
+pub fn refuse_remote(name: &str) -> Result<()> {
+    let Ok(registry) = Registry::load() else {
+        return Ok(());
+    };
+    if let Some(remote) = registry.remote.get(name) {
+        bail!("{}", remote_refusal(name, remote));
+    }
+    Ok(())
+}
+
+/// The sentence [`refuse_remote`] gives.
+pub fn remote_refusal(name: &str, remote: &Remote) -> String {
+    format!(
+        "{name} is a remote store: Semlith Cloud ({}) indexes it from its own sources and \
+         this machine only reads it, so it cannot be indexed, added to, forgotten from, \
+         compacted, changed or deleted here. Change it in the cloud app, or send files \
+         to it with `semlith cloud push {name} <dir>`.",
+        remote
+            .host
+            .split_once("://")
+            .map_or(remote.host.as_str(), |(_, h)| h)
+    )
 }
 
 impl Registry {
@@ -1042,6 +1113,7 @@ pub fn resolve(flags: &[PathBuf], anchor: &Path, name: Option<&str>) -> Result<C
     // An explicit `--name` is an instruction, so it skips the search: it names
     // the store to use or to create, and nothing else may answer for it.
     if let Some(name) = name {
+        refuse_remote(name)?;
         let name = sanitize(name);
         let dir = Registry::dir_of(&name)?;
         return Ok(if registry.stores.contains_key(&name) {
@@ -1288,6 +1360,7 @@ pub fn adopt(source: &Path, root: Option<&Path>, name: Option<&str>) -> Result<(
 /// portal offers it beside a root it can see is missing, so the directory is
 /// checked here rather than discovered by a watcher that finds nothing.
 pub fn repoint(name: &str, root: &Path) -> Result<()> {
+    refuse_remote(name)?;
     if !root.is_dir() {
         bail!("{} is not a directory", root.display());
     }
@@ -1318,6 +1391,7 @@ pub fn repoint(name: &str, root: &Path) -> Result<()> {
 /// The files on disk that were indexed are not touched. This deletes what
 /// semlith derived from them.
 pub fn delete_store(name: &str) -> Result<PathBuf> {
+    refuse_remote(name)?;
     let mut registry = Registry::load()?;
     if !registry.stores.contains_key(name) {
         bail!(
