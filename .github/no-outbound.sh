@@ -97,7 +97,7 @@ get() {
 }
 get 30 /dev/null /
 get 30 privacy.json /api/privacy
-get 60 /dev/null '/api/search?q=order%20total'
+get 60 /dev/null '/api/search?query=order%20total'
 step "stop"
 sudo systemctl stop semlith-nocap 2> /dev/null || true
 sudo pkill -u "$user" -f semlith-under-test || true
