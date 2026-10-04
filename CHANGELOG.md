@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0-rc.1] - 2026-10-04
+
 ### Semlith Cloud, from this machine
 
 Nothing changes for anybody who never signs in: with no `~/.semlith/cloud.json`
@@ -66,6 +68,15 @@ the binary makes no outbound connection and starts no thread for the cloud.
   to the download it took the umask, and on Ubuntu, whose default is 002, the
   first run downloaded the model and every later run refused the
   group-writable directory.
+- Markdown heading names drop their inline emphasis, code spans and links: a
+  Confluence heading `## **Making purposeful content**` was named with its
+  asterisks in search and the graph. Existing stores keep the old names until
+  those files are re-indexed.
+- A finished run's history row is written before anything can read the run
+  as finished; a daemon stopped right after "done" could lose it.
+- With the cloud unreachable, the search summary counts its stores as
+  skipped, not as 0 hits; a remote store the cloud no longer offers says so in
+  Settings › Cloud; `cloud status` sizes caps in GB.
 
 ## [0.36.0] - 2026-10-02
 
