@@ -5579,6 +5579,8 @@ def _(d):
     want("the sources listed", roots, max(1, len(row.get("roots") or [])))
     press_text(d, "#main button", "Search it")
     d.wait_for("location.hash === '#/search'", what="Search it to open Search")
+    # The hash moves before Search paints; wait for its scope button.
+    d.wait_for("!!document.querySelector('#main .scope-btn .v')", what="Search to paint its scope")
     want("the store Search is scoped to", text_of(d, "#main .scope-btn .v", "the search scope"), store)
     no_console_errors(d, "a store's Overview")
 
