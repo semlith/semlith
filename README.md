@@ -542,6 +542,28 @@ Peak memory does not grow with the corpus — 105k chunks is 85 times the work o
 at. Query latency does grow: the index scan is linear.
 [docs/performance.md](docs/performance.md) has the full tables.
 
+## Benchmarks
+
+Public code-retrieval benchmarks, run by `bench/scorecard/` in this repository
+on one 4P+4E M1 MacBook Air (8 GB), October 2026, with semlith 0.36.0 — the
+retrieval path 0.38.0 ships, which changes only how fast a scope resolves and
+that an emptied file is evicted. Every number is the median of the runs named
+beside it, with the spread when it is not zero, and each table ends with the
+command that reproduces it. [bench/scorecard/README.md](bench/scorecard/README.md)
+lists the downloads (about 12 GB with the clones and stores) and the order to
+run them in. They are published as measured: where grep or another tool wins,
+the table says so.
+
+The baselines are what an agent does without semlith. *BM25* runs one ripgrep
+pass for the query's identifiers and words and ranks the files it hits by BM25;
+*grep then read* takes that ranking and reads up to twenty files whole, in
+order, the way an agent that greps then opens files does.
+"Tokens" are the bytes an arm hands back divided by four, counted up to the
+first gold file.
+
+<!-- scorecard:begin -->
+<!-- scorecard:end -->
+
 ## Known limits
 
 - One writer per store. A second `index` run against a store already being

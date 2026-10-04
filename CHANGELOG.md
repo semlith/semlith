@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The public scorecard
+
+**`bench/scorecard/` reproduces every published number.** One entry point per
+benchmark, each printing its table and the command that produced it, every
+figure the median of three runs with its spread: SWE-bench Lite and Verified
+retrieval (each instance indexed at its own base commit), CodeRAG-Bench on its
+canonical corpora, a seeded sample of RepoBench-R's test split, nine competitor
+tools on a seeded 20 of SWE-bench Lite, an agent round with Opus and Haiku, and the savings in
+the ledger's real sessions. Data, clones and stores live under
+`~/semlith-bench/scorecard`, never in the repository, and nothing under
+`bench/` is in the crate.
+
+### Fixed
+
+- **A long query no longer puts a screenshot first.** CLIP reads 77 tokens, so
+  an issue or a pasted paragraph was compared to the store's images by its
+  opening words alone, and a screenshot of text matches the opening of almost
+  any technical prose: on the scorecard's SWE-bench walk a documentation image
+  came first for 57 of 102 Django and Astropy issues, above the code they were
+  about. A query CLIP has to cut short no longer counts as a confident image
+  match; its images still rank, as weak candidates.
+- **A file emptied on disk is evicted from the store.** The index pass skipped an
+  empty file without removing what it used to hold, so its old chunks went on
+  answering searches for text no longer on disk; the same held for a file that
+  grew past the size cap or became unreadable. Found by the scorecard's
+  base-commit check on the SWE-bench walk, where a commit emptied two astropy
+  files.
+- **A scope's first search no longer pays the whole filter resolution each time
+  the scope changes (#183).** A store kept one resolved filter, so an agent
+  moving between two repositories resolved each again on every call; it keeps
+  the eight most recent now. Allowlists are sorted once when built, so a sharded
+  index takes each shard's ids by binary search instead of testing every id
+  against every shard. A scope with a literal directory in front, `<root>/**`,
+  is a range of a new index on the lowered path rather than a GLOB over every
+  path; the index is added on open and older binaries ignore it.
+- **A failed accelerator lane is tried again (#188).** One failed start of the
+  Neural Engine worker left the daemon embedding on the CPU, about a tenth of the
+  speed, until it was restarted — switching the lane off and on from the terminal
+  never reached it, and nothing was written to its log. A failed lane is tried
+  again on the first run ten minutes later, and the failure goes to the log.
+
 ## [0.36.0] - 2026-10-02
 
 ### Search on a store of many repositories

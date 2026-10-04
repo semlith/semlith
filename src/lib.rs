@@ -747,6 +747,9 @@ fn checkpoint_files() -> usize {
 
 /// One resolved filter: what it was, the store state it was resolved
 /// against, and what it resolved to.
+/// How many resolved filters a store keeps (#183).
+const FILTER_MEMOS: usize = 8;
+
 struct FilterMemo {
     groups: Vec<Vec<String>>,
     generation: u64,
@@ -1614,11 +1617,12 @@ pub struct Semlith {
     /// The index generation this process has loaded. Compared against the
     /// store's on every search to notice another process's writes.
     generation: u64,
-    /// The last filter this store resolved, kept until the store changes. An
-    /// agent scoped to one repository asks with the same `path` call after
-    /// call, and resolving it again was the largest cost left in a scoped
-    /// search (#170).
-    filter_memo: Option<FilterMemo>,
+    /// The filters this store resolved most recently, newest first, each kept
+    /// until the store changes. An agent scoped to one repository asks with
+    /// the same `path` call after call, and resolving it again was the largest
+    /// cost left in a scoped search (#170); an agent moving between a few
+    /// repositories missed a one-entry memo on every call (#183).
+    filter_memo: std::collections::VecDeque<FilterMemo>,
     /// Print model-download progress to stderr. Off for the MCP server, where
     /// stdout/stderr are a protocol channel.
     pub quiet: bool,
@@ -1729,7 +1733,7 @@ impl Semlith {
             tokenizer: None,
             clip: image::Clip::default(),
             generation,
-            filter_memo: None,
+            filter_memo: std::collections::VecDeque::new(),
             quiet: false,
             boundary: Boundary::default(),
             gitignore: true,
@@ -3025,14 +3029,16 @@ impl Semlith {
                         self.tx_begin()?;
                         // A batch of events can name a file that has just been
                         // deleted or renamed away. Evicting it here is what makes
-                        // a deletion visible without a full sweep.
-                        if gone {
-                            let ids = store::delete_file(&self.db, &key, now())?;
-                            if !ids.is_empty() {
-                                for id in ids {
-                                    self.index.remove(id)?;
-                                }
-                                report.removed += 1;
+                        // a deletion visible without a full sweep. A file still
+                        // there but no longer usable -- emptied, grown past the
+                        // cap, unreadable -- is evicted too: its old chunks
+                        // would go on answering for text no longer on disk.
+                        // Through `evict`, so an image's vectors leave the
+                        // image index with its rows.
+                        let (chunks, images) = self.evict(&key)?;
+                        if chunks > 0 || images > 0 {
+                            report.removed += 1;
+                            if gone {
                                 say_file(
                                     &mut on_file,
                                     &report,
@@ -4593,12 +4599,14 @@ impl Semlith {
         // and the newest chunk id, which a row written ahead of its vectors
         // moves before the generation does.
         let newest_chunk = store::newest_chunk(&self.db)?;
-        if let Some(memo) = &self.filter_memo
-            && memo.groups == filter.groups()
-            && memo.generation == self.generation
-            && memo.newest_chunk == newest_chunk
-        {
-            return Ok((memo.allowlist.clone(), Some(memo.selected.clone())));
+        let (generation, groups) = (self.generation, filter.groups());
+        self.filter_memo
+            .retain(|m| m.generation == generation && m.newest_chunk == newest_chunk);
+        if let Some(at) = self.filter_memo.iter().position(|m| m.groups == groups) {
+            let memo = self.filter_memo.remove(at).expect("position is in range");
+            let out = (memo.allowlist.clone(), Some(memo.selected.clone()));
+            self.filter_memo.push_front(memo);
+            return Ok(out);
         }
         let candidates = store::filtered_chunk_ids(&self.db, filter.groups())?;
         let mut ids = Vec::with_capacity(candidates.len());
@@ -4618,16 +4626,20 @@ impl Semlith {
             // the whole index for no benefit.
             Allowlist::All
         } else {
-            Allowlist::Subset(ids)
+            Allowlist::subset(ids)
         };
         let selected = std::sync::Arc::new(candidates.into_iter().collect());
-        self.filter_memo = Some(FilterMemo {
+        self.filter_memo.push_front(FilterMemo {
             groups: filter.groups().to_vec(),
             generation: self.generation,
             newest_chunk,
             allowlist: allowlist.clone(),
             selected: std::sync::Arc::clone(&selected),
         });
+        // ponytail: a fixed count, not bytes; a memo of a whole-store-sized
+        // subset holds about 9 bytes per chunk, so eight stay small next to
+        // the index itself.
+        self.filter_memo.truncate(FILTER_MEMOS);
         Ok((allowlist, Some(selected)))
     }
 
@@ -4891,7 +4903,7 @@ impl Semlith {
         // query has to be embedded a second time, with CLIP's text encoder
         // rather than the store's own model, and a store of source code should
         // not pay for a model it has nothing to compare against.
-        let images = self.image_search(query, depth, filter)?;
+        let (images, truncated) = self.image_search(query, depth, filter)?;
 
         // Two id spaces — a chunk id and an image id both count from one — so
         // the fusion is keyed by which space an id belongs to as well as by the
@@ -4918,7 +4930,14 @@ impl Semlith {
                 // before: 0.25 / 13 = 0.019 at rank one, against 1 / 61 =
                 // 0.016 under the old flat curve. The order among the
                 // also-rans is unchanged; only the confident case moved.
-                let weight = if *similarity >= image_floor() {
+                //
+                // A query CLIP had to cut short is never confident: the cosine
+                // is of its opening words, not of what was asked. An issue or a
+                // pasted paragraph runs past 77 tokens, and a screenshot of
+                // text matches the opening of almost any technical prose
+                // (0.24-0.31 on Django's docs, against 0.39 for a sentence
+                // describing a screenshot).
+                let weight = if *similarity >= image_floor() && !truncated {
                     TEXT_LISTS
                 } else {
                     WEAK_IMAGE
@@ -5522,7 +5541,7 @@ impl Semlith {
     }
 
     /// The image half of a search: the query in CLIP's text space, against the
-    /// store's image vectors.
+    /// store's image vectors, and whether CLIP had to cut the query short.
     ///
     /// Empty, and free, for a store that holds no image — which is every store
     /// that has only ever been pointed at source code.
@@ -5531,9 +5550,9 @@ impl Semlith {
         query: &str,
         depth: usize,
         filter: &Filter,
-    ) -> Result<Vec<(u64, f32)>> {
+    ) -> Result<(Vec<(u64, f32)>, bool)> {
         if store::image_count(&self.db)? == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
         let allowlist = if filter.is_empty() {
             index::Allowlist::All
@@ -5548,18 +5567,20 @@ impl Semlith {
                 }
             }
             if ids.is_empty() {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), false));
             }
-            index::Allowlist::Subset(ids)
+            index::Allowlist::subset(ids)
         };
 
-        let mut vector = self.clip.embed_query(query, self.quiet)?;
+        let (mut vector, truncated) = self.clip.embed_query(query, self.quiet)?;
         normalize(&mut vector);
         let (scores, ids) = self.images.search(&vector, depth, &allowlist)?;
-        Ok(ids
-            .into_iter()
-            .zip(scores.into_iter().chain(std::iter::repeat(0.0)))
-            .collect())
+        Ok((
+            ids.into_iter()
+                .zip(scores.into_iter().chain(std::iter::repeat(0.0)))
+                .collect(),
+            truncated,
+        ))
     }
 
     /// How many images this store holds.
@@ -6587,6 +6608,46 @@ fn semlithignore_for(dir: &Path) -> Option<ignore::gitignore::Gitignore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two scopes asked in turn both stay resolved (#183): a one-entry memo
+    /// resolved each of them again on every call.
+    #[test]
+    #[ignore = "downloads an embedding model on first run"]
+    fn alternating_scopes_both_stay_resolved() {
+        let corpus = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let others: Vec<String> = (0..FILTER_MEMOS).map(|i| format!("other{i}")).collect();
+        for dir in ["one", "two"]
+            .into_iter()
+            .chain(others.iter().map(String::as_str))
+        {
+            std::fs::create_dir(corpus.path().join(dir)).unwrap();
+            std::fs::write(
+                corpus.path().join(dir).join("retry.rs"),
+                format!("fn backoff_{dir}() {{ let delay = base * 2u32.pow(attempt); }}\n"),
+            )
+            .unwrap();
+        }
+        let mut s = Semlith::open(store.path(), None).unwrap();
+        s.quiet = true;
+        s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+            .unwrap();
+        let one = Filter::new(&["one/**".into()], &[], &[]).unwrap();
+        let two = Filter::new(&["two/**".into()], &[], &[]).unwrap();
+        for filter in [&one, &two, &one, &two] {
+            s.search_filtered("retry backoff", 4, filter).unwrap();
+        }
+        assert_eq!(s.filter_memo.len(), 2, "each scope resolved once");
+        // The one asked last is the newest.
+        assert_eq!(s.filter_memo[0].groups, two.groups());
+        // A scope past the memo's size pushes the oldest out, not the newest.
+        for dir in &others {
+            let f = Filter::new(&[format!("{dir}/**")], &[], &[]).unwrap();
+            s.search_filtered("retry backoff", 4, &f).unwrap();
+        }
+        assert_eq!(s.filter_memo.len(), FILTER_MEMOS);
+        assert!(s.filter_memo.iter().all(|m| m.groups != one.groups()));
+    }
 
     /// The head finds repositories below a projects folder, and within one
     /// commit takes the code before the licence and the changelog.
