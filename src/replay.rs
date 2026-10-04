@@ -268,7 +268,7 @@ pub fn read(dir: &Path, limit: usize) -> Result<Replay> {
 
     let mut sessions = Vec::new();
     for (last, path, project) in found {
-        let Some(session) = one(&path, &project, last) else {
+        let Some(session) = one(&path, &project, last, KEEP) else {
             continue;
         };
         if session.answers > 0 {
@@ -284,8 +284,37 @@ pub fn read(dir: &Path, limit: usize) -> Result<Replay> {
     })
 }
 
-/// One transcript's counts, or nothing when it cannot be read.
-fn one(path: &Path, project: &str, last: i64) -> Option<Session> {
+/// One transcript by its id, with every answer in it rather than the last
+/// [`KEEP`]: what `semlith cloud replay` sends when a member picks it.
+pub fn session(dir: &Path, id: &str) -> Result<Option<Session>> {
+    let Ok(projects) = std::fs::read_dir(dir) else {
+        return Ok(None);
+    };
+    for project in projects.flatten() {
+        let path = project.path().join(format!("{id}.jsonl"));
+        if !path.is_file() {
+            continue;
+        }
+        let label = project
+            .file_name()
+            .to_string_lossy()
+            .trim_start_matches('-')
+            .to_string();
+        let last = path
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        return Ok(one(&path, &label, last, usize::MAX));
+    }
+    Ok(None)
+}
+
+/// One transcript's counts, or nothing when it cannot be read. `keep` is how
+/// many of its newest answers to keep for the timeline.
+fn one(path: &Path, project: &str, last: i64, keep: usize) -> Option<Session> {
     let text = read_tail(path, BYTES)?;
     let mut calls: Vec<String> = Vec::new();
     // Parallel to `calls`, and only filled for semlith's own: what was asked
@@ -351,8 +380,8 @@ fn one(path: &Path, project: &str, last: i64) -> Option<Session> {
     }
     // The newest, oldest first: the panel reads downwards in time, and the
     // count above it is over the whole file either way.
-    if session.recent.len() > KEEP {
-        session.recent.drain(..session.recent.len() - KEEP);
+    if session.recent.len() > keep {
+        session.recent.drain(..session.recent.len() - keep);
     }
     Some(session)
 }

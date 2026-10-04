@@ -178,6 +178,43 @@ jobs:
           name: portal-${{ matrix.os }}
           path: portal-${{ matrix.os }}.log
 
+  # With no cloud token, nothing leaves the machine: a packet capture of the
+  # semlith user's traffic during a whole session, with a control proving the
+  # capture sees traffic at all. Linux, where iptables and NFLOG are.
+  no-outbound:
+    needs: [plan, build]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      (github.event_name != 'pull_request' || (needs.plan.outputs.heavy == 'true' && needs.build.result == 'success'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SEMLITH_VERSION: ${{ inputs.version }}
+      SEMLITH_YES: "1"
+      SEMLITH_NO_SERVICE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: ./.github/actions/install-semlith
+        with:
+          os: ubuntu-latest
+
+      - name: Capture a session
+        shell: bash
+        run: |
+          set -o pipefail
+          bash .github/no-outbound.sh 2>&1 | tee no-outbound.log
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: no-outbound
+          path: |
+            no-outbound.log
+            session.pcap
+            control.pcap
+            privacy.json
+
   smoke:
     needs: [plan, build]
     if: >-

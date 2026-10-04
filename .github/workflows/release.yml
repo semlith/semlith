@@ -276,3 +276,5 @@ jobs:
           name: Semlith ${{ steps.version.outputs.number }}
           files: dist/*
           body_path: notes.md
+          # A tag with a suffix (v0.37.0-rc.1) is a release candidate.
+          prerelease: ${{ contains(github.ref_name, '-') }}

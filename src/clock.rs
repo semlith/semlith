@@ -112,6 +112,13 @@ pub fn local_clock(at: i64) -> String {
     )
 }
 
+/// `2026-10-01T09:14:03Z`: unix seconds as RFC 3339 in UTC, the form the
+/// cloud's API takes.
+pub fn utc_rfc3339(at: i64) -> String {
+    let (y, mo, d, h, mi, s) = civil_from_unix(at);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
 /// Seconds since the epoch to a civil date, by Howard Hinnant's `civil_from_days`.
 ///
 /// Proleptic Gregorian, valid either side of the epoch, no table and no leap

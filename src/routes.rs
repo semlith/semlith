@@ -66,6 +66,40 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         return Response::asset(kind, bytes);
     }
 
+    // A write naming a remote store is refused here, once, with the sentence
+    // that says why, rather than by each route finding no such store open.
+    if post
+        && matches!(
+            path,
+            "/api/index"
+                | "/api/add"
+                | "/api/forget"
+                | "/api/root"
+                | "/api/refused/decide"
+                | "/api/store/delete"
+                | "/api/store/settings"
+                | "/api/store/compact"
+        )
+        && let Ok(body) = request.json()
+        && let Some(name) = body.get("store").and_then(Value::as_str)
+        && let Err(e) = home::refuse_remote(name)
+    {
+        return Response::error(400, &e.to_string());
+    }
+
+    if get && let Some(answered) = with_remotes(state, request) {
+        return answered;
+    }
+    dispatch(state, request)
+}
+
+/// The routes themselves, after the guards above. `with_remotes` asks this
+/// for the local half of an answer, so it never forwards twice.
+fn dispatch(state: &Arc<State>, request: &Request) -> Response {
+    let path = request.path.as_str();
+    let get = request.method == "GET";
+    let post = request.method == "POST";
+
     match (get, post, path) {
         (true, _, "/") => crate::portal::page(),
 
@@ -98,6 +132,12 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/map") => map(state, request),
         (true, _, "/api/report") => report(state, request),
         (true, _, "/api/schedules") => schedules(state),
+        // Settings › Cloud: who this machine is signed in as. Answered from
+        // `cloud.json` alone; nothing here reaches the host.
+        (true, _, "/api/cloud") => Response::json(&crate::cloud::local_view()),
+        // Asks each signed-in org's host for its status: the one cloud read
+        // the page makes, and only when Settings › Cloud is open.
+        (true, _, "/api/cloud/status") => Response::json(&crate::cloud::status_view()),
         // Both verbs: a GET reports whether the toggle is on and, when it
         // is, what the transcripts say; a POST is the toggle itself.
         (_, _, "/api/ledger/replay") if get || post => replay(request),
@@ -159,6 +199,16 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         })),
         (_, true, "/api/accel") => accel_change(request),
         (_, true, "/api/schedules") => schedule_write(state, request),
+        (_, true, "/api/cloud/sync") => cloud_sync(state, request),
+        (
+            _,
+            true,
+            "/api/cloud/connect"
+            | "/api/cloud/disconnect"
+            | "/api/cloud/push"
+            | "/api/cloud/report"
+            | "/api/cloud/replay",
+        ) => cloud_write(request),
         (_, true, "/api/upgrade") => upgrade(request),
         (_, true, "/api/drop/resolve") => drop_resolve(state, request),
 
@@ -184,6 +234,254 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         ) => Response::error(405, "wrong method for this route"),
         _ => Response::error(404, "no such route"),
     }
+}
+
+/// Settings › Cloud's per-store ledger sync switch, and `semlith cloud sync`
+/// when a daemon is running. Turning one on starts the sync thread if this
+/// daemon has none yet.
+fn cloud_sync(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let (Some(store), Some(on)) = (
+        body.get("store").and_then(Value::as_str),
+        body.get("on").and_then(Value::as_bool),
+    ) else {
+        return Response::error(400, "missing store or on");
+    };
+    match crate::cloud::set_sync(store, on, body.get("org").and_then(Value::as_str)) {
+        Ok(sync) => {
+            if sync.is_some() {
+                crate::cloud::spawn_sync(Arc::clone(state));
+            }
+            Response::json(&json!({ "store": store, "sync": sync }))
+        }
+        Err(e) => Response::error(400, &format!("{e:#}")),
+    }
+}
+
+/// Settings › Cloud's buttons: the portal's view of `cloud connect`,
+/// `disconnect` (which signs this machine out of the org too), `push`,
+/// `report` and `replay`. Each is one call the person pressed.
+fn cloud_write(request: &Request) -> Response {
+    use anyhow::Context as _;
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let text = |k: &str| body.get(k).and_then(Value::as_str);
+    let org = text("org");
+    let answer = (|| -> anyhow::Result<Value> {
+        Ok(match request.path.as_str() {
+            "/api/cloud/connect" => {
+                let entry = crate::cloud::entry_for(org, None)?;
+                json!({ "connected": crate::cloud::connect(&entry, &[])? })
+            }
+            "/api/cloud/disconnect" => {
+                let org = org.context("name the org")?;
+                let removed = crate::cloud::disconnect(org)?;
+                // Already signed out is not a failure of a disconnect.
+                let signed_out = crate::cloud::logout(Some(org), None).ok().map(|e| e.org);
+                json!({ "removed": removed, "signed_out": signed_out })
+            }
+            "/api/cloud/push" => {
+                let store = text("store").context("name the store as <org>/<store>")?;
+                let dir = text("dir").context("name the folder to push")?;
+                serde_json::to_value(crate::cloud::push(
+                    store,
+                    Path::new(dir),
+                    false,
+                    body.get("prune").and_then(Value::as_bool).unwrap_or(false),
+                    &mut |_| {},
+                )?)?
+            }
+            "/api/cloud/report" => {
+                let entry = crate::cloud::entry_for(org, None)?;
+                let format = text("format").unwrap_or("md");
+                if format == "pdf" {
+                    anyhow::bail!(
+                        "a PDF is written by `semlith cloud report --format pdf --out <file>`"
+                    );
+                }
+                let bytes = crate::cloud::report(
+                    &entry,
+                    &crate::cloud::ReportAsk {
+                        kind: text("kind").unwrap_or("savings"),
+                        format,
+                        window: text("window"),
+                        model: None,
+                        stores: &[],
+                    },
+                )?;
+                json!({ "text": String::from_utf8_lossy(&bytes) })
+            }
+            _ => {
+                let entry = crate::cloud::entry_for(org, None)?;
+                let id = text("session").context("pick a session")?;
+                let (dir, _) = crate::cloud::replay_sessions()?;
+                let chosen = crate::replay::session(&dir, id)?
+                    .with_context(|| format!("no transcript called {id}"))?;
+                json!({
+                    "sent": chosen.recent.len(),
+                    "accepted": crate::cloud::replay(&entry, &chosen)?,
+                })
+            }
+        })
+    })();
+    match answer {
+        Ok(value) => Response::json(&value),
+        Err(e) => Response::error(400, &format!("{e:#}")),
+    }
+}
+
+/// The read routes a remote store can answer, with the MCP tool that does.
+const FORWARDED: [(&str, &str); 10] = [
+    ("/api/search", "semlith_search"),
+    ("/api/brief", "semlith_brief"),
+    ("/api/read", "semlith_read"),
+    ("/api/symbol", "semlith_symbol"),
+    ("/api/neighbors", "semlith_neighbors"),
+    ("/api/path", "semlith_path"),
+    ("/api/impact", "semlith_impact"),
+    ("/api/trace", "semlith_trace"),
+    ("/api/pattern", "semlith_pattern"),
+    ("/api/files", "semlith_files"),
+];
+
+/// A read route on a machine with remote stores, or `None` to answer it as
+/// always.
+///
+/// `/api/search` naming a remote store or none merges the remote hits into
+/// `hits` by score under the same `k`, each carrying `remote`, `badge`,
+/// `revision` and `behind_seconds`. Any other read naming a remote store asks
+/// that store's MCP endpoint and adds `remote: [{store, badge, text}]` beside
+/// the local answer. A store that cannot be asked is named in
+/// `remote_skipped`; the local answer is untouched.
+fn with_remotes(state: &Arc<State>, request: &Request) -> Option<Response> {
+    let (_, tool) = FORWARDED.iter().find(|(p, _)| *p == request.path)?;
+    let remotes = crate::cloud::remote_stores();
+    if remotes.is_empty() {
+        return None;
+    }
+    let named = request.query_all("store");
+    let is_remote = |n: &String| remotes.iter().any(|(r, _)| r == n);
+    let (remote_named, local_named): (Vec<String>, Vec<String>) =
+        named.iter().cloned().partition(is_remote);
+    let exact = request
+        .query("exact")
+        .is_some_and(|v| v == "1" || v == "true");
+    let merging = *tool == "semlith_search" && !exact;
+    let targets: Vec<(String, home::Remote)> = remotes
+        .iter()
+        .filter(|(r, _)| {
+            if named.is_empty() {
+                merging
+            } else {
+                remote_named.contains(r)
+            }
+        })
+        .cloned()
+        .collect();
+    if targets.is_empty() {
+        return None;
+    }
+    let skip_local = !named.is_empty() && local_named.is_empty();
+    let query = request.query("query").unwrap_or_default();
+
+    let mut answer = if skip_local {
+        let shape = crate::shape_of(query);
+        json!({
+            "hits": [],
+            "offset": 0,
+            "shape": shape,
+            "shape_label": shape.as_str(),
+            "weighting": shape.weighting(),
+        })
+    } else {
+        let mut local = request.clone();
+        if local_named.is_empty() {
+            local.query.remove("store");
+        } else {
+            local
+                .query
+                .insert("store".into(), local_named.join("\u{1}"));
+        }
+        let response = dispatch(state, &local);
+        if response.status() != 200 {
+            return Some(response);
+        }
+        response.json_value()?
+    };
+
+    let who = crate::cloud::Who {
+        client: "portal",
+        session: "portal",
+    };
+    let mut skipped = Vec::new();
+    if merging {
+        let k = request
+            .query("k")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(8)
+            .clamp(1, 100);
+        let fetched = crate::cloud::search(
+            &targets,
+            &crate::cloud::Query {
+                query,
+                k,
+                path: &request.query_all("path"),
+                ext: &request.query_all("ext"),
+                lang: &request.query_all("lang"),
+                prefer: request.query("prefer"),
+            },
+            &who,
+        );
+        let mut hits: Vec<Value> = answer["hits"].as_array().cloned().unwrap_or_default();
+        hits.extend(fetched.hits.iter().map(|h| h.to_json(query)));
+        hits.sort_by(|a, b| {
+            let score = |v: &Value| v["score"].as_f64().unwrap_or(0.0);
+            score(b).total_cmp(&score(a))
+        });
+        hits.truncate(k);
+        answer["hits"] = json!(hits);
+        skipped = fetched.skipped;
+    } else {
+        // The query, as the tool's arguments: one value as a string, a
+        // repeated one as a list.
+        let mut args = serde_json::Map::new();
+        for key in request.query.keys() {
+            let all = request.query_all(key);
+            args.insert(
+                key.clone(),
+                if all.len() == 1 {
+                    json!(all[0])
+                } else {
+                    json!(all)
+                },
+            );
+        }
+        if exact {
+            args.insert("exact".into(), json!(true));
+        }
+        let args = Value::Object(args);
+        let mut rows = Vec::new();
+        for (store, remote) in &targets {
+            match crate::cloud::forward_tool(store, remote, tool, &args, &who) {
+                Ok(text) => rows.push(json!({
+                    "store": store,
+                    "badge": crate::cloud::badge(remote),
+                    "text": text,
+                })),
+                Err(why) => skipped.push(why),
+            }
+        }
+        answer["remote"] = json!(rows);
+    }
+    if let Some(line) = crate::cloud::skipped_line(&skipped) {
+        answer["remote_skipped"] = json!(line);
+    }
+    Some(Response::json(&answer))
 }
 
 /// Every schedule the daemon holds, exactly as the file holds them.
@@ -661,6 +959,13 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
     if !failed.is_empty() {
         answer["failed"] = json!(failed);
     }
+    // Semlith Cloud stores this machine reads, beside the local ones rather
+    // than among them: every page that totals, opens or writes a store reads
+    // `stores`, and none of that applies to one. Absent when there are none.
+    let remote = crate::cloud::remote_rows();
+    if !remote.is_empty() {
+        answer["remote"] = json!(remote);
+    }
     Response::json(&answer)
 }
 
@@ -878,6 +1183,15 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
 /// as the tool serialises it, so the page cannot drift into showing something
 /// the agent surface does not return.
 fn brief(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(
+        state,
+        request,
+        json!({ "spans": [], "symbols": [] }),
+        brief_on,
+    )
+}
+
+fn brief_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let Some(question) = request.query("question").filter(|q| !q.trim().is_empty()) else {
         return Response::error(400, "missing question");
     };
@@ -901,14 +1215,6 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
         .query("store")
         .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
-
-    if let Err(e) = state.open_fleet() {
-        return Response::error(500, &e.to_string());
-    }
-    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(fleet) = fleet.as_mut() else {
-        return Response::json(&json!({ "spans": [], "symbols": [] }));
-    };
 
     let started = std::time::Instant::now();
     let only = (!only.is_empty()).then_some(only);
@@ -968,6 +1274,15 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn search(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(
+        state,
+        request,
+        json!({ "hits": [], "selected": 0 }),
+        search_on,
+    )
+}
+
+fn search_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let Some(query) = request.query("query").filter(|q| !q.trim().is_empty()) else {
         return Response::error(400, "missing query");
     };
@@ -992,8 +1307,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
             .query("offset")
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(0);
-        let empty = json!({ "matches": [], "files": 0, "truncated": false });
-        return with_fleet(state, empty, move |fleet| {
+        return answer_with(fleet, move |fleet| {
             let only = (!only.is_empty()).then_some(only);
             Ok(serde_json::to_value(fleet.grep_in(
                 only.as_deref(),
@@ -1019,14 +1333,6 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
             &format!("offset must be between 0 and {FILE_OFFSET_MAX}"),
         );
     }
-
-    if let Err(e) = state.open_fleet() {
-        return Response::error(500, &e.to_string());
-    }
-    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(fleet) = fleet.as_mut() else {
-        return Response::json(&json!({ "hits": [], "selected": 0 }));
-    };
 
     // Asked before the search, exactly as the CLI asks it: a filter that
     // selects nothing is a different answer from a corpus that does not
@@ -1985,6 +2291,9 @@ fn privacy(state: &Arc<State>) -> Response {
         // found with the GPU lane on, and the CUDA pack only after an explicit
         // turn-on; `--airgap` refuses all of them unless they were pre-seeded.
         "downloads": downloads(&cache),
+        // What this machine sends Semlith Cloud, if it signed in: the Privacy
+        // page's Cloud row reads it.
+        "cloud": crate::cloud::local_view(),
     }))
 }
 
@@ -2250,69 +2559,6 @@ fn privacy_fix(state: &Arc<State>, request: &Request) -> Response {
     }))
 }
 
-/// Write the configuration file of every client semlith cannot ask to register
-/// itself — the portal's half of `semlith setup --register-all`.
-///
-/// Two calls, deliberately. Without a body it returns the plan: every path and
-/// what would happen to it, which is what the page shows before it asks. With
-/// `{"confirm": true}` it applies that plan. This is the one place the daemon
-/// writes a file it does not own, and a user who has not seen the list has not
-/// agreed to it.
-/// What a typical answer from each tool costs an agent, before it asks.
-///
-/// Fixed estimates, in tokens, for a machine whose ledger has fewer than
-/// [`TYPICAL_MIN_ROWS`] rows for a tool: a locate search at its default
-/// budget, a brief at its default budget, a definition read whole, and the
-/// graph and housekeeping tools' short replies. Rough on purpose and labelled
-/// `estimate` beside every figure; the ledger's own median replaces each as
-/// soon as there are rows enough to take one from.
-const TYPICAL_ESTIMATES: &[(&str, &str, i64)] = &[
-    (
-        "semlith_search",
-        "where something is: one line per hit",
-        700,
-    ),
-    (
-        "semlith_brief",
-        "how something works: spans, text and callers",
-        1800,
-    ),
-    ("semlith_read", "one span or definition, whole", 900),
-    (
-        "semlith_pattern",
-        "every place one syntax shape occurs",
-        600,
-    ),
-    ("semlith_stats", "what is indexed, per store", 150),
-    (
-        "semlith_languages",
-        "which languages filter and carry a graph",
-        300,
-    ),
-    ("semlith_files", "what a folder holds", 450),
-    (
-        "semlith_index",
-        "a folder indexed, and what was skipped",
-        120,
-    ),
-    ("semlith_add", "one URL fetched and indexed", 80),
-    ("semlith_forget", "one file taken out", 40),
-    (
-        "semlith_symbol",
-        "where a name is defined and what touches it",
-        300,
-    ),
-    ("semlith_neighbors", "who calls it and what it calls", 350),
-    ("semlith_report", "one of the five reports", 1200),
-    ("semlith_impact", "every caller a change would reach", 450),
-    (
-        "semlith_trace",
-        "the chain from A to B, a line per hop",
-        400,
-    ),
-    ("semlith_path", "whether A reaches B, and how", 200),
-];
-
 /// The documented clients as `/api/agents` lists them, each with its id and
 /// whether its own file names semlith now.
 fn client_rows() -> Vec<Value> {
@@ -2332,9 +2578,6 @@ fn client_rows() -> Vec<Value> {
         })
         .collect()
 }
-
-/// Ledger rows a tool needs before its median replaces the estimate.
-const TYPICAL_MIN_ROWS: usize = 5;
 
 fn tool_sizes(state: &Arc<State>) -> Vec<Value> {
     // The ledger's tool column holds the short name: `search`, not
@@ -2360,36 +2603,7 @@ fn tool_sizes(state: &Arc<State>) -> Vec<Value> {
             }
         }
     }
-    let listed = crate::mcp::listed_names();
-    crate::mcp::tool_list()
-        .into_iter()
-        .map(|(name, about)| {
-            let short = name.strip_prefix("semlith_").unwrap_or(&name).to_string();
-            let offered = listed.contains(&name);
-            let (answers, estimate) = TYPICAL_ESTIMATES
-                .iter()
-                .find(|(n, _, _)| *n == name)
-                .map(|(_, answers, tokens)| (answers.to_string(), *tokens))
-                .unwrap_or_else(|| (about.clone(), 300));
-            let (typical, source) = match seen.get_mut(&short) {
-                Some(rows) if rows.len() >= TYPICAL_MIN_ROWS => {
-                    rows.sort_unstable();
-                    (rows[rows.len() / 2], "ledger")
-                }
-                _ => (estimate, "estimate"),
-            };
-            json!({
-                "name": name,
-                "about": about,
-                "answers": answers,
-                "typical_tokens": typical,
-                "typical_source": source,
-                // Whether `tools/list` sends it. A client offers its agent
-                // only those; the rest are the CLI's and this portal's.
-                "listed": offered,
-            })
-        })
-        .collect()
+    crate::mcp::tool_catalog(&mut seen)
 }
 
 /// A client's id in a request: its name, lowercased, dashes for the rest
@@ -2582,6 +2796,9 @@ fn about(state: &Arc<State>) -> Response {
         "graph_languages": crate::graph::languages(),
         "edge_kinds": crate::graph::KINDS,
         "stores": state.stores().len(),
+        // Who this machine is signed in to Semlith Cloud as, for the daemon
+        // card's `· cloud: <org>`. From `cloud.json` alone.
+        "cloud": crate::cloud::local_view(),
         // Background while idle, normal while embedding, and what the last
         // switch cost. Read by the About page and by the acceptance check that
         // times each transition.
@@ -2619,28 +2836,13 @@ fn reveal(state: &Arc<State>) -> Response {
 /// charge for having semlith connected at all, and a user should be able to
 /// read it rather than capture traffic to discover it.
 fn tool_list_tokens(state: &Arc<State>) -> (i64, &'static str) {
-    // The listed tools only: their bytes are what `tool_list_bytes` counts,
-    // and a ratio of sixteen tools' prose to eight tools' bytes is neither.
-    let listed = crate::mcp::listed_names();
-    let text = crate::mcp::tool_list()
-        .into_iter()
-        .filter(|(name, _)| listed.contains(name))
-        .map(|(name, about)| format!("{name} {about}"))
-        .collect::<Vec<_>>()
-        .join(" ");
     let guard = state.fleet.lock().ok();
     let counter = guard
         .as_ref()
         .and_then(|f| f.as_ref())
         .map(|f| f.counter())
         .unwrap_or(crate::ledger::Counter::Chars4);
-    let count = counter.count(&text);
-    // The whole payload, not only the prose: the schemas are what an agent is
-    // sent. The prose is what a tokenizer can be run over honestly, so the
-    // count is scaled by the payload's share of it rather than estimated twice.
-    let bytes = crate::mcp::tool_list_bytes() as i64;
-    let prose = text.len().max(1) as i64;
-    (count * bytes / prose, counter.label())
+    (crate::mcp::tool_list_tokens(&counter), counter.label())
 }
 
 /// The live connections, one row per app and transport. Every Claude Code
@@ -2835,6 +3037,70 @@ fn with_fleet(
     }
 }
 
+/// A read route over the daemon's open stores. With none open, the route still
+/// runs over an empty fleet, so a malformed request is refused as it always
+/// was; anything else answers `empty`.
+fn on_fleet(
+    state: &Arc<State>,
+    request: &Request,
+    empty: Value,
+    route: fn(&mut crate::fleet::Fleet, &Request) -> Response,
+) -> Response {
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &e.to_string());
+    }
+    let mut guard = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_mut() {
+        Some(fleet) => route(fleet, request),
+        None => {
+            let refused = route(&mut crate::fleet::Fleet::empty(), request);
+            if (400..500).contains(&refused.status()) {
+                refused
+            } else {
+                Response::json(&empty)
+            }
+        }
+    }
+}
+
+/// [`with_fleet`]'s answer for a route already holding the fleet.
+fn answer_with(
+    fleet: &crate::fleet::Fleet,
+    read: impl FnOnce(&crate::fleet::Fleet) -> anyhow::Result<Value>,
+) -> Response {
+    match read(fleet) {
+        Ok(mut value) => {
+            failures_beside(fleet, &mut value);
+            Response::json(&value)
+        }
+        Err(e) => Response::error(500, &format!("{e:#}")),
+    }
+}
+
+/// The portal's read routes over a fleet the caller holds: Search (ranked,
+/// brief, exact, read), patterns, and the Graph page's symbol, neighbours,
+/// path, impact, trace, map and drawing. `None` for any other path.
+///
+/// Public for an embedder that keeps its own stores — Semlith Cloud draws the
+/// same Search and Graph pages over an organisation's stores and answers them
+/// with the very routes the local portal uses.
+pub fn portal_read(fleet: &mut crate::fleet::Fleet, request: &Request) -> Option<Response> {
+    Some(match request.path.as_str() {
+        "/api/search" => search_on(fleet, request),
+        "/api/brief" => brief_on(fleet, request),
+        "/api/pattern" => pattern_on(fleet, request),
+        "/api/read" => read_on(fleet, request),
+        "/api/symbol" => symbol_on(fleet, request),
+        "/api/neighbors" => neighbors_on(fleet, request),
+        "/api/path" => shortest_path_on(fleet, request),
+        "/api/impact" => impact_on(fleet, request),
+        "/api/trace" => trace_on(fleet, request),
+        "/api/map" => map_on(fleet, request),
+        "/api/graph" => graph_on(fleet, request),
+        _ => return None,
+    })
+}
+
 /// Say which stores an answer could not reach, beside the answer.
 ///
 /// Additive by construction: the key is absent when every store answered, so a
@@ -2853,6 +3119,15 @@ fn failures_beside(fleet: &crate::fleet::Fleet, value: &mut Value) {
 
 /// A tree-sitter structural pattern over the indexed files of one language.
 fn pattern(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(
+        state,
+        request,
+        json!({ "matches": [], "files": 0, "truncated": false }),
+        pattern_on,
+    )
+}
+
+fn pattern_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let Some(query) = request.query("query").filter(|q| !q.trim().is_empty()) else {
         return Response::error(400, "missing query");
     };
@@ -2870,8 +3145,7 @@ fn pattern(state: &Arc<State>, request: &Request) -> Response {
         .query("offset")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
-    let empty = json!({ "language": lang, "matches": [], "files": 0, "truncated": false });
-    with_fleet(state, empty, move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         // A bad pattern or an unknown language is the caller's to correct, and
         // comes back as the parser's own words rather than an empty list.
@@ -2892,12 +3166,16 @@ fn pattern(state: &Arc<State>, request: &Request) -> Response {
 /// stage: the list costs about 150 bytes a hit and this is what turns one of
 /// them into the text.
 fn read(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(state, request, json!({ "span": null }), read_on)
+}
+
+fn read_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let Some(raw) = request.query("target").filter(|t| !t.trim().is_empty()) else {
         return Response::error(400, "missing target");
     };
     let target = crate::Target::parse(raw);
     let only = request.query_all("store");
-    with_fleet(state, json!({ "span": null }), move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         match fleet.read_in(only.as_deref(), &target, &crate::filter::Filter::default())? {
             None => Ok(json!({ "span": null, "definitions": [] })),
@@ -2908,6 +3186,10 @@ fn read(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn symbol(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(state, request, json!({ "symbols": [] }), symbol_on)
+}
+
+fn symbol_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let filter = match filter_of(request) {
         Ok(f) => f,
         Err(e) => return Response::error(400, &e),
@@ -2922,7 +3204,7 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
             .take(crate::graph::NAMES_LIMIT)
             .collect();
         let only = request.query_all("store");
-        return with_fleet(state, json!({ "table": [] }), move |fleet| {
+        return answer_with(fleet, move |fleet| {
             let only = (!only.is_empty()).then_some(only);
             Ok(json!({ "table": fleet.signatures_in(only.as_deref(), &names, &filter)? }))
         });
@@ -2937,7 +3219,7 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
         .unwrap_or(20)
         .clamp(1, 200);
     let only = request.query_all("store");
-    with_fleet(state, json!({ "symbols": [] }), move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         let found = fleet.evidence_in(
             only.as_deref(),
@@ -2966,6 +3248,15 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn neighbors(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(
+        state,
+        request,
+        json!({ "callers": [], "callees": [] }),
+        neighbors_on,
+    )
+}
+
+fn neighbors_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let filter = match filter_of(request) {
         Ok(f) => f,
         Err(e) => return Response::error(400, &e),
@@ -2985,8 +3276,7 @@ fn neighbors(state: &Arc<State>, request: &Request) -> Response {
     let all = request
         .query("all")
         .is_some_and(|v| v == "1" || v == "true");
-    let empty = json!({ "callers": [], "callees": [] });
-    with_fleet(state, empty, move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         Ok(json!(fleet.neighbours_in(
             only.as_deref(),
@@ -2999,6 +3289,10 @@ fn neighbors(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(state, request, json!({ "path": null }), shortest_path_on)
+}
+
+fn shortest_path_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let (Some(from), Some(to)) = (request.query("from"), request.query("to")) else {
         return Response::error(400, "missing from or to");
     };
@@ -3015,7 +3309,7 @@ fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
     let all_edges = request
         .query("all_edges")
         .is_some_and(|v| v == "1" || v == "true");
-    with_fleet(state, json!({ "path": null }), move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         let chain = fleet.path_in(only.as_deref(), &from, &to, depth, all_edges)?;
         // `path` keeps its name and its shape — an array of steps or null —
@@ -3035,6 +3329,10 @@ fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
 /// reason: a caller that crosses a name with several definitions is a guess,
 /// so the default refuses and the page says so when it asks anyway.
 fn impact(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(state, request, json!({ "impact": null }), impact_on)
+}
+
+fn impact_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let filter = match filter_of(request) {
         Ok(f) => f,
         Err(e) => return Response::error(400, &e),
@@ -3053,7 +3351,7 @@ fn impact(state: &Arc<State>, request: &Request) -> Response {
     let all_edges = request
         .query("all_edges")
         .is_some_and(|v| v == "1" || v == "true");
-    with_fleet(state, json!({ "impact": null }), move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         let impact = fleet.impact_in(only.as_deref(), &name, &kinds, depth, all_edges, &filter)?;
         Ok(json!({
@@ -3070,6 +3368,10 @@ fn impact(state: &Arc<State>, request: &Request) -> Response {
 /// hop, so the panel quotes the store rather than the file on disk — the same
 /// rule `semlith read` follows and for the same reason.
 fn trace(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(state, request, json!({ "trace": null }), trace_on)
+}
+
+fn trace_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let (Some(from), Some(to)) = (request.query("from"), request.query("to")) else {
         return Response::error(400, "missing from or to");
     };
@@ -3083,7 +3385,7 @@ fn trace(state: &Arc<State>, request: &Request) -> Response {
     let all_edges = request
         .query("all_edges")
         .is_some_and(|v| v == "1" || v == "true");
-    with_fleet(state, json!({ "trace": null }), move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         let trace = fleet.trace_in(only.as_deref(), &from, &to, depth, all_edges, &crate::plain)?;
         Ok(json!({
@@ -3099,13 +3401,17 @@ fn trace(state: &Arc<State>, request: &Request) -> Response {
 /// and what a reader wants from it is which subsystems exist and what joins
 /// them, which reads better as rows.
 fn map(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(state, request, json!({ "communities": [] }), map_on)
+}
+
+fn map_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let only = request.query_all("store");
     let shown = request
         .query("shown")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(crate::graph::COMMUNITIES_SHOWN)
         .clamp(1, 50);
-    with_fleet(state, json!({ "communities": [] }), move |fleet| {
+    answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         let (communities, total, edges) = fleet.communities_in(only.as_deref(), shown)?;
         Ok(json!({
@@ -3392,6 +3698,15 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
 const GRAPH_LIMIT: std::time::Duration = std::time::Duration::from_secs(15);
 
 fn graph(state: &Arc<State>, request: &Request) -> Response {
+    on_fleet(
+        state,
+        request,
+        json!({ "nodes": [], "edges": [], "total": 0, "shown": 0 }),
+        graph_on,
+    )
+}
+
+fn graph_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     let focus = request.query("name").map(str::to_string);
     let prefix = request.query("path").map(str::to_string);
     let limit = request
@@ -3403,7 +3718,6 @@ fn graph(state: &Arc<State>, request: &Request) -> Response {
         .unwrap_or(70)
         .clamp(1, crate::graph::MAX_NODES);
     let only = request.query_all("store");
-    let empty = json!({ "nodes": [], "edges": [], "total": 0, "shown": 0 });
 
     // The fleet's lock is held only to choose the stores: through the fleet,
     // so a store that cannot be read is left out and reported beside the
@@ -3412,14 +3726,7 @@ fn graph(state: &Arc<State>, request: &Request) -> Response {
     // of its own, so a large store's graph never holds Search, Home or any
     // other route behind it (0.35.0: on the 879k-chunk corpus it held them
     // for minutes).
-    if let Err(e) = state.open_fleet() {
-        return Response::error(500, &e.to_string());
-    }
     let (picked, many, failed) = {
-        let fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(fleet) = fleet.as_ref() else {
-            return Response::json(&empty);
-        };
         let only = (!only.is_empty()).then_some(only);
         let chosen = match fleet.selected(only.as_deref()) {
             Ok(c) => c,
@@ -5245,7 +5552,9 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     // whether or not anything is indexed: an agent connecting to a fresh
     // install should be told which tools exist, not that the daemon is broken.
     let corpus_free = matches!(method, "initialize" | "tools/list" | "ping")
-        || method.starts_with("notifications/");
+        || method.starts_with("notifications/")
+        // A machine whose only stores are remote still answers from them.
+        || !crate::cloud::remote_stores().is_empty();
     if let Err(e) = state.open_mcp_fleet()
         && !corpus_free
     {
@@ -5265,6 +5574,9 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     // ledger records comes from what was noted then. The transport's session id
     // is the conversation id, which is what it is for.
     let mut mcp_session = crate::mcp::Session::new(session.clone());
+    // The proxy's header, never this daemon's own ancestry: the daemon is
+    // serving the request, not hosting the client.
+    mcp_session.host = host.map(str::to_string);
     if let Some((named, version)) = state.client_name(&session, transport) {
         mcp_session.client = named;
         mcp_session.version = version;

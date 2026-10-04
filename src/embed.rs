@@ -1286,8 +1286,19 @@ pub fn verify(name: &str, bytes: &[u8], expected: &str) -> Result<()> {
 pub fn check_cache_dir(cache: &Path) -> Result<()> {
     #[cfg(unix)]
     {
+        use std::os::unix::fs::DirBuilderExt;
         use std::os::unix::fs::MetadataExt;
         use std::os::unix::fs::PermissionsExt;
+        // Made here, private, when it does not exist yet. Left to the
+        // download it inherited the umask, and Ubuntu's 002 made it
+        // group-writable: the first run downloaded, every later one refused.
+        if std::fs::metadata(cache).is_err() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(cache)
+                .with_context(|| format!("creating the model cache {}", cache.display()))?;
+        }
         let Ok(meta) = std::fs::metadata(cache) else {
             return Ok(());
         };
@@ -1323,6 +1334,23 @@ pub fn check_cache_dir(cache: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_cache_is_made_private_whatever_the_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let cache = home.path().join(".cache/semlith/models");
+        // SAFETY: umask is process-wide; this sets the permissive one Ubuntu
+        // users have and puts the old one back.
+        let old = unsafe { libc::umask(0o002) };
+        let checked = check_cache_dir(&cache);
+        unsafe { libc::umask(old) };
+        checked.unwrap();
+        let mode = std::fs::metadata(&cache).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        check_cache_dir(&cache).expect("and the next run accepts it");
+    }
 
     #[test]
     fn granite_round_trips_through_its_stored_name() {
