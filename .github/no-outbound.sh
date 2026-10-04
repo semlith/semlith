@@ -69,6 +69,17 @@ timeout 120 sudo -u "$user" -H env HOME="/home/$user" sh -c "umask 077; cd $corp
 # terminal (a daemon backgrounded under sudo kept sudo waiting until the
 # job's limit), and still running as the capture user.
 step "the daemon and its portal"
+# Three ways of starting the daemon have each left the job waiting here until
+# its limit with nothing printed; trace this part, and if it is still going
+# after two minutes print what every process is doing.
+PS4='+ $(date +%T) '
+set -x
+( sleep 120
+  echo "== still in the daemon step after 120 s =="
+  ps -eo pid,ppid,user,stat,etime,wchan:20,args --forest | grep -vE '\[.*\]$' | tail -60
+  sudo systemctl status semlith-nocap --no-pager 2>&1 | head -20
+  sudo cat "/home/$user/daemon.out" 2>&1 | tail -40 ) &
+watchdog=$!
 sudo systemd-run --quiet --unit=semlith-nocap --uid="$user" --gid="$user" \
   --property=UMask=0077 --working-directory="/home/$user" \
   --setenv=HOME="/home/$user" --setenv=SEMLITH_NO_SERVICE=1 \
@@ -80,6 +91,8 @@ token=$(sudo grep -oE 'token=[0-9a-f]+' "/home/$user/daemon.out" | head -1 | cut
 curl -fsS -m 30 -o /dev/null "http://127.0.0.1:$port/"
 curl -fsS -m 30 -H "Semlith-Token: $token" "http://127.0.0.1:$port/api/privacy" > privacy.json
 curl -fsS -m 60 -H "Semlith-Token: $token" "http://127.0.0.1:$port/api/search?q=order%20total" > /dev/null
+kill "$watchdog" 2> /dev/null || true
+set +x
 step "stop"
 sudo systemctl stop semlith-nocap 2> /dev/null || true
 sudo pkill -u "$user" -f semlith-under-test || true
