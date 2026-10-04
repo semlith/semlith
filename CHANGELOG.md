@@ -28,8 +28,10 @@ the binary makes no outbound connection and starts no thread for the cloud.
   revision and lag. Other tools naming a remote store are forwarded to the org's
   MCP endpoint. An unreachable or refusing host costs one line naming the stores
   skipped; the local answer is whole.
-- `semlith cloud push <org>/<store> <dir> [--wait]` sends only the files whose
-  hashes changed, after semlith's own refusals.
+- `semlith cloud push <org>/<store> <dir> [--wait] [--prune]` sends only the
+  files whose hashes changed, after semlith's own refusals. A push that would
+  remove files the store's uploads hold and the folder lacks is refused with
+  their names unless it says `--prune`; the portal asks first.
 - `semlith cloud sync <store> on|off`: per store, off by default, the ledger's
   rows (when, client, session, tool, tokens; never the query text) go to the
   org's ledger once a minute, at most 1,000 at a time. A new `synced_at` column

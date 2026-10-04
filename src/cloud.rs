@@ -1340,8 +1340,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// `semlith cloud push <org>/<store> <dir>`: the manifest after the binary's
 /// own refusals, the files the store's upload source does not already hold
 /// in tar.gz requests of at most 100 MB, the commit, and with `wait` the job
-/// followed to its end.
-pub fn push(target: &str, dir: &Path, wait: bool, say: &mut dyn FnMut(&str)) -> Result<PushReport> {
+/// followed to its end. Without `prune` the cloud refuses a push that would
+/// remove files the source holds, naming them.
+pub fn push(
+    target: &str,
+    dir: &Path,
+    wait: bool,
+    prune: bool,
+    say: &mut dyn FnMut(&str),
+) -> Result<PushReport> {
     let (org, store) = split_target(target)?;
     let entry = entry_for(Some(org), None)?;
     if !dir.is_dir() {
@@ -1375,8 +1382,9 @@ pub fn push(target: &str, dir: &Path, wait: bool, say: &mut dyn FnMut(&str)) -> 
     }
     report.files = manifest.len();
     say(&format!(
-        "{} files to {target} from {}{}",
+        "{} file{} to {target} from {}{}",
         manifest.len(),
+        if manifest.len() == 1 { "" } else { "s" },
         root.display(),
         if refused.is_empty() {
             String::new()
@@ -1384,7 +1392,7 @@ pub fn push(target: &str, dir: &Path, wait: bool, say: &mut dyn FnMut(&str)) -> 
             format!(" · {} kept back by semlith's own rules", refused.len())
         }
     ));
-    let mut body = json!({ "files": manifest });
+    let mut body = json!({ "files": manifest, "prune": prune });
     if let Some(commit) = git_head(&root) {
         body["commit"] = json!(commit);
     }

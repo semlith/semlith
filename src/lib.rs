@@ -5702,7 +5702,9 @@ fn now() -> i64 {
 pub fn human_bytes(bytes: i64) -> String {
     const KB: f64 = 1024.0;
     let b = bytes as f64;
-    if b >= KB * KB {
+    if b >= KB * KB * KB {
+        format!("{:.1} GB", b / (KB * KB * KB))
+    } else if b >= KB * KB {
         format!("{:.1} MB", b / (KB * KB))
     } else if b >= KB {
         format!("{:.0} KB", b / KB)

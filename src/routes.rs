@@ -292,6 +292,7 @@ fn cloud_write(request: &Request) -> Response {
                     store,
                     Path::new(dir),
                     false,
+                    body.get("prune").and_then(Value::as_bool).unwrap_or(false),
                     &mut |_| {},
                 )?)?
             }

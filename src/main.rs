@@ -1029,6 +1029,11 @@ enum CloudCommand {
         /// Follow the indexing job until it is done.
         #[arg(long)]
         wait: bool,
+        /// Remove what the store's uploads hold and the folder does not.
+        /// Without it, a push that would remove anything is refused with the
+        /// list.
+        #[arg(long)]
+        prune: bool,
         #[arg(long)]
         json: bool,
     },
@@ -5190,9 +5195,10 @@ fn run_cloud(what: CloudCommand, stores: &[PathBuf]) -> Result<()> {
             target,
             dir,
             wait,
+            prune,
             json,
         } => {
-            let report = cloud::push(&target, &dir, wait, &mut |line| eprintln!("{line}"))?;
+            let report = cloud::push(&target, &dir, wait, prune, &mut |line| eprintln!("{line}"))?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -5200,8 +5206,9 @@ fn run_cloud(what: CloudCommand, stores: &[PathBuf]) -> Result<()> {
                     println!("kept back  {path}  {why}");
                 }
                 println!(
-                    "{} files in the manifest · {} sent ({}) · {} removed{}",
+                    "{} file{} in the manifest · {} sent ({}) · {} removed{}",
                     report.files,
+                    if report.files == 1 { "" } else { "s" },
                     report.sent,
                     semlith::human_bytes(report.bytes_sent as i64),
                     report.removed,
