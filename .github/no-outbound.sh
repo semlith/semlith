@@ -78,11 +78,26 @@ sudo systemd-run --quiet --unit=semlith-nocap --uid="$user" --gid="$user" \
   --property=StandardOutput="file:/home/$user/daemon.out" --property=StandardError="file:/home/$user/daemon.out" \
   /usr/local/bin/semlith-under-test start --port "$port"
 for _ in $(seq 1 90); do sudo grep -q 'token=' "/home/$user/daemon.out" 2> /dev/null && break; sleep 1; done
-token=$(sudo grep -oE 'token=[0-9a-f]+' "/home/$user/daemon.out" | head -1 | cut -d= -f2 || true)
-[ -n "$token" ] || { echo "the daemon printed no token:"; sudo cat "/home/$user/daemon.out"; exit 1; }
-curl -fsS -m 30 -o /dev/null "http://127.0.0.1:$port/"
-curl -fsS -m 30 -H "Semlith-Token: $token" "http://127.0.0.1:$port/api/privacy" > privacy.json
-curl -fsS -m 60 -H "Semlith-Token: $token" "http://127.0.0.1:$port/api/search?q=order%20total" > /dev/null
+# The address the daemon printed, port included: `start` names an already
+# running daemon instead of starting a second one.
+url=$(sudo grep -oE 'http://127\.0\.0\.1:[0-9]+/\?token=[0-9a-f]+' "/home/$user/daemon.out" | head -1 || true)
+diagnose() {
+  echo "$1"
+  echo "-- daemon.out"; sudo cat "/home/$user/daemon.out"
+  echo "-- listening"; sudo ss -ltnp 2> /dev/null | grep -E "semlith|:$port " || true
+  exit 1
+}
+[ -n "$url" ] || diagnose "the daemon printed no address"
+base=${url%%/\?*}
+token=${url##*token=}
+echo "daemon at $base"
+get() {
+  code=$(curl -sS -m "$1" -o "$2" -w '%{http_code}' -H "Semlith-Token: $token" "$base$3" || echo 000)
+  [ "$code" = 200 ] || diagnose "GET $3 answered $code: $(head -c 300 "$2" 2> /dev/null)"
+}
+get 30 /dev/null /
+get 30 privacy.json /api/privacy
+get 60 /dev/null '/api/search?q=order%20total'
 step "stop"
 sudo systemctl stop semlith-nocap 2> /dev/null || true
 sudo pkill -u "$user" -f semlith-under-test || true
