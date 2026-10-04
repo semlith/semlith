@@ -272,12 +272,17 @@ fn the_readme_credits_the_work_the_index_is_built_on() {
 /// Moved from 580 to 625 in 0.36.0 for the Security section the installer
 /// hardening asked for by name: what the installer writes, what it checks,
 /// and how to read and verify it before running it.
+///
+/// Moved from 625 to 760 in 0.38.0 for the Benchmarks section the contract
+/// puts on the front page and nowhere else: one table per public benchmark,
+/// each with its instance count, spread and reproducing command, rendered by
+/// `bench/scorecard/report.py`.
 #[test]
 fn the_readme_is_short() {
     let lines = README.lines().count();
     assert!(
-        lines < 625,
-        "the README is {lines} lines; the ceiling is 625"
+        lines < 760,
+        "the README is {lines} lines; the ceiling is 760"
     );
 }
 

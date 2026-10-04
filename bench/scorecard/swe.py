@@ -1,8 +1,8 @@
 """SWE-bench Lite and Verified, retrieval only: the issue is the query, the gold is every file the reference
 patch edits.
 
-    uv run --with pyarrow python bench/scorecard/swe.py walk [--sets lite,verified] [--arms semlith,r0] [--repo R]
-    uv run --with pyarrow python bench/scorecard/swe.py score <run dir>
+    uv run --with pyarrow python bench/scorecard/swe.py walk [--sets lite,verified] [--arms semlith,r0] [--repo R,R]
+    uv run --with pyarrow python bench/scorecard/swe.py score <run dir> [<run dir> ...]
     uv run --with pyarrow python bench/scorecard/swe.py check [--repo R]
 
 `walk` checks out each instance's base commit (instances of one repository in commit order), re-indexes the
@@ -118,7 +118,7 @@ def walk(args):
         by_repo.setdefault(i["repo"], []).append(i)
     arm_names = args.arms.split(",")
     for repo in sorted(by_repo):
-        if args.repo and repo != args.repo:
+        if args.repo and repo not in args.repo.split(","):
             continue
         root = os.path.join(REPOS, repo.replace("/", "__"))
         store = os.path.join(STORES, "swe-" + repo.replace("/", "__"))
@@ -150,8 +150,11 @@ def walk(args):
     return out
 
 
-def score(directory, sets=("lite", "verified")):
-    rows = [json.loads(l) for l in open(os.path.join(directory, "rows.jsonl"))]
+def score(directories, sets=("lite", "verified")):
+    """Scores the rows of every directory together -- walks of disjoint repositories run side by side -- and
+    writes score.json to the first."""
+    rows = [json.loads(l) for d in directories for l in open(os.path.join(d, "rows.jsonl"))]
+    directory = directories[0]
     table = []
     for s in sets:
         for arm in sorted({r["arm"] for r in rows}):
@@ -188,7 +191,7 @@ def score(directory, sets=("lite", "verified")):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["walk", "score", "check"])
-    ap.add_argument("dir", nargs="?")
+    ap.add_argument("dir", nargs="*")
     ap.add_argument("--sets", default="lite,verified")
     ap.add_argument("--arms", default="semlith,r0")
     ap.add_argument("--repo")
