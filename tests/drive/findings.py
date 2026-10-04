@@ -3206,13 +3206,15 @@ def _(d):
 def _(d):
     d.open_view("settings/cloud")
     body = view_text(d)
-    if "Semlith Cloud" not in body or "One hosted store for a whole organisation" not in body:
+    # 0.37.0's not-connected state: what the cloud adds, and that this binary
+    # reaches nothing until someone signs in.
+    if "Semlith Cloud" not in body or "contacts nothing until you sign in" not in body:
         fail("Settings › Cloud did not render: %s" % body[:300])
     if "not connected" not in body:
         fail("Settings › Cloud does not say it is not connected")
     for word in ["Disconnect", "token prefix", "acme/api"]:
         if word in body:
-            fail("Settings › Cloud drew its connected state, which this release has no client for")
+            fail("Settings › Cloud drew its connected state on a machine that never signed in")
 
 
 @finding("5.10", "the Agents page measures what its tool list costs")

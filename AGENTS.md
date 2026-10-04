@@ -156,6 +156,7 @@ Module responsibilities:
 | `src/helpers.rs` | The opt-in "Index with semlith" file-manager entries (Finder, Explorer, Nautilus, Dolphin, Thunar), installed and removed beside the user's own |
 | `src/proxy.rs` | `semlith mcp` forwarding to a running daemon |
 | `src/clients.rs` | `docs/clients.md`'s client stanzas, parsed, so the portal shows the tested text |
+| `src/cloud.rs` | Semlith Cloud's client: `cloud.json`, the one function that calls the host (`call`), device login, status, remote stores, the merge and forward behind remote answers, push, ledger sync, report and replay. Nothing in it runs for a machine that never signed in |
 | `src/main.rs` | Clap parsing and human output formatting |
 
 ### Invariants worth knowing before editing
@@ -614,6 +615,14 @@ Module responsibilities:
   rather than a grace period.
 - Extraction dispatches on extension *before* looking at bytes — `.docx` and
   friends are ZIP archives and the binary check would reject them all.
+- **Semlith Cloud is reached only after `semlith cloud login`.** With no
+  `~/.semlith/cloud.json` nothing opens a socket, starts the sync thread or
+  probes a host. `cloud::call` is the only function that calls one: it takes a
+  host and a path, so a token reaches the host it is stored with and no other,
+  it follows no redirect, it is refused under airgap, and it notes every call
+  on the Privacy page. Remote stores live in `registry.json`'s own `remote`
+  map, never in `stores`, because every older binary walks `stores` as
+  directories. `tests/cloud.rs` proves it against a stub host.
 - **`add` is the only command that reaches the network besides `upgrade` and
   the model download**, it is https-only, it refuses before opening a socket
   under `--airgap`, and it writes only inside the store's own `downloads/`.

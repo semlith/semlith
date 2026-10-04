@@ -498,7 +498,7 @@ const FTS_BUILT: &str = "fts_built";
 /// never sees them. That is the whole reason `format_version` does not move —
 /// the same reasoning `docs/compatibility.md` records for the graph tables.
 fn add_columns(db: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 19] = [
+    const ADDITIONS: [(&str, &str, &str); 20] = [
         ("edges", "hint", "TEXT"),
         // 0.16.0: the line the reference was written on.
         ("edges", "line", "INTEGER"),
@@ -536,6 +536,11 @@ fn add_columns(db: &Connection) -> Result<()> {
         ("retrievals", "cost_usd", "REAL"),
         ("retrievals", "cost_source", "TEXT"),
         ("retrievals", "usage_source", "TEXT"),
+        // 0.37.0: when ledger sync sent the row to the org's ledger, in unix
+        // seconds; NULL is not sent. Outside the chain like the usage
+        // columns: it is written after the row, which a hashed column could
+        // never allow.
+        ("retrievals", "synced_at", "INTEGER"),
         // 0.25.0: what the parser made of this file — "parsed", "timeout" or
         // "none" for a language that carries no grammar. Without it a file
         // with no definitions and a file the parser gave up on look the same
@@ -859,6 +864,13 @@ pub fn all_hashes(db: &Connection) -> Result<std::collections::HashMap<String, S
 /// Drop a file and its chunks, returning the chunk ids so the caller can
 /// evict them from the vector index too.
 pub fn delete_file(db: &Connection, path: &str, now: i64) -> Result<Vec<u64>> {
+    retire_symbols(db, path, now)?;
+    delete_file_unretired(db, path)
+}
+
+/// [`delete_file`] without keeping the file's definitions as history: for a
+/// stopped run's undo, whose files were never the store's to remember.
+pub fn delete_file_unretired(db: &Connection, path: &str) -> Result<Vec<u64>> {
     let ids: Vec<u64> = {
         let mut stmt = db.prepare(
             "SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.path = ?1",
@@ -869,7 +881,6 @@ pub fn delete_file(db: &Connection, path: &str, now: i64) -> Result<Vec<u64>> {
             .map(|i| i as u64)
             .collect()
     };
-    retire_symbols(db, path, now)?;
     db.execute("DELETE FROM files WHERE path = ?1", params![path])?;
     Ok(ids)
 }
@@ -2812,6 +2823,63 @@ pub fn fill_usage(db: &Connection, row: &Unfilled, filled: &Filled) -> Result<()
             row.query_id,
         ],
     )?;
+    Ok(())
+}
+
+/// One ledger row as ledger sync sends it: what was retrieved, never the
+/// query text, which this struct does not carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncRow {
+    pub id: i64,
+    pub at: i64,
+    pub client: String,
+    pub session: String,
+    pub tool: String,
+    pub excerpt_tokens: i64,
+}
+
+/// Rows written at or after `since` and not yet sent, oldest first, at most
+/// `limit`.
+pub fn unsynced(db: &Connection, since: i64, limit: usize) -> Result<Vec<SyncRow>> {
+    let mut q = db.prepare(
+        "SELECT id, at, client, COALESCE(session, ''), COALESCE(tool, ''), excerpt_tokens
+           FROM retrievals
+          WHERE synced_at IS NULL AND at >= ?1
+          ORDER BY id LIMIT ?2",
+    )?;
+    let rows = q.query_map(params![since, limit as i64], |r| {
+        Ok(SyncRow {
+            id: r.get(0)?,
+            at: r.get(1)?,
+            client: r.get(2)?,
+            session: r.get(3)?,
+            tool: r.get(4)?,
+            excerpt_tokens: r.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// How many rows since `since` are still to send.
+pub fn unsynced_count(db: &Connection, since: i64) -> Result<i64> {
+    Ok(db.query_row(
+        "SELECT COUNT(*) FROM retrievals WHERE synced_at IS NULL AND at >= ?1",
+        params![since],
+        |r| r.get(0),
+    )?)
+}
+
+/// Record that these rows reached the org's ledger.
+pub fn mark_synced(db: &Connection, ids: &[i64], at: i64) -> Result<()> {
+    let _writing = Writing::begin(db)?;
+    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+    {
+        let mut q = tx.prepare("UPDATE retrievals SET synced_at = ?1 WHERE id = ?2")?;
+        for id in ids {
+            q.execute(params![at, id])?;
+        }
+    }
+    tx.commit()?;
     Ok(())
 }
 

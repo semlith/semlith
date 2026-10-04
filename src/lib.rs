@@ -25,6 +25,7 @@ pub mod clientfile;
 pub mod clientid;
 pub mod clients;
 pub mod clock;
+pub mod cloud;
 pub mod compact;
 pub mod coreml;
 pub mod cuda;
@@ -2410,6 +2411,51 @@ impl Semlith {
         self.index_within_held(roots, budget, on_file)
     }
 
+    /// [`Semlith::index_paths`] under a control another thread drives: asked
+    /// once per file, it may pause the run, yield it (stop and keep what is
+    /// done, reporting the rest in [`IndexReport::pending`]) or stop it. A
+    /// stopped slice still commits what it embedded and lists it in
+    /// [`IndexReport::written`]; one logical run is several slices, so the
+    /// undo is the caller's: [`Semlith::undo_run`] with every slice's
+    /// `written`, which leaves the store as it was before the run.
+    ///
+    /// Public for an embedder that schedules runs of its own — Semlith Cloud
+    /// pauses, stops and slices them — and takes the store's lock exactly as
+    /// `index_paths` does.
+    pub fn index_paths_under(
+        &mut self,
+        roots: &[PathBuf],
+        control: &dyn Fn() -> Flow,
+        on_file: impl FnMut(&Path, IndexProgress),
+    ) -> Result<IndexReport> {
+        let _lock = lock::StoreLock::acquire(&self.dir)?;
+        self.index_walk_under(roots, control, on_file)
+    }
+
+    /// Carry on a run that yielded, from the previous slice's
+    /// [`IndexReport::pending`], under the same kind of control. No walk, and
+    /// no time budget of its own: the control decides when it yields again.
+    pub fn index_rest_under(
+        &mut self,
+        files: Vec<PathBuf>,
+        control: &dyn Fn() -> Flow,
+        on_file: impl FnMut(&Path, IndexProgress),
+    ) -> Result<IndexReport> {
+        let _lock = lock::StoreLock::acquire(&self.dir)?;
+        // A century is "no budget" without the overflow `Duration::MAX` would
+        // risk when it is added to an `Instant`.
+        let unbounded = std::time::Duration::from_secs(100 * 365 * 24 * 3600);
+        self.index_rest_held_under(files, unbounded, None, control, on_file)
+    }
+
+    /// Take a stopped run's files back out of the store: every path its
+    /// slices listed in [`IndexReport::written`]. Takes the store's lock.
+    /// Returns how many files were taken out.
+    pub fn undo_run(&mut self, written: &[String]) -> Result<usize> {
+        let _lock = lock::StoreLock::acquire(&self.dir)?;
+        self.undo_held(written)
+    }
+
     /// [`Semlith::index_paths_within`] without taking the lock, for a caller
     /// that already holds it — `semlith start` holds it for the daemon's life,
     /// and its queue runs on the thread that holds it.
@@ -4399,7 +4445,9 @@ impl Semlith {
     pub(crate) fn undo_held(&mut self, keys: &[String]) -> Result<usize> {
         self.writing(|me| {
             for key in keys {
-                me.evict(key)?;
+                // The run's files leave without becoming history: they were
+                // never the store's, so a later `history` must not list them.
+                me.evict_as(key, false)?;
             }
             me.save()?;
             Ok(keys.len())
@@ -4438,11 +4486,20 @@ impl Semlith {
     /// tree that gained a `.env` quadratic. `forget` saves straight away
     /// because it is the whole of what it was asked to do.
     fn evict(&mut self, key: &str) -> Result<(usize, usize)> {
+        self.evict_as(key, true)
+    }
+
+    /// [`Self::evict`], keeping the file's definitions as history or not.
+    fn evict_as(&mut self, key: &str, retire: bool) -> Result<(usize, usize)> {
         // Read before the delete: the cascade that removes the rows is what
         // makes their ids unreadable, and the vectors they address still have
         // to leave the image index.
         let images = store::image_ids_of(&self.db, key)?;
-        let ids = store::delete_file(&self.db, key, now())?;
+        let ids = if retire {
+            store::delete_file(&self.db, key, now())?
+        } else {
+            store::delete_file_unretired(&self.db, key)?
+        };
         for id in &ids {
             self.index.remove(*id)?;
         }
@@ -5645,7 +5702,9 @@ fn now() -> i64 {
 pub fn human_bytes(bytes: i64) -> String {
     const KB: f64 = 1024.0;
     let b = bytes as f64;
-    if b >= KB * KB {
+    if b >= KB * KB * KB {
+        format!("{:.1} GB", b / (KB * KB * KB))
+    } else if b >= KB * KB {
         format!("{:.1} MB", b / (KB * KB))
     } else if b >= KB {
         format!("{:.0} KB", b / KB)
@@ -6170,6 +6229,58 @@ fn sibling_exists(parent: &Path, manifest: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+/// The files `semlith cloud push` may send from `root`, and every one it may
+/// not, with the reason.
+///
+/// The index pass's own rules, not a copy of them: the same walk (hidden
+/// files, `.gitignore`, `.semlithignore`, generated and vendored folders),
+/// the same boundary (the deny-list, credential names), the same secret scan
+/// — a file holding a live-looking value is refused, a declared dummy is not
+/// — and a size cap of the push's own. The cloud applies the list again;
+/// this is what keeps a file from leaving the machine in the first place.
+pub fn push_files(root: &Path, cap: u64) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
+    let walked = walk_allowing(&[root.to_path_buf()], &[], true);
+    let home = crate::home::user_home().ok().map(|h| canonical(&h));
+    let boundary = Boundary {
+        roots: None,
+        allow_secrets: false,
+    }
+    .resolved(home.as_deref());
+    let mut ok = Vec::new();
+    let mut refused: Vec<(PathBuf, String)> = walked.unreadable;
+    for path in walked.credentials {
+        refused.push((path, "a credential file by its name".to_string()));
+    }
+    for path in walked.files.into_iter().chain(walked.named) {
+        if let Some(refusal) = boundary.refuses(&path, true) {
+            refused.push((path, refusal.why));
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            refused.push((path, "could not be read".to_string()));
+            continue;
+        };
+        if bytes.len() as u64 > cap {
+            refused.push((path, format!("over {} MB", cap / (1 << 20))));
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        if let Some(live) = keyscan::scan(&path.to_string_lossy(), &text)
+            .into_iter()
+            .find(|m| m.dummy.is_none())
+        {
+            refused.push((
+                path,
+                format!("holds what looks like {} at line {}", live.kind, live.line),
+            ));
+            continue;
+        }
+        ok.push(path);
+    }
+    refused.sort();
+    (ok, refused)
 }
 
 #[cfg(test)]

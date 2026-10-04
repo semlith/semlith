@@ -153,6 +153,9 @@ const VIEWS: &[(&str, &str)] = &[
     // Settings › Performance, "Where embedding runs": a switch per lane with
     // its device, state and share.
     ("accel", "/api/accel"),
+    // Settings › Cloud: who this machine is signed in as, its remote stores,
+    // ledger sync per store, and what leaves the machine.
+    ("cloud", "/api/cloud"),
 ];
 
 /// And the same for the MCP tool surface.
@@ -1664,31 +1667,48 @@ fn the_agents_page_marks_no_tool_as_paid_and_measures_the_list() {
 /// It was a page of its own until 0.35.0; v6 makes it a Settings section. The
 /// guarantee is unchanged: no connected state until the cloud client (0.38.0),
 /// and no command behind it.
+/// 0.37.0 ships `semlith cloud`, so the Cloud section draws two states: not
+/// signed in (what the cloud adds, the two commands, no price) and signed in
+/// (each org's header, reachability, remote stores, ledger sync, what leaves
+/// the machine). Both read `/api/cloud`; the live half reads
+/// `/api/cloud/status`, which a machine that never signed in answers with
+/// nothing and no request.
 #[test]
-fn the_cloud_section_is_the_not_connected_state_and_has_no_client() {
+fn the_cloud_section_draws_both_states() {
+    for needle in [
+        "function seCloud()",
+        "function seCloudOff()",
+        "cloud: \"/api/cloud\"",
+        "/api/cloud/status",
+        "pill(\"not connected\"",
+        "semlith cloud login <org>",
+        "semlith cloud connect <org>",
+        "What leaves this machine",
+        "Ledger sync",
+        "\"Disconnect\"",
+        "syncing ${on} of",
+        "· cloud: ",
+    ] {
+        assert!(APP_JS.contains(needle), "app.js lost `{needle}`");
+    }
+    let off = &APP_JS[APP_JS.find("function seCloudOff()").unwrap()..];
+    // `\n}` and not `\n}\n`: a Windows checkout ends lines with CRLF.
+    let off = &off[..off.find("\n}").unwrap()];
+    for price in ["$", "₹", "per month", "/mo", "price"] {
+        assert!(
+            !off.contains(price),
+            "the not-connected state names a price: {price}"
+        );
+    }
     assert!(
-        APP_JS.contains("function seCloud()"),
-        "no Cloud section in Settings"
+        subcommands().iter().any(|name| name == "cloud"),
+        "`semlith cloud` is missing"
     );
-    assert!(
-        APP_JS.contains("One hosted store for a whole organisation"),
-        "the Cloud section lost its lead copy"
-    );
-    assert!(
-        APP_JS.contains("pill(\"not connected\""),
-        "the Cloud section does not say it is not connected"
-    );
-    // No connected state in this release: `cloudConnected` would be the flag
-    // that draws one, and there is none.
-    assert!(
-        !APP_JS.contains("cloudConnected"),
-        "a connected state exists"
-    );
-    // And no command behind it. The blocks on the page are text to copy.
-    assert!(
-        !subcommands().iter().any(|name| name == "cloud"),
-        "`semlith cloud` exists, which this release says it does not"
-    );
+    let daemon = Daemon::start();
+    let status = daemon.json("/api/cloud/status");
+    assert_eq!(status["orgs"], serde_json::json!([]), "{status}");
+    let local = daemon.json("/api/cloud");
+    assert_eq!(local["signed_in"], false, "{local}");
 }
 
 /// No element is sized or coloured by a `style` attribute.

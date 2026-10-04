@@ -1311,33 +1311,31 @@ impl Store {
     /// another queued behind it has two records, and an event folded into the
     /// wrong one is a card describing work it did not do.
     fn record(&self, id: u64, event: &serde_json::Value) {
-        let ended = self
-            .runs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter_mut()
-            .find(|run| run.id == id)
-            .and_then(|run| {
-                let was = run.status.finished();
-                run.absorb(event);
-                // A burst of events that changed nothing is not a run anybody
-                // will look for, as it leaves no card either.
-                let quiet = run.kind == RunKind::Batch
-                    && run.indexed == 0
-                    && run
-                        .summary
-                        .as_ref()
-                        .and_then(|s| s.get("removed"))
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0)
-                        == 0;
-                (!was && run.status.finished() && !quiet).then(|| run.history_row(&self.name))
-            });
-        // Written outside the lock: a page polling runs should not wait on
-        // the disk.
-        if let Some(row) = ended {
-            remember_run(&self.dir, &row);
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(run) = runs.iter_mut().find(|run| run.id == id) {
+            let was = run.status.finished();
+            run.absorb(event);
+            // A burst of events that changed nothing is not a run anybody
+            // will look for, as it leaves no card either.
+            let quiet = run.kind == RunKind::Batch
+                && run.indexed == 0
+                && run
+                    .summary
+                    .as_ref()
+                    .and_then(|s| s.get("removed"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+                    == 0;
+            // Written before the lock is released: once anything can read the
+            // run as finished, its history row is on disk. Written after, a
+            // daemon stopped right after "done" lost the record.
+            // ponytail: an append under the runs lock; a poller waits on one
+            // small write per finished run.
+            if !was && run.status.finished() && !quiet {
+                remember_run(&self.dir, &run.history_row(&self.name));
+            }
         }
+        drop(runs);
         self.runs_changed();
     }
 
@@ -3747,6 +3745,11 @@ pub fn run(
         Err(e) => report_line(&format!("schedules: {e:#}")),
     }
     crate::schedule::Runner::spawn(Arc::clone(&state));
+    // Ledger sync, only for a machine that has signed in to Semlith Cloud: a
+    // daemon nobody signed in to starts no thread for it and reaches nothing.
+    if crate::cloud::signed_in() {
+        crate::cloud::spawn_sync(Arc::clone(&state));
+    }
 
     // Installed before the first thread starts: the signal is how this process
     // ends, so the ordinary exit has to be the safe one.
