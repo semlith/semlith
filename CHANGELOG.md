@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0-rc.2] - 2026-10-04
+
+### Fixed
+
+- An image whose extension misnames its format - a PNG saved as `.jpg`, as
+  image generators and chat apps often save them - is indexed by its bytes.
+  It had failed as a malformed JPEG ("Illegal start bytes") and was never
+  searchable.
+
 ## [0.37.0-rc.1] - 2026-10-04
 
 ### Semlith Cloud, from this machine
