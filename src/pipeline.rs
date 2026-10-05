@@ -314,6 +314,8 @@ pub struct Context {
     pub clocks: Clocks,
     /// What the vector cache keys on, when the cache is on for this run.
     pub cache: Option<crate::cache::Scope>,
+    /// The cache this run reads and writes: the store's own, or the machine's.
+    pub cache_at: Option<crate::cache::Location>,
     /// The variants a cached vector may be, in the order to try them: the
     /// lanes this run would use, best first, then the CPU's.
     pub variants: Vec<&'static str>,
@@ -670,7 +672,7 @@ impl Prefetch {
                 .spawn_scoped(scope, move || {
                     let _class = crate::priority::indexing_thread();
                     // A connection per thread: SQLite's are not shared.
-                    let cache = ctx.cache.as_ref().and_then(|_| crate::cache::Cache::open());
+                    let cache = ctx.cache_at.as_ref().and_then(crate::cache::Cache::open_in);
                     loop {
                         let i = shared.next.fetch_add(1, Ordering::Relaxed);
                         // The path at `i`, waiting for the list to grow to it,

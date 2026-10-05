@@ -1634,6 +1634,11 @@ pub struct Semlith {
     /// without the vector cache: a forced re-index (0.35.0) exists to replace
     /// what is stored, and a cache hit would hand back the same vectors.
     pub(crate) force: bool,
+    /// A vector cache of this store's own in place of the machine's: index
+    /// runs read and write it and never the machine's. `None`, the binary's
+    /// only setting, keeps the machine's cache where this process uses it
+    /// ([`accel::cache_in_use`]).
+    pub vector_cache: Option<cache::Location>,
     /// Size, mtime and content hash of each file the scan phase read, so the
     /// embed pass that follows it does not read an unchanged file twice.
     prehashed: std::collections::HashMap<PathBuf, (u64, i64, String)>,
@@ -1735,6 +1740,7 @@ impl Semlith {
             boundary: Boundary::default(),
             gitignore: true,
             force: false,
+            vector_cache: None,
             prehashed: Default::default(),
             scrub: false,
         })
@@ -2828,6 +2834,15 @@ impl Semlith {
         } else {
             None
         };
+        let cache_at = if self.force {
+            None
+        } else if let Some(own) = &self.vector_cache {
+            (own.cap > 0).then(|| own.clone())
+        } else if accel::cache_in_use() {
+            cache::Location::machine()
+        } else {
+            None
+        };
         let ctx = pipeline::Context {
             rechunk,
             rescan,
@@ -2848,7 +2863,8 @@ impl Semlith {
             each: each.cloned(),
             tokenizer,
             clocks: pipeline::Clocks::default(),
-            cache: (accel::cache_in_use() && !self.force).then(|| cache::Scope::of(&self.model)),
+            cache_at: cache_at.clone(),
+            cache: cache_at.as_ref().map(|_| cache::Scope::of(&self.model)),
             variants: accel::cache_variants(),
             lookups: Default::default(),
             hits: Default::default(),
@@ -3739,12 +3755,12 @@ impl Semlith {
         report.threads = self.index_threads();
         report.cache_lookups = ctx.lookups.load(std::sync::atomic::Ordering::Relaxed) as usize;
         report.cache_hits = ctx.hits.load(std::sync::atomic::Ordering::Relaxed) as usize;
-        // What this call embedded goes into the machine's cache, and what it
+        // What this call embedded goes into the run's cache, and what it
         // took out is marked used. A cache that cannot be written is a cache
         // that misses next time, never a failed run.
         if let Some(scope) = &ctx.cache
             && report.cache_lookups > 0
-            && let Some(mut cache) = cache::Cache::open()
+            && let Some(mut cache) = ctx.cache_at.as_ref().and_then(cache::Cache::open_in)
         {
             let fresh: Vec<([u8; 32], &'static str, &[f32])> = cached
                 .fresh
