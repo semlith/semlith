@@ -116,7 +116,7 @@ const PROSE: &[&str] = &["css", "html", "json", "markdown", "toml", "yaml"];
 /// filter, the `prefer` hint and the graph extractor cannot disagree about it.
 /// Matching is case-insensitive because `Makefile`, `makefile` and `MAKEFILE`
 /// are the same file to everyone except a string comparison.
-pub fn language_of_path(path: &str) -> Option<&'static Language> {
+pub fn path_language(path: &str) -> Option<&'static Language> {
     let lower = path.to_ascii_lowercase();
     let name = lower.rsplit(['/', '\\']).next().unwrap_or(&lower);
     let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
@@ -134,7 +134,7 @@ pub fn language_of_path(path: &str) -> Option<&'static Language> {
 /// A path in no language at all — a `.txt` note, an extracted `.epub` — reads
 /// as prose, which is what it is.
 pub fn is_code(path: &str) -> bool {
-    language_of_path(path).is_some_and(|entry| !PROSE.contains(&entry.name))
+    path_language(path).is_some_and(|entry| !PROSE.contains(&entry.name))
 }
 
 /// The entry for a `--lang` name, matched case-insensitively.
