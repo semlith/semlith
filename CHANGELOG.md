@@ -67,12 +67,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A progress bar redrawn in place moves: the page patched its width as a style
   attribute, which the portal's content-security policy drops, so the bar kept
   its first width while its percentage climbed.
-- The WebGPU lane runs attention as plain operations, rewritten from the
-  downloaded graph at fetch time and pinned by digest, and a lane that embeds
-  the known-answer fixture at under 2 chunks/s is refused as a software
-  renderer standing in for the card. On rented NVIDIA containers without the
-  graphics capability, Dawn ran on llvmpipe while reporting the card, so the
-  "GPU" lane embedded on the CPU at 0.7 chunks/s (#197).
+- The WebGPU lane on Linux refuses to start when Vulkan has only a software
+  device, and names the hardware device it uses. The known-answer failure on
+  NVIDIA (#197) was never NVIDIA: the rented containers it was measured on lack
+  the graphics capability, so Dawn ran on llvmpipe on the CPU while the device
+  still reported the card. On a real NVIDIA Vulkan driver (an RTX PRO 6000) the
+  lane passes at a minimum cosine of 0.99997 and embeds 1,408 chunks/s, against
+  CUDA's 2,784 on the same card. A worker lane that embeds the fixture at under
+  2 chunks/s is also refused, as a backstop.
 - A failed accelerator lane is tried again on the first run ten minutes after
   it failed, and the failure is written to the daemon's log. One transient
   load failure of the Neural Engine lane had left every run on the CPU until
