@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0-rc.3] - 2026-10-05
+
+### Added
+
+- A store opened through the library can be given a vector cache of its own:
+  `Semlith::vector_cache` takes a `cache::Location` (a file and a cap), and
+  that store's index runs read and write that cache and never the machine's.
+  A cap of 0 turns the cache off for that store only. `cache::stats_at` reports
+  one cache's rows, size and hit rate, and `cache::clear` deletes one. Semlith
+  Cloud gives each organisation its own, so no customer's run reads another's
+  vectors. The binary never sets one: its machine-wide cache, the
+  `SEMLITH_VECTOR_CACHE_MB` cap and the portal's cache settings are unchanged.
+
+### Changed
+
+- `semlith cloud status` reports how many chunks the organisation indexed this
+  month against its cap (`212,400 of 2,650,000 chunks indexed`), as Semlith
+  Cloud 0.4.0 meters indexing in chunks; `semlith cloud push` states the host's
+  estimate (`about 1,400 chunks to index`) and its `--json` report carries
+  `estimate_chunks`. Against a host before Cloud 0.4.0 both read the minutes it
+  sends, as before.
+
 ## [0.37.0-rc.2] - 2026-10-04
 
 ### Fixed

@@ -362,7 +362,7 @@ fn org_host(mcp_host: Option<String>) -> Stub {
                           "sources": [{ "label": "acme/api", "kind": "github", "revision": "a41c9e2", "behind_seconds": 38, "state": "fresh" }] },
                         { "name": "docs", "state": "fresh", "files": 3, "chunks": 9, "sources": [] }
                     ],
-                    "usage": { "month": "2026-10", "store_bytes": 1000, "cap_bytes": 8000, "index_minutes": 2, "cap_minutes": 100, "queue": { "running": 0, "waiting": 0 } }
+                    "usage": { "month": "2026-10", "store_bytes": 1000, "cap_bytes": 8000, "index_chunks": 212400, "cap_chunks": 2650000, "queue": { "running": 0, "waiting": 0 } }
                 }),
             ),
             _ => stub::error(404, "not_found", "No such route."),
@@ -424,6 +424,15 @@ fn connect_then_disconnect_leaves_the_registry_byte_for_byte() {
     // Never a directory: not in `stores`, and nothing made under the home.
     assert!(reg["stores"].get("acme/platform").is_none());
     assert!(!home.path().join(".semlith/stores/acme-platform").exists());
+
+    // Cloud 0.4.0's usage is in chunks, and the status line says so.
+    let o = semlith(home.path(), &["cloud", "status", "acme"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        text.contains("212,400 of 2,650,000 chunks indexed"),
+        "{text}"
+    );
 
     let o = semlith(home.path(), &["cloud", "disconnect", "acme"]);
     assert!(o.status.success(), "{}", out(&o));
@@ -1213,7 +1222,7 @@ fn upload_host() -> Stub {
                 *pending.lock().unwrap() = wanted;
                 stub::json(
                     201,
-                    json!({ "push": "p_1", "need": need, "remove": [], "estimate_minutes": 1 }),
+                    json!({ "push": "p_1", "need": need, "remove": [], "estimate_chunks": 1400 }),
                 )
             }
             ("PUT", "/v1/orgs/acme/pushes/p_1/files") => (204, vec![], vec![]),
@@ -1326,6 +1335,7 @@ fn a_push_sends_only_what_changed_after_the_binarys_own_refusals() {
     assert_eq!(sent, ["README.md", "terraform/main.tf"]);
     assert_eq!(report["job"], 48121);
     assert_eq!(report["position"], 2);
+    assert_eq!(report["estimate_chunks"], 1400);
     assert_eq!(report["state"], "done");
     assert_eq!(host.to("/v1/orgs/acme/jobs/48121").len(), 1);
 
