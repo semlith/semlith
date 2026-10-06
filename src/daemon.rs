@@ -1941,6 +1941,41 @@ impl Store {
         progress
     }
 
+    /// Take admitted index runs that have not started off this store's writer
+    /// queue: `run` names one, `None` takes every one. The card of a run
+    /// admitted behind another job says "queued", and taking it out used to
+    /// look only in the admission line, so it answered "nothing waiting"
+    /// (walk 3). Jobs that are not runs (a forget, a fetch) are never taken.
+    pub fn dequeue_runs(&self, run: Option<u64>) -> usize {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut dropped = 0;
+        queue.retain(|pending| {
+            let ours = pending.run != NO_RUN
+                && matches!(pending.job, Job::Index(_))
+                && run.is_none_or(|run| run == pending.run);
+            if !ours {
+                return true;
+            }
+            let answer = serde_json::json!({
+                "event": "done",
+                "indexed": 0,
+                "unchanged": 0,
+                "skipped": 0,
+                "removed": 0,
+                "chunks": 0,
+                "images": 0,
+                "remaining": 0,
+                "stopped": true,
+                "dequeued": true,
+            });
+            self.record(pending.run, &answer);
+            let _ = pending.report.send(answer);
+            dropped += 1;
+            false
+        });
+        dropped
+    }
+
     /// [`Store::submit`], at the front of the queue.
     fn submit_front(&self, job: Job) -> mpsc::Receiver<serde_json::Value> {
         let (report, progress) = mpsc::channel();
@@ -5711,6 +5746,38 @@ mod tests {
         assert_eq!(answer["removed"], 0, "a dequeued run undid something");
         // And nothing is left to dequeue.
         assert_eq!(admission.dequeue("b"), 0);
+    }
+
+    /// A run admitted behind another writer job still says "queued", and
+    /// taking it out finds it there: walk 3 answered "nothing waiting".
+    #[test]
+    fn a_run_waiting_on_the_writer_can_be_taken_out() {
+        let _held = counters();
+        let store = bare_store("w");
+        let forget = store.submit(Job::Forget(PathBuf::from("/nowhere/x")), None);
+        let (report, waiting) = mpsc::channel();
+        store.submit_index(
+            7,
+            Vec::new(),
+            RunKind::Run,
+            report,
+            serde_json::json!({ "event": "queued", "run": 7 }),
+        );
+        assert_eq!(waiting.recv().unwrap()["event"], "queued");
+
+        assert_eq!(
+            store.dequeue_runs(Some(8)),
+            0,
+            "took a run it was not asked for"
+        );
+        assert_eq!(store.dequeue_runs(Some(7)), 1);
+        let answer = waiting.recv().expect("the dequeued run was answered");
+        assert_eq!(answer["dequeued"], true);
+        assert_eq!(answer["removed"], 0, "a dequeued run undid something");
+        // The forget is not a run and stays queued.
+        assert_eq!(store.queue.lock().unwrap().len(), 1);
+        drop(forget);
+        assert_eq!(store.dequeue_runs(None), 0);
     }
 
     /// Each counter moves when, and only when, its own domain is written.

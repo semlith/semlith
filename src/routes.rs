@@ -4597,6 +4597,10 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
         // to unwind, only a place in a line.
         Some("dequeue") => {
             dequeued += state.admission.dequeue(&store.name);
+            // Admitted already and waiting on the writer behind another job.
+            if dequeued == 0 {
+                dequeued += store.dequeue_runs(run);
+            }
             if dequeued == 0 {
                 return Response::error(
                     409,
