@@ -6158,6 +6158,17 @@ def _(d):
                 fail("the run that took the wizard's decisions has no decisions phase: %r" % names)
             if "Applying decisions" not in labels:
                 fail("the decisions phase was never drawn: %r" % labels)
+            # After Start's steps the timeline carries on with the run's own
+            # phases: finding and reading files, and the last one it reached.
+            own = [p.get("phase") for p in phases[names.index("decisions"):]]
+            for key, label in (("walk", "Finding files"), ("read", "Reading and chunking")):
+                if key in own and label not in labels:
+                    fail("the run's %s phase was never drawn on its card: %r" % (key, labels))
+            last = d.eval("PHASE_LABEL[%s]" % json.dumps(own[-1]))
+            if last not in labels:
+                fail("the run's last phase (%s) was never drawn on its card: %r" % (own[-1], labels))
+            if labels.index("Applying decisions") < labels.index("Starting the run"):
+                fail("the run's phases were drawn before Start's own steps: %r" % labels)
         # Minimum dwell, seen on the real page: every current step held >= 0.7 s
         # (sampled every 50 ms, so 0.6 s is the floor that proves it).
         # The step current when the run ends gives way to the done card at once.
@@ -6210,7 +6221,7 @@ def _(d):
          ["Applying decisions", "Finding files", "Starting the Neural Engine", "Embedding"])
     want("a queued run's steps", seen["queued"], [["Queued"], "2 runs ahead of this one"])
     want("the current step's sentence", seen["cur"], "Neural Engine 230 chunks/s · CPU 31 chunks/s")
-    want("a phase line in the log", seen["log"][1:3], ["Writing the index to disk", "4,864 chunks still embedding"])
+    want("a phase line in the log", seen["log"][1:3], ["phase", "Writing the index to disk — 4,864 chunks still embedding"])
     want("an image's log outcome", seen["image"], "image")
     want("a run-truth run's time left", seen["left"], "about 13 min")
     no_console_errors(d, "the timeline")

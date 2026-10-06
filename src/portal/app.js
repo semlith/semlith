@@ -1778,7 +1778,7 @@ const msOf = (t) => (t > 1e12 ? t : t * 1000);
 const QUEUED = new Map();
 
 /** A run's steps from its own events: the queue, then every phase it sent. */
-function runSteps(r) {
+function runSteps(r, skip) {
   const steps = [];
   const queued = r.status === "queued";
   const key = `${r.store}:${r.id}`;
@@ -1787,7 +1787,7 @@ function runSteps(r) {
   if (q && !queued && q.until == null) q.until = Date.now();
   if (q) steps.push({ label: "Queued", at: q.at, until: q.until, detail: queued ? (r.position > 1 ? `${plural(r.position - 1, "run")} ahead of this one` : "next in line") : "" });
   if (queued) return steps;
-  const phases = r.phases || [];
+  const phases = (r.phases || []).slice(skip || 0);
   phases.forEach((p, i) => {
     const current = i === phases.length - 1 && p.until == null;
     steps.push({
@@ -3767,7 +3767,15 @@ function wizardScreen() {
     if (live) return runningCard(live, R);
     // A run over in a blink still shows each of its last steps for their
     // dwell before the done card takes its place.
-    if (w.startKey && (SHOWN.get(w.startKey) || {}).behind) return runningCard(R[R.length - 1], R, true);
+    // The card is drawn with the run's final phases first: while the queue is
+    // still behind them, or the last one has been up under its dwell, it stays.
+    if (w.startKey) {
+      const card = runningCard(R[R.length - 1], R, true);
+      const q = SHOWN.get(w.startKey) || {};
+      const held = q.behind || Date.now() - q.since < DWELL_MS;
+      if (held) setTimeout(wizAgain, DWELL_MS / 2);
+      if (held) return card;
+    }
     return doneCard(R);
   }
 
@@ -3898,6 +3906,10 @@ function wizardScreen() {
       });
       const started = [];
       const held = runs.filter((x) => x.status === "review");
+      // The phases a held run already has are its scan's, the scan card's to
+      // show; the run card starts after them. Counted, not timed, so no clock
+      // is compared with the daemon's.
+      w.scanPhases = Object.fromEntries(held.map((r) => [r.id, (r.phases || []).length]));
       if (held.length) {
         await step(`Starting ${held.length === 1 ? "the run" : plural(held.length, "run")}`, "the daemon to take the run", async () => {
           for (const r of held) {
@@ -3960,7 +3972,7 @@ function wizardScreen() {
   function runningCard(r, all, tail) {
     // Start's own steps come first, then the run's own.
     const pre = w.startSteps && w.startKey ? w.startSteps.map((s) => ({ label: s.label, at: s.at, until: s.until, detail: "" })) : [];
-    return runCard(r, { pre, key: w.startKey, meta: all.length > 1 ? `${all.filter((x) => !LIVE_RUN.has(x.status)).length} of ${all.length} done` : "", again: wizAgain, live: tail });
+    return runCard(r, { pre, key: w.startKey, skip: (w.scanPhases || {})[r.id] || 0, meta: all.length > 1 ? `${all.filter((x) => !LIVE_RUN.has(x.status)).length} of ${all.length} done` : "", again: wizAgain, live: tail });
   }
   const wizAgain = () => host.isConnected && w.step === 4 && paint();
 
@@ -4393,7 +4405,8 @@ function logParts(ev) {
     const tone = /refus|skip|fail/.test(outcome) ? "bad" : /embed|index|image/.test(outcome) ? "ok" : /unchanged|queued/.test(outcome) ? "" : "info";
     return [`${n(ev.scanned)}/${n(ev.total)}`, outcome, ev.why ? `${ev.path} — ${ev.why}` : ev.path, tone];
   }
-  if (ev.event === "phase") return [when, phaseLabel(ev.phase, ev.detail, ev.lane), ev.detail || "", "info"];
+  // A phase line: a short marker in the status column, the words in the wide one.
+  if (ev.event === "phase") return [when, "phase", [phaseLabel(ev.phase, ev.detail, ev.lane), ev.detail].filter(Boolean).join(" — "), "info"];
   const text = {
     submitted: ev.ahead ? `waiting — ${plural(ev.ahead, "run")} ahead of this one` : "submitted",
     queued: ev.ahead ? `waiting for ${ev.store}'s writer — ${plural(ev.ahead, "job")} ahead` : "waiting for the store's writer",
@@ -4476,14 +4489,11 @@ function runCard(r, o) {
   const p = runPct(r);
   const paused = r.status === "paused" || r.status === "pausing";
   const pre = opts.pre || [];
-  // A run held for review began at its scan: what it did before Start is the
-  // scan card's. A step still going, or one that began while Start's own
-  // requests were out, is queued after Start's steps so the order holds.
-  const from = pre.length ? pre[0].at : 0;
+  // `o.skip`: the phases a held run had before Start, its scan's. A step that
+  // began while Start's own requests were out is queued after Start's steps,
+  // so the order holds; it keeps its own start time for the label.
   const after = pre.length ? pre[pre.length - 1].at : 0;
-  const own = runSteps(r)
-    .filter((s) => s.until == null || s.at >= from)
-    .map((s) => (s.at < after ? { ...s, at: after, began: s.at } : s));
+  const own = runSteps(r, opts.skip || 0).map((s) => (s.at < after ? { ...s, at: after, began: s.at } : s));
   const shown = shownOf(opts.key || `${r.store}:${r.id}:${r.submitted || ""}`, pre.concat(own), opts.again);
   const review = r.status === "review";
   const queued = r.status === "queued";
