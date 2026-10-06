@@ -4596,7 +4596,9 @@ function runCard(r, o) {
   const own = runSteps(r, opts.skip || 0).map((s) => (s.at < after ? { ...s, at: after, began: s.at } : s));
   const shown = shownOf(opts.key || `${r.store}:${r.id}:${r.submitted || ""}`, pre.concat(own), opts.again);
   const cur = shown[shown.length - 1];
-  const starting = cur && LIVE_RUN.has(r.status) && (shown.length <= pre.length || cur.label === "Queued" || cur.label === PHASE_LABEL.decisions) ? cur : null;
+  // A run over in a blink still shows its start steps first (`o.live`: the
+  // wizard holds its card while they have their dwell).
+  const starting = cur && (LIVE_RUN.has(r.status) || opts.live) && (shown.length <= pre.length || cur.label === "Queued" || cur.label === PHASE_LABEL.decisions) ? cur : null;
   const review = r.status === "review";
   const queued = r.status === "queued";
   const head = !LIVE_RUN.has(r.status) ? "Finishing" : queued ? "Waiting to start" : review ? "Held for review" : r.status === "scanning" ? "Scanning" : "Running now";

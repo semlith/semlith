@@ -6501,7 +6501,7 @@ def _(d):
     if not rates:
         skip("this daemon sends no lane rates (/api/accel `rates`), so there is nothing to estimate from")
     d.clear_console()
-    wizard_to(d, 4)
+    name = wizard_to(d, 4)
     lanes = [l for l in accel["lanes"] if (l.get("status") or {}).get("state") != "unavailable"]
     other = next((l for l in lanes if l["lane"] != "cpu" and (rates.get(l["lane"]) or {}).get("per_s")), None)
     if not other:
@@ -6533,11 +6533,32 @@ def _(d):
         return reading()
 
     try:
+        plan = (run_for(d, name) or {}).get("plan") or {}
+        if plan.get("chunks") is None:
+            skip("the held plan counts no chunks: %s" % json.dumps(plan)[:200])
+
+        def expected():
+            """The plan's chunks over the rates of the lanes a run would use:
+            the Neural Engine alone when it is on (the GPU beside it only when
+            asked), every lane that is on otherwise."""
+            a = d.api("/api/accel")
+            r = a.get("rates") or {}
+            on = [l["lane"] for l in a["lanes"] if l.get("enabled") and (l.get("status") or {}).get("state") != "unavailable"]
+            if "ane" in on and r.get("ane"):
+                on = [x for x in on if x != "cpu" and (x != "gpu" or a.get("gpu_beside_ane"))]
+            per_s = sum((r.get(x) or {}).get("per_s") or 0 for x in on)
+            return round(plan["chunks"] / per_s * 1000) if per_s else None
+
         first = switch(not was)
+        first_want = expected()
         second = switch(was)
-        off, on = (first, second) if was else (second, first)
-        if off["ms"] <= on["ms"]:
-            fail("the estimate with %s off (%r ms) is not longer than with it on (%r ms)" % (label, off["ms"], on["ms"]))
+        second_want = expected()
+        if first["ms"] == second["ms"] and first_want != second_want:
+            fail("the estimate did not move when %s was switched: %r ms both ways" % (label, first["ms"]))
+        for seen, wanted, state in ((first, first_want, not was), (second, second_want, was)):
+            if wanted and abs(seen["ms"] - wanted) > max(2, wanted * 0.02):
+                fail("with %s %s the estimate reads %r ms; the plan's %d chunks over the lanes' rates is %r ms"
+                     % (label, "on" if state else "off", seen["ms"], plan["chunks"], wanted))
     finally:
         now = next((l for l in d.api("/api/accel")["lanes"] if l["lane"] == other["lane"]), {})
         if now.get("enabled") != was:
