@@ -792,18 +792,44 @@ pub fn render_status(entry: &Entry, status: &Value, version: Option<&str>) -> St
     }
     let usage = &status["usage"];
     if usage.is_object() {
+        let n = |k: &str| usage[k].as_i64().unwrap_or(0);
+        // Cloud 0.4.0 meters chunks; a host before it sends minutes.
+        let indexed = if usage.get("index_chunks").is_some() || usage.get("cap_chunks").is_some() {
+            format!(
+                "{} of {} chunks indexed",
+                grouped(n("index_chunks")),
+                grouped(n("cap_chunks"))
+            )
+        } else {
+            format!(
+                "{} of {} index minutes",
+                n("index_minutes"),
+                n("cap_minutes")
+            )
+        };
         out.push_str(&format!(
-            "usage    {} · {} of {} stored · {} of {} index minutes · queue {} running, {} waiting\n",
+            "usage    {} · {} of {} stored · {indexed} · queue {} running, {} waiting\n",
             s(&usage["month"]),
-            crate::human_bytes(usage["store_bytes"].as_i64().unwrap_or(0)),
-            crate::human_bytes(usage["cap_bytes"].as_i64().unwrap_or(0)),
-            usage["index_minutes"].as_i64().unwrap_or(0),
-            usage["cap_minutes"].as_i64().unwrap_or(0),
+            crate::human_bytes(n("store_bytes")),
+            crate::human_bytes(n("cap_bytes")),
             usage["queue"]["running"].as_i64().unwrap_or(0),
             usage["queue"]["waiting"].as_i64().unwrap_or(0),
         ));
     }
     out.trim_end().to_string()
+}
+
+/// 2650000 as 2,650,000.
+fn grouped(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, d) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(d);
+    }
+    if n < 0 { format!("-{out}") } else { out }
 }
 
 /// The MCP URL to keep for an org: the host's own when it is on the same
@@ -1308,6 +1334,27 @@ const UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 /// How often `--wait` asks how the job is doing.
 const JOB_POLL: Duration = Duration::from_secs(2);
 
+impl PushReport {
+    /// The estimate a push open carries, in whichever unit the host meters.
+    fn estimate_from(&mut self, opened: &Value) {
+        self.estimate_chunks = opened["estimate_chunks"].as_i64();
+        self.estimate_minutes = opened["estimate_minutes"].as_i64();
+    }
+
+    /// The estimate as the push line says it, chunks first.
+    pub fn estimate_line(&self) -> Option<String> {
+        match (self.estimate_chunks, self.estimate_minutes) {
+            (Some(1), _) => Some("about 1 chunk to index".into()),
+            (Some(n), _) => Some(format!("about {} chunks to index", grouped(n))),
+            (None, Some(m)) => Some(format!(
+                "about {m} index minute{}",
+                if m == 1 { "" } else { "s" }
+            )),
+            (None, None) => None,
+        }
+    }
+}
+
 /// What a push did.
 #[derive(Debug, Default, Serialize)]
 pub struct PushReport {
@@ -1323,6 +1370,9 @@ pub struct PushReport {
     pub push: String,
     pub job: Option<i64>,
     pub position: Option<i64>,
+    /// What the host expects the push to index, in chunks (cloud 0.4.0).
+    pub estimate_chunks: Option<i64>,
+    /// The same estimate in minutes, from a host before cloud 0.4.0.
     pub estimate_minutes: Option<i64>,
     /// The job's last state, when `--wait` followed it.
     pub state: Option<String>,
@@ -1420,7 +1470,7 @@ pub fn push(
         bail!("{} opened no push", entry.host_name());
     }
     report.removed = opened["remove"].as_array().map_or(0, Vec::len);
-    report.estimate_minutes = opened["estimate_minutes"].as_i64();
+    report.estimate_from(&opened);
     let need: Vec<&str> = opened["need"]
         .as_array()
         .into_iter()
@@ -2290,5 +2340,68 @@ mod tests {
             "Pushing needs a plan. It needs the Pro plan."
         );
         assert_eq!(plan.kind(), "refused");
+    }
+
+    /// Cloud 0.4.0 meters indexing in chunks; a host before it sends minutes,
+    /// and the line keeps saying what that host means.
+    #[test]
+    fn status_reads_indexed_chunks_and_falls_back_to_minutes_for_an_older_host() {
+        let entry = entry_at("https://cloud.example");
+        let status = |usage: Value| json!({ "org": { "slug": "acme", "plan": "pro", "status": "active" }, "usage": usage });
+        let chunks = render_status(
+            &entry,
+            &status(
+                json!({ "month": "2026-10", "store_bytes": 1000, "cap_bytes": 8000,
+                "index_chunks": 212400, "cap_chunks": 2650000, "queue": { "running": 0, "waiting": 0 } }),
+            ),
+            None,
+        );
+        assert!(
+            chunks.contains("212,400 of 2,650,000 chunks indexed"),
+            "{chunks}"
+        );
+        assert!(!chunks.contains("minutes"), "{chunks}");
+        let minutes = render_status(
+            &entry,
+            &status(
+                json!({ "month": "2026-10", "store_bytes": 1000, "cap_bytes": 8000,
+                "index_minutes": 2, "cap_minutes": 100, "queue": { "running": 0, "waiting": 0 } }),
+            ),
+            None,
+        );
+        assert!(minutes.contains("2 of 100 index minutes"), "{minutes}");
+        assert!(!minutes.contains("chunks"), "{minutes}");
+    }
+
+    #[test]
+    fn a_push_estimate_reads_chunks_or_the_older_minutes() {
+        let mut report = PushReport::default();
+        report.estimate_from(&json!({ "push": "p", "estimate_chunks": 1400 }));
+        assert_eq!(
+            (report.estimate_chunks, report.estimate_minutes),
+            (Some(1400), None)
+        );
+        assert_eq!(
+            report.estimate_line().as_deref(),
+            Some("about 1,400 chunks to index")
+        );
+        let mut report = PushReport::default();
+        report.estimate_from(&json!({ "push": "p", "estimate_minutes": 3 }));
+        assert_eq!(
+            (report.estimate_chunks, report.estimate_minutes),
+            (None, Some(3))
+        );
+        assert_eq!(
+            report.estimate_line().as_deref(),
+            Some("about 3 index minutes")
+        );
+        let mut report = PushReport::default();
+        report.estimate_from(&json!({ "push": "p", "estimate_chunks": 1 }));
+        assert_eq!(
+            report.estimate_line().as_deref(),
+            Some("about 1 chunk to index")
+        );
+        report.estimate_from(&json!({ "push": "p" }));
+        assert_eq!(report.estimate_line(), None);
     }
 }

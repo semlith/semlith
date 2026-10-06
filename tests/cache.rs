@@ -140,3 +140,81 @@ fn a_cached_vector_is_the_vector_the_cache_was_given_and_compaction_leaves_it() 
     let after = semlith::cache::stats();
     assert_eq!(before.rows, after.rows, "compaction touched the cache");
 }
+
+fn index_into(
+    store: &Path,
+    root: &Path,
+    cache: Option<semlith::cache::Location>,
+) -> semlith::IndexReport {
+    let mut s = Semlith::open(store, None).unwrap();
+    s.quiet = true;
+    s.vector_cache = cache;
+    s.index_paths(&[root.to_path_buf()], |_, _| {}).unwrap()
+}
+
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn two_stores_with_caches_of_their_own_never_share_a_vector() {
+    home();
+    let repo = tempfile::tempdir().unwrap();
+    repository(repo.path(), 4);
+    let caches = tempfile::tempdir().unwrap();
+    let org_a = semlith::cache::Location::at(caches.path().join("org-a.db"), 64);
+    let org_b = semlith::cache::Location::at(caches.path().join("org-b.db"), 64);
+    let machine = semlith::cache::stats().rows;
+
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let first = index_into(a.path(), repo.path(), Some(org_a.clone()));
+    let second = index_into(b.path(), repo.path(), Some(org_b.clone()));
+    assert!(second.cache_lookups > 0);
+    assert_eq!(second.cache_hits, 0, "org b's run read org a's cache");
+    assert_eq!(
+        semlith::cache::stats_at(&org_a).rows as usize,
+        first.cache_lookups
+    );
+    assert_eq!(
+        semlith::cache::stats_at(&org_b).rows as usize,
+        second.cache_lookups
+    );
+    assert_eq!(
+        semlith::cache::stats().rows,
+        machine,
+        "an instance cache wrote the machine's"
+    );
+
+    // The same text again under org a's cache is all hits.
+    let c = tempfile::tempdir().unwrap();
+    let again = index_into(c.path(), repo.path(), Some(org_a));
+    assert_eq!(again.cache_hits, again.cache_lookups);
+
+    // A cap of 0 turns the cache off for that store only.
+    let d = tempfile::tempdir().unwrap();
+    let off = index_into(
+        d.path(),
+        repo.path(),
+        Some(semlith::cache::Location::at(
+            caches.path().join("off.db"),
+            0,
+        )),
+    );
+    assert_eq!(off.cache_lookups, 0);
+    assert!(!caches.path().join("off.db").exists());
+}
+
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_store_with_no_cache_of_its_own_writes_the_machines() {
+    home();
+    let repo = tempfile::tempdir().unwrap();
+    repository(repo.path(), 3);
+    // Text no other test in this binary indexes, so every chunk is new here.
+    std::fs::write(repo.path().join("unique.rs"), "/// The machine cache's own witness, kept apart from the other tests' widgets.\npub fn machine_cache_witness_only_here(x: u64) -> u64 { x.wrapping_mul(2654435761) ^ 0x9e37_79b9 }\n").unwrap();
+    let before = semlith::cache::stats().rows;
+    let store = tempfile::tempdir().unwrap();
+    let report = index(store.path(), repo.path());
+    assert!(report.cache_lookups > report.cache_hits);
+    assert!(
+        semlith::cache::stats().rows > before,
+        "the machine cache was not written"
+    );
+}

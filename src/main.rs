@@ -5213,12 +5213,16 @@ fn run_cloud(what: CloudCommand, stores: &[PathBuf]) -> Result<()> {
                     println!("kept back  {path}  {why}");
                 }
                 println!(
-                    "{} file{} in the manifest · {} sent ({}) · {} removed{}",
+                    "{} file{} in the manifest · {} sent ({}) · {} removed{}{}",
                     report.files,
                     if report.files == 1 { "" } else { "s" },
                     report.sent,
                     semlith::human_bytes(report.bytes_sent as i64),
                     report.removed,
+                    report
+                        .estimate_line()
+                        .map(|e| format!(" · {e}"))
+                        .unwrap_or_default(),
                     report
                         .job
                         .map(|j| format!(
