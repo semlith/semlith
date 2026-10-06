@@ -2704,13 +2704,12 @@ function wizardScreen() {
       if (del) {
         const scans = scanRuns();
         for (const s of scans) await post("/api/index/control", { store: s.store, run: s.id, action: "stop", delete: true }).catch(() => {});
-        // A scan stopped with `delete` takes its store with it once it has
-        // ended; deleting it while it ends is refused (409). So: wait for the
-        // scans to end, bounded, and delete only what is still there.
-        const ids = new Set(scans.map((s) => s.id));
-        for (let i = 0; i < 25 && ids.size; i++) {
-          await load("runs", true);
-          if ((data.runs?.runs || []).every((r) => !ids.has(r.id) || !LIVE_RUN.has(r.status))) break;
+        // A scan stopped with `delete` takes its store with it a moment after
+        // it ends; deleting it meanwhile is refused (409). So: wait, bounded,
+        // for the store to go, and delete only what is still there.
+        for (let i = 0; i < 25 && scans.length; i++) {
+          await load("stores", true);
+          if (!store(w.created)) break;
           await new Promise((ok) => setTimeout(ok, 200));
         }
         await load("stores", true);

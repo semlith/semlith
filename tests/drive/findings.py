@@ -6288,6 +6288,7 @@ def _(d):
 
 @finding("rc4.5", "a bulk decision shows its progress in batches of 100, holds the table, and ends on a done line")
 def _(d):
+    d.clear_console()
     store = indexed_fixture(d, secret_tree(d, "rc4bulk", 150))
     d.open_view("store/%s/review" % store, fresh=True)
     d.wait_for("document.querySelectorAll('#main .dec-list .dec-grid').length >= 150", timeout=30,
