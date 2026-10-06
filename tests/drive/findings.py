@@ -4533,7 +4533,11 @@ def _(d):
         if not run.get("bytes_total") or not (0 < run.get("bytes", 0) <= run["bytes_total"]):
             fail("the snapshot's bytes are %r of %r" % (run.get("bytes"), run.get("bytes_total")))
         d.open_view("store/%s/runs" % store)
-        d.wait_for("(() => { const c = %s; return !!c && /left|almost done|estimating/.test(c.innerText); })()" % CARD,
+        # 0.37.0-rc.4: the one run card says its time left in its TIME LEFT
+        # meter as "about 12 min" or "under a minute" (the run-truth spec's
+        # words), where the old card's line read "12 min left".
+        d.wait_for("(() => { const c = %s; return !!c && /left|almost done|estimating|about \\d+ (min|h)|under a minute/.test("
+                   "[...c.querySelectorAll('.run-stats .v, .t-mono-sm')].map(n => n.textContent).join(' ')); })()" % CARD,
                    timeout=20, what="%s's card to show the time left" % store)
         # The card without its log: since 0.37.0-rc.4 the log sits inside the
         # card (one run card everywhere), and its lines carry the wall-clock
