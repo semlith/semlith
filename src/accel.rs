@@ -1836,6 +1836,12 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
     Ok((worker, hello))
 }
 
+/// The slowest batched rate a worker lane may show on the fixture and still be
+/// used. Every hardware lane measured is far above it, even on a loaded
+/// machine (an M1's GPU 17.8 and Neural Engine 21 while another run embedded;
+/// an A30's CUDA 863); llvmpipe standing in for an A30 managed 0.7.
+const MIN_LANE_PER_S: f64 = 2.0;
+
 /// A worker's variant as the `'static` name a store's counts use.
 fn static_variant(name: &str) -> Option<&'static str> {
     [
@@ -2152,6 +2158,28 @@ pub fn worker_main(lane: &str, dir: Option<&Path>, adapter: Option<&str>) -> i32
         }
         Ok(check)
     });
+    // A lane slower than any GPU is not on one. On a Linux box whose
+    // container lacks the graphics capability, or with no vendor Vulkan
+    // driver, Dawn runs on llvmpipe while the device it reports is still the
+    // card's PCI id, and the "NVIDIA" lane embedded on the CPU at under one
+    // chunk a second (#197, measured on an A30). Refused, saying so.
+    if let (Ok(check), Some(per_s)) = (&check, batched)
+        && check.passed
+        && per_s < MIN_LANE_PER_S
+    {
+        say(
+            &mut out,
+            serde_json::json!({
+                "ok": false,
+                "unavailable": true,
+                "reason": format!(
+                    "{} embedded at {per_s:.1} chunks/s, slower than any GPU, so it is most likely a software renderer standing in for the card (on Linux: the GPU maker's Vulkan driver is missing, or the container has no graphics capability)",
+                    check.device
+                ),
+            }),
+        );
+        return 1;
+    }
     match check {
         Ok(check) if check.passed => say(
             &mut out,
