@@ -1439,15 +1439,28 @@ fn step_hooks(wanted: bool, mode: crate::hook::Mode) -> Result<Step> {
         name: "hook",
         state: State::Done,
         detail: format!(
-            "{} in {}",
+            "{} in {}{}",
             mode.as_str(),
             written
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            gate_hint(mode)
         ),
     })
+}
+
+/// What `--hook-mode gate` buys, said where the choice is made (#189). On
+/// code an agent with Grep reaches for it first and no wording moves it; the
+/// gate does, measured on 50 held-out code questions with Opus 5.5.
+fn gate_hint(mode: crate::hook::Mode) -> &'static str {
+    if matches!(mode, crate::hook::Mode::Soft) {
+        "; `semlith setup --hook-mode gate` makes agents call semlith before grep on code \
+         (44 of 50 sessions against 0, two more correct answers, about 31 % more cost a session)"
+    } else {
+        ""
+    }
 }
 
 /// Append the rule block to the rules files of the clients that have one.
