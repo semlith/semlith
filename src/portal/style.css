@@ -2170,6 +2170,28 @@ button.gl-row:hover,
   font-size: 13px;
   color: var(--blue-ink);
 }
+.selbar.bulk .what {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.selbar.bulk.ok {
+  background: var(--green-soft);
+}
+.selbar.bulk.ok .what,
+.selbar.bulk.ok > .i {
+  color: var(--green-ink);
+}
+.selbar.bulk.bad {
+  background: var(--red-soft);
+}
+.selbar.bulk.bad .what,
+.selbar.bulk.bad > .i {
+  color: var(--red);
+}
+/* A table a bulk decision is being applied to takes no input until it ends. */
+[inert] {
+  opacity: 0.55;
+}
 .filterbar {
   display: flex;
   align-items: center;
@@ -3402,31 +3424,9 @@ button.gl-row:hover,
   color: var(--muted);
   overflow-wrap: anywhere;
 }
-.stage-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 24px;
-  padding: 0 9px;
-  border-radius: 12px;
-  font-size: 12px;
-  border: 1px solid var(--line);
-  color: var(--muted);
-  background: var(--panel);
-}
-.stage-chip.done {
-  color: var(--green-ink);
-  border-color: var(--green-edge);
-  background: var(--green-soft);
-}
-.stage-chip.cur {
-  color: var(--blue-ink);
-  border-color: var(--blue);
-  background: var(--blue-soft);
-}
 .stage-box {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 8px 10px;
   border-radius: 6px;
@@ -3434,6 +3434,32 @@ button.gl-row:hover,
   background: var(--soft);
   font-size: 12.5px;
   color: var(--muted);
+  min-width: 0;
+}
+.stage-box > .dot {
+  margin-top: 5px;
+  flex: none;
+}
+/* The label, then its status on a line of its own: a status never wraps
+ * mid-word beside a long label ("don / e", the 0.37.0-rc.4 walk). */
+.sb-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.sb-label {
+  overflow-wrap: normal;
+}
+.sb-status {
+  font: 11.5px var(--mono);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stage-box.done .sb-status {
+  color: var(--green-ink);
 }
 .stage-box.done {
   color: var(--ink-2);
@@ -3464,6 +3490,79 @@ button.gl-row:hover,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.run-stats .s {
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-stats.five {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+/* A run's timeline: one row per phase it has been through, from its own
+ * events; the current one pulses (run-truth spec §3.2). */
+.tl {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tl-step {
+  display: flex;
+  gap: 10px;
+  padding: 4px 0;
+  position: relative;
+  min-width: 0;
+}
+.tl-step > .dot {
+  margin-top: 6px;
+  flex: none;
+}
+.tl-step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 2.5px;
+  top: 17px;
+  bottom: -5px;
+  width: 1px;
+  background: var(--line);
+}
+.tl-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.tl-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.tl-label {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.tl-step.cur .tl-label {
+  color: var(--ink);
+  font-weight: 600;
+}
+.tl-when {
+  font: 11.5px var(--mono);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.tl-detail {
+  font-size: 12.5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.tl-step.cur .tl-detail {
+  color: var(--blue-ink);
 }
 .lives {
   display: flex;
@@ -4935,7 +5034,10 @@ button.gl-row:hover,
   .check4 > button:nth-child(-n + 2) {
     border-bottom: 1px solid var(--line-soft);
   }
-  .run-stats > div:nth-child(2) {
+  .run-stats.five {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .run-stats > div:nth-child(2n) {
     border-right: 0;
   }
   .span2 {
@@ -5089,7 +5191,8 @@ button.gl-row:hover,
     display: none !important;
   }
   .q4,
-  .run-stats {
+  .run-stats,
+  .run-stats.five {
     grid-template-columns: minmax(0, 1fr);
   }
   .check4 {

@@ -6037,6 +6037,349 @@ def _(d):
     no_console_errors(d, "run progress")
 
 
+# ------------------------------------------------- 0.37.0-rc.4 run truth (rc4.x)
+#
+# The owner's 2026-10-06 walk (W1-W7 in releases/0.37.0-rc.4/run-truth-spec.md):
+# Start sat on "Starting…", the run card's stage pills were guesses, the scan
+# card's stages were thresholds on a paced fraction, bulk decisions said
+# nothing while they ran, and the Index step's estimate read "—". Each check
+# drives the page the way the walk did. Where a figure comes from a field only
+# a run-truth daemon sends, the check asserts it when the daemon sends it and
+# says so when it does not.
+
+#: Records every decide POST's body and can hold any request for a while, so a
+#: check can see batches, `defer`, and a slow request's waiting line.
+FETCH_SPY = r"""
+(() => {
+  if (window.__spy) return true;
+  const spy = window.__spy = {decides: [], delay: {}};
+  const real = window.fetch.bind(window);
+  window.fetch = async (input, init) => {
+    const url = String((input && input.url) || input);
+    if (url.includes('/api/refused/decide') && init && init.body) spy.decides.push(JSON.parse(init.body));
+    const hold = Object.entries(spy.delay).find(([part]) => url.includes(part));
+    if (hold) await new Promise(r => setTimeout(r, hold[1]));
+    return real(input, init);
+  };
+  return true;
+})()
+"""
+
+#: Samples the run card's timeline every 50 ms: when each step label first
+#: showed and which was current.
+TIMELINE_SAMPLER = r"""
+(() => {
+  const seen = window.__tl = {first: {}, cur: [], order: []};
+  const real = window.__realSetInterval || window.setInterval;
+  seen.timer = real(() => {
+    const card = document.querySelector('.wz-body .run-card');
+    if (!card) return;
+    const steps = [...card.querySelectorAll('.tl-step')];
+    steps.forEach(s => {
+      const label = (s.querySelector('.tl-label') || {}).textContent || '';
+      if (!(label in seen.first)) { seen.first[label] = Date.now(); seen.order.push(label); }
+    });
+    const cur = card.querySelector('.tl-step.cur .tl-label');
+    const word = cur ? cur.textContent : '';
+    if (seen.cur.length === 0 || seen.cur[seen.cur.length - 1][0] !== word) seen.cur.push([word, Date.now()]);
+  }, 50);
+  return true;
+})()
+"""
+
+
+def secret_tree(d, name, count):
+    """`count` files the scan refuses and a person may review, for a bulk
+    decision that has to go in more than one batch."""
+    root = os.path.join(d.fixtures.root, "%s-%d" % (name, random.randint(0, 10**9)))
+    os.makedirs(root)
+    for i in range(count):
+        with open(os.path.join(root, "conf-%03d.txt" % i), "w") as f:
+            f.write("# settings %d\nkey = \"%s\"\n" % (i, live_aws()))
+    with open(os.path.join(root, "lib.rs"), "w") as f:
+        f.write("pub fn callee() -> u32 { 1 }\n")
+    return root
+
+
+@finding("rc4.2", "Start lands on the run view at once and shows each step, the decisions recorded first")
+def _(d):
+    d.clear_console()
+    root = review_tree(d, "rc4start")
+    name = wizard_to(d, 3, root=root)
+    held = held_run(d, root)
+    press_text(d, ".wz-body button", "Apply suggestions to 2 undecided", "applying the suggestions")
+    press_text(d, ".wz-foot button", "Continue to index", "Continue to index")
+    wz_step(d, 4)
+    d.eval(FETCH_SPY)
+    # A slow request says what it waits for: the settings save is held 2.6 s.
+    d.eval("window.__spy.delay['/api/store/settings'] = 2600; true")
+    d.eval(TIMELINE_SAMPLER)
+    clicked = d.eval("(() => { const b = [...document.querySelectorAll('.wz-foot button')].find(b => /Start indexing/.test(b.textContent));"
+                     " if (!b) return null; window.__clicked = Date.now(); b.click(); return true; })()")
+    if not clicked:
+        fail("the Index step offers no Start indexing")
+    try:
+        # At once: the run view, with its first step, not a busy button alone.
+        landed = d.eval("new Promise(done => { const t0 = window.__clicked; const tick = setInterval(() => {"
+                        " const c = document.querySelector('.wz-body .run-card .tl-step');"
+                        " if (c || Date.now() - t0 > 3000) { clearInterval(tick); done(c ? Date.now() - t0 : null); } }, 20); })")
+        if landed is None or landed > 500:
+            fail("Start took %s ms to show the run view; it lands there at once" % landed)
+        first = d.eval("[...document.querySelectorAll('.wz-body .run-card .tl-label')].map(x => x.textContent)")
+        if not first or not re.match(r"Recording 2 decisions", first[0]):
+            fail("the start sequence does not begin with the decisions recorded: %r" % first)
+        d.wait_for("[...document.querySelectorAll('.wz-body .run-card .tl-detail')].some(x => /^Waiting for the daemon to save the settings/.test(x.textContent))",
+                   timeout=6, what="the held settings save to say what it waits for")
+        decides = d.eval("window.__spy.decides")
+        if not decides or any(not b.get("defer") for b in decides):
+            fail("the wizard's decisions were not sent with defer: true, so they were applied run-less "
+                 "before the run (W1): %s" % json.dumps(decides)[:300])
+        final = wait_for_run(d, held["store"], run_id=held["id"])
+        if final.get("status") != "done":
+            fail("the started run ended %s" % final.get("status"))
+        seen = d.eval("window.__tl")
+        labels = seen["order"]
+        for want_label in ("Recording 2 decisions", "Saving the store's settings", "Starting the run"):
+            if want_label not in labels:
+                fail("the timeline never showed %r: %r" % (want_label, labels))
+        phases = final.get("phases")
+        if phases is not None:
+            names = [p.get("phase") for p in phases]
+            if "decisions" not in names:
+                fail("the run that took the wizard's decisions has no decisions phase: %r" % names)
+            if "Applying decisions" not in labels:
+                fail("the decisions phase was never drawn: %r" % labels)
+        # Minimum dwell, seen on the real page: every current step held >= 0.7 s
+        # (sampled every 50 ms, so 0.6 s is the floor that proves it).
+        # The step current when the run ends gives way to the done card at once.
+        cur = seen["cur"]
+        short = [(cur[i][0], cur[i + 1][1] - cur[i][1]) for i in range(len(cur) - 1)
+                 if cur[i][0] and cur[i + 1][0] and cur[i + 1][1] - cur[i][1] < 600]
+        if short:
+            fail("a step was current for under 0.7 s before the next: %r (of %r)" % (short, [c[0] for c in cur]))
+    finally:
+        release_held(d, held)
+    no_console_errors(d, "the start sequence")
+    d.eval("window.__spy.delay = {}; true")
+    del name
+
+
+@finding("rc4.3", "the timeline draws the run's phases, holds each for 0.7 s, never runs ahead and never lags 3 s")
+def _(d):
+    open_clean(d, "stores", fresh=True)
+    seen = d.eval(r"""
+    (() => {
+      const t0 = 1791275400000;
+      const steps = [0, 50, 100, 150].map((d, i) => ({label: 'p' + i, at: t0 + d}));
+      const out = [];
+      for (const now of [t0 + 200, t0 + 600, t0 + 950, t0 + 1650, t0 + 2400, t0 + 2500])
+        out.push(dwell('rc4.3', steps, now).steps.length);
+      // Opened late: everything began over 3 s ago, so it is caught up.
+      const late = dwell('rc4.3-late', steps, t0 + 10000).steps.length;
+      // Never ahead: one real step is one shown step, however long it waits.
+      const one = dwell('rc4.3-one', steps.slice(0, 1), t0 + 9000).steps.length;
+      const run = {store: 'x', id: 1, status: 'running', submitted: 1791275376, queued_ms: 400,
+        phase: 'embed', phase_detail: 'Neural Engine 230 chunks/s · CPU 31 chunks/s',
+        phases: [{phase: 'decisions', detail: '21 decisions', at: 1791275376500, until: 1791275377100, count: 21},
+                 {phase: 'walk', detail: '4,369 files · 1.2 GB', at: 1791275377100, until: 1791275378000},
+                 {phase: 'lane', detail: 'Neural Engine loading', at: 1791275378000, until: 1791275380000},
+                 {phase: 'embed', detail: 'embedding', at: 1791275380000, until: null}]};
+      const node = timeline(runSteps(run), true);
+      const queued = runSteps({store: 'q', id: 9, status: 'queued', position: 3});
+      return {out, late, one, queued: [queued.map(s => s.label), queued[0].detail],
+        labels: [...node.querySelectorAll('.tl-label')].map(x => x.textContent),
+        cur: (node.querySelector('.tl-step.cur .tl-detail') || {}).textContent,
+        log: logParts({event: 'phase', phase: 'save', detail: '4,864 chunks still embedding', at: 1791275400}),
+        image: logParts({event: 'file', outcome: 'image', path: '/a.png', scanned: 1, total: 2})[1],
+        left: runLeftText({status: 'running', phases: [], eta_ms: 754000, elapsed_ms: 1000, progress: 0.5})};
+    })()
+    """)
+    want("steps shown at 0.2, 0.6, 0.95, 1.65, 2.4 and 2.5 s after four phases in 0.15 s", seen["out"], [1, 1, 2, 3, 4, 4])
+    want("steps shown when the page meets the run 10 s late", seen["late"], 4)
+    want("steps shown when only one phase has happened", seen["one"], 1)
+    want("the timeline's steps", seen["labels"],
+         ["Applying decisions", "Finding files", "Starting the Neural Engine", "Embedding"])
+    want("a queued run's steps", seen["queued"], [["Queued"], "2 runs ahead of this one"])
+    want("the current step's sentence", seen["cur"], "Neural Engine 230 chunks/s · CPU 31 chunks/s")
+    want("a phase line in the log", seen["log"][1:3], ["Writing the index to disk", "4,864 chunks still embedding"])
+    want("an image's log outcome", seen["image"], "image")
+    want("a run-truth run's time left", seen["left"], "about 13 min")
+    no_console_errors(d, "the timeline")
+
+
+@finding("rc4.4", "the scan card follows the scan's phases, each for 0.7 s, under a Scanning… heading")
+def _(d):
+    d.clear_console()
+    wizard_to(d, 2)
+    root = clean_tree(d, "rc4scan")
+    wizard_mode(d, "Paste a path")
+    d.type(".wz-body .box input", root)
+    d.press("Enter")
+    d.wait_for("document.querySelectorAll('.wz-body .src-row').length > 0", what="the pasted folder as a source")
+    # Intervals the page starts from here on can be held, so the card can be
+    # measured at four widths while it is on screen; the sampler is not held.
+    d.eval(r"""
+    (() => {
+      window.__realSetInterval = window.__realSetInterval || window.setInterval.bind(window);
+      window.setInterval = (fn, ms, ...a) => window.__realSetInterval(() => { if (!window.__hold) fn(); }, ms, ...a);
+      const seen = window.__scan = {cur: [], heads: [], index: []};
+      seen.timer = window.__realSetInterval(() => {
+        const box = document.querySelector('.wz-body .stage-box.cur');
+        const word = box ? box.getAttribute('data-stage') : (document.querySelector('.wz-body .stage-box') ? '' : 'gone');
+        if (!seen.cur.length || seen.cur[seen.cur.length - 1][0] !== word) seen.cur.push([word, Date.now()]);
+        if (document.querySelector('.wz-body .stage-box')) {
+          seen.heads.push((document.querySelector('.wz-head .h') || {}).textContent);
+          const row = [...document.querySelectorAll('.sum-row')].find(r => /INDEX/.test(r.innerText));
+          seen.index.push(row ? row.querySelector('.v').textContent : null);
+        }
+      }, 50);
+      return true;
+    })()
+    """)
+    press_text(d, ".wz-foot button", "Scan 1 source", "Scan 1 source")
+    d.wait_for("!!document.querySelector('.wz-body .stage-box.cur[data-stage=\"read\"], .wz-body .stage-box.cur[data-stage=\"credentials\"]')",
+               timeout=30, what="the scan card to reach its second stage")
+    d.eval("window.__hold = true")
+    bad = []
+    try:
+        for width in (1440, 1024, 768, 390):
+            d.set_viewport(width, 900, mobile=width < 500)
+            pause(d, 60)
+            for box in d.eval(r"""[...document.querySelectorAll('.wz-body .stage-box')].map(b => {
+                const l = b.querySelector('.sb-label').getBoundingClientRect(), s = b.querySelector('.sb-status');
+                const r = s.getBoundingClientRect(), lh = parseFloat(getComputedStyle(s).lineHeight) || 16;
+                return {stage: b.getAttribute('data-stage'), below: r.top >= l.bottom - 1, oneLine: r.height <= lh * 1.5,
+                        fits: s.scrollWidth <= s.clientWidth + 1 || getComputedStyle(s).textOverflow === 'ellipsis', text: s.textContent}; })"""):
+                if not (box["below"] and box["oneLine"]):
+                    bad.append("%dpx %s %r: %s" % (width, box["stage"], box["text"], "beside its label" if not box["below"] else "wraps"))
+    finally:
+        d.reset_viewport()
+        d.eval("window.__hold = false")
+    if bad:
+        fail("a stage's status is not on one line of its own under its label: %s" % "; ".join(bad[:4]))
+    d.wait_for("!!document.querySelector('.wz-body .q4')", timeout=60, what="the review step after the scan")
+    seen = d.eval("clearInterval(window.__scan.timer), window.__scan")
+    order = [c[0] for c in seen["cur"] if c[0] not in ("", "gone")]
+    want("the stages the scan card went through", order, ["walk", "read", "credentials", "rules"])
+    cur = seen["cur"]
+    short = [(cur[i][0], cur[i + 1][1] - cur[i][1]) for i in range(len(cur) - 1) if cur[i][0] not in ("", "gone") and cur[i + 1][1] - cur[i][1] < 600]
+    if short:
+        fail("a scan stage was current for under 0.7 s: %r" % short)
+    heads = set(seen["heads"])
+    want("the heading while the scan card is up", heads, {"Scanning…"})
+    if any(v != "after the scan" for v in seen["index"]):
+        fail("the sidebar's INDEX row read %r during the scan" % sorted(set(seen["index"])))
+    if text_of(d, ".wz-head .h", "the heading after the scan") == "Scanning…":
+        fail("the heading still reads Scanning… on the review step")
+    no_console_errors(d, "the scan card")
+    press_text(d, "header.top button", "Exit setup", "leaving the wizard")
+    if d.modal_open():
+        d.modal_press("Delete store")
+
+
+@finding("rc4.5", "a bulk decision shows its progress in batches of 100, holds the table, and ends on a done line")
+def _(d):
+    store = indexed_fixture(d, secret_tree(d, "rc4bulk", 150))
+    d.open_view("store/%s/review" % store, fresh=True)
+    d.wait_for("document.querySelectorAll('#main .dec-list .dec-grid').length >= 150", timeout=30,
+               what="150 files waiting for a decision")
+    d.eval(FETCH_SPY)
+    d.eval("window.__spy.delay['/api/refused/decide'] = 400; true")
+    d.eval(r"""
+    (() => {
+      const seen = window.__bulk = {lines: [], inert: false};
+      seen.timer = setInterval(() => {
+        const bar = document.querySelector('#main .selbar.bulk');
+        const t = bar ? bar.innerText.trim() : '';
+        if (t && seen.lines[seen.lines.length - 1] !== t) seen.lines.push(t);
+        if (bar && !/applied|stopped/.test(t) && document.querySelector('#main .dec-list[inert]')) seen.inert = true;
+      }, 20);
+      return true;
+    })()
+    """)
+    d.eval("document.querySelector('#main .dec-grid.head [role=checkbox]').click()")
+    d.wait_for("!!document.querySelector('#main .selbar:not(.bulk)')", what="the selection bar")
+    press_text(d, "#main .selbar button", "Keep out", "Keep out on the selection")
+    d.wait_for("/applied to|stopped at/.test((document.querySelector('#main .selbar.bulk') || {}).innerText || '')",
+               timeout=60, what="the bulk decision to end")
+    seen = d.eval("clearInterval(window.__bulk.timer), window.__bulk")
+    sizes = [len(b["files"]) for b in d.eval("window.__spy.decides")]
+    want("the decide requests' sizes", sizes, [100, 50])
+    progress = [l for l in seen["lines"] if l.startswith("Applying 'Keep out' to 150 files…")]
+    counts = [l.rsplit("…", 1)[1].strip() for l in progress]
+    if "0 / 150" not in counts or "100 / 150" not in counts:
+        fail("the progress line did not count the batches: %r" % seen["lines"])
+    if not seen["inert"]:
+        fail("the table took input while the decision was applied")
+    if not re.search(r"'Keep out' applied to 150 files", seen["lines"][-1]):
+        fail("the bulk decision did not end on a done line: %r" % seen["lines"][-1])
+    kept = [r for s in d.api("/api/refused")["stores"] if s["store"] == store for r in s["rows"] if r.get("accepted") in ("refused", "kept")]
+    want("files kept out", len(kept), 150)
+    # The wizard records locally, at once, and says so in the same place.
+    root = review_tree(d, "rc4wzbulk")
+    wizard_to(d, 3, root=root)
+    held = held_run(d, root)
+    try:
+        d.eval("document.querySelector('.wz-body .dec-grid.head [role=checkbox]').click()")
+        press_text(d, ".wz-body .selbar button", "Keep out", "Keep out on the wizard's selection")
+        line = text_of(d, ".wz-body .selbar.bulk", "the wizard's bulk line")
+        if not re.search(r"'Keep out' recorded for 2 files — applied when the run starts", line):
+            fail("the wizard's bulk decision says %r" % line)
+        # Before leaving: dropping a held scan's store is the leave flow's, not this.
+        no_console_errors(d, "bulk decisions")
+    finally:
+        press_text(d, "header.top button", "Exit setup", "leaving the wizard")
+        if d.modal_open():
+            d.modal_press("Delete store")
+        release_held(d, held)
+
+
+@finding("rc4.6", "the Index step's estimate is this machine's lanes over the plan, and moves as a lane is switched")
+def _(d):
+    accel = d.api("/api/accel")
+    rates = accel.get("rates")
+    if not rates:
+        skip("this daemon sends no lane rates (/api/accel `rates`), so there is nothing to estimate from")
+    d.clear_console()
+    wizard_to(d, 4)
+    lanes = [l for l in accel["lanes"] if (l.get("status") or {}).get("state") != "unavailable"]
+    other = next((l for l in lanes if l["lane"] != "cpu" and (rates.get(l["lane"]) or {}).get("chunks_per_s")), None)
+    if not other:
+        skip("no lane besides the CPU has a rate here, so switching one cannot move the estimate")
+
+    def reading():
+        return d.eval("(() => { const k = [...document.querySelectorAll('.wz-body .kpi')].find(k => /Estimate/i.test(k.innerText));"
+                      " return k ? {ms: Number(k.getAttribute('data-estimate-ms')), text: k.innerText,"
+                      " foot: document.querySelector('.wz-foot').innerText} : null; })()")
+
+    before = reading()
+    if not before or not before["ms"]:
+        fail("the Index step shows no estimate: %r" % before)
+    if "on this machine" not in before["text"] or "on this machine" not in before["foot"]:
+        fail("the estimate is not labelled as this machine's: %r" % before)
+    was = other["enabled"]
+    label = other.get("label") or other["lane"]
+    try:
+        if not d.eval("(() => { const c = [...document.querySelectorAll('.wz-body .pick-card')].find(c =>"
+                      " ((c.querySelector('.t') || {}).textContent || '').trim() === %s); if (!c) return false; c.click(); return true; })()"
+                      % json.dumps(label)):
+            fail("the Index step offers no %s lane card" % label)
+        d.wait_for("(() => { const k = [...document.querySelectorAll('.wz-body .kpi')].find(k => /Estimate/i.test(k.innerText));"
+                   " return k && Number(k.getAttribute('data-estimate-ms')) !== %d; })()" % before["ms"],
+                   timeout=10, what="the estimate to move with %s switched" % label)
+        after = reading()
+        if was and after["ms"] <= before["ms"]:
+            fail("switching %s off made the estimate shorter: %r then %r" % (label, before["ms"], after["ms"]))
+    finally:
+        now = next((l for l in d.api("/api/accel")["lanes"] if l["lane"] == other["lane"]), {})
+        if now.get("enabled") != was:
+            d.api_result("/api/accel", method="POST", body={"lane": other["lane"], "action": "on" if was else "off"})
+        press_text(d, "header.top button", "Exit setup", "leaving the wizard")
+        if d.modal_open():
+            d.modal_press("Delete store")
+    no_console_errors(d, "the Index step's estimate")
+
+
 @finding("v6.shots", "every v6 view, in light and dark, at 1440px and 390px")
 def _(d):
     """The release record's evidence: one screenshot per view per theme per

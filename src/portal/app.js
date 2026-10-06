@@ -1665,7 +1665,7 @@ function startLive() {
 }
 
 /** The runs that are not finished, per store. */
-const LIVE_RUN = new Set(["queued", "review", "running", "pausing", "paused", "held", "stopping"]);
+const LIVE_RUN = new Set(["queued", "scanning", "review", "running", "pausing", "paused", "held", "stopping"]);
 
 function runsOf(name) {
   return (data.runs?.runs || []).filter((r) => r.store === name);
@@ -1698,13 +1698,158 @@ function runPct(run) {
   return high;
 }
 
-// Time left from the share still to do and the time spent so far, which
-// holds through embedding where the daemon's own estimate covers reading only.
+// A daemon that keeps one account of its runs (run-truth spec, rc.4) sends
+// `phases` and `expected_chunks`; its `eta_ms` covers the whole run.
+const truthRun = (run) => run.phases !== undefined || run.expected_chunks !== undefined;
+
+// Time left. From a run-truth daemon, its own estimate, never extrapolated
+// here. From an older one, the share still to do over the time spent so far,
+// which holds through embedding where its estimate covers reading only.
 function runLeftMs(run) {
   if (!run || run.status !== "running") return null;
+  if (truthRun(run)) return run.eta_ms ?? null;
   const done = runPct(run) / 100;
   if (done < 0.05 || !run.elapsed_ms) return run.eta_ms ?? null;
   return Math.round((run.elapsed_ms - (run.queued_ms || 0)) * (1 - done) / done);
+}
+
+/** "about 12 min", the way an estimate is said: never to the second. */
+function spellAbout(ms) {
+  if (ms === null || ms === undefined) return "estimating…";
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 10) return "almost done";
+  if (seconds < 60) return "under a minute";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `about ${minutes} min`;
+  return `about ${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
+}
+
+/** A running run's time left, in the words its card uses. */
+function runLeftText(run) {
+  return truthRun(run) ? spellAbout(runLeftMs(run)) : spellLeft(runLeftMs(run));
+}
+
+/** The low/high spread of a run's estimate, for a tooltip. */
+function runRangeTip(run) {
+  const range = run.eta_range_ms;
+  return Array.isArray(range) && range.length === 2 ? `Between ${spellTook(range[0])} and ${spellTook(range[1])}, from the spread of the last minute's rate` : null;
+}
+
+// What each phase of a run is called on screen (spec §3.2).
+const PHASE_LABEL = {
+  decisions: "Applying decisions",
+  queued: "Queued",
+  walk: "Finding files",
+  credentials: "Checking for credentials",
+  rules: "Matching rules",
+  read: "Reading and chunking",
+  lane: "Starting a lane",
+  embed: "Embedding",
+  images: "Embedding images",
+  graph: "Writing the graph",
+  drain: "Finishing embeddings in flight",
+  save: "Writing the index to disk",
+  checkpoint: "Checkpoint",
+  finalize: "Finishing up",
+  undo: "Undoing",
+};
+
+function phaseLabel(phase, detail, lane) {
+  if (phase !== "lane") return PHASE_LABEL[phase] || phase;
+  const named = lane ? laneName(lane) : (/^(.+?)\s+(?:is\s+)?(?:loading|compiling|ready|failed|waiting|downloading|starting)/i.exec(detail || "") || [])[1];
+  if (!named) return PHASE_LABEL.lane;
+  return `Starting ${/^the /i.test(named) ? named : `the ${named}`}`;
+}
+
+/** What a run is doing now, in one line: the phase and its sentence. An
+ * older daemon sends a sentence in `phase` itself. */
+function phaseText(run) {
+  if (!run.phase) return "";
+  if (!PHASE_LABEL[run.phase]) return run.phase;
+  return [phaseLabel(run.phase, run.phase_detail, run.lane), run.phase_detail].filter(Boolean).join(" — ");
+}
+
+// A daemon time in milliseconds: phases carry ms, older fields seconds.
+const msOf = (t) => (t > 1e12 ? t : t * 1000);
+
+/* When this page saw a run wait in the queue, per run: the snapshot says a run
+ * is queued, not since when or for how long, and a run held for review was
+ * submitted when its scan began. */
+const QUEUED = new Map();
+
+/** A run's steps from its own events: the queue, then every phase it sent. */
+function runSteps(r) {
+  const steps = [];
+  const queued = r.status === "queued";
+  const key = `${r.store}:${r.id}`;
+  let q = QUEUED.get(key);
+  if (queued && !q) QUEUED.set(key, (q = { at: Date.now(), until: null }));
+  if (q && !queued && q.until == null) q.until = Date.now();
+  if (q) steps.push({ label: "Queued", at: q.at, until: q.until, detail: queued ? (r.position > 1 ? `${plural(r.position - 1, "run")} ahead of this one` : "next in line") : "" });
+  if (queued) return steps;
+  const phases = r.phases || [];
+  phases.forEach((p, i) => {
+    const current = i === phases.length - 1 && p.until == null;
+    steps.push({
+      label: phaseLabel(p.phase, p.detail, p.lane),
+      at: msOf(p.at),
+      until: p.until != null ? msOf(p.until) : null,
+      detail: (current && r.phase === p.phase && r.phase_detail) || p.detail || (p.count != null ? n(p.count) : ""),
+    });
+  });
+  // An older daemon names no phases: one step, in its own words.
+  if (!r.phases && LIVE_RUN.has(r.status)) steps.push({ label: "Indexing", at: msOf(r.started_at || r.submitted || 0), until: null, detail: r.phase || "" });
+  return steps;
+}
+
+/* The minimum dwell (spec §3.2, W5). A phase that came and went in a blink is
+ * still drawn for DWELL_MS, queued behind the real one; the display never runs
+ * ahead of the events and never more than LAG_MS behind them — past that it
+ * skips to catch up. Kept per run here, so a repaint never resets the queue. */
+const DWELL_MS = 700;
+const LAG_MS = 3000;
+const SHOWN = new Map();
+function dwell(key, steps, now) {
+  const at = now || Date.now();
+  if (!steps.length) return { steps, behind: false };
+  let s = SHOWN.get(key);
+  if (!s) SHOWN.set(key, (s = { i: 0, since: at }));
+  const last = steps.length - 1;
+  s.i = Math.min(s.i, last);
+  while (s.i < last && at - steps[s.i + 1].at > LAG_MS) {
+    s.i += 1;
+    s.since = at;
+  }
+  if (s.i < last && at - s.since >= DWELL_MS) {
+    s.i += 1;
+    s.since = at;
+  }
+  return { steps: steps.slice(0, s.i + 1), behind: s.i < last };
+}
+
+/** Steps as a timeline: label, when it began, how long it took, its counters;
+ * the last one pulses while the run is live. */
+function timeline(steps, live) {
+  const now = Date.now();
+  return el(
+    "ol",
+    { class: "tl" },
+    steps.map((s, i) => {
+      const cur = live && i === steps.length - 1;
+      const took = s.until != null ? s.until - s.at : now - s.at;
+      return el(
+        "li",
+        { class: `tl-step${cur ? " cur" : ""}` },
+        el("span", { class: `dot ${cur ? "blue pulse" : "green"}` }),
+        el(
+          "div",
+          { class: "tl-body" },
+          el("div", { class: "tl-head" }, el("span", { class: "tl-label", text: s.label }), el("span", { class: "tl-when", text: `${s.at ? new Date(s.at).toTimeString().slice(0, 8) : ""} · ${spellTook(Math.max(0, took))}` })),
+          s.detail ? el("div", { class: "tl-detail", text: s.detail }) : null,
+        ),
+      );
+    }),
+  );
 }
 
 let lastRunState = {};
@@ -2359,6 +2504,14 @@ function pickFolder({ title, ok, hint, start, confirm }) {
  * held for review, step 4 is the run itself, step 5 registers clients. */
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
+// The scan's own phases (spec §2.3), as the wizard's scan card names them.
+const SCAN_STAGES = [
+  ["walk", "Walking the tree"],
+  ["read", "Reading and hashing"],
+  ["credentials", "Checking for credentials"],
+  ["rules", "Matching rules"],
+];
+
 function blankWizard(opts) {
   const o = opts || {};
   return {
@@ -2454,11 +2607,17 @@ function wizardScreen() {
     const embedBytes = held.reduce((a, r) => a + (r.plan.embed_bytes || 0), 0);
     const unchanged = held.reduce((a, r) => a + (r.plan.unchanged || 0), 0);
     const eta = held.length && held.every((r) => r.plan.eta_ms != null) ? held.reduce((a, r) => a + r.plan.eta_ms, 0) : null;
+    // A run-truth plan counts its chunks and images; an accepted file adds
+    // its own chunks where the scan counted them.
+    const chunks = held.length && held.every((r) => r.plan.chunks != null) ? held.reduce((a, r) => a + r.plan.chunks, 0) + decided.filter((d) => w.decisions[d.path] !== "out").reduce((a, d) => a + (d.chunks || 0), 0) : null;
+    const images = held.reduce((a, r) => a + (r.plan.images || 0), 0);
     return {
       held,
       items,
       undecided: items.length - decided.length,
       accepted,
+      chunks,
+      images,
       embed,
       embedBytes,
       unchanged,
@@ -2468,6 +2627,38 @@ function wizardScreen() {
       credential: (notIndexed.credential || 0) || (paths.credential || []).length,
       skipped: Object.entries(notIndexed).filter(([c]) => c !== "credential" && c !== "content" && c !== "policy").reduce((a, [, v]) => a + v, 0),
     };
+  }
+
+  /** The run's estimate before Start (spec §3.3): the plan's chunks over the
+   * summed rates of the lanes that are on, plus its images over CLIP's rate.
+   * Lanes come from /api/accel, so it moves as a lane is switched. An older
+   * daemon counts no chunks: its text bytes over about 1 KB a chunk, or its
+   * own per-store byte rate when no lane has a rate either. */
+  function estimate(P) {
+    const accel = data.accel || {};
+    const rates = accel.rates || {};
+    const lanes = (accel.lanes || []).filter((l) => (l.status?.state || "") !== "unavailable");
+    const on = lanes.filter((l) => l.enabled);
+    if (accel.cpu_fallback && !on.some((l) => l.lane === "cpu")) on.push(...lanes.filter((l) => l.lane === "cpu"));
+    let perSec = 0;
+    let knownAnswer = false;
+    for (const l of on) {
+      const r = rates[l.lane];
+      const v = r && r.chunks_per_s > 0 ? r.chunks_per_s : l.rate > 0 ? l.rate : 0;
+      if (r && r.chunks_per_s > 0 && r.source === "known-answer") knownAnswer = true;
+      perSec += v;
+    }
+    // ponytail: 1 KB a chunk is the bench median (spec §1.2); only an older daemon needs it.
+    const chunks = P.chunks != null ? P.chunks : P.embedBytes ? P.embedBytes / 1024 : null;
+    if (perSec > 0 && chunks != null) {
+      const clip = rates.clip && rates.clip.images_per_s;
+      return { ms: (chunks / perSec) * 1000 + (P.images && clip > 0 ? (P.images / clip) * 1000 : 0), knownAnswer };
+    }
+    return P.eta != null ? { ms: P.eta, knownAnswer: false } : null;
+  }
+
+  function estimateText(e) {
+    return e ? `${e.ms < 60000 ? "under a minute" : spellAbout(e.ms)} on this machine${e.knownAnswer ? " (from the lane's known-answer speed)" : ""}` : null;
   }
 
   function nameState() {
@@ -2554,7 +2745,7 @@ function wizardScreen() {
     const heads = {
       1: ["Name your store", "A store is one index on this machine. You can add more sources to it later, and make as many stores as you like."],
       2: ["Add what it should read", "Drop folders or files, browse to them, or paste a path. Semlith reads them in place and watches them for changes."],
-      3: [plan().undecided ? "Review before anything is indexed" : "Everything is decided", "Semlith checked every file for credentials and generated noise. Nothing has been embedded yet — this is your chance to say no."],
+      3: [w.scan.state === "scanning" || w.scan.state === "idle" ? "Scanning…" : plan().undecided ? "Review before anything is indexed" : "Everything is decided","Semlith checked every file for credentials and generated noise. Nothing has been embedded yet — this is your chance to say no."],
       4: [R.length ? (doneRun ? "Indexed" : `Indexing ${w.created}`) : "Ready to index", R.length ? "Chunking, embedding and writing the graph — all on this machine." : "Where the work runs, and what to keep doing after. The defaults suit this machine."],
       5: ["Connect your agents", `One endpoint, ${data.agents?.endpoint?.url || "on this machine"}, for every client. Semlith writes each client's config for you.`],
     }[step];
@@ -3227,23 +3418,24 @@ function wizardScreen() {
     const runs = scanRuns();
     const scanning = w.scan.state !== "done";
     if (scanning) {
-      const total = runs.reduce((a, r) => a + (r.total || 0), 0);
-      const realScanned = runs.reduce((a, r) => a + (r.scanned || 0), 0);
-      // Shown at the slower of the real scan and a pace of 4-8 seconds: a
-      // scan of a small folder is over in a blink, and a card that flashes
-      // past says nothing about what was checked. A slow scan is never
-      // hurried; the pace only holds a fast one back.
-      const real = w.scan.realDone ? 1 : total ? realScanned / total : 0;
-      const paced = Math.min(1, (Date.now() - (w.scan.began || Date.now())) / (w.scan.pace || 1));
-      const f = Math.min(real, paced);
-      const p = Math.max(3, f * 100);
-      const scanned = total ? Math.min(realScanned || total, Math.round(f * total)) : 0;
-      const stages = [
-        ["Walking the tree", f >= 0.15, f < 0.15, total ? plural(total, "file") : ""],
-        ["Reading and hashing", f >= 0.55, f >= 0.15 && f < 0.55, total ? `${n(scanned)} / ${n(total)}` : ""],
-        ["Checking for credentials", f >= 0.85, f >= 0.55 && f < 0.85, "content + names"],
-        ["Matching rules", f >= 1, f >= 0.85 && f < 1, ".gitignore · build"],
-      ];
+      const sum = (k) => runs.reduce((a, r) => a + (r[k] || 0), 0);
+      const total = sum("total");
+      const scanned = sum("scanned");
+      // The stages are the scan's own phases (spec §2.3), each shown for at
+      // least DWELL_MS so a scan over in a blink still reads as four steps;
+      // the card never runs ahead of the scan.
+      const shown = Math.min(w.scan.shown || 0, SCAN_STAGES.length);
+      const real = scanReal();
+      const counter = {
+        walk: total ? `${plural(total, "file")} found` : "looking…",
+        read: total ? `${n(scanned)} / ${n(total)}` : "reading…",
+        credentials: runs.some((r) => r.phase === "credentials") && total ? `${n(scanned)} / ${n(total)} checked` : "content + names",
+        rules: ".gitignore · build",
+      };
+      const frac = shown === real && SCAN_STAGES[shown] && SCAN_STAGES[shown][0] === "read" && total ? scanned / total : 0;
+      const p = Math.max(3, ((shown + frac) / SCAN_STAGES.length) * 100);
+      const stages = SCAN_STAGES.map(([key, label], k) => [label, k < shown, k === shown, counter[key], key]);
+      const bytesTip = sum("bytes_total") ? `${bytes(sum("bytes"))} of ${bytes(sum("bytes_total"))} read` : null;
       paceScan();
       return el(
         "div",
@@ -3258,7 +3450,14 @@ function wizardScreen() {
         el(
           "div",
           { class: "auto-fit m170 gap8" },
-          stages.map(([label, done, cur, m]) => el("div", { class: `stage-box${done ? " done" : cur ? " cur" : ""}` }, el("span", { class: `dot ${done ? "green" : cur ? "blue pulse" : "line"}` }), el("span", { class: "grow", text: label }), el("span", { class: "t-mono-sm", text: done ? "done" : cur ? m : "" }))),
+          stages.map(([label, done, cur, m, key]) =>
+            el(
+              "div",
+              { class: `stage-box${done ? " done" : cur ? " cur" : ""}`, "data-stage": key, "data-tip": key === "read" ? bytesTip : null },
+              el("span", { class: `dot ${done ? "green" : cur ? "blue pulse" : "line"}` }),
+              el("span", { class: "sb-text" }, el("span", { class: "sb-label", text: label }), el("span", { class: "sb-status", text: done ? "done" : cur ? m : "waiting" })),
+            ),
+          ),
         ),
         el("div", { class: "muted t-sm", text: "Names and hashes only. Nothing is embedded until you start the run." }),
       );
@@ -3266,9 +3465,23 @@ function wizardScreen() {
     return reviewPanel();
   }
 
-  // While a scan is shown, the card is redrawn a few times a second so the
-  // paced bar moves; the scan reads as done only when the real scan has
-  // finished and the pace has run its course.
+  /** How far the scan really is, in stages: the least advanced of its runs,
+   * by the phase each names (an older daemon names none: walking until it
+   * has a total, then reading). Every stage once the scan is held. */
+  function scanReal() {
+    if (w.scan.realDone) return SCAN_STAGES.length;
+    const live = scanRuns().filter((r) => r.status !== "review" && LIVE_RUN.has(r.status));
+    if (!live.length) return 0;
+    const at = (r) => {
+      const k = SCAN_STAGES.findIndex(([key]) => key === r.phase);
+      return k >= 0 ? k : r.total ? 1 : 0;
+    };
+    return Math.min(...live.map(at));
+  }
+
+  // While a scan is shown, the card is redrawn a few times a second so each
+  // stage it has reached gets its minimum dwell; the scan reads as done only
+  // when the real scan has finished and every stage has been on screen.
   function paceScan() {
     const scan = w.scan;
     if (scan.tick) return;
@@ -3279,7 +3492,11 @@ function wizardScreen() {
         scan.tick = null;
         return;
       }
-      if (scan.realDone && Date.now() - scan.began >= scan.pace) {
+      if ((scan.shown || 0) < scanReal() && Date.now() - scan.since >= DWELL_MS) {
+        scan.shown = (scan.shown || 0) + 1;
+        scan.since = Date.now();
+      }
+      if (scan.realDone && scan.shown >= SCAN_STAGES.length) {
         clearInterval(scan.tick);
         scan.tick = null;
         scan.state = "done";
@@ -3289,7 +3506,7 @@ function wizardScreen() {
   }
 
   async function startScan() {
-    w.scan = { state: "scanning", runs: [], error: "", began: Date.now(), pace: 4000 + Math.random() * 4000 };
+    w.scan = { state: "scanning", runs: [], error: "", shown: 0, since: Date.now() };
     const paths = w.sources.filter((s) => s.type !== "url").map((s) => s.path);
     if (!paths.length) {
       // Only URLs: nothing to scan. They are fetched when the run starts.
@@ -3327,12 +3544,14 @@ function wizardScreen() {
     const credOnly = (ids) => ids.filter((id) => P.items.find((d) => d.path === id)?.class === "credential");
     const ACT = { out: "Keep out", redact: "Redact & index", in: "Index" };
     const RES = { out: ["Kept out", "grey"], redact: ["Redacted · indexed", "amber"], in: ["Will be indexed", "blue"] };
+    // Recorded here, at once; the run applies them as its first phase. The
+    // selection bar says so in the same words a store's Review tab uses.
     const bulk = (v) => () => {
       if (v && v !== "out" && credOnly(selIds).length) return toast("A credential file can only be kept out", true);
+      w.bulk = { label: v ? ACT[v] : "Reset", total: selIds.length, done: selIds.length, over: true, local: true };
       setDec(selIds, v);
       w.decSel.clear();
       paint();
-      if (v) toast(`${ACT[v]} — applied to ${plural(selIds.length, "file")}`);
     };
     const openShown = shown.filter((d) => !w.decisions[d.path]);
     const cnt = (f) => sorted.filter(f).length;
@@ -3381,8 +3600,8 @@ function wizardScreen() {
                     onclick: () => {
                       openShown.forEach((d) => (w.decisions[d.path] = d.suggest || "out"));
                       w.decSel.clear();
+                      w.bulk = { label: "Suggestions", total: openShown.length, done: openShown.length, over: true, local: true };
                       paint();
-                      toast(`Applied suggestions to ${plural(openShown.length, "file")} — undo any one`);
                     },
                   },
                   `Apply suggestions to ${openShown.length} undecided`,
@@ -3418,7 +3637,9 @@ function wizardScreen() {
                     btn({ class: "btn sm dark", onclick: bulk("in") }, "Index"),
                     selIds.some((id) => w.decisions[id]) ? lnk("Reset", bulk(null)) : null,
                   )
-                : null,
+                : w.bulk
+                  ? bulkLine(w.bulk, () => ((w.bulk = null), paint()))
+                  : null,
               el(
                 "div",
                 { class: "dec-list", "data-scroll-keep": "dec" },
@@ -3519,7 +3740,7 @@ function wizardScreen() {
   // ---- step 4: index
   function step4() {
     const R = run();
-    if (!R.length) return preRun();
+    if (!R.length) return w.startSteps ? startingCard() : preRun();
     const live = R.find((x) => LIVE_RUN.has(x.status));
     if (live) return runningCard(live, R);
     return doneCard(R);
@@ -3541,7 +3762,12 @@ function wizardScreen() {
         { class: "auto-fit m150" },
         kpi("Files to index", n(files), P.accepted ? `includes ${P.accepted} you accepted` : urls ? `plus ${plural(urls, "URL")} fetched at the start` : "after review"),
         kpi("Text", bytes(P.embedBytes), P.unchanged ? `${n(P.unchanged)} unchanged, skipped by hash` : "read where it sits"),
-        kpi("Estimate", P.eta != null ? spellTook(P.eta) : "—", P.eta != null ? "from this machine's last measured rate" : "measured once the run starts"),
+        (() => {
+          const e = estimate(P);
+          const k = kpi("Estimate", e ? (e.ms < 60000 ? "under a minute" : spellAbout(e.ms)) : "—", e ? `on this machine${e.knownAnswer ? " (from the lane's known-answer speed)" : ""}` : "measured once the run starts");
+          if (e) k.setAttribute("data-estimate-ms", String(Math.round(e.ms)));
+          return k;
+        })(),
       ),
       model && !model.cached
         ? el(
@@ -3591,65 +3817,151 @@ function wizardScreen() {
       const ok = await ask({ title: `Turn ${l.label || l.lane} on?`, body: `It downloads the ${l.label || l.lane} pack first, ${bytes(l.download_bytes)}, once, into this machine's model cache.`, ok: "Download and turn on" });
       if (!ok) return;
     }
+    // Drawn switched at once, so the estimate moves with the press; the
+    // daemon's answer is read back over it.
+    l.enabled = on;
+    paint();
     await act(() => post("/api/accel", { lane: l.lane, action: on ? "on" : "off" }));
     await load("accel", true);
     paint();
   }
 
+  /* Start (spec §3.1, W1) lands on the run view at once and says what each
+   * request is doing; one that takes over two seconds says what it waits for.
+   * The decisions are recorded only (`defer`): the run applies them as its
+   * first phase, so nothing is embedded run-less before it starts. */
   async function startRun() {
     if (w.busy) return;
     w.busy = true;
-    paintFoot();
+    w.startSteps = [];
+    // One display queue for Start's steps and then the run's, so the view
+    // carries on from one to the other without starting its dwell again.
+    w.startKey = `start:${Date.now()}`;
+    const ticker = setInterval(() => host.isConnected && w.step === 4 && !run().length && paint(), 500);
+    const step = async (label, waits, fn) => {
+      const s = { label, waits, at: Date.now(), until: null };
+      w.startSteps.push(s);
+      paint();
+      try {
+        return await fn();
+      } finally {
+        s.until = Date.now();
+      }
+    };
     try {
       const runs = scanRuns();
       const stores = [...new Set(runs.map((r) => r.store).concat(w.created && w.split !== "split" ? [w.created] : []))];
-      // The decisions, applied as the person's, per file, before the run.
       const P = plan();
       const by = {};
+      let count = 0;
       for (const d of P.items) {
         const v = w.decisions[d.path];
         if (!v) continue;
+        count += 1;
         (by[`${d.store}\n${v}`] = by[`${d.store}\n${v}`] || []).push(d.path);
       }
-      for (const [key, files] of Object.entries(by)) {
-        const [st, decision] = key.split("\n");
-        await post("/api/refused/decide", { store: st, files, decision });
+      if (count) {
+        await step(`Recording ${plural(count, "decision")}`, "the daemon to record the decisions", async () => {
+          for (const [key, files] of Object.entries(by)) {
+            const [st, decision] = key.split("\n");
+            for (let i = 0; i < files.length; i += BULK_BATCH) await post("/api/refused/decide", { store: st, files: files.slice(i, i + BULK_BATCH), decision, defer: true });
+          }
+        });
       }
-      for (const st of stores) {
-        await post("/api/store/settings", { store: st, watch: w.watchAfter, record: w.record, kind: w.kind }).catch(() => {});
-      }
+      await step("Saving the store's settings", "the daemon to save the settings", async () => {
+        for (const st of stores) await post("/api/store/settings", { store: st, watch: w.watchAfter, record: w.record, kind: w.kind }).catch(() => {});
+      });
       const started = [];
-      for (const r of runs.filter((x) => x.status === "review")) {
-        await post("/api/index/control", { store: r.store, run: r.id, action: "start" });
-        started.push(r.id);
+      const held = runs.filter((x) => x.status === "review");
+      if (held.length) {
+        await step(`Starting ${held.length === 1 ? "the run" : plural(held.length, "run")}`, "the daemon to take the run", async () => {
+          for (const r of held) {
+            await post("/api/index/control", { store: r.store, run: r.id, action: "start" });
+            started.push(r.id);
+          }
+        });
       }
-      for (const s of w.sources.filter((x) => x.type === "url")) {
-        const out = await post("/api/add", { url: s.path, store: w.created });
-        for (const r of out.runs || []) started.push(r.run);
+      const urls = w.sources.filter((x) => x.type === "url");
+      if (urls.length) {
+        await step(`Adding ${plural(urls.length, "URL")}`, "the daemon to take the URLs", async () => {
+          for (const s of urls) {
+            const out = await post("/api/add", { url: s.path, store: w.created });
+            for (const r of out.runs || []) started.push(r.run);
+          }
+        });
       }
       // A split run spent the named store on nothing: it is removed rather
       // than left empty beside the stores it was split into.
       if (w.split === "split" && w.created && !w.existing && !(w.scan.stores || []).includes(w.created)) {
         await post("/api/store/delete", { store: w.created }).catch(() => {});
       }
-      w.started = started.length ? started : runs.map((r) => r.id);
-      await loadMany(["runs", "stores"], true);
+      await step("Reading the run back", "the daemon's list of runs", async () => {
+        w.started = started.length ? started : runs.map((r) => r.id);
+        await loadMany(["runs", "stores"], true);
+      });
     } catch (e) {
+      const last = w.startSteps[w.startSteps.length - 1];
+      if (last) last.error = e.message;
       toast(e.message, true);
     }
+    clearInterval(ticker);
     w.busy = false;
     paint();
+  }
+
+  /** What Start is doing before the run exists: its own requests, as steps. */
+  function startingCard() {
+    const steps = w.startSteps.map((s) => {
+      const waited = (s.until || Date.now()) - s.at;
+      return { label: s.label, at: s.at, until: s.until || (s.error ? s.at + waited : null), detail: s.error ? `Failed: ${s.error}` : !s.until && waited > 2000 ? `Waiting for ${s.waits} — ${Math.round(waited / 1000)} s so far` : "" };
+    });
+    const live = w.busy;
+    const shown = shownSteps(w.startKey, steps);
+    return el(
+      "div",
+      { class: "card run-card" },
+      el(
+        "div",
+        { class: "card-b" },
+        el("div", { class: "row" }, el("span", { class: "mono t-b", text: w.created || "" }), pill(live ? "starting" : "did not start", live ? "amber" : "red", { pulse: live })),
+        timeline(shown, live),
+        live ? null : btn({ class: "btn", onclick: () => ((w.startSteps = null), paint()) }, "Back to the plan"),
+      ),
+    );
+  }
+
+  // The steps the dwell queue lets through now; while it is behind the real
+  // ones, the step is painted again shortly so each comes in on time.
+  let dwellTimer = null;
+  function shownSteps(key, steps) {
+    const shown = dwell(key, steps);
+    if (shown.behind && !dwellTimer) {
+      dwellTimer = setTimeout(() => {
+        dwellTimer = null;
+        if (host.isConnected && w.step === 4) paint();
+      }, 200);
+    }
+    return shown.steps;
   }
 
   function runningCard(r, all) {
     const p = runPct(r);
     const paused = r.status === "paused" || r.status === "pausing";
-    const stagesNow = runStages(r);
+    // Start's own steps, then the run's: the decisions it applies, its place
+    // in the queue, the lane starting, and on to the end.
+    const pre = w.startSteps && w.startKey ? w.startSteps.map((s) => ({ label: s.label, at: s.at, until: s.until, detail: "" })) : [];
+    // A run held for review began at its scan: what it did then is the scan
+    // card's, and a step still going is drawn as starting after Start's.
+    const from = pre.length ? pre[pre.length - 1].at : 0;
+    const own = runSteps(r)
+      .filter((s) => s.until == null || s.until >= from)
+      .map((s) => (s.at < from ? { ...s, at: from } : s));
+    const shown = shownSteps(w.startKey || `${r.store}:${r.id}:${r.submitted || ""}`, pre.concat(own));
     const log = el("div", { class: "log", "data-scroll-keep": "wzlog" });
     followLog(r, log);
     return el(
       "div",
-      { class: "card" },
+      { class: "card run-card" },
       el(
         "div",
         { class: "card-b" },
@@ -3674,8 +3986,7 @@ function wizardScreen() {
           })(),
           el("span", { class: "mono t-b", text: `${Math.floor(p)}%` }),
         ),
-        el("div", { class: "row gap6" }, stagesNow.map(([label, st]) => el("span", { class: `stage-chip ${st}` }, el("span", { class: `dot ${st === "done" ? "green" : st === "cur" ? "blue pulse" : "line"}` }), label))),
-        r.phase ? el("div", { class: "muted t-sm", text: r.phase }) : null,
+        timeline(shown, !paused),
       ),
       runStatsRow(r),
       log,
@@ -3871,12 +4182,15 @@ function wizardScreen() {
       ["HOLDS", { code: "Code", docs: "Docs & notes", both: "Code and docs" }[w.kind], !!w.created],
       ["SOURCES", sourcesLine(), w.sources.length > 0 && step > 2, !w.sources.length, true],
       ["REVIEW", step < 3 || w.scan.state !== "done" ? "after the scan" : P.undecided ? `${P.undecided} undecided — they stay out` : `${P.accepted ? `${P.accepted} accepted · ` : ""}all decided`, step > 3, step < 3],
-      [
-        "INDEX",
-        R.length ? (live ? `${Math.floor(runPct(live))}% · ${live.status}` : `${n(R.reduce((a, r) => a + (r.indexed || 0), 0))} files · ready`) : step >= 4 ? `${n(P.embed + P.accepted)} files${P.eta != null ? ` · ${spellTook(P.eta)}` : ""}` : "not started",
-        R.length && !live,
-        !R.length && step < 4,
-      ],
+      // Nothing about the index is known until the scan is done.
+      w.scan.state !== "done"
+        ? ["INDEX", step < 3 ? "not started" : "after the scan", false, true]
+        : [
+            "INDEX",
+            R.length ? (live ? `${Math.floor(runPct(live))}% · ${live.status}` : `${n(R.reduce((a, r) => a + (r.indexed || 0), 0))} files · ready`) : step >= 4 ? `${n(P.embed + P.accepted)} files${estimate(P) ? ` · ${spellAbout(Math.max(60000, estimate(P).ms))}` : ""}` : "not started",
+            R.length && !live,
+            !R.length && step < 4,
+          ],
     ];
     if (w.onboarding) rowsList.push(["AGENTS", w.reg === "done" ? `${(w.regResult?.ok || []).length} connected` : "not yet", w.reg === "done", w.reg !== "done"]);
     const tips = {
@@ -3926,6 +4240,8 @@ function wizardScreen() {
       nextFn = async () => {
         w.scan = { state: "idle", runs: [], error: "" };
         w.decisions = {};
+        w.bulk = null;
+        w.startSteps = null;
         setStep(3);
       };
     } else if (step === 3) {
@@ -3939,7 +4255,8 @@ function wizardScreen() {
         const P = plan();
         label = w.busy ? "Starting…" : "Start indexing";
         on = !w.busy;
-        hint = `${plural(P.embed + P.accepted, "file")}${P.eta != null ? ` · about ${spellTook(P.eta)}` : ""}`;
+        const e = estimateText(estimate(P));
+        hint = w.busy ? "Starting — each step is on the left" : `${plural(P.embed + P.accepted, "file")}${e ? ` · ${e}` : ""}`;
         nextFn = startRun;
       } else if (live) {
         if (w.onboarding) {
@@ -4034,15 +4351,15 @@ function wizardScreen() {
   const offRuns = onRunsChange(() => {
     if (!host.isConnected) return offRuns();
     const scans = scanRuns();
-    if (w.scan.state === "scanning" && scans.length && scans.every((r) => r.status !== "running" && r.status !== "queued")) {
-      // A failure shows at once; a success waits for the paced card to
-      // reach its end (paceScan), unless the pace is already over.
+    if (w.scan.state === "scanning" && scans.length && scans.every((r) => !["running", "queued", "scanning"].includes(r.status))) {
+      // A failure shows at once; a success waits for the card to have shown
+      // every stage (paceScan), unless it already has.
       if (scans.some((r) => r.status === "failed")) {
         w.scan.state = "error";
         w.scan.error = "The scan failed. Its log is on the store's Runs tab.";
       } else {
         w.scan.realDone = true;
-        if (!w.scan.began || Date.now() - w.scan.began >= (w.scan.pace || 0)) w.scan.state = "done";
+        if ((w.scan.shown ?? SCAN_STAGES.length) >= SCAN_STAGES.length) w.scan.state = "done";
       }
     }
     // When the started runs end, the store's own totals are read once more,
@@ -4100,12 +4417,13 @@ function followLog(r, logNode) {
 followLog.cursors = {};
 
 function logParts(ev) {
-  const when = ev.at ? clock(ev.at) : "";
+  const when = ev.at ? clock(msOf(ev.at) / 1000) : "";
   if (ev.event === "file") {
     const outcome = ev.outcome || "read";
-    const tone = /refus|skip|fail/.test(outcome) ? "bad" : /embed|index/.test(outcome) ? "ok" : /unchanged|queued/.test(outcome) ? "" : "info";
+    const tone = /refus|skip|fail/.test(outcome) ? "bad" : /embed|index|image/.test(outcome) ? "ok" : /unchanged|queued/.test(outcome) ? "" : "info";
     return [`${n(ev.scanned)}/${n(ev.total)}`, outcome, ev.why ? `${ev.path} — ${ev.why}` : ev.path, tone];
   }
+  if (ev.event === "phase") return [when, phaseLabel(ev.phase, ev.detail, ev.lane), ev.detail || "", "info"];
   const text = {
     submitted: ev.ahead ? `waiting — ${plural(ev.ahead, "run")} ahead of this one` : "submitted",
     queued: ev.ahead ? `waiting for ${ev.store}'s writer — ${plural(ev.ahead, "job")} ahead` : "waiting for the store's writer",
@@ -4119,54 +4437,42 @@ function logParts(ev) {
   return [when, ev.event || "", text || ev.text || "", ev.event === "error" ? "bad" : ev.event === "done" ? "ok" : "info"];
 }
 
-function runStages(r) {
-  const finished = r.status === "done";
-  const total = r.total || 0;
-  const read = total && r.scanned >= total;
-  const embedding = (r.chunks || 0) > 0;
-  const list = [
-    ["Walk", total > 0 || finished],
-    ["Read & hash", read || finished],
-    ["Scan", read || finished],
-    ["Parse & chunk", read || finished],
-    ["Embed", finished],
-    ["Write graph", finished],
-  ];
-  let curSet = false;
-  return list.map(([label, done]) => {
-    if (done) return [label, "done"];
-    if (!curSet && (label !== "Embed" || embedding || read)) {
-      curSet = true;
-      return [label, "cur"];
-    }
-    return [label, ""];
-  });
+/** Chunks embedded, of those the run expects once a run-truth daemon says. */
+function chunksOf(r) {
+  return r.expected_chunks ? `${n(r.chunks || 0)} / ${n(r.expected_chunks)}` : n(r.chunks || 0);
+}
+
+function laneRatesText(r) {
+  return Object.entries(r.lane_rates || {})
+    .filter(([, v]) => v > 0)
+    .map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`)
+    .join(" · ");
 }
 
 function runRows(r) {
   return rows([
     ["files", r.total ? `${n(r.scanned)} / ${n(r.total)}` : ""],
-    ["chunks", n(r.chunks || 0)],
+    ["chunks", chunksOf(r)],
+    ["images", r.images_total ? `${n(r.images || 0)} / ${n(r.images_total)}` : ""],
     ["rate", r.rate != null ? `${perSecond(r.rate)} chunks/s` : ""],
-    ["time left", r.status === "running" ? spellLeft(runLeftMs(r)) : ""],
+    ["time left", r.status === "running" ? runLeftText(r) : ""],
   ]);
 }
 
 function runStatsRow(r) {
   const paused = r.status === "paused" || r.status === "pausing";
-  const lanes = Object.entries(r.lane_rates || {})
-    .filter(([, v]) => v > 0)
-    .map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`)
-    .join(" · ");
+  const lanes = laneRatesText(r);
+  const tiles = [
+    ["FILES READ", r.total ? `${n(r.scanned)} / ${n(r.total)}` : "counting…", r.bytes_total ? `${bytes(r.bytes || 0)} of ${bytes(r.bytes_total)} read` : "Files read and hashed; embedding follows, counted in chunks"],
+    ["CHUNKS", chunksOf(r), r.expected_chunks ? "Embedded of those expected; the total firms up as each file is chunked" : null, r.backlog ? `${n(r.backlog)} waiting for a lane` : null],
+    r.images_total ? ["IMAGES", `${n(r.images || 0)} / ${n(r.images_total)}`, "Images embedded with CLIP"] : null,
+    ["RATE", paused ? "paused" : r.rate != null ? `${perSecond(r.rate)} chunks/s` : "—", lanes, paused ? null : lanes],
+    ["TIME LEFT", paused ? "—" : r.status === "running" ? runLeftText(r) : r.status, runRangeTip(r), r.elapsed_ms ? `${spellTook(r.elapsed_ms)} elapsed` : null],
+  ].filter(Boolean);
   return el(
     "div",
-    { class: "run-stats" },
-    [
-      ["FILES READ", r.total ? `${n(r.scanned)} / ${n(r.total)}` : "counting…", "Files read and hashed; embedding follows, counted in chunks"],
-      ["CHUNKS", n(r.chunks || 0)],
-      ["RATE", paused ? "paused" : r.rate != null ? `${perSecond(r.rate)} chunks/s` : "—", lanes],
-      ["TIME LEFT", paused ? "—" : r.status === "running" ? spellLeft(runLeftMs(r)) : r.status],
-    ].map(([k, v, t]) => el("div", { "data-tip": t || null }, el("span", { class: "eyebrow sm wide", text: k }), el("span", { class: "v", text: v }))),
+    { class: `run-stats${tiles.length > 4 ? " five" : ""}` },
+    tiles.map(([k, v, t, s]) => el("div", { "data-tip": t || null }, el("span", { class: "eyebrow sm wide", text: k }), el("span", { class: "v", text: v }), s ? el("span", { class: "s", text: s }) : null)),
   );
 }
 
@@ -5425,6 +5731,52 @@ function detailOf(s) {
 
 const OUTCOME_TONE = { accepted: "blue", "never indexed": "red", "redacted · indexed": "amber", "read as image": "green", "kept out": "grey", skipped: "grey" };
 
+/* One bulk decision pattern for the wizard's Review step and a store's Review
+ * tab (spec §3.5, W6): while it is applied the selection bar is its progress
+ * line, and it ends on a done or an error line. `b` is
+ * { label, total, done, over, error, local, runs }. */
+const BULK_BATCH = 100;
+
+function bulkLine(b, dismiss, extra) {
+  if (!b.over) {
+    return el("div", { class: "selbar bulk", role: "status", "aria-live": "polite" }, el("span", { class: "dot blue pulse" }), el("span", { class: "what", text: `Applying '${b.label}' to ${plural(b.total, "file")}… ${n(b.done)} / ${n(b.total)}` }));
+  }
+  if (b.error) {
+    return el("div", { class: "selbar bulk bad", role: "alert" }, icon(I.x, 13, { w: 2.6 }), el("span", { class: "what", text: `'${b.label}' stopped at ${n(b.done)} / ${n(b.total)}: ${b.error}` }), el("span", { class: "spacer" }), lnk("Dismiss", dismiss));
+  }
+  return el(
+    "div",
+    { class: "selbar bulk ok", role: "status", "aria-live": "polite" },
+    icon(I.check, 13, { w: 2.6 }),
+    el("span", { class: "what", text: b.local ? `'${b.label}' recorded for ${plural(b.total, "file")} — applied when the run starts` : `'${b.label}' applied to ${plural(b.total, "file")}` }),
+    extra || null,
+    el("span", { class: "spacer" }),
+    lnk("Dismiss", dismiss),
+  );
+}
+
+/** Send `groups` ([decision, files]) in batches, moving `b` along; `step` is
+ * called after each batch so the page can redraw the line. */
+async function decideInBatches(store, groups, b, step) {
+  b.runs = b.runs || [];
+  try {
+    for (const [decision, files] of groups) {
+      for (let i = 0; i < files.length; i += BULK_BATCH) {
+        const part = files.slice(i, i + BULK_BATCH);
+        const out = await post("/api/refused/decide", { store, files: part, decision });
+        if (out && out.run != null) b.runs.push(out.run);
+        b.done += part.length - ((out && out.failed) || 0);
+        if (out && out.failed) throw new Error(`${plural(out.failed, "file")} could not be decided`);
+        step();
+      }
+    }
+  } catch (e) {
+    b.error = e.message;
+  }
+  b.over = true;
+  step();
+}
+
 function sdReview(s, holder) {
   const entry = decisionsOf(s.name);
   const rowsAll = entry.rows || [];
@@ -5442,18 +5794,28 @@ function sdReview(s, holder) {
   const shown = pending.filter((d) => risk === "any" || band(d.risk) === risk);
   const cnt = (b) => pending.filter((d) => b === "any" || band(d.risk) === b).length;
   const SUGGEST = { out: "Keep it out", redact: "Redact & index", in: "Index it" };
-  const applySuggestions = async () => {
-    const by = {};
-    for (const d of shown) (by[d.suggest || "out"] = by[d.suggest || "out"] || []).push(d.path);
-    for (const [decision, files] of Object.entries(by)) {
-      const out = await act(() => post("/api/refused/decide", { store: s.name, files, decision }), null);
-      if (!out) break;
-    }
-    toast(`Applied suggestions to ${plural(shown.length, "file")} — undo any one below`);
+  // A selection or every suggestion, sent in batches with its progress in
+  // the selection bar; the table is inert until it is over.
+  const WORD = { out: "Keep out", redact: "Redact & index", in: "Index" };
+  const bulk = sdReview.bulk[s.name];
+  const busy = bulk && !bulk.over;
+  const runBulk = async (label, groups) => {
+    if (sdReview.bulk[s.name] && !sdReview.bulk[s.name].over) return;
+    const b = (sdReview.bulk[s.name] = { label, total: groups.reduce((a, [, f]) => a + f.length, 0), done: 0, over: false });
     sel.clear();
+    repaint();
+    await decideInBatches(s.name, groups, b, repaint);
     await loadMany(["refused", "decisions", "stores", "runs"], true);
     repaint();
   };
+  const applySuggestions = () => {
+    const by = {};
+    for (const d of shown) (by[d.suggest || "out"] = by[d.suggest || "out"] || []).push(d.path);
+    return runBulk("Suggestions", Object.entries(by));
+  };
+  const bulkBar = bulk
+    ? bulkLine(bulk, () => (delete sdReview.bulk[s.name], repaint()), bulk.over && bulk.runs && bulk.runs.length ? lnk(bulk.runs.length === 1 ? "See its run" : `See its ${bulk.runs.length} runs`, () => go("store", s.name, "runs")) : null)
+    : null;
   const pendingCard = pending.length
     ? el(
         "div",
@@ -5461,7 +5823,7 @@ function sdReview(s, holder) {
         el("div", { class: "card-h amber" }, el("span", { class: "card-t grow amber-ink", text: "Waiting for your decision" }), el("span", { class: "card-meta amber-ink", text: `${plural(pending.length, "file")} · refused until you decide` })),
         el(
           "div",
-          { class: "filterbar" },
+          { class: "filterbar", inert: busy || null },
           seg(
             [
               ["any", "Any risk", cnt("any")],
@@ -5473,7 +5835,7 @@ function sdReview(s, holder) {
             (v) => ((sdReview.risk[s.name] = v), sel.clear(), repaint()),
           ),
           el("span", { class: "spacer" }),
-          shown.length ? btn({ class: "btn sm", onclick: applySuggestions, "data-tip": "Each file takes the decision suggested beside it; every one is logged and can be undone" }, `Apply suggestions to ${n(shown.length)}`) : null,
+          shown.length ? btn({ class: "btn sm", disabled: busy || null, onclick: applySuggestions, "data-tip": "Each file takes the decision suggested beside it; every one is logged and can be undone" }, `Apply suggestions to ${n(shown.length)}`) : null,
         ),
         el(
           "div",
@@ -5483,27 +5845,25 @@ function sdReview(s, holder) {
             { class: "minw780" },
             el(
               "div",
-              { class: "dec-grid head" },
+              { class: "dec-grid head", inert: busy || null },
               checkbox(shown.length && shown.every((d) => sel.has(d.path)) ? true : shown.some((d) => sel.has(d.path)) ? "mixed" : false, (on) => (shown.forEach((d) => (on ? sel.add(d.path) : sel.delete(d.path))), repaint()), "Select all shown"),
               el("span", { text: `FILE · ${n(shown.length)} shown · highest risk first` }),
               el("span", { text: "RISK IF INDEXED" }),
               el("span", { text: "DECISION" }),
             ),
-            sel.size
+            sel.size && !busy
               ? el(
                   "div",
                   { class: "selbar" },
                   el("span", { class: "what", text: `${plural(sel.size, "file")} selected` }),
                   lnk("Clear", () => (sel.clear(), repaint())),
                   el("span", { class: "spacer" }),
-                  btn({ class: "btn sm", onclick: () => decide([...sel.values()], "out").then(() => sel.clear()) }, "Keep out"),
-                  btn({ class: "btn sm amber", onclick: () => decide([...sel.values()], "redact").then(() => sel.clear()) }, "Redact & index"),
-                  btn({ class: "btn sm dark", onclick: () => decide([...sel.values()], "in").then(() => sel.clear()) }, "Index"),
+                  ["out", "redact", "in"].map((v) => btn({ class: `btn sm${v === "redact" ? " amber" : v === "in" ? " dark" : ""}`, onclick: () => runBulk(WORD[v], [[v, [...sel.values()]]]) }, WORD[v])),
                 )
-              : null,
+              : bulkBar,
             el(
               "div",
-              { class: "dec-list", "data-scroll-keep": `sd-dec-${s.name}` },
+              { class: "dec-list", "data-scroll-keep": `sd-dec-${s.name}`, inert: busy || null },
               !shown.length ? empty("No file at this risk.", "lg") : null,
               shown.map((d) => {
                 const b = band(d.risk);
@@ -5538,7 +5898,7 @@ function sdReview(s, holder) {
           ),
         ),
       )
-    : el("div", { class: "notice green" }, icon(I.check, 14, { w: 2.6 }), "Nothing waits for you. New files that look sensitive will show up here before they are indexed.");
+    : el("div", { class: "stack" }, bulkBar, el("div", { class: "notice green" }, icon(I.check, 14, { w: 2.6 }), "Nothing waits for you. New files that look sensitive will show up here before they are indexed."));
 
   const decisions = (entry.decisions || rowsAll.filter((r) => !(r.reviewable && !r.accepted && !r.kept_out)).map(decisionFromRow)).map((d, i) => ({ ...d, i, id: `${i}:${d.path}` }));
   const q = sdUi.decQ.toLowerCase();
@@ -5605,6 +5965,7 @@ function sdReview(s, holder) {
 }
 sdReview.sel = {};
 sdReview.risk = {};
+sdReview.bulk = {};
 
 /** A refusal row as a Decisions-table row, for a daemon that sends no table. */
 function decisionFromRow(r) {
@@ -5655,8 +6016,8 @@ function sdRuns(s, holder) {
           btn({ class: "btn sm danger-soft", "data-keep": `run-stop-${r.id}`, onclick: () => stopRun(r) }, r.status === "queued" ? "Take out of the queue" : "Stop…"),
         ),
         el("div", { class: "row nowrap gap12" }, b, el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
-        el("div", { class: "t-mono-sm", text: [r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "", `${n(r.chunks || 0)} chunks`, r.rate != null ? `${perSecond(r.rate)} chunks/s` : "", Object.entries(r.lane_rates || {}).filter(([, v]) => v > 0).map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`).join(" · "), r.status === "running" ? spellLeft(runLeftMs(r)) : ""].filter(Boolean).join(" · ") }),
-        el("div", { class: "muted t-sm", text: r.phase || "", hidden: r.phase ? null : true }),
+        el("div", { class: "t-mono-sm", "data-tip": runRangeTip(r), text: [r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "", `${chunksOf(r)} chunks`, r.images_total ? `${n(r.images || 0)} / ${n(r.images_total)} images` : "", r.rate != null ? `${perSecond(r.rate)} chunks/s` : "", laneRatesText(r), r.backlog ? `${n(r.backlog)} waiting` : "", r.status === "running" ? (truthRun(r) && r.eta_ms != null && r.eta_ms >= 10000 ? `${runLeftText(r)} left` : runLeftText(r)) : ""].filter(Boolean).join(" · ") }),
+        el("div", { class: "muted t-sm", text: phaseText(r), hidden: r.phase ? null : true }),
         log,
       ),
     );
