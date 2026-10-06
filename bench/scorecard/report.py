@@ -56,7 +56,8 @@ def swe(directory):
             "edits; each instance is indexed at its own base commit.\n\n"
             + table(["set", "arm", "instances", "file hit@1", "@5", "@10", "all gold @10", "first gold within 4k tokens",
                      "median tokens to first gold"], body)
-            + f"\n\n`{command(directory)}`")
+            + "\n\n`uv run --with pyarrow python bench/scorecard/swe.py walk && uv run --with pyarrow python "
+            "bench/scorecard/swe.py score <run dir>...`")
 
 
 def coderag(directory):
@@ -98,15 +99,17 @@ def repobench(directory):
 
 def competitors(path):
     doc = json.load(open(path))
-    try:
-        versions = json.load(open(os.path.join(os.path.dirname(path), "MANIFEST.json")))["versions"]
-    except (OSError, KeyError, ValueError):
-        versions = {}
+    versions = {}
+    for manifest in sorted(glob.glob(os.path.join(HOME, "competitors*", "MANIFEST.json"))):  # each walk records its own tools
+        try:
+            versions.update({t: v for t, v in json.load(open(manifest))["versions"].items() if v})
+        except (OSError, KeyError, ValueError):
+            pass
     m = lambda r, key: cell(r, key) if r else "—"
     body = []
     for t in doc["tools"]:
         tm, sm = t["tool_metrics"], t["semlith_metrics"]
-        nr = "; ".join(f"{v}: {k}" for k, v in t["not_run"].items())
+        nr = "; ".join(f"{v}: {': '.join(k.split(': ')[:2])}" for k, v in t["not_run"].items())  # kind, not the command
         body.append([t["tool"], versions.get(t["tool"], ""), f"{t['completed']}/{t['of']}", m(tm, "any@1"), m(tm, "any@5"),
                      m(tm, "any@10"), m(tm, "tok4000"), m(sm, "any@5"), m(sm, "tok4000"), nr or "—"])
     a = doc.get("semlith_all")
@@ -119,7 +122,8 @@ def competitors(path):
             "and its remaining instances are \"not run\".\n\n"
             + table(["tool", "version", "completed", "file hit@1", "@5", "@10", "first gold within 4k tokens",
                      "semlith hit@5, same instances", "semlith within 4k, same instances", "not run"], body)
-            + "\n\n`cd bench/scorecard && python3.11 competitors_swe.py walk && python3.11 competitors_swe.py score`")
+            + "\n\n`cd bench/scorecard && python3.11 competitors_swe.py walk && python3.11 competitors_swe.py score` (the slow "
+            "tools in their own `--out` with `SEMLITH_VECTOR_CACHE_MB=0`, scored with `--also`; see bench/scorecard/README.md)")
 
 
 ARMS_AGENT = {"g": "grep (Grep, Glob, Read)", "s": "semlith installed, Grep built in",
