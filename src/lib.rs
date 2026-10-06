@@ -3117,6 +3117,14 @@ impl Semlith {
                 let (chunks, images) = expected_of(&head, self.planned.as_deref());
                 report.expected_left = chunks;
                 report.images_left = images;
+                // A reviewed run's scan counted every file already: its whole
+                // total from the first second, rather than the recent head's
+                // 48 files until the walk catches up (walk 3 said "about 25
+                // min" for an hour's run).
+                if let Some(planned) = self.planned.as_deref() {
+                    report.expected_left = report.expected_left.max(planned.values().sum());
+                    total = total.max(planned.len());
+                }
                 head.clone()
             }
         };
@@ -3270,7 +3278,10 @@ impl Semlith {
                 *total = head_set.len() + counted.saturating_sub(head_set.len());
                 report.bytes_total += bytes_of(&rest);
                 let (chunks, images) = expected_of(&rest, me.planned.as_deref());
-                report.expected_left += chunks;
+                // With a plan the head already stood for its whole total.
+                if me.planned.is_none() {
+                    report.expected_left += chunks;
+                }
                 report.images_left += images;
                 prefetch.extend_and_seal(rest);
                 if report.live.borrow().phase == progress::Phase::Walk {
