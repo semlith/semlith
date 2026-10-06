@@ -1675,9 +1675,10 @@ button.dial {
   padding: 8px 12px;
   min-height: 0;
 }
+/* Counter or time, outcome, then the words: the first two never wrap. */
 .log .ln {
   display: grid;
-  grid-template-columns: 82px 74px minmax(0, 1fr);
+  grid-template-columns: 13ch 10ch minmax(0, 1fr);
   gap: 8px;
   font: 12px/1.6 var(--mono);
   color: var(--code-ink);
@@ -1689,6 +1690,10 @@ button.dial {
 .log .ln .a {
   color: var(--code-dim);
   text-align: right;
+  white-space: nowrap;
+}
+.log .ln .b {
+  white-space: nowrap;
 }
 .log .ln .b.ok {
   color: #8cc5a6;
@@ -1702,9 +1707,12 @@ button.dial {
 .log .ln .b.info {
   color: #86aec7;
 }
-/* A log line's path and reason wrap: the reason is what the reader acts on. */
+/* A log line's path and reason wrap, indented past the first line: the
+ * reason is what the reader acts on. */
 .log .ln .c {
   overflow-wrap: anywhere;
+  padding-left: 2ch;
+  text-indent: -2ch;
 }
 .lines {
   padding: 8px 0;
@@ -2359,6 +2367,20 @@ button.gl-row:hover,
   gap: 8px;
   margin-top: 6px;
   flex-wrap: wrap;
+}
+/* A checkbox and its words on one row, as a form row reads: no box. */
+.modal .opt-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.modal .opt-check input {
+  margin: 0;
+  flex: none;
+  accent-color: var(--accent);
 }
 .modal .opt {
   display: flex;
@@ -3508,68 +3530,76 @@ button.gl-row:hover,
 .run-stats.five {
   grid-template-columns: repeat(5, minmax(0, 1fr));
 }
-/* A run's timeline: one row per phase it has been through, from its own
- * events; the current one pulses (run-truth spec §3.2). */
-.tl {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+/* A run card's Pipeline panel: four lanes of fixed shape (spec W2, the
+ * owner's second walk) — name, bar, figures — and one status line. */
+.pipe {
   display: flex;
   flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px 14px;
 }
-.tl-step {
-  display: flex;
-  gap: 10px;
-  padding: 4px 0;
-  position: relative;
-  min-width: 0;
+.pipe[hidden],
+.log[hidden] {
+  display: none;
 }
-.tl-step > .dot {
-  margin-top: 6px;
-  flex: none;
+.pipe-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) minmax(0, 15em);
+  align-items: center;
+  gap: 12px;
+  padding: 3px 8px;
+  margin: 0 -8px;
+  border-radius: 6px;
+  font-size: 12.5px;
 }
-.tl-step:not(:last-child)::after {
-  content: "";
-  position: absolute;
-  left: 2.5px;
-  top: 17px;
-  bottom: -5px;
-  width: 1px;
-  background: var(--line);
+.pipe-row[hidden] {
+  display: none;
 }
-.tl-body {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-  flex: 1;
+.pipe-row.sub .pipe-k {
+  padding-left: 12px;
+  color: var(--muted);
 }
-.tl-head {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  flex-wrap: wrap;
+.pipe-row.slow {
+  background: var(--amber-soft);
 }
-.tl-label {
-  font-size: 13px;
+.pipe-k {
   color: var(--ink-2);
 }
-.tl-step.cur .tl-label {
-  color: var(--ink);
-  font-weight: 600;
+.pipe-bar.none {
+  height: 6px;
 }
-.tl-when {
-  font: 11.5px var(--mono);
+.pipe-v {
+  font: 12px var(--mono);
   color: var(--muted);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.tl-detail {
+.pipe-row.slow .pipe-v,
+.pipe-row.slow .pipe-k {
+  color: var(--amber-ink);
+}
+.pipe-status {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 4px;
   font-size: 12.5px;
-  color: var(--muted);
+  color: var(--ink-2);
+  min-height: 1.6em;
+}
+.pipe-status > .dot {
+  flex: none;
+  transform: translateY(-1px);
+}
+.pipe-status.slow {
+  color: var(--amber-ink);
+}
+.pipe-status .grow {
   overflow-wrap: anywhere;
 }
-.tl-step.cur .tl-detail {
-  color: var(--blue-ink);
+.run-tabs {
+  border-top: 0;
 }
 .lives {
   display: flex;
@@ -5194,6 +5224,20 @@ button.gl-row:hover,
   .hide-xs {
     display: none !important;
   }
+  .pipe-row {
+    grid-template-columns: 56px minmax(0, 1fr);
+    row-gap: 2px;
+  }
+  /* A phone keeps the outcome and the words; the counter is the meters'. */
+  .log .ln {
+    grid-template-columns: 7ch minmax(0, 1fr);
+  }
+  .log .ln .a {
+    display: none;
+  }
+  .pipe-row .pipe-v {
+    grid-column: 2;
+  }
   .q4,
   .run-stats,
   .run-stats.five {
@@ -5610,7 +5654,6 @@ button,
   .hist-open {
     padding-left: 14px;
   }
-  .log .ln,
   .log.rounded .ln {
     /* 60px holds "embedded" whole; 54px broke it after the seventh letter. */
     grid-template-columns: 52px 60px minmax(0, 1fr);

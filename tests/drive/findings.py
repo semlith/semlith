@@ -4163,9 +4163,9 @@ def _(d):
         still_open(d, STILL_VIEWPORT, "store/%s/runs" % store)
         d.wait_for("!!%s" % CARD, what="the live run's card")
         # 0.37.0-rc.4 owner decision (W8): the live card is the wizard's run
-        # card, whose timeline grows a step per phase the way its log grows a
-        # line per file. Both may grow; nothing else on the tab may be rebuilt.
-        seen = observe(d, CARD, ".log, .tl", 20000, rate=True)
+        # card. Its log grows a line per file; its Pipeline is fixed in shape,
+        # so nothing else on the tab may be rebuilt.
+        seen = observe(d, CARD, ".log", 20000, rate=True)
         if seen["loading"]:
             fail("the loader appeared %d time(s) on the Runs tab during a live run" % seen["loading"])
         if seen["count"]:
@@ -6075,23 +6075,24 @@ FETCH_SPY = r"""
 })()
 """
 
-#: Samples the run card's timeline every 50 ms: when each step label first
-#: showed and which was current.
-TIMELINE_SAMPLER = r"""
+#: Samples the run card every 50 ms: each status line it showed (and when),
+#: whether it was the start sequence's, and the Pipeline panel's height.
+PIPE_SAMPLER = r"""
 (() => {
-  const seen = window.__tl = {first: {}, cur: [], order: []};
+  const seen = window.__pipe = {lines: [], heights: [], lanes: []};
   const real = window.__realSetInterval || window.setInterval;
   seen.timer = real(() => {
     const card = document.querySelector('.wz-body .run-card');
     if (!card) return;
-    const steps = [...card.querySelectorAll('.tl-step')];
-    steps.forEach(s => {
-      const label = (s.querySelector('.tl-label') || {}).textContent || '';
-      if (!(label in seen.first)) { seen.first[label] = Date.now(); seen.order.push(label); }
-    });
-    const cur = card.querySelector('.tl-step.cur .tl-label');
-    const word = cur ? cur.textContent : '';
-    if (seen.cur.length === 0 || seen.cur[seen.cur.length - 1][0] !== word) seen.cur.push([word, Date.now()]);
+    const st = card.querySelector('.pipe-status');
+    const text = st ? st.textContent.trim() : '';
+    const last = seen.lines[seen.lines.length - 1];
+    if (!last || last[0] !== text) seen.lines.push([text, Date.now(), !!(st && st.classList.contains('starting'))]);
+    const pipe = card.querySelector('.pipe');
+    if (pipe && !pipe.hidden && !st.classList.contains('starting') && card.querySelector('.pipe-row'))
+      seen.heights.push(Math.round(pipe.getBoundingClientRect().height));
+    const lanes = [...card.querySelectorAll('.pipe-row')].map(r => r.getAttribute('data-lane')).join(',');
+    if (lanes && !seen.lanes.includes(lanes)) seen.lanes.push(lanes);
   }, 50);
   return true;
 })()
@@ -6111,9 +6112,10 @@ def secret_tree(d, name, count):
     return root
 
 
-@finding("rc4.2", "Start lands on the run view at once and shows each step, the decisions recorded first")
+@finding("rc4.2", "Start lands on the run view at once and says each step on one line, the decisions recorded first")
 def _(d):
     d.clear_console()
+    d.eval("try { localStorage.removeItem('semlith-run-tab'); } catch (e) {}")
     root = review_tree(d, "rc4start")
     name = wizard_to(d, 3, root=root)
     held = held_run(d, root)
@@ -6123,7 +6125,7 @@ def _(d):
     d.eval(FETCH_SPY)
     # A slow request says what it waits for: the settings save is held 2.6 s.
     d.eval("window.__spy.delay['/api/store/settings'] = 2600; true")
-    d.eval(TIMELINE_SAMPLER)
+    d.eval(PIPE_SAMPLER)
     clicked = d.eval("(() => { const b = [...document.querySelectorAll('.wz-foot button')].find(b => /Start indexing/.test(b.textContent));"
                      " if (!b) return null; window.__clicked = Date.now(); b.click(); return true; })()")
     if not clicked:
@@ -6131,14 +6133,17 @@ def _(d):
     try:
         # At once: the run view, with its first step, not a busy button alone.
         landed = d.eval("new Promise(done => { const t0 = window.__clicked; const tick = setInterval(() => {"
-                        " const c = document.querySelector('.wz-body .run-card .tl-step');"
+                        " const c = document.querySelector('.wz-body .run-card .pipe-status');"
                         " if (c || Date.now() - t0 > 3000) { clearInterval(tick); done(c ? Date.now() - t0 : null); } }, 20); })")
         if landed is None or landed > 500:
             fail("Start took %s ms to show the run view; it lands there at once" % landed)
-        first = d.eval("[...document.querySelectorAll('.wz-body .run-card .tl-label')].map(x => x.textContent)")
-        if not first or not re.match(r"Recording 2 decisions", first[0]):
+        first = text_of(d, ".wz-body .run-card .pipe-status", "the start sequence's line")
+        if not first.startswith("Recording 2 decisions"):
             fail("the start sequence does not begin with the decisions recorded: %r" % first)
-        d.wait_for("[...document.querySelectorAll('.wz-body .run-card .tl-detail')].some(x => /^Waiting for the daemon to save the settings/.test(x.textContent))",
+        if d.eval("document.querySelectorAll('.wz-body .run-card .pipe-status').length") != 1:
+            fail("the start sequence is drawn as more than one line")
+        d.wait_for("/^Saving the store's settings… — Waiting for the daemon to save the settings/.test("
+                   "(document.querySelector('.wz-body .run-card .pipe-status') || {}).textContent || '')",
                    timeout=6, what="the held settings save to say what it waits for")
         decides = d.eval("window.__spy.decides")
         if not decides or any(not b.get("defer") for b in decides):
@@ -6147,39 +6152,33 @@ def _(d):
         final = wait_for_run(d, held["store"], run_id=held["id"])
         if final.get("status") != "done":
             fail("the started run ended %s" % final.get("status"))
-        # The card holds each last step for its dwell, then gives way.
-        d.wait_for("!!document.querySelector('.wz-body .done-banner')", timeout=30, what="the done card after the run's last steps")
-        seen = d.eval("window.__tl")
-        labels = seen["order"]
+        d.wait_for("!!document.querySelector('.wz-body .done-banner')", timeout=30, what="the done card after the run")
+        seen = d.eval("window.__pipe")
+        lines = seen["lines"]
+        steps = [re.split(r"…| — ", l[0])[0] for l in lines if l[2]]
         for want_label in ("Recording 2 decisions", "Saving the store's settings", "Starting the run"):
-            if want_label not in labels:
-                fail("the timeline never showed %r: %r" % (want_label, labels))
-        phases = final.get("phases")
-        if phases is not None:
-            names = [p.get("phase") for p in phases]
-            if "decisions" not in names:
-                fail("the run that took the wizard's decisions has no decisions phase: %r" % names)
-            if "Applying decisions" not in labels:
-                fail("the decisions phase was never drawn: %r" % labels)
-            # After Start's steps the timeline carries on with the run's own
-            # phases: finding and reading files, and the last one it reached.
-            own = [p.get("phase") for p in phases[names.index("decisions"):]]
-            for key, label in (("walk", "Finding files"), ("read", "Reading and chunking")):
-                if key in own and label not in labels:
-                    fail("the run's %s phase was never drawn on its card: %r" % (key, labels))
-            last = d.eval("PHASE_LABEL[%s]" % json.dumps(own[-1]))
-            if last not in labels:
-                fail("the run's last phase (%s) was never drawn on its card: %r" % (own[-1], labels))
-            if labels.index("Applying decisions") < labels.index("Starting the run"):
-                fail("the run's phases were drawn before Start's own steps: %r" % labels)
-        # Minimum dwell, seen on the real page: every current step held >= 0.7 s
-        # (sampled every 50 ms, so 0.6 s is the floor that proves it).
-        # The step current when the run ends gives way to the done card at once.
-        cur = seen["cur"]
-        short = [(cur[i][0], cur[i + 1][1] - cur[i][1]) for i in range(len(cur) - 1)
-                 if cur[i][0] and cur[i + 1][0] and cur[i + 1][1] - cur[i][1] < 600]
+            if want_label not in steps:
+                fail("the start sequence never said %r: %r" % (want_label, steps))
+        names = [p.get("phase") for p in final.get("phases") or []]
+        if names and "decisions" not in names:
+            fail("the run that took the wizard's decisions has no decisions phase: %r" % names)
+        if names and "Applying decisions" not in steps:
+            fail("the start sequence never showed the run applying the decisions: %r" % steps)
+        # Minimum dwell on the start sequence's line, seen on the real page:
+        # each step held >= 0.7 s (sampled every 50 ms, so 0.6 s is the floor).
+        start = [(re.split(r"…| — ", l[0])[0], l[1]) for l in lines if l[2]]
+        firsts = [start[0]] + [start[k] for k in range(1, len(start)) if start[k][0] != start[k - 1][0]]
+        short = [(firsts[k][0], firsts[k + 1][1] - firsts[k][1]) for k in range(len(firsts) - 1) if firsts[k + 1][1] - firsts[k][1] < 600]
         if short:
-            fail("a step was current for under 0.7 s before the next: %r (of %r)" % (short, [c[0] for c in cur]))
+            fail("a start step was on the line for under 0.7 s: %r" % short)
+        # The Pipeline: the four lanes in order (images hidden, there are
+        # none), one height for the whole run, and a status after the start.
+        want("the Pipeline's lanes", seen["lanes"], ["read,chunk,embed,images,write"])
+        if len(set(seen["heights"])) > 1:
+            fail("the Pipeline changed height across polls: %r" % sorted(set(seen["heights"])))
+        after = [l[0] for l in lines if not l[2] and l[0]]
+        if not after:
+            fail("the Pipeline never said what is slowest once the run started: %r" % lines)
     finally:
         release_held(d, held)
     no_console_errors(d, "the start sequence")
@@ -6187,8 +6186,9 @@ def _(d):
     del name
 
 
-@finding("rc4.3", "the timeline draws the run's phases, holds each for 0.7 s, never runs ahead and never lags 3 s")
+@finding("rc4.3", "the pipeline names the slowest lane from the run's own phase, and the start line keeps its dwell")
 def _(d):
+    a_store(d)
     open_clean(d, "stores", fresh=True)
     seen = d.eval(r"""
     (() => {
@@ -6197,37 +6197,68 @@ def _(d):
       const out = [];
       for (const now of [t0 + 200, t0 + 600, t0 + 950, t0 + 1650, t0 + 2400, t0 + 2500])
         out.push(dwell('rc4.3', steps, now).steps.length);
-      // Opened late: everything began over 3 s ago, so it is caught up.
       const late = dwell('rc4.3-late', steps, t0 + 10000).steps.length;
-      // Never ahead: one real step is one shown step, however long it waits.
       const one = dwell('rc4.3-one', steps.slice(0, 1), t0 + 9000).steps.length;
-      const run = {store: 'x', id: 1, status: 'running', submitted: 1791275376, queued_ms: 400,
-        phase: 'embed', phase_detail: 'Neural Engine 230 chunks/s · CPU 31 chunks/s',
-        phases: [{phase: 'decisions', detail: '21 decisions', at: 1791275376500, until: 1791275377100, count: 21},
-                 {phase: 'walk', detail: '4,369 files · 1.2 GB', at: 1791275377100, until: 1791275378000},
-                 {phase: 'lane', detail: 'Neural Engine loading', at: 1791275378000, until: 1791275380000},
-                 {phase: 'embed', detail: 'embedding', at: 1791275380000, until: null}]};
-      const node = timeline(runSteps(run), true);
-      const queued = runSteps({store: 'q', id: 9, status: 'queued', position: 3});
-      return {out, late, one, queued: [queued.map(s => s.label), queued[0].detail],
-        labels: [...node.querySelectorAll('.tl-label')].map(x => x.textContent),
-        cur: (node.querySelector('.tl-step.cur .tl-detail') || {}).textContent,
+      const base = {store: 'x', id: 1, status: 'running', scanned: 3148, total: 3987, rows: 79810,
+        expected_chunks: 90479, chunks: 74742, images: 12, images_total: 451, backlog: 0,
+        lane_rates: {ane: 230.1, cpu: 31}, saves: 3, saved_at: Date.now() - 30000, save_ms: 300};
+      const cases = {
+        lane: {phase: 'lane', phase_detail: 'Neural Engine compiling 40 %'},
+        images: {phase: 'embed', phase_detail: 'embedding images with CLIP'},
+        big: {phase: 'read', phase_detail: 'reading and chunking big.json (80 MB)'},
+        drain: {phase: 'drain', phase_detail: 'x', backlog: 4864},
+        save: {phase: 'save', phase_detail: 'writing'},
+        backlog: {phase: 'embed', phase_detail: 'embedding', backlog: 3100},
+        pace: {phase: 'embed', phase_detail: 'embedding'},
+        done: {status: 'done', elapsed_ms: 872000},
+      };
+      const out2 = {};
+      for (const [k, v] of Object.entries(cases)) {
+        const node = pipeline({...base, ...v});
+        out2[k] = {status: node.querySelector('.pipe-status').textContent,
+          slow: [...node.querySelectorAll('.pipe-row.slow')].map(r => r.getAttribute('data-lane')),
+          rows: [...node.querySelectorAll('.pipe-row')].map(r => [r.getAttribute('data-lane'), r.hidden, r.querySelector('.pipe-v').textContent]),
+          full: [...node.querySelectorAll('.pipe-row .bar > i')].every(i => parseFloat(i.style.width) === 100)};
+      }
+      const noImages = pipeline({...base, images_total: 0, saves: 0}).querySelectorAll('.pipe-row');
+      const home = {roots: [{path: '/Users/me/notes'}]};
+      return {out, late, one, cases: out2,
+        noImages: [...noImages].map(r => [r.getAttribute('data-lane'), r.hidden, r.querySelector('.pipe-v').textContent]),
         log: logParts({event: 'phase', phase: 'save', detail: '4,864 chunks still embedding', at: 1791275400}),
-        image: logParts({event: 'file', outcome: 'image', path: '/a.png', scanned: 1, total: 2})[1],
+        read: logParts({event: 'file', outcome: 'indexing', path: '/Users/me/notes/a/b.md', why: '12 chunks', scanned: 1, total: 2}, home),
+        image: logParts({event: 'file', outcome: 'image', path: '/Users/me/notes/p.png', scanned: 2, total: 2}, home),
         left: runLeftText({status: 'running', phases: [], eta_ms: 754000, elapsed_ms: 1000, progress: 0.5})};
     })()
     """)
     want("steps shown at 0.2, 0.6, 0.95, 1.65, 2.4 and 2.5 s after four phases in 0.15 s", seen["out"], [1, 1, 2, 3, 4, 4])
     want("steps shown when the page meets the run 10 s late", seen["late"], 4)
     want("steps shown when only one phase has happened", seen["one"], 1)
-    want("the timeline's steps", seen["labels"],
-         ["Applying decisions", "Finding files", "Starting the Neural Engine", "Embedding"])
-    want("a queued run's steps", seen["queued"], [["Queued"], "2 runs ahead of this one"])
-    want("the current step's sentence", seen["cur"], "Neural Engine 230 chunks/s · CPU 31 chunks/s")
+    c = seen["cases"]
+    want("the lanes, in order", [r[0] for r in c["pace"]["rows"]], ["read", "chunk", "embed", "images", "write"])
+    want("the lanes' figures", [r[2] for r in c["pace"]["rows"]],
+         ["3,148 / 3,987 files", "79,810 chunks made", "74,742 / 90,479", "12 / 451", "index saved 3 times · last 30 s ago (0.3 s)"])
+    want("a run with no images", [(r[0], r[1]) for r in seen["noImages"]][3], ("images", True))
+    want("Write before the first save", seen["noImages"][4][2], "not yet")
+    expect = {
+        "lane": ("Waiting for the Neural Engine to load — Neural Engine compiling 40 %", ["embed"]),
+        "images": ("The image model is working through images; text waits (12 of 451)", ["embed"]),
+        "big": ("Reading a large file: big.json (80 MB)", ["read"]),
+        "drain": ("Finishing embeddings in flight before saving: 4,864 chunks", ["embed"]),
+        "save": ("Writing the index to disk", ["write"]),
+        "backlog": ("Embed is the slowest step now: Neural Engine 230/s · CPU 31/s · 3,100 chunks waiting", ["embed"]),
+        "pace": ("Reading and embedding keep pace", []),
+        "done": ("done in 14m 32s · 3 saves", []),
+    }
+    for k, (status, slow) in expect.items():
+        want("the status line when %s" % k, c[k]["status"], status)
+        want("the highlighted lane when %s" % k, c[k]["slow"], slow)
+    if not c["done"]["full"]:
+        fail("a finished run's lanes are not all full")
     want("a phase line in the log", seen["log"][1:3], ["phase", "Writing the index to disk — 4,864 chunks still embedding"])
-    want("an image's log outcome", seen["image"], "image")
+    want("a text file's log line", seen["read"][1:3], ["read", "a/b.md — 12 chunks"])
+    want("an image's log line", seen["image"][1:3], ["image", "p.png"])
     want("a run-truth run's time left", seen["left"], "about 13 min")
-    no_console_errors(d, "the timeline")
+    no_console_errors(d, "the pipeline")
 
 
 @finding("rc4.4", "the scan card follows the scan's phases, each for 0.7 s, under a Scanning… heading")
@@ -6361,7 +6392,7 @@ def _(d):
 
 
 #: A card's shape: every element's tag and first class, depth first, leaving
-#: out what grows (the timeline's steps, the log's lines).
+#: out what grows (the log's lines).
 CARD_SHAPE = r"""
 (sel => {
   const card = document.querySelector(sel);
@@ -6369,13 +6400,13 @@ CARD_SHAPE = r"""
   const out = [];
   const walk = (n, depth) => {
     out.push(depth + ':' + n.tagName.toLowerCase() + '.' + ((n.getAttribute('class') || '').split(' ')[0]));
-    if (n.matches('.tl, .log')) return;
+    if (n.matches('.log')) return;
     for (const k of n.children) if (k.tagName !== 'svg') walk(k, depth + 1);
   };
   walk(card, 0);
   return {shape: out, run: card.getAttribute('data-run'), cls: card.className,
           stats: [...card.querySelectorAll('.run-stats .eyebrow')].map(e => e.textContent),
-          steps: card.querySelectorAll('.tl .tl-step').length};
+          steps: card.querySelectorAll('.pipe .pipe-row').length};
 })
 """
 
@@ -6404,12 +6435,63 @@ def _(d):
         if tab["shape"] != wizard["shape"]:
             diff = [(a, b) for a, b in zip(wizard["shape"], tab["shape"]) if a != b][:4]
             fail("the two pages draw the run differently (wizard vs Runs tab): %r" % (diff or (len(wizard["shape"]), len(tab["shape"]))))
-        if not tab["steps"]:
-            fail("the Runs tab's card draws no timeline")
+        if tab["steps"] != 5:
+            fail("the Runs tab's card draws %d pipeline lanes, not Read, Chunk, Embed, images and Write" % tab["steps"])
         no_console_errors(d, "the run card on two pages")
     finally:
         stop_quietly(d, store)
     del name
+
+
+@finding("rc4.8", "a run card's Pipeline | Log strip switches the panel, and the choice is kept")
+def _(d):
+    d.eval("try { localStorage.removeItem('semlith-run-tab'); } catch (e) {}")
+    run_id, store = start_index(d, d.fixtures.unique("rc4tabs", count=1500))
+    card = "document.querySelector('#main .run-card')"
+    shown = ("(() => { const c = %s; return c && {pipe: !c.querySelector('.pipe').hidden, log: !c.querySelector('.log').hidden,"
+             " tab: (c.querySelector('.run-tabs .tab[aria-selected=true]') || {}).textContent}; })()" % card)
+    try:
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("!!%s" % card, timeout=30, what="the run's card")
+        want("the panel first shown", d.eval(shown), {"pipe": True, "log": False, "tab": "Pipeline"})
+        press_text(d, "#main .run-card .run-tabs .tab", "Log", "the Log tab")
+        want("the panel after pressing Log", d.eval(shown), {"pipe": False, "log": True, "tab": "Log"})
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("!!%s" % card, timeout=30, what="the run's card after a reload")
+        want("the panel after a reload", d.eval(shown), {"pipe": False, "log": True, "tab": "Log"})
+        press_text(d, "#main .run-card .run-tabs .tab", "Pipeline", "the Pipeline tab")
+        want("the panel after pressing Pipeline", d.eval(shown), {"pipe": True, "log": False, "tab": "Pipeline"})
+        no_console_errors(d, "the run card's tabs")
+    finally:
+        d.eval("try { localStorage.removeItem('semlith-run-tab'); } catch (e) {}")
+        stop_quietly(d, store)
+
+
+@finding("rc4.9", "the Stop dialog's delete option is a checkbox and its words on one row, with no box")
+def _(d):
+    run_id, store = start_index(d, d.fixtures.unique("rc4stop", count=1500))
+    try:
+        running(d, run_id, store)
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for(card_offers(CARD, "Stop…"), what="the live run's card, offering Stop")
+        for width, height, mobile in ((1440, 900, False), (390, 844, True)):
+            d.set_viewport(width, height, mobile=mobile)
+            press_in(d, CARD, "Stop…")
+            d.wait_for("!!document.querySelector('#stop-delete')", what="the Stop dialog's delete option")
+            row = d.eval(r"""(() => { const box = document.querySelector('#stop-delete'), label = box.closest('label');
+                const words = label.querySelector('span'), a = box.getBoundingClientRect(), b = words.getBoundingClientRect();
+                const cs = getComputedStyle(label);
+                return {overlap: Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top), beside: b.left >= a.right - 1,
+                        shadow: cs.boxShadow, modalClass: label.classList.contains('modal')}; })()""")
+            if row["overlap"] <= 0 or not row["beside"]:
+                fail("at %dpx the checkbox and its words are not on one row: %r" % (width, row))
+            if row["shadow"] != "none" or row["modalClass"]:
+                fail("at %dpx the option is drawn as a box with a shadow: %r" % (width, row))
+            d.modal_press("Keep running")
+            d.wait_for("!document.querySelector('#stop-delete')", what="the dialog to close")
+    finally:
+        d.reset_viewport()
+        stop_quietly(d, store)
 
 
 @finding("rc4.6","the Index step's estimate is this machine's lanes over the plan, and moves as a lane is switched")

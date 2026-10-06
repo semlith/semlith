@@ -1833,33 +1833,11 @@ function dwell(key, steps, now) {
   return { steps: steps.slice(0, s.i + 1), behind: s.behind };
 }
 
-/** Steps as a timeline: label, when it began, how long it took, its counters;
- * the last one pulses while the run is live. */
-function timeline(steps, live) {
-  const now = Date.now();
-  const t0 = steps.length ? steps[0].at : now;
-  return el(
-    "ol",
-    { class: "tl" },
-    steps.map((s, i) => {
-      const cur = live && i === steps.length - 1;
-      const began = s.began ?? s.at;
-      const took = (s.until != null ? s.until : now) - began;
-      return el(
-        "li",
-        { class: `tl-step${cur ? " cur" : ""}` },
-        el("span", { class: `dot ${cur ? "blue pulse" : "green"}` }),
-        el(
-          "div",
-          { class: "tl-body" },
-          // When it began, from the first step (its clock time on hover; a
-          // running card shows no clock, 9.1), then how long it took.
-          el("div", { class: "tl-head" }, el("span", { class: "tl-label", text: s.label }), el("span", { class: "tl-when", "data-tip": began ? `began ${new Date(began).toTimeString().slice(0, 8)}` : null, text: `+${spellTook(Math.max(0, began - t0))} · ${s.until != null ? `took ${spellTook(Math.max(0, took))}` : `${spellTook(Math.max(0, took))} so far`}` })),
-          s.detail ? el("div", { class: "tl-detail", text: s.detail }) : null,
-        ),
-      );
-    }),
-  );
+/** The one step the start sequence is on, as a single status line: what it
+ * is, and what it waits for when that takes a while. */
+function startLine(step, live) {
+  const t = step ? `${step.label}${live && step.until == null ? "…" : ""}${step.detail ? ` — ${step.detail}` : ""}` : "";
+  return el("div", { class: `pipe-status${live ? " starting" : ""}`, role: "status" }, el("span", { class: `dot ${live ? "blue pulse" : "green"}` }), el("span", { class: "grow", text: t }));
 }
 
 let lastRunState = {};
@@ -3412,7 +3390,7 @@ function wizardScreen() {
         candidates.map((c, i) =>
           btn(
             {
-              class: "modal opt",
+              class: "opt",
               onclick: (e) => {
                 picked = c;
                 for (const b of list.children) b.querySelector(".radio").classList.toggle("on", b === e.currentTarget);
@@ -3970,7 +3948,7 @@ function wizardScreen() {
         "div",
         { class: "card-b" },
         el("div", { class: "row" }, el("span", { class: "mono t-b", text: w.created || "" }), pill(live ? "starting" : "did not start", live ? "amber" : "red", { pulse: live })),
-        timeline(shown, live),
+        startLine(shown[shown.length - 1], live),
         live ? null : btn({ class: "btn", onclick: () => ((w.startSteps = null), paint()) }, "Back to the plan"),
       ),
     );
@@ -4375,7 +4353,7 @@ function followLog(r, logNode) {
     fill(
       logNode,
       seen.lines.slice(-120).map((ev) => {
-        const [a, b, c, tone] = logParts(ev);
+        const [a, b, c, tone] = logParts(ev, store(r.store));
         return el("div", { class: "ln" }, el("span", { class: "a", text: a }), el("span", { class: `b ${tone}`, text: b }), el("span", { class: "c", text: c }));
       }),
     );
@@ -4405,12 +4383,15 @@ function followLog(r, logNode) {
 }
 followLog.cursors = {};
 
-function logParts(ev) {
+function logParts(ev, home) {
   const when = ev.at ? clock(msOf(ev.at) / 1000) : "";
   if (ev.event === "file") {
-    const outcome = ev.outcome || "read";
-    const tone = /refus|skip|fail/.test(outcome) ? "bad" : /embed|index|image/.test(outcome) ? "ok" : /unchanged|queued/.test(outcome) ? "" : "info";
-    return [`${n(ev.scanned)}/${n(ev.total)}`, outcome, ev.why ? `${ev.path} — ${ev.why}` : ev.path, tone];
+    // A text file being read says "read" (its chunks follow in `why`); the
+    // path is under its store's root, so it seldom wraps.
+    const outcome = ev.outcome === "indexing" ? "read" : ev.outcome || "read";
+    const tone = /refus|skip|fail/.test(outcome) ? "bad" : /embed|read|image/.test(outcome) ? "ok" : /unchanged|queued/.test(outcome) ? "" : "info";
+    const path = home ? relTo(home, ev.path || "") : ev.path;
+    return [`${n(ev.scanned)}/${n(ev.total)}`, outcome, ev.why ? `${path} — ${ev.why}` : path, tone];
   }
   // A phase line: a short marker in the status column, the words in the wide one.
   if (ev.event === "phase") return [when, "phase", [phaseLabel(ev.phase, ev.detail, ev.lane), ev.detail].filter(Boolean).join(" — "), "info"];
@@ -4485,10 +4466,118 @@ function shownOf(key, steps, again) {
   return shown.steps;
 }
 
-/* One card for a live run, wherever one is shown in full (W8): the wizard's
- * Index step and a store's Runs tab draw this, the same nodes in the same
- * order. Every part is drawn and hidden when it does not apply, so a patch in
- * place (morph) edits words and only the timeline and the log grow.
+/* Which panel run cards show, Pipeline or Log: this viewer's, kept. */
+let RUN_TAB = "pipeline";
+try {
+  RUN_TAB = localStorage.getItem("semlith-run-tab") === "log" ? "log" : "pipeline";
+} catch (_) {
+  /* storage refused: the default it is */
+}
+function setRunTab(t) {
+  RUN_TAB = t;
+  try {
+    localStorage.setItem("semlith-run-tab", t);
+  } catch (_) {
+    /* kept for this page only */
+  }
+  // Every run card on screen at once; the next paint reads RUN_TAB.
+  for (const card of document.querySelectorAll(".run-card")) {
+    for (const tab of card.querySelectorAll(".run-tabs .tab")) tab.setAttribute("aria-selected", String(tab.textContent.trim().toLowerCase() === t));
+    const pipe = card.querySelector(".pipe");
+    const log = card.querySelector(".log");
+    if (pipe) pipe.hidden = t !== "pipeline";
+    if (log) {
+      log.hidden = t !== "log";
+      log.scrollTop = log.scrollHeight;
+    }
+  }
+}
+
+/** How long ago, to the second, for a line that ticks: "30 s ago". */
+function agoMs(at) {
+  const s = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (s < 60) return `${s} s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  return `${Math.floor(s / 3600)} h ago`;
+}
+
+/* The Write lane's "last 30 s ago" moves between polls: one clock for every
+ * such node, editing its words only. */
+let agoTimer = null;
+function tickAgo() {
+  if (agoTimer) return;
+  agoTimer = setInterval(() => {
+    for (const node of document.querySelectorAll("[data-saved-at]")) {
+      setText(node, writeText(Number(node.getAttribute("data-saves")), Number(node.getAttribute("data-saved-at")), Number(node.getAttribute("data-save-ms"))));
+    }
+  }, 1000);
+}
+
+function writeText(saves, at, ms) {
+  if (!saves) return "not yet";
+  return `index saved ${saves === 1 ? "once" : `${n(saves)} times`}${at ? ` · last ${agoMs(at)}` : ""}${ms ? ` (${(ms / 1000).toFixed(1)} s)` : ""}`;
+}
+
+/** What is slowest now, and which lane it is (read, chunk, embed, write or
+ * none), from the run's phase, its sentence and its backlog. */
+function pipelineStatus(r) {
+  const d = r.phase_detail || "";
+  if (!LIVE_RUN.has(r.status)) return [r.status === "done" ? `done in ${spellTook(r.elapsed_ms || 0)} · ${plural(r.saves || 0, "save")}` : r.status, null];
+  if (r.status === "paused" || r.status === "pausing") return ["Paused between files — the writer is still this run's", null];
+  if (r.status === "queued") return [`Queued — ${r.position > 1 ? `${plural(r.position - 1, "run")} ahead of this one` : "next in line"}`, null];
+  if (r.status === "review") return ["Held for review — nothing is embedded until it starts", null];
+  if (r.status === "scanning") return [`Scanning — ${phaseText(r) || "finding files"}`, "read"];
+  if (r.phase === "lane") {
+    const named = phaseLabel("lane", d).replace(/^Starting /, "");
+    return [`Waiting for ${named === PHASE_LABEL.lane ? "a lane" : named} to load${d ? ` — ${d}` : ""}`, "embed"];
+  }
+  if (/^embedding images/i.test(d)) return [`The image model is working through images; text waits (${n(r.images || 0)} of ${n(r.images_total || 0)})`, "embed"];
+  if (/^reading and chunking/i.test(d)) return [`Reading a large file: ${d.replace(/^reading and chunking:?\s*/i, "")}`, "read"];
+  if (r.phase === "drain") return [`Finishing embeddings in flight before saving: ${plural(r.backlog || 0, "chunk")}`, "embed"];
+  if (r.phase === "save") return ["Writing the index to disk", "write"];
+  if ((r.backlog || 0) > 1000) return [`Embed is the slowest step now: ${laneRatesText(r) || "the lanes"} · ${n(r.backlog)} chunks waiting`, "embed"];
+  return ["Reading and embedding keep pace", null];
+}
+
+/** The Pipeline panel: four lanes in a fixed order and shape — Read, Chunk,
+ * Embed (with images under it), Write — then one line naming what is slowest
+ * now, the start sequence's step while it starts. */
+function pipeline(r, startStep) {
+  const over = !LIVE_RUN.has(r.status);
+  const [said, slow] = startStep ? [null, null] : pipelineStatus(r);
+  const share = (a, b) => (over ? 100 : b ? Math.min(100, (a / b) * 100) : 0);
+  const lane = (key, label, pctValue, text, opts) =>
+    el(
+      "div",
+      { class: `pipe-row${slow === key ? " slow" : ""}${opts && opts.sub ? " sub" : ""}`, "data-lane": key, hidden: opts && opts.hide ? true : null },
+      el("span", { class: "pipe-k", text: label }),
+      pctValue === null ? el("span", { class: "pipe-bar none" }) : bar(pctValue, "h6 pipe-bar"),
+      el("span", { class: "pipe-v", text }),
+    );
+  const write = lane("write", "Write", null, writeText(r.saves || 0, r.saved_at || 0, r.save_ms || 0));
+  const words = write.querySelector(".pipe-v");
+  words.setAttribute("data-saves", String(r.saves || 0));
+  words.setAttribute("data-saved-at", String(r.saved_at || 0));
+  words.setAttribute("data-save-ms", String(r.save_ms || 0));
+  tickAgo();
+  const exp = r.expected_chunks || 0;
+  return el(
+    "div",
+    { class: "pipe", role: "tabpanel", "aria-label": "Pipeline" },
+    lane("read", "Read", share(r.scanned || 0, r.total || 0), r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "counting files…"),
+    lane("chunk", "Chunk", share(r.rows || 0, exp), `${n(r.rows || 0)} chunks made`),
+    lane("embed", "Embed", share(r.chunks || 0, exp), exp ? `${n(r.chunks || 0)} / ${n(exp)}` : n(r.chunks || 0)),
+    lane("images", "images", share(r.images || 0, r.images_total || 0), `${n(r.images || 0)} / ${n(r.images_total || 0)}`, { sub: true, hide: !r.images_total }),
+    write,
+    startStep ? startLine(startStep, true) : el("div", { class: `pipe-status${slow ? " slow" : ""}`, role: "status" }, el("span", { class: `dot ${over ? "green" : slow ? "amber" : "blue"}` }), el("span", { class: "grow", text: said })),
+  );
+}
+
+/* One card for a run, wherever one is shown in full (W8): the wizard's Index
+ * step and a store's Runs tab draw this, the same nodes in the same order —
+ * header, bar, meters, a Pipeline | Log strip and its panel. Every part is
+ * drawn and hidden when it does not apply, so a patch in place (morph) edits
+ * words; only the log grows.
  * `o.pre` steps come before the run's own (the wizard's Start), `o.key` names
  * the dwell queue, `o.meta` is a note beside the pill, `o.again` repaints. */
 function runCard(r, o) {
@@ -4496,21 +4585,25 @@ function runCard(r, o) {
   const p = runPct(r);
   const paused = r.status === "paused" || r.status === "pausing";
   const pre = opts.pre || [];
-  // `o.skip`: the phases a held run had before Start, its scan's. A step that
-  // began while Start's own requests were out is queued after Start's steps,
-  // so the order holds; it keeps its own start time for the label.
+  // The start sequence — Start's own steps, the queue, the decisions — shows
+  // as one line in the pipeline's status place, each step for its dwell.
+  // `o.skip`: the phases a held run had before Start, its scan's.
   const after = pre.length ? pre[pre.length - 1].at : 0;
   const own = runSteps(r, opts.skip || 0).map((s) => (s.at < after ? { ...s, at: after, began: s.at } : s));
   const shown = shownOf(opts.key || `${r.store}:${r.id}:${r.submitted || ""}`, pre.concat(own), opts.again);
+  const cur = shown[shown.length - 1];
+  const starting = cur && LIVE_RUN.has(r.status) && (shown.length <= pre.length || cur.label === "Queued" || cur.label === PHASE_LABEL.decisions) ? cur : null;
   const review = r.status === "review";
   const queued = r.status === "queued";
   const head = !LIVE_RUN.has(r.status) ? "Finishing" : queued ? "Waiting to start" : review ? "Held for review" : r.status === "scanning" ? "Scanning" : "Running now";
-  const word = !LIVE_RUN.has(r.status) ? "finishing" : r.status === "pausing" ? "pausing" : paused ? "paused" : review ? "waiting for review" : r.status === "scanning" ? "scanning" : queued ? `queued${r.position ? ` · ${r.position} in line` : ""}` : r.kind === "compact" ? "compacting" : r.kind === "catch-up" ? "catching up" : "indexing";
+  const word = !LIVE_RUN.has(r.status) ? (r.status === "done" ? "done" : r.status) : r.status === "pausing" ? "pausing" : paused ? "paused" : review ? "waiting for review" : r.status === "scanning" ? "scanning" : queued ? `queued${r.position ? ` · ${r.position} in line` : ""}` : r.kind === "compact" ? "compacting" : r.kind === "catch-up" ? "catching up" : "indexing";
   const b = bar(p, "h8 accent grow");
   b.setAttribute("data-tip", `Index run · ${Math.floor(p)}%`);
   b.setAttribute("data-tip-rows", runRows(r));
-  const log = el("div", { class: "log", "data-scroll-keep": `log-${r.id}`, "data-morph-keep": `log-${r.id}` });
+  const log = el("div", { class: "log", role: "tabpanel", "aria-label": "Log", hidden: RUN_TAB === "log" ? null : true, "data-scroll-keep": `log-${r.id}`, "data-morph-keep": `log-${r.id}` });
   followLog(r, log);
+  const pipe = pipeline(r, starting);
+  if (RUN_TAB === "log") pipe.hidden = true;
   return el(
     "div",
     { class: "card run-card blue-edge", "data-run": `${r.store}:${r.id}` },
@@ -4531,9 +4624,18 @@ function runCard(r, o) {
         btn({ class: "btn danger-soft", hidden: LIVE_RUN.has(r.status) ? null : true, "data-keep": `run-stop-${r.id}`, onclick: () => stopRun(r) }, queued ? "Take out of the queue" : "Stop…"),
       ),
       el("div", { class: "row nowrap gap12" }, b, el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
-      timeline(shown, opts.live || ["running", "scanning", "queued", "stopping"].includes(r.status)),
     ),
     runStatsRow(r),
+    tabs(
+      [
+        ["pipeline", "Pipeline"],
+        ["log", "Log"],
+      ],
+      RUN_TAB,
+      setRunTab,
+      { cls: "in-card run-tabs" },
+    ),
+    pipe,
     log,
     el("div", { class: "lives" }, el("span", { class: "dot green" }), "The run lives in the daemon. Leave this page, close the tab — it keeps going and the header shows its progress."),
   );
@@ -4573,7 +4675,7 @@ async function stopRun(r) {
   const ok = await ask({
     title: `Stop ${r.store}'s index run?`,
     body: "What it has embedded so far is undone, so the store is left exactly as it was before the run. The files on disk are untouched.",
-    extra: fresh ? el("label", { class: "modal opt", for: "stop-delete" }, del, el("span", { text: "Also delete the store — it held nothing before this run" })) : null,
+    extra: fresh ? el("label", { class: "opt-check", for: "stop-delete" }, del, el("span", { text: "Also delete the store — it held nothing before this run" })) : null,
     ok: "Stop and undo",
     cancel: "Keep running",
     danger: true,
@@ -6089,7 +6191,7 @@ function sdRuns(s, holder) {
                         { class: "hist-open" },
                         h.stages ? el("span", { class: "t-mono-sm", text: stagesText(h.stages) }) : null,
                         (h.log || []).length ? el("div", { class: "log rounded" }, h.log.slice(-40).map((ev) => {
-                          const [a, b, c, tone] = typeof ev === "string" ? ["", "", ev, ""] : ev.event ? logParts(ev) : [ev.at ? clock(ev.at) : "", ev.level || "", ev.text || "", ev.level === "error" ? "bad" : ev.level === "warn" ? "warn" : "info"];
+                          const [a, b, c, tone] = typeof ev === "string" ? ["", "", ev, ""] : ev.event ? logParts(ev, s) : [ev.at ? clock(ev.at) : "", ev.level || "", ev.text || "", ev.level === "error" ? "bad" : ev.level === "warn" ? "warn" : "info"];
                           return el("div", { class: "ln" }, el("span", { class: "a", text: a }), el("span", { class: `b ${tone}`, text: b }), el("span", { class: "c", text: c }));
                         })) : el("span", { class: "muted t-xs", text: "No log was kept for this run." }),
                       )
