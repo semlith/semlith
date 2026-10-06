@@ -5697,3 +5697,36 @@ button,
 .log .ln {
   min-width: 0;
 }
+
+/* Parity with the cloud (2026-10-07). */
+.sortable .ar.off,
+th .sort .ar.off {
+  color: inherit;
+}
+.kpi.accent {
+  border: 1.5px solid var(--accent);
+}
+.store-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 8px -16px -12px;
+  padding: 8px 16px;
+  background: var(--soft);
+  border-top: 1px solid var(--line-soft);
+}
+.factchip.red {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.card.amber-edge {
+  border-color: var(--amber-edge);
+}
+.nav-badge.red {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.rb.red {
+  background: var(--red);
+}

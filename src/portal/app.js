@@ -153,12 +153,47 @@ function setText(node, value) {
 }
 
 /** A bar whose fill is `pct` of its track. The width is set through the CSSOM.
- * `tip` says on hover what it measures, with its numbers. */
-function bar(pct, cls, tip) {
+ * Every bar has a hover tip: `tip` (a title, and `tipRows` as
+ * "label::value||…") when the caller knows what the bar measures, its
+ * percentage otherwise. */
+function bar(pct, cls, tip, tipRows) {
   const fillNode = el("i");
-  fillNode.style.width = `${Math.max(0, Math.min(100, pct || 0)).toFixed(1)}%`;
-  return el("div", { class: cls ? `bar ${cls}` : "bar", "data-tip": tip || null }, fillNode);
+  const clamped = Math.max(0, Math.min(100, pct || 0));
+  fillNode.style.width = `${clamped.toFixed(1)}%`;
+  return el("div", { class: cls ? `bar ${cls}` : "bar", "data-tip": tip || `${Math.round(clamped)}%`, "data-tip-rows": tipRows || null }, fillNode);
 }
+
+/* Page state survives a reload. Each page's own state object (filters, tabs,
+ * pages, open rows, toggles) registers here once: it is restored from this
+ * viewer's local storage now and written back whenever the page is redrawn
+ * and when the tab unloads. The address holds the page and tab; this holds
+ * what the reader set on it. Results, fetched data and anything secret are
+ * named in `skip` and never kept. */
+const KEPT = [];
+function keepState(name, obj, skip) {
+  const key = `semlith-ui:${name}`;
+  const omit = new Set(skip || []);
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) || "null");
+    if (saved && typeof saved === "object") for (const [k, v] of Object.entries(saved)) if (!omit.has(k) && k in obj) obj[k] = v;
+  } catch (_) {
+    /* storage refused or a stale shape: the defaults stand */
+  }
+  KEPT.push(() => {
+    try {
+      const out = {};
+      for (const [k, v] of Object.entries(obj)) if (!omit.has(k) && typeof v !== "function" && !(v instanceof Node)) out[k] = v;
+      localStorage.setItem(key, JSON.stringify(out));
+    } catch (_) {
+      /* as above */
+    }
+  });
+  return obj;
+}
+function saveKept() {
+  for (const save of KEPT) save();
+}
+window.addEventListener("pagehide", saveKept);
 
 /** Move a bar made by `bar` to a new value without rebuilding it. */
 function setBar(node, pct) {
@@ -619,7 +654,7 @@ function kpi(label, value, sub, opts) {
   const tag = o.onclick ? "button" : "div";
   const node = el(
     tag,
-    { class: `kpi${o.warn ? " warn" : ""}`, type: o.onclick ? "button" : null, onclick: o.onclick || null, "data-tip": o.tip || null, "data-tip-rows": o.rows || null },
+    { class: `kpi${o.warn ? " warn" : ""}${o.accent ? " accent" : ""}`, type: o.onclick ? "button" : null, onclick: o.onclick || null, "data-tip": o.tip || null, "data-tip-rows": o.rows || null },
     el("span", { class: "eyebrow", text: label }),
     el("span", { class: "v", text: value }),
     sub ? el("span", { class: "s", text: sub }) : null,
@@ -711,7 +746,17 @@ const tip = {
 
   find(target) {
     const host = target && target.closest ? target.closest("[data-tip]") : null;
-    if (!host) return null;
+    // Text cut short with an ellipsis shows the whole of itself on hover,
+    // wherever it is and whoever drew it.
+    if (!host) {
+      for (let node = target, i = 0; node && node.nodeType === 1 && i < 4; node = node.parentElement, i++) {
+        if (node.scrollWidth > node.clientWidth + 1 && getComputedStyle(node).textOverflow === "ellipsis") {
+          const text = (node.textContent || "").trim();
+          return text ? { el: node, title: text, rows: "", color: "", full: true } : null;
+        }
+      }
+      return null;
+    }
     const title = host.getAttribute("data-tip");
     if (!title) return null;
     return {
@@ -1149,7 +1194,7 @@ function grid(spec) {
               },
             },
             c.label,
-            el("span", { class: "ar", text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
+            el("span", { class: `ar${on ? "" : " off"}`, text: on ? (view.dir === "asc" ? "↑" : "↓") : "↕" }),
           ),
         );
       }),
@@ -1328,7 +1373,7 @@ function sortHead(label, key, view, onChange, cls) {
         },
       },
       label,
-      el("span", { class: "ar", text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
+      el("span", { class: `ar${on ? "" : " off"}`, text: on ? (view.dir === "asc" ? "↑" : "↓") : "↕" }),
     ),
   );
 }
@@ -2056,6 +2101,7 @@ function mount(view, route) {
 /* Draw the current view again from the cache, keeping the scroll position and
  * the focused field. Inputs carry `data-keep` so the new copy can be found. */
 function repaint() {
+  saveKept();
   if (!shell.main || !current.view) return;
   const at = shell.main.scrollTop;
   const inner = [...shell.main.querySelectorAll("[data-scroll-keep]")].map((n) => [n.getAttribute("data-scroll-keep"), n.scrollTop]);
@@ -2229,20 +2275,25 @@ function paintChrome() {
   if (!shell.nav) return;
   const reviewN = (data.refused?.stores || []).reduce((a, s) => a + (s.review || 0), 0);
   const noAgent = data.agents ? !registeredClients().length : false;
-  const badges = { stores: reviewN ? String(reviewN) : "", agents: noAgent ? "!" : "" };
+  // Files to review, else a red "!" for a store in error.
+  const errN = (data.stores?.stores || []).filter((s) => storeError(s)).length;
+  const badges = { stores: reviewN ? String(reviewN) : errN ? "!" : "", agents: noAgent ? "!" : "" };
+  const tones = { stores: reviewN ? "amber" : "red", agents: "amber" };
   for (const node of document.querySelectorAll("[data-badge]")) {
-    const b = badges[node.getAttribute("data-badge")] || "";
+    const id = node.getAttribute("data-badge");
+    const b = badges[id] || "";
     node.hidden = !b;
-    node.className = "nav-badge amber";
+    node.className = `nav-badge ${tones[id] || "amber"}`;
     setText(node, b);
   }
   for (const node of document.querySelectorAll("[data-rail-badge]")) {
     const id = node.getAttribute("data-rail-badge");
     node.hidden = !badges[id];
+    node.className = `rb ${badges[id] ? tones[id] || "amber" : ""}`;
     const host = node.parentElement;
     host.setAttribute(
       "data-tip-rows",
-      id === "stores" && badges.stores ? `to review::${badges.stores} files` : id === "agents" && badges.agents ? "status::no agent registered yet" : "",
+      id === "stores" && badges.stores ? (reviewN ? `to review::${badges.stores} files` : `status::${plural(errN, "store")} in error`) : id === "agents" && badges.agents ? "status::no agent registered yet" : "",
     );
   }
   const run = activeRun();
@@ -2559,13 +2610,52 @@ function sourcesLine() {
   return added ? `${kept} + ${added}` : kept;
 }
 
+/* The wizard survives a reload: its choices are kept per tab (session
+ * storage) and its store, scan and runs are on the daemon. Never kept: a
+ * folder listing (asked again), a drag in progress, a busy flag, a try-search
+ * answer and a registration result. */
+const WZ_KEY = "semlith-wz";
+function saveWizard(w) {
+  try {
+    const { browse, drag, busy, tried, regResult, reg, decSel, clientSel, dropWait, endedRead, ...keep } = w;
+    const { tick, ...scan } = w.scan || {};
+    sessionStorage.setItem(WZ_KEY, JSON.stringify({ ...keep, scan, browse: { dir: browse.dir, sel: [...browse.sel] }, decSel: [...decSel], clientSel: [...clientSel], reg: reg === "busy" ? "idle" : reg, at: Date.now() }));
+  } catch (_) {
+    /* storage refused: the wizard lasts as long as this document */
+  }
+}
+function restoreWizard() {
+  try {
+    const o = JSON.parse(sessionStorage.getItem(WZ_KEY) || "null");
+    if (!o || Date.now() - (o.at || 0) > 6 * 3600e3) return null;
+    delete o.at;
+    const w = Object.assign(blankWizard({}), o);
+    w.browse = { dir: o.browse?.dir || "", listing: null, sel: new Set(o.browse?.sel || []), error: "" };
+    w.decSel = new Set(o.decSel || []);
+    w.clientSel = new Set(o.clientSel || []);
+    // A start cut short by the reload is shown again from the plan.
+    if (!(w.started || []).length) w.startSteps = null;
+    return w;
+  } catch (_) {
+    return null;
+  }
+}
+function clearWizard() {
+  try {
+    sessionStorage.removeItem(WZ_KEY);
+  } catch (_) {
+    /* as above */
+  }
+  return null;
+}
+
 function openWizard(opts) {
   state.wz = blankWizard(opts);
   go("new");
 }
 
 function wizardScreen() {
-  if (!state.wz) state.wz = blankWizard({});
+  if (!state.wz) state.wz = restoreWizard() || blankWizard({});
   const w = state.wz;
   const host = el("div", { id: "app" });
   const top = el("header", { class: "top wide-pad" });
@@ -2574,8 +2664,12 @@ function wizardScreen() {
   host.append(top, body, foot);
   let paintGen = 0;
 
-  // Data the steps read, fetched once.
-  loadMany(["stores", "runs", "accel", "privacy", "agents"]).then(() => paint());
+  // Data the steps read, fetched once. A restored wizard whose store is gone
+  // (deleted elsewhere, or the daemon's home changed) starts over.
+  loadMany(["stores", "runs", "accel", "privacy", "agents"]).then(() => {
+    if (w.created && !w.existing && !store(w.created)) Object.assign(w, blankWizard({ onboarding: w.onboarding }));
+    paint();
+  });
 
   function labels() {
     return ["Name", "Sources", "Review", "Index"].concat(w.onboarding ? ["Connect"] : []);
@@ -2678,6 +2772,8 @@ function wizardScreen() {
     const ok = fmtOk && !taken;
     const msg = !nm
       ? ["Lowercase letters, digits and dashes. Agents see this name when they choose where to look.", ""]
+      : nm.length > 40
+        ? [`At most 40 characters — this one has ${nm.length}.`, "bad"]
       : !fmtOk
         ? ["Use lowercase letters, digits and dashes — for example research-notes.", "bad"]
         : taken
@@ -2688,7 +2784,7 @@ function wizardScreen() {
 
   async function exit() {
     if (w.onboarding && !w.created) {
-      state.wz = null;
+      state.wz = clearWizard();
       return go("welcome");
     }
     const r = run().find((x) => LIVE_RUN.has(x.status) && x.status !== "review");
@@ -2721,7 +2817,7 @@ function wizardScreen() {
         for (const s of scanRuns().filter((x) => x.status === "review" || x.status === "scanning")) await post("/api/index/control", { store: s.store, run: s.id, action: "stop" }).catch(() => {});
       }
     }
-    state.wz = null;
+    state.wz = clearWizard();
     if (w.created && (store(w.created) || w.existing)) go("store", w.created, r ? "runs" : "overview");
     else go(liveStores().length ? "home" : "welcome");
   }
@@ -2787,6 +2883,7 @@ function wizardScreen() {
       const nd = body.querySelector(`[data-scroll-keep="${k}"]`);
       if (nd) nd.scrollTop = t;
     }
+    if (state.wz === w) saveWizard(w);
     paintFoot();
   }
 
@@ -3672,7 +3769,7 @@ function wizardScreen() {
           el("div", { class: "card-note", text: "Every decision is yours — one file or a selection — and is logged per file. An agent can never decide. Redact & index swaps each match for a typed placeholder before chunking; the value never reaches the index. An acceptance keeps a salted fingerprint of the match, never the value." }),
         ),
       );
-    }
+    } else parts.push(el("div", { class: "done-banner grey-zone" }, el("span", { class: "check-ok" }, icon(I.check, 11, { w: 3 })), el("span", { text: "Nothing in the grey zone. Credential files are left out without asking." })));
     parts.push(leftOutCard(P));
     return el("div", { class: "stack" }, parts);
   }
@@ -4209,7 +4306,7 @@ function wizardScreen() {
     let sec = null;
     nextFn = null;
     if (step === 1) {
-      label = w.created ? (w.created === ns.nm ? "Continue" : "Rename and continue") : "Create store";
+      label = w.busy ? (w.created ? "Saving…" : "Creating…") : w.created ? (w.created === ns.nm ? "Continue" : "Rename and continue") : "Create store";
       on = ns.ok && !w.busy;
       hint = ns.ok ? `Creates an empty store at ~/.semlith/stores/${ns.nm}` : "Pick a name to continue";
       nextFn = createOrRename;
@@ -4248,7 +4345,7 @@ function wizardScreen() {
           label = "Run in background";
           nextFn = async () => {
             const name = w.created || live.store;
-            state.wz = null;
+            state.wz = clearWizard();
             go("store", name, "runs");
           };
           hint = "Watch it from the store's Runs tab or the header";
@@ -4261,7 +4358,7 @@ function wizardScreen() {
           label = "Open store";
           nextFn = async () => {
             const name = w.created || R[0].store;
-            state.wz = null;
+            state.wz = clearWizard();
             go("store", name);
           };
         }
@@ -4270,7 +4367,7 @@ function wizardScreen() {
     } else if (step === 5) {
       const done = w.reg === "done";
       const finish = async () => {
-        state.wz = null;
+        state.wz = clearWizard();
         await load("stores", true);
         go("home");
       };
@@ -4287,7 +4384,7 @@ function wizardScreen() {
         nextFn = register;
       }
     }
-    const backOn = step > 1 && !(step === 4 && live) && !(step === 2 && w.existing);
+    const backOn = step > 1 && !(step === 4 && live) && !(step === 2 && w.existing) && !w.busy;
     fill(
       foot,
       el(
@@ -4296,7 +4393,8 @@ function wizardScreen() {
         btn({ class: "btn md", disabled: backOn ? null : true, hidden: step === 1 ? true : null, onclick: () => backOn && setStep(step - 1) }, icon(I.back, 14, { w: 1.8 }), "Back"),
         el("span", { class: "hint hide-sm", text: hint }),
         sec ? btn({ class: "btn md", onclick: sec[1] }, sec[0]) : null,
-        btn({ class: "btn md primary", disabled: on ? null : true, onclick: next }, label, icon(I.arrow, 14, { w: 2 })),
+        // Busy says so with the spinner every pending button shows.
+        btn({ class: `btn md primary${w.busy ? " busy" : ""}`, "aria-busy": w.busy ? "true" : null, disabled: on ? null : true, onclick: next }, label, icon(I.arrow, 14, { w: 2 })),
       ),
     );
     paintRail();
@@ -4359,14 +4457,23 @@ function wizardScreen() {
   return host;
 }
 
-/* Poll a run's log while its card is on screen, from its own cursor, into a
- * log view. The daemon's ring keeps a run's last 500 lines; a run that has
- * said more is read whole from its file first (/api/index/history/log). */
+/* Poll a run's log while a card showing it is on screen, from its own cursor,
+ * into every log view showing that run. The daemon's ring keeps a run's last
+ * 500 lines; a run that has said more is read whole from its file first
+ * (/api/index/history/log). One follower per run, shared by every card: two
+ * cards each polling (the wizard rebuilds its card as the run starts) read
+ * from one cursor at once and appended the same lines twice. */
 function followLog(r, view) {
   const key = `${r.store}:${r.id}`;
-  const seen = (followLog.cursors[key] = followLog.cursors[key] || { after: r.log_from ?? null, lines: [], backfilled: false });
+  const seen = (followLog.cursors[key] = followLog.cursors[key] || { after: r.log_from ?? null, lines: [], backfilled: false, views: new Set(), running: false });
   view.__lines = () => seen.lines;
   view.__redraw();
+  seen.views.add(view);
+  if (seen.running) return;
+  seen.running = true;
+  const redraw = () => {
+    for (const v of seen.views) v.__redraw();
+  };
   const backfill = async () => {
     seen.backfilled = true;
     if (!r.log_file || !(r.log_from > 0)) return;
@@ -4383,7 +4490,10 @@ function followLog(r, view) {
     if (last != null && (seen.after == null || last > seen.after)) seen.after = last;
   };
   const tick = async () => {
-    if (!view.isConnected) return;
+    // Cards that left the page drop out; with none left the follower stops,
+    // and the next card to show this run starts it again from its cursor.
+    for (const v of [...seen.views]) if (!v.isConnected) seen.views.delete(v);
+    if (!seen.views.size) return void (seen.running = false);
     try {
       const first = !seen.backfilled;
       if (first) await backfill();
@@ -4393,12 +4503,13 @@ function followLog(r, view) {
         if (seen.lines.length > 200000) seen.lines.splice(0, seen.lines.length - 200000);
         seen.after = out.cursor;
       }
-      if (first || (out.lines && out.lines.length)) view.__redraw();
+      if (first || (out.lines && out.lines.length)) redraw();
     } catch (_) {
       /* the next tick tries again */
     }
     const live = (data.runs?.runs || []).find((x) => x.id === r.id);
     if (live && LIVE_RUN.has(live.status)) setTimeout(tick, 1000);
+    else seen.running = false;
   };
   // After the caller has put the view on the page: called while the card is
   // still being built, it is not connected yet, and a first tick run now
@@ -4821,6 +4932,19 @@ function storeState(s) {
   return { state: "fresh", tone: "green" };
 }
 
+/** What is wrong with a store, or null: its directory, database or a root is
+ * gone, or its newest finished run failed and nothing has run since. The
+ * reason is the last error line that run logged. */
+function storeError(s) {
+  if (!s || activeRun(s.name)) return null;
+  const st = storeState(s);
+  if (st.tone === "red") return { title: st.state === "root missing" ? "A folder this store reads is gone" : `This store is ${st.state}`, detail: st.tip || ((s.roots || []).filter((r) => !r.present).map((r) => r.path).join("\n") || "No reason was recorded."), runs: false };
+  const last = (data.runs?.history || []).filter((h) => h.store === s.name && h.kind !== "compact").sort((a, b) => (b.finished || b.finished_at || 0) - (a.finished || a.finished_at || 0))[0];
+  if (!last || (last.result || last.status) !== "failed") return null;
+  const why = [...(last.log || [])].reverse().find((l) => l.level === "error");
+  return { title: "The last run stopped with an error", detail: (why && why.text) || "No reason was recorded.", runs: true };
+}
+
 function statePill(s) {
   const st = storeState(s);
   return pill(st.state, st.tone, { pulse: st.pulse, tip: st.tip });
@@ -5016,7 +5140,7 @@ VIEWS.home = {
                   el("span", { class: "num-dim", text: s.last_write ? ago(s.last_write) : "never" }),
                 ),
               )
-            : empty("No store yet."),
+            : el("div", { class: "empty" }, "No store yet. ", lnk("Create one", () => openWizard({}))),
         ),
       ),
       el("div", { class: "card-foot", text: `${plural(all.length, "store")} · ${n(files)} files · ${n(chunks)} chunks${disk ? ` · ${bytes(disk)} on disk` : ""}` }),
@@ -5171,7 +5295,7 @@ function savePrefs(patch) {
 
 // -------------------------------------------------------------------- stores
 
-const storesUi = { filter: "", kind: "all" };
+const storesUi = keepState("stores", { filter: "", kind: "all" });
 
 VIEWS.stores = {
   needs: (route) => (route.parts[0] === "inside" ? ["stores", "coverage", "corpus", "ledger"] : ["stores", "runs", "refused"]),
@@ -5275,7 +5399,7 @@ function storesList() {
         sortHead("WRITTEN", "last", view, changed, "c-written right"),
         el("span"),
       ),
-      !shown.length ? el("div", { class: "empty lg" }, "No store matches. ", lnk("Clear the filter", () => ((storesUi.filter = ""), (storesUi.kind = "all"), repaint()))) : null,
+      !shown.length ? el("div", { class: "empty lg" }, all.length ? ["No store matches. ", lnk("Clear the filter", () => ((storesUi.filter = ""), (storesUi.kind = "all"), repaint()))] : ["No store yet. ", lnk("Create one", () => openWizard({}))]) : null,
       shown.map((s) =>
         el(
           "div",
@@ -5336,6 +5460,31 @@ function storesList() {
 
 const PALETTE = ["#F0A43C", "#4C7088", "#3E9A6E", "#2F4F68", "#B07A2A", "#8A9DAB"];
 
+/** Every source (a root folder or file) of every store, as the cloud lists
+ * its sources. The daemon counts files and chunks per store, not per root,
+ * so the counts are the store's. */
+function insideSources() {
+  const storesAll = data.stores?.stores || [];
+  const list = storesAll.flatMap((st) => (st.roots || []).map((r) => ({ path: r.path, present: r.present, store: st.name, files: st.files || 0, chunks: st.chunks || 0, last: st.last_write || 0 })));
+  const g = grid({
+    key: "inside:sources",
+    caption: "Sources",
+    rows: list,
+    sort: "store",
+    dir: "asc",
+    empty: "No source yet. Add one to a store and it is measured here.",
+    columns: [
+      { key: "path", label: "Source", cls: "m t-b", sort: (r) => r.path, render: (r) => pathEl(r.path, 44, "mono t-sm") },
+      { key: "state", label: "State", sort: (r) => (r.present ? 1 : 0), render: (r) => pill(r.present ? "present" : "missing", r.present ? "green" : "red", { dot: false }) },
+      { key: "store", label: "Store", cls: "ms", sort: (r) => r.store, render: (r) => lnk(r.store, () => go("store", r.store)) },
+      { key: "files", label: "Store files", cls: "m r", firstDir: "desc", sort: (r) => r.files, render: (r) => (r.files ? n(r.files) : "—") },
+      { key: "chunks", label: "Store chunks", cls: "m r", firstDir: "desc", sort: (r) => r.chunks, render: (r) => (r.chunks ? n(r.chunks) : "—") },
+      { key: "last", label: "Written", cls: "ms nowrap", firstDir: "desc", sort: (r) => r.last, render: (r) => (r.last ? el("span", { "data-tip": dayClock(r.last), text: ago(r.last) }) : "never") },
+    ],
+  });
+  return el("div", { class: "card inside-sources" }, el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Sources" }), meta(`${plural(list.length, "source")} · ${plural(storesAll.length, "store")}`)), g.node);
+}
+
 function insideIndex() {
   const corpus = (data.corpus?.stores || []).filter((c) => !c.error && !c.measuring);
   const measuring = (data.corpus?.stores || []).filter((c) => c.measuring);
@@ -5390,6 +5539,7 @@ function insideIndex() {
     el("div", { class: "muted t-sm", text: `Measured from the stores themselves, again after every change, not estimated — ${plural(corpus.length, "store")}, ${n(files)} files.` }),
     measuring.length ? el("div", { class: "notice" }, el("span", { class: "sub", text: `Measuring ${measuring.map((m) => m.store).join(", ")} — the figures appear here when it is done.` })) : null,
     errs.length ? el("div", { class: "notice red" }, el("span", { class: "sub", text: `${errs.map((e) => e.store).join(", ")} could not be measured: ${errs[0].error}` })) : null,
+    insideSources(),
     el(
       "div",
       { class: "q4" },
@@ -5541,7 +5691,7 @@ function monthName(ym) {
 
 // --------------------------------------------------------------- store detail
 
-const sdUi = { glob: "", type: "all", lang: "all", view: "list", decQ: "", decOut: "all", decBy: "all", histOpen: {}, rename: {} };
+const sdUi = keepState("store", { glob: "", type: "all", lang: "all", view: "list", decQ: "", decOut: "all", decBy: "all", histOpen: {}, rename: {} }, ["rename"]);
 
 VIEWS.store = {
   needs: () => ["stores", "runs", "refused", "decisions", "detail", "ledger"],
@@ -5602,6 +5752,17 @@ VIEWS.store = {
         ),
       );
     }
+    const err = tab === "overview" ? storeError(s) : null;
+    if (err)
+      page.append(
+        el(
+          "div",
+          { class: "card amber-edge pad stack gap8 store-error" },
+          el("div", { class: "row" }, el("span", { class: "card-t grow", text: err.title }), err.runs ? btn({ class: "btn sm", onclick: () => go("store", name, "runs") }, "See its run") : null, btn({ class: "btn sm", disabled: rootsGone(s) || s.missing ? true : null, onclick: () => reindexStore(name) }, "Re-index")),
+          el("div", { class: "code sm", text: err.detail }),
+          el("span", { class: "muted t-sm", text: s.files ? "What was indexed before the error is still searchable." : "Nothing from this store is searchable yet." }),
+        ),
+      );
     const body = { overview: sdOverview, files: sdFiles, review: sdReview, runs: sdRuns, settings: sdSettings }[tab] || sdOverview;
     page.append(body(s, holder));
     return page;
@@ -5988,6 +6149,15 @@ async function decideInBatches(store, groups, b, step) {
 }
 
 function sdReview(s, holder) {
+  // Not read yet (the daemon answered before it could open the store, or the
+  // cache was dropped): a spinner while it is asked once more.
+  if (!(data.refused?.stores || []).some((x) => x.store === s.name) && !sdReview.asked[s.name]) {
+    sdReview.asked[s.name] = true;
+    loadMany(["refused", "decisions"], true)
+      .catch(() => {})
+      .finally(() => current.view === VIEWS.store && repaint());
+    return el("div", { class: "stack" }, el("div", { class: "empty lg row gap10 review-loading", role: "status" }, el("span", { class: "spinner" }), "Reading what waits for you…"));
+  }
   const entry = decisionsOf(s.name);
   const rowsAll = entry.rows || [];
   const pending = rowsAll.filter((r) => r.reviewable && !r.accepted && !r.kept_out).map((r) => ({ ...r, risk: riskOf(r) })).sort((a, b) => b.risk - a.risk);
@@ -6176,6 +6346,7 @@ function sdReview(s, holder) {
 sdReview.sel = {};
 sdReview.risk = {};
 sdReview.bulk = {};
+sdReview.asked = {};
 
 /** A refusal row as a Decisions-table row, for a daemon that sends no table. */
 function decisionFromRow(r) {
@@ -6249,6 +6420,20 @@ function logLines(ev, home) {
   return [[null, a, b, c, tone]];
 }
 
+/** Under a stage filter, a phase line that says what the last phase line
+ * shown said, with no other phase between, is folded into it (the first is
+ * kept): a save files under Write, so Embed showed "Embedding" again after
+ * every checkpoint. Under All nothing is folded. As the cloud's. */
+function foldPhases() {
+  let last = null;
+  return (e) => {
+    if (LOG_STAGE === "all" || e[2] !== "phase") return true;
+    if (e[3] === last) return false;
+    last = e[3];
+    return true;
+  };
+}
+
 /** A log view: the stage selector over the lines. `view.__lines()` hands it
  * the events; `limit` keeps a live view to its newest lines. */
 function logView(key, home, opts) {
@@ -6263,7 +6448,8 @@ function logView(key, home, opts) {
     const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
     const entries = view.__lines()
       .flatMap((ev) => logLines(ev, home))
-      .filter((e) => LOG_STAGE === "all" || e[0] === LOG_STAGE);
+      .filter((e) => LOG_STAGE === "all" || e[0] === LOG_STAGE)
+      .filter(foldPhases());
     const shown = o.limit ? entries.slice(-o.limit) : entries;
     fill(
       box,
@@ -6562,6 +6748,8 @@ try {
   /* private window */
 }
 
+keepState("search", sr, ["result", "error", "busy", "sel", "whole", "detail", "scopeOpen", "recentSeed"]);
+
 const BUDGETS = [500, 1000, 1500, 3000, 6000];
 
 VIEWS.search = {
@@ -6572,6 +6760,11 @@ VIEWS.search = {
     if (state.pending.searchStore !== undefined) {
       sr.store = state.pending.searchStore;
       delete state.pending.searchStore;
+    }
+    // A query restored after a reload is asked again, so the page shows its answer.
+    if (!state.pending.searchQuery && sr.query && !sr.result && !sr.busy && !sr.error && !searchView.rerun) {
+      searchView.rerun = true;
+      setTimeout(() => runSearch(), 0);
     }
     if (state.pending.searchQuery) {
       sr.query = state.pending.searchQuery;
@@ -6707,6 +6900,17 @@ VIEWS.search = {
         sr.result && !sr.result.error ? el("span", { class: "row gap6 nowrap t-mono-sm" }, el("span", { class: "dot blue" }), resultMeta()) : null,
       ),
     );
+    // Every store as a chip, the scope dropdown's choices at a glance.
+    const names = (data.stores?.stores || []).filter((s) => s.files).map((s) => s.name);
+    if (names.length > 1)
+      bar.append(
+        el(
+          "div",
+          { class: "store-strip" },
+          el("span", { class: "eyebrow", text: "STORES" }),
+          [["", "all stores"], ...names.map((s) => [s, s])].map(([v, label]) => btn({ class: "chip sm mono", "aria-pressed": String((sr.store || "") === v), onclick: () => ((sr.store = v), repaint(), sr.query && runSearch()) }, label)),
+        ),
+      );
     function paintBody() {
       fill(body, searchBody());
     }
@@ -6864,7 +7068,7 @@ function rankedView(r) {
   }
   const tokens = r.tokens || 0;
   const pctUsed = Math.min(100, (tokens / sr.budget) * 100);
-  const used = bar(pctUsed, `h5 grow ${pctUsed > 90 ? "accent" : "green"}`);
+  const used = bar(pctUsed, `h5 grow ${pctUsed > 90 ? "accent" : "green"}`, "Token budget", `sent::${n(tokens)} tokens||budget::${n(sr.budget)}||used::${Math.round(pctUsed)}%`);
   used.classList.add("minw60");
   used.setAttribute("data-tip", "Token budget");
   used.setAttribute("data-tip-rows", rows([["sent", `${n(tokens)} tokens`], ["budget", n(sr.budget)], ["headroom", n(Math.max(0, sr.budget - tokens))], ["shown", r.truncated ? `${r.truncated.shown} of ${r.truncated.total}` : `${hits.length} of ${hits.length}`]]));
@@ -6887,8 +7091,8 @@ function rankedView(r) {
             el(
               "div",
               { class: "hit-head" },
-              pathSpan(hitPath(g), "p", g.path),
-              el("span", { class: "t-mono-sm grow", text: g.store || "" }),
+              g.store ? el("span", { class: "t-mono-sm nowrap", text: `${g.store} ›` }) : null,
+              pathSpan(hitPath(g), "p grow", g.path),
               g.remote ? pill(g.remote.badge, "blue", { dot: false, sm: true, tip: `${g.remote.revision ? `indexed at ${g.remote.revision}` : "revision not stated"} · ${lagWord(g.remote.behind_seconds)}` }) : null,
               el("span", { class: "t-mono-sm nowrap", text: g.spans.length > 1 ? `${g.spans.length} spans` : `${g.spans[0].start_line}-${g.spans[0].end_line}` }),
             ),
@@ -7004,7 +7208,7 @@ function detailPanel() {
       el(
         "div",
         { class: "card-b line-row gap8" },
-        el("div", { class: "row nowrap" }, pathSpan(hitPath(h), "mono t-b t-sm", h.path), el("span", { class: "t-mono-sm grow", text: span ? `${span.start_line}-${span.end_line}` : `${h.start_line}-${h.end_line}` }), pill(fresh ? (span && span.from_disk ? "read from disk" : "fresh") : "stale", fresh ? "green" : "amber")),
+        el("div", { class: "row nowrap" }, h.store ? el("span", { class: "t-mono-sm nowrap", text: `${h.store} ›` }) : null, pathSpan(hitPath(h), "mono t-b t-sm", h.path), el("span", { class: "t-mono-sm grow", text: span ? `${span.start_line}-${span.end_line}` : `${h.start_line}-${h.end_line}` }), pill(fresh ? (span && span.from_disk ? "read from disk" : "fresh") : "stale", fresh ? "green" : "amber")),
         el("div", { class: "title-strip", text: h.symbol ? `${h.symbol_kind || ""} ${h.symbol}`.trim() : h.line || h.path }),
       ),
       d.error ? errorBox(d.error) : lines ? el("div", { class: "lines scroll" }, lines) : el("div", { class: "empty" }, "Reading…"),
@@ -7068,7 +7272,7 @@ function briefView(out) {
         ? el(
             "div",
             { class: "card" },
-            el("div", { class: "card-h tight" }, pathSpan(hitPath(top), "mono t-b t-sm min0", top.path), el("span", { class: "t-mono-sm", text: `${top.start_line}-${top.end_line}` }), el("span", { class: "t-mono-sm grow", text: top.store || "" }), listBadges(top.lists), el("span", { class: `dot ${top.fresh === false ? "amber" : "green"}` })),
+            el("div", { class: "card-h tight" }, top.store ? el("span", { class: "t-mono-sm nowrap", text: `${top.store} ›` }) : null, pathSpan(hitPath(top), "mono t-b t-sm min0", top.path), el("span", { class: "t-mono-sm grow", text: `${top.start_line}-${top.end_line}` }), listBadges(top.lists), el("span", { class: `dot ${top.fresh === false ? "amber" : "green"}` })),
             top.text ? el("div", { class: "lines wrap" }, top.text.split("\n").map((t, i) => el("div", { class: "l" }, el("span", { class: "n", text: String(top.start_line + i) }), el("span", { text: t })))) : empty("The budget left no room for the text; the locator is still sent."),
           )
         : null,
@@ -7138,7 +7342,7 @@ function linesView(r) {
           el(
             "div",
             { class: "card hit-group" },
-            el("div", { class: "hit-head" }, pathSpan(hitPath(g), "p", g.path), el("span", { class: "t-mono-sm grow", text: g.store || "" }), el("span", { class: "t-mono-sm", text: plural(g.spans.length, "line") })),
+            el("div", { class: "hit-head" }, g.store ? el("span", { class: "t-mono-sm nowrap", text: `${g.store} ›` }) : null, pathSpan(hitPath(g), "p grow", g.path), el("span", { class: "t-mono-sm", text: plural(g.spans.length, "line") })),
             g.spans.map((m) =>
               btn(
                 { class: `hit${sr.sel === m.i ? " on" : ""}`, onclick: () => openHit({ ...m, path: m.path, start_line: m.start_line, end_line: m.end_line || m.start_line, store: m.store, symbol: null, line: m.text }) },
@@ -7160,7 +7364,7 @@ function linesView(r) {
 
 /* One store at a time, picked in the toolbar: the graph of every store at once
  * is a hairball on a small corpus and wedged the daemon on the 879k one. */
-const gr = { store: "", sel: "", find: "", off: {}, dir: "in", unres: false, mapOpen: true, data: null, sym: null, map: null, br: { sym: "", hops: 3, verified: true, q: "", hop: "all", edge: "all", out: null }, pt: { from: "", to: "", verified: true, strict: false, out: null, showInferred: false } };
+const gr = keepState("graph", { store: "", sel: "", find: "", off: {}, dir: "in", unres: false, mapOpen: true, data: null, sym: null, map: null, br: { sym: "", hops: 3, verified: true, q: "", hop: "all", edge: "all", out: null }, pt: { from: "", to: "", verified: true, strict: false, out: null, showInferred: false } }, ["data", "sym", "map"]);
 
 let graphDragging = false;
 
@@ -8241,7 +8445,7 @@ function pathTab(picker) {
 
 // -------------------------------------------------------------------- agents
 
-const ag = { client: "", method: "json", reveal: null };
+const ag = keepState("agents", { client: "", method: "json", reveal: null }, ["reveal"]);
 
 VIEWS.agents = {
   needs: () => ["agents", "ledger"],
@@ -8549,13 +8753,15 @@ function agHealth(a) {
 
 // -------------------------------------------------------------------- ledger
 
-const lg = { tab: "sessions", filter: null, q: "", store: "all", tier: "all", zero: false, replay: null };
+const lg = keepState("ledger", { tab: "sessions", filter: null, q: "", store: "all", tier: "all", zero: false, replay: null }, ["replay"]);
 
 VIEWS.ledger = {
   needs: (route) => ["ledger", "stores", "cloud"].concat((route.parts[0] || "sessions") === "replay" ? ["replay"] : []),
   live: ["ledger"],
   render(route) {
     lg.tab = route.parts[0] || "sessions";
+    // A store kept from an earlier visit that has since gone filters nothing.
+    if (lg.store !== "all" && !store(lg.store)) lg.store = "all";
     const L = data.ledger || {};
     const rec = recordingWord();
     const recState = L.recording && typeof L.recording === "object" ? L.recording : { on: rec === "on", reason: rec === "on" ? null : "flag" };
@@ -8609,13 +8815,17 @@ VIEWS.ledger = {
         "div",
         { class: "q4" },
         kpi("Queries recorded", n(L.queries), `${plural(L.clients || byClient.length, "client")}${lastRow ? ` · last ${ago(lastRow.at)}` : ""}`),
-        kpi("Fewer tokens", L.ratio ? `${L.ratio.toFixed(1)}×` : "—", L.ratio ? `than reading those files whole · coverage ${L.coverage}% · ${L.tier}` : "counted once an agent asks", { warn: false }),
+        kpi("Fewer tokens", L.ratio ? `${L.ratio.toFixed(1)}×` : "—", L.ratio ? `than reading those files whole · coverage ${L.coverage}% · ${L.tier}` : "counted once an agent asks", { accent: !!L.ratio }),
         kpi("Net tokens not read", n(L.net_tokens), "whole-file less excerpt, rows with a hit"),
         kpi("Zero-hit", `${zeroShare.toFixed(0)}%`, `${n(L.zero_hit)} queries the corpus could not answer`),
       ),
     );
     const whole = L.whole_file_tokens || 0;
     const sent = L.excerpt_tokens || 0;
+    // Both bars on one scale, the larger full: agents can be sent more than
+    // the whole files (each answer counted per call), and then the orange
+    // bar is the long one, not one that runs off its track.
+    const readMax = Math.max(whole, sent);
     parts.push(
       el(
         "div",
@@ -8625,13 +8835,14 @@ VIEWS.ledger = {
           { class: "card pad" },
           el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "What agents read, against reading whole files" }), el("span", { class: "t-mono-sm", text: "store tokenizer · modelled" })),
           [
-            ["Reading every file a retrieval answered from", whole, 100, "line"],
-            ["What agents were actually sent", sent, whole ? Math.max(0.6, (sent / whole) * 100) : 0, "accent"],
-          ].map(([k, v, p, tone]) => {
+            ["Reading every file a retrieval answered from", whole, "line"],
+            ["What agents were actually sent", sent, "accent"],
+          ].map(([k, v, tone]) => {
+            const p = readMax ? Math.max(v ? 0.6 : 0, (v / readMax) * 100) : 0;
             const b = bar(p, `h10 ${tone === "accent" ? "accent" : ""}`);
             if (tone === "line") b.firstChild.style.background = "var(--line)";
             b.setAttribute("data-tip", k);
-            b.setAttribute("data-tip-rows", rows([["tokens", n(v)], ["relative", `${p.toFixed(1)}%`], ["that is", p < 100 && L.ratio ? `${L.ratio.toFixed(1)}× fewer` : "the baseline"]]));
+            b.setAttribute("data-tip-rows", rows([["tokens", n(v)], tone === "accent" ? ["against whole files", whole ? `${Math.round((sent / whole) * 100)}%` : "—"] : ["that is", "the baseline"], tone === "accent" && L.ratio ? ["that is", `${L.ratio.toFixed(1)}× fewer`] : null].filter(Boolean)));
             return el("div", { class: "col gap4" }, el("div", { class: "row base t-sm" }, el("span", { class: "grow ink2", text: k }), el("span", { class: "mono t-b", text: n(v) })), b);
           }),
           el("div", { class: "row gap6 tb-line" }, [`coverage ${L.coverage || 0}%`, `refunds ${n(L.refunds)} · ${L.refunds_measured ? "measured" : "a floor"}`, `tier ${L.tier || "modelled"}`].map((f) => el("span", { class: "factchip", text: f }))),
@@ -8654,6 +8865,40 @@ VIEWS.ledger = {
         ),
       ),
     );
+    // Savings by agent and by store, summed from the sessions the daemon
+    // sends (its newest, capped), so the tables say how many they cover.
+    const savings = (title, key, col) => {
+      const groups = new Map();
+      for (const s of sessionsAll) {
+        const k = s[key] || "—";
+        const g = groups.get(k) || { name: k, sessions: 0, retrievals: 0, net: 0, saved: 0, priced: false, measured: true };
+        g.sessions += 1;
+        g.retrievals += s.retrievals || 0;
+        g.net += s.net_tokens || 0;
+        if (s.saved_usd != null) (g.saved += s.saved_usd), (g.priced = true);
+        g.measured = g.measured && s.tier === "measured";
+        groups.set(k, g);
+      }
+      const list = [...groups.values()];
+      const g = grid({
+        key: `lg:by-${key}`,
+        caption: title,
+        rows: list,
+        sort: "net",
+        dir: "desc",
+        empty: "Nothing recorded yet.",
+        columns: [
+          { key: "name", label: col, cls: "m t-b", sort: (r) => r.name, render: (r) => r.name },
+          { key: "sessions", label: "Sessions", cls: "m r", firstDir: "desc", sort: (r) => r.sessions, render: (r) => n(r.sessions) },
+          { key: "reads", label: "Retrievals", cls: "m r", firstDir: "desc", sort: (r) => r.retrievals, render: (r) => n(r.retrievals) },
+          { key: "net", label: "Net tokens", cls: "m r", firstDir: "desc", sort: (r) => r.net, render: (r) => n(r.net) },
+          { key: "saved", label: "Saved", cls: "m r", firstDir: "desc", sort: (r) => r.saved, render: (r) => (r.priced ? el("span", { "data-tip": "at each session's own model input price; sessions with no known model are not priced" }, dollars(r.saved)) : "—") },
+          { key: "tier", label: "Tier", sort: (r) => (r.measured ? 1 : 0), render: (r) => pill(r.measured ? "measured" : "modelled", r.measured ? "blue" : "grey", { dot: false, tip: r.measured ? "Every session measured from the agent's own session log" : "Modelled with the store tokenizer, not observed" }) },
+        ],
+      });
+      return el("div", { class: "card" }, el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: title }), meta(sessionsAll.length ? `newest ${plural(sessionsAll.length, "session")}` : "no sessions yet")), g.node);
+    };
+    parts.push(el("div", { class: "split s-1-1" }, savings("Savings by agent", "client", "Agent"), savings("Savings by store", "store", "Store")));
     // Usage from the clients' own logs: their tokens and cost beside ours.
     const usage = L.usage || {};
     const tabsNode = tabs(
@@ -8695,6 +8940,18 @@ VIEWS.ledger = {
         ].map(([c, tipText]) => btn({ class: "cmdchip", "data-tip": tipText, onclick: () => copy(c) }, c, icon(I.copy, 11, { w: 2 }))),
         el("span", { class: "spacer" }),
         el("span", { class: "t-mono-sm", text: "~/.semlith/stores/<name>/store.db · table retrievals" }),
+      ),
+    );
+    // The chain and retention foot, as the cloud's.
+    const broken = L.intact === false;
+    parts.push(
+      el(
+        "div",
+        { class: "row gap8 t-mono-sm ledger-foot" },
+        dot(broken ? "red" : "green"),
+        el("span", { text: "rows kept on this machine until their store is deleted" }),
+        el("span", { text: "·" }),
+        el("span", { text: !L.queries ? "hash chain · nothing written yet" : broken ? `hash chain breaks${L.break ? ` at row ${n(L.break.row)} in ${L.break.store}` : ""}` : `hash chain verified · ${plural(L.queries, "query", "queries")}` }),
       ),
     );
     return el("div", { class: "page" }, parts);
@@ -8939,10 +9196,11 @@ const CADENCES = [
   ["month", 2592000],
 ];
 
-const rp = { kind: "savings", window: "month", format: "markdown", stores: [], hash: false, excerpts: false, model: "", out: null, busy: false, picking: false };
+const rp = keepState("reports", { kind: "savings", window: "month", format: "markdown", stores: [], hash: false, excerpts: false, model: "", out: null, busy: false, picking: false }, ["out", "busy", "picking"]);
 
 VIEWS.reports = {
-  needs: () => ["stores", "prices", "schedules"],
+  // The ledger for the chain chip on the savings net line.
+  needs: () => ["stores", "prices", "schedules", "ledger"],
   live: [],
   render(route, holder) {
     const prices = data.prices || {};
@@ -9033,7 +9291,7 @@ VIEWS.reports = {
           el(
             "div",
             { class: "save-line net" },
-            el("span", { class: "row gap6" }, el("span", { class: "t-b big14", text: "Net" }), facts.filter((f) => !/^Net/.test(f[0])).map((f) => el("span", { class: "factchip sm", text: `${f[0].toLowerCase()} ${f[1]}` }))),
+            el("span", { class: "row gap6" }, el("span", { class: "t-b big14", text: "Net" }), facts.filter((f) => !/^Net/.test(f[0])).map((f) => el("span", { class: "factchip sm", text: `${f[0].toLowerCase()} ${f[1]}` })), data.ledger ? el("span", { class: `factchip sm${data.ledger.intact === false ? " red" : ""}`, "data-tip": data.ledger.intact === false ? "A ledger row does not match its parent; see the Ledger page" : "Every ledger row matches its parent in the hash chain", text: data.ledger.intact === false ? "chain broken" : "chain verified" }) : null),
             el("span", { class: "tok", text: net[1] || "—" }),
             el("span", { class: "cost", text: netCost[1] || "—" }),
           ),
