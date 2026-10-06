@@ -458,17 +458,8 @@ failed and the command that shows it, repairs a registration that cannot launch,
 and catches what nothing else does — a server registered at user scope and
 switched off for one directory, which every check run from elsewhere calls
 healthy. `--brief` is one line and an exit code for a shell prompt or a
-session-start hook, and [docs/clients.md](docs/clients.md) has that snippet.
-
-**On code, an agent with Grep reaches for Grep, and only the gate changes
-that.** `setup` installs a soft hook by default: it adds a line pointing at
-semlith and never blocks anything. Measured on 50 held-out code questions with
-Opus 5.5, no wording of the instructions, the tool descriptions or the hook
-moved it — 0 to 5 of 50 sessions called semlith. `semlith setup --hook-mode
-gate` refuses a session's first raw lookup in an indexed folder until it has
-made one semlith call: 44 of 50 sessions then used it, with two more correct
-answers and about 31 % more cost a session. It stays opt-in. On documents the
-picture is the opposite: 116 of 127 sessions called semlith unforced (#189).
+session-start hook, and [docs/clients.md](docs/clients.md) has that snippet,
+and why on code only `setup --hook-mode gate` makes agents call semlith (#189).
 
 ## What gets indexed
 
