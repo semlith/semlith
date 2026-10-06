@@ -4519,7 +4519,7 @@ function tickAgo() {
 
 function writeText(saves, at, ms) {
   if (!saves) return "not yet";
-  return `index saved ${saves === 1 ? "once" : `${n(saves)} times`}${at ? ` · last ${agoMs(at)}` : ""}${ms ? ` (${(ms / 1000).toFixed(1)} s)` : ""}`;
+  return `index saved ${saves === 1 ? "once" : `${n(saves)} times`}${at ? ` · last ${agoMs(at)}` : ""}${ms ? ` (${ms < 100 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`})` : ""}`;
 }
 
 /** What is slowest now, and which lane it is (read, chunk, embed, write or
@@ -4539,7 +4539,10 @@ function pipelineStatus(r) {
   if (/^reading and chunking/i.test(d)) return [`Reading a large file: ${d.replace(/^reading and chunking:?\s*/i, "")}`, "read"];
   if (r.phase === "drain") return [`Finishing embeddings in flight before saving: ${plural(r.backlog || 0, "chunk")}`, "embed"];
   if (r.phase === "save") return ["Writing the index to disk", "write"];
-  if ((r.backlog || 0) > 1000) return [`Embed is the slowest step now: ${laneRatesText(r) || "the lanes"} · ${n(r.backlog)} chunks waiting`, "embed"];
+  if ((r.backlog || 0) > 1000) {
+    const lanes = laneRatesText(r);
+    return [`Embed is the slowest step now: ${lanes ? `${lanes} · ${n(r.backlog)} chunks waiting` : `${n(r.backlog)} chunks waiting for a lane`}`, "embed"];
+  }
   return ["Reading and embedding keep pace", null];
 }
 

@@ -3566,7 +3566,11 @@ button.gl-row:hover,
   color: var(--ink-2);
 }
 .pipe-bar.none {
-  height: 6px;
+  display: none;
+}
+/* Write has no bar: its words take the bar's place, left to right. */
+.pipe-row[data-lane="write"] .pipe-v {
+  grid-column: 2 / 4;
 }
 .pipe-v {
   font: 12px var(--mono);
@@ -5235,7 +5239,8 @@ button.gl-row:hover,
   .log .ln .a {
     display: none;
   }
-  .pipe-row .pipe-v {
+  .pipe-row .pipe-v,
+  .pipe-row[data-lane="write"] .pipe-v {
     grid-column: 2;
   }
   .q4,
