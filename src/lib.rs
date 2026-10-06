@@ -4980,6 +4980,7 @@ impl Semlith {
     fn tx_begin(&self) -> Result<()> {
         if self.db.is_autocommit() {
             self.db.execute_batch("BEGIN")?;
+            store::drop_insert_trigger(&self.db)?;
         }
         Ok(())
     }

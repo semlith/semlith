@@ -53,13 +53,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     tokenize='unicode61'
 );
 
--- External-content FTS5 does not track its source table by itself. These keep
--- the two in step; a delete has to hand back the original text so FTS5 can
--- find the terms it needs to remove. Foreign-key cascades fire them too, which
--- is what keeps `delete_file` correct.
-CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
-    INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
-END;
+-- External-content FTS5 does not track its source table by itself. A delete
+-- has to hand back the original text so FTS5 can find the terms it needs to
+-- remove; this trigger does, and foreign-key cascades fire it too, which is
+-- what keeps `delete_file` correct. An insert is indexed by `insert_chunk`
+-- itself: the trigger that did it cost twice the row's own insert (#198), and
+-- one an older binary recreated is dropped again before every write (see
+-- `drop_insert_trigger`).
+DROP TRIGGER IF EXISTS chunks_fts_insert;
 
 CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
     INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.id, old.text);
@@ -1241,7 +1242,26 @@ pub fn insert_chunk(
          VALUES (?1, ?2, ?3, ?4, ?5)",
     )?
     .execute(params![file_id, ord as i64, start_line, end_line, text])?;
-    Ok(db.last_insert_rowid())
+    let id = db.last_insert_rowid();
+    db.prepare_cached("INSERT INTO chunks_fts(rowid, text) VALUES (?1, ?2)")?
+        .execute(params![id, text])?;
+    Ok(id)
+}
+
+/// Drop the insert trigger an older semlith's schema puts back when it opens
+/// this store, inside the writer's transaction so it cannot come back before
+/// the commit. With it in place every chunk would be indexed twice.
+pub fn drop_insert_trigger(db: &Connection) -> Result<()> {
+    let present: bool = db
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'chunks_fts_insert')",
+        )?
+        .query_row([], |r| r.get(0))?;
+    if present {
+        db.execute_batch("DROP TRIGGER chunks_fts_insert")?;
+    }
+    Ok(())
 }
 
 /// Indexed files whose path ends with `suffix`, most specific first.
@@ -5490,6 +5510,37 @@ mod tests {
         let into = edges_in(&db, "callee", &[]).unwrap();
         assert_eq!(into.len(), 1, "{into:?}");
         assert_eq!(into[0].line, None);
+    }
+
+    /// An older binary opening the store puts the insert trigger back; the
+    /// writer drops it before inserting, so a chunk is indexed once (#198).
+    #[test]
+    fn an_insert_trigger_an_older_binary_restored_does_not_index_twice() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        add_columns(&db).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+                 INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
+             END;",
+        )
+        .unwrap();
+        db.execute_batch("BEGIN").unwrap();
+        drop_insert_trigger(&db).unwrap();
+        let f = insert_file(&db, "/a/lib.rs", "h", 10, 0).unwrap();
+        let id = insert_chunk(&db, f, 0, 1, 5, "retry backoff and jitter").unwrap();
+        db.execute_batch("COMMIT").unwrap();
+        assert_eq!(
+            keyword_search(&db, "jitter", 10, &[]).unwrap(),
+            vec![id as u64]
+        );
+        // Indexed once: an integrity check of external content fails on a
+        // doubled row.
+        db.execute_batch("INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1);")
+            .unwrap();
+        // And a delete still takes it out of the index.
+        db.execute("DELETE FROM files WHERE id = ?1", [f]).unwrap();
+        assert!(keyword_search(&db, "jitter", 10, &[]).unwrap().is_empty());
     }
 
     #[test]
