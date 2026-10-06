@@ -228,6 +228,14 @@ def main():
             issue = known.get(check_id)
             failure = None
             skipped = None
+            # Every check starts from the pages' defaults: page state and the
+            # wizard now survive a reload (per viewer), so one check's filters
+            # would otherwise be the next one's starting point.
+            try:
+                drive.eval("(() => { try { for (const k of Object.keys(localStorage)) if (k.startsWith('semlith-ui:')) localStorage.removeItem(k);"
+                           " sessionStorage.removeItem('semlith-wz'); if (typeof KEPT !== 'undefined') KEPT.length = 0; } catch (e) {} return true; })()")
+            except Exception:
+                pass
             try:
                 function(drive)
             except findings.Skipped as reason:
