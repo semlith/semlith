@@ -920,7 +920,16 @@ fn check_cpu() -> Result<Check> {
         Ok(got)
     })?;
     if check.passed {
-        note_known_answer("cpu", check.chunks_per_s);
+        // In batches, as a run embeds: see the worker's figure.
+        let (texts, _) = fixture();
+        let started = Instant::now();
+        model
+            .embed(&texts, Some(8))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        note_known_answer(
+            "cpu",
+            texts.len() as f64 / started.elapsed().as_secs_f64().max(1e-6),
+        );
     }
     Ok(check)
 }
@@ -997,30 +1006,12 @@ pub fn note_rate(lane: &str, per_s: f64) {
     save_rates(&all);
 }
 
-/// How much faster a lane embeds a run's batches than its known-answer
-/// check, which embeds one chunk at a time. Measured on the owner's M1 and a
-/// rented NVIDIA L4 (2026-10-06): the CPU's int8 check 2.7 chunks/s against
-/// about 25 in a run, the Neural Engine 7.1 against about 230, CUDA 110
-/// against about 400, TensorRT 19 against about 400. A first estimate on any
-/// machine is these factors times its own check, until a run measures it.
-fn batch_factor(lane: &str) -> f64 {
-    match lane {
-        "cpu" => 9.0,
-        "ane" => 30.0,
-        "cuda" => 3.6,
-        "trt" => 20.0,
-        "gpu" => 8.0,
-        _ => 4.0,
-    }
-}
-
-/// A lane's known-answer speed, scaled to a run's batches, kept only until a
+/// A lane's speed on the known-answer fixture in batches, kept only until a
 /// run measures the lane.
 pub fn note_known_answer(lane: &str, per_s: f64) {
     if !per_s.is_finite() || per_s <= 0.0 {
         return;
     }
-    let per_s = per_s * batch_factor(lane);
     let mut all = rates();
     if all
         .get(lane)
@@ -1607,7 +1598,7 @@ fn worker_args(lane: &Arc<Lane>) -> Result<Vec<String>> {
 /// The Core ML worker's protocol: bump it whenever the `__embed-worker ane`
 /// or `gpu-coreml` code, its arguments or its frames change, and a fresh copy
 /// of the binary becomes the worker (see [`coreml_worker`]).
-pub const COREML_WORKER: u32 = 2;
+pub const COREML_WORKER: u32 = 3;
 
 /// Run the Core ML lanes' worker from the binary that is running now rather
 /// than the stable copy: for developing the worker itself.
@@ -1825,7 +1816,7 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
         }
         bail!("{reason}");
     }
-    if let Some(per_s) = hello["chunks_per_s"].as_f64() {
+    if let Some(per_s) = hello["batch_per_s"].as_f64() {
         note_known_answer(lane.id, per_s);
     }
     if let Some(device) = hello["device"].as_str() {
@@ -2125,15 +2116,33 @@ pub fn worker_main(lane: &str, dir: Option<&Path>, adapter: Option<&str>) -> i32
     // The worker tokenises only here, for the fixture; a run's batches arrive
     // as ids.
     let tokenizer = crate::model_cache_dir().and_then(|cache| crate::session::tokenizer(&cache));
+    let mut batched = None;
     let check = tokenizer.and_then(|tokenizer| {
-        known_answer(lane, &session.device(), session.variant(), |texts| {
+        let check = known_answer(lane, &session.device(), session.variant(), |texts| {
             let batch = texts
                 .iter()
                 .map(|text| crate::session::encode(&tokenizer, text))
                 .collect::<Result<Vec<_>>>()?;
             let rows: Vec<&[u32]> = batch.iter().map(Vec::as_slice).collect();
             session.embed(&rows)
-        })
+        })?;
+        // The check embeds one chunk at a time, which is latency, not what a
+        // run's batches manage: the fixture again in batches of eight, timed,
+        // is this lane's first figure for an estimate.
+        if check.passed {
+            let (texts, _) = fixture();
+            let ids = texts
+                .iter()
+                .map(|text| crate::session::encode(&tokenizer, text))
+                .collect::<Result<Vec<_>>>()?;
+            let started = Instant::now();
+            for group in ids.chunks(8) {
+                let rows: Vec<&[u32]> = group.iter().map(Vec::as_slice).collect();
+                session.embed(&rows)?;
+            }
+            batched = Some(ids.len() as f64 / started.elapsed().as_secs_f64().max(1e-6));
+        }
+        Ok(check)
     });
     match check {
         Ok(check) if check.passed => say(
@@ -2144,6 +2153,7 @@ pub fn worker_main(lane: &str, dir: Option<&Path>, adapter: Option<&str>) -> i32
                 "variant": check.variant,
                 "cosine": check.cosine,
                 "chunks_per_s": check.chunks_per_s,
+                "batch_per_s": batched,
             }),
         ),
         Ok(check) => {
