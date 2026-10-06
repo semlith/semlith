@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, mpsc};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Written beside the store's lock while a daemon holds it, so `semlith mcp`
 /// can find the daemon and forward to it instead of fighting for the lock.
@@ -68,6 +68,14 @@ const LOG_HISTORY: usize = 500;
 /// for a week does not accumulate them without limit. Only finished runs are
 /// ever dropped.
 const RUN_HISTORY: usize = 24;
+
+/// Lines one run's log file keeps before it says it stopped keeping them. A
+/// line is about 200 bytes, so this is about 40 MB for a run of more files
+/// than any measured here.
+const FULL_LOG_LINES: u64 = 200_000;
+
+/// The folder beside `store.db` that holds each run's log in full.
+pub const LOGS_DIR: &str = "logs";
 
 /// The run id a job that is not an index run carries.
 ///
@@ -554,6 +562,16 @@ pub struct RunState {
     /// client reads after.
     log: VecDeque<serde_json::Value>,
     next_seq: u64,
+    /// Every line of the run, in full, on disk beside the store (see
+    /// [`RunState::push_log`]): what the run history shows, where the ring
+    /// above keeps only the last [`LOG_HISTORY`].
+    log_file: Option<PathBuf>,
+    /// The file's name without `.jsonl`, which the page asks for it by.
+    log_key: Option<String>,
+    /// The embedded count and images at the last `embed` line, and when.
+    logged: (u64, u64, Option<Instant>),
+    /// Index saves already said on the log.
+    logged_saves: u64,
     /// The run's expected chunks and its images, embedded and expected (see
     /// `crate::IndexProgress`), as the run's, not the slice's.
     pub expected_chunks: u64,
@@ -635,6 +653,10 @@ impl RunState {
             cache: (0, 0),
             log: VecDeque::new(),
             next_seq: 0,
+            log_file: None,
+            log_key: None,
+            logged: (0, 0, None),
+            logged_saves: 0,
             expected_chunks: 0,
             images: 0,
             images_total: 0,
@@ -1103,6 +1125,15 @@ impl RunState {
             _ => {}
         }
 
+        // The embed and write stages say themselves on the log too, as their
+        // own lines: embedding every two seconds while it moves, and each
+        // index save once it is written. The run's last figures go before
+        // its `done`.
+        let finishing = matches!(
+            event.get("event").and_then(serde_json::Value::as_str),
+            Some("done" | "error")
+        );
+        self.stage_lines(finishing);
         // Per-batch progress moves the snapshot and nothing else: a log line
         // per eight chunks would push every file line off the ring.
         if matches!(
@@ -1111,13 +1142,83 @@ impl RunState {
         ) {
             return;
         }
-        let mut line = event.clone();
+        self.push_log(event.clone());
+    }
+
+    /// An `embed` line when embedding has moved and two seconds have passed
+    /// since the last (or `now`), and a `write` line for each index save the
+    /// log has not said yet.
+    fn stage_lines(&mut self, now: bool) {
+        let (chunks, images, at) = self.logged;
+        let moved = self.chunks > chunks || self.images > images;
+        if moved && (now || at.is_none_or(|at| at.elapsed() >= Duration::from_secs(2))) {
+            let lanes: serde_json::Map<String, serde_json::Value> = self
+                .lane_rates()
+                .into_iter()
+                .filter(|(_, rate)| *rate > 0.0)
+                .map(|(lane, rate)| (lane, serde_json::json!((rate * 10.0).round() / 10.0)))
+                .collect();
+            self.push_log(serde_json::json!({
+                "event": "embed",
+                "embedded": self.chunks,
+                "delta": self.chunks.saturating_sub(chunks),
+                "expected": self.expected_chunks.max(self.rows),
+                "images": self.images,
+                "images_total": self.images_total,
+                "lanes": lanes,
+            }));
+            self.logged = (self.chunks, self.images, Some(Instant::now()));
+        }
+        if self.saves > self.logged_saves {
+            self.logged_saves = self.saves;
+            self.push_log(serde_json::json!({
+                "event": "write",
+                "saves": self.saves,
+                "ms": self.save_ms,
+                "embedded": self.chunks,
+                "rows": self.rows,
+            }));
+        }
+    }
+
+    /// One line onto the run's log: numbered for a page catching up, kept in
+    /// the ring, and appended to the run's file in full.
+    fn push_log(&mut self, mut line: serde_json::Value) {
         if let Some(object) = line.as_object_mut() {
             object.insert("seq".into(), serde_json::json!(self.next_seq));
             // When, for the run history's log (0.35.0); additive on the line.
             object.entry("at").or_insert(serde_json::json!(now()));
         }
         self.next_seq += 1;
+        if let Some(path) = &self.log_file {
+            use std::io::Write;
+            let line = if self.next_seq <= FULL_LOG_LINES {
+                Some(line.to_string())
+            } else if self.next_seq == FULL_LOG_LINES + 1 {
+                Some(
+                    serde_json::json!({
+                        "event": "truncated",
+                        "text": format!("the log keeps a run's first {FULL_LOG_LINES} lines"),
+                        "at": now(),
+                    })
+                    .to_string(),
+                )
+            } else {
+                None
+            };
+            if let Some(line) = line {
+                // ponytail: an open and append per line, about 20 µs; a
+                // held handle if a run's lines ever cost that much.
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut file| writeln!(file, "{line}"));
+            }
+        }
         if self.log.len() == LOG_HISTORY {
             self.log.pop_front();
         }
@@ -1182,6 +1283,8 @@ impl RunState {
             "chunks": self.chunks,
             "stages": stages,
             "log": log,
+            // The whole log, by `/api/index/history/log`.
+            "log_file": self.log_key,
         })
     }
 }
@@ -1216,6 +1319,21 @@ fn history_line(event: &serde_json::Value) -> serde_json::Value {
             )
         }
         "error" => ("error", format!("error: {}", text("error"))),
+        "embed" => (
+            "info",
+            format!(
+                "embedded {} of {} chunks",
+                event
+                    .get("embedded")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                event
+                    .get("expected")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            ),
+        ),
+        "write" => ("info", "index saved".to_string()),
         "done" => (
             "info",
             format!(
@@ -1260,10 +1378,68 @@ fn remember_run(dir: &Path, row: &serde_json::Value) {
     if let Ok(text) = std::fs::read_to_string(&path) {
         let lines: Vec<&str> = text.lines().collect();
         if lines.len() > HISTORY_KEEP * 2 {
-            let kept = lines[lines.len() - HISTORY_KEEP..].join("\n") + "\n";
-            let _ = crate::home::write_private(&path, kept.as_bytes());
+            let kept = &lines[lines.len() - HISTORY_KEEP..];
+            let _ = crate::home::write_private(&path, (kept.join("\n") + "\n").as_bytes());
+            forget_logs(dir, kept);
         }
     }
+}
+
+/// Delete the log files of runs older than every run the history still keeps.
+/// A file is named for the millisecond its run began, so a run still going,
+/// which has no row yet, is newer than all of them and is left alone.
+fn forget_logs(dir: &Path, kept: &[&str]) {
+    let began = |key: &str| key.split('-').next().and_then(|ms| ms.parse::<u64>().ok());
+    let Some(oldest) = kept
+        .iter()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|row| row["log_file"].as_str().and_then(began))
+        .min()
+    else {
+        return;
+    };
+    for entry in std::fs::read_dir(dir.join(LOGS_DIR))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name
+            .strip_suffix(".jsonl")
+            .and_then(began)
+            .is_some_and(|ms| ms < oldest)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// One run's whole log, from line `from` (counted from 0), at most `limit`
+/// lines, and whether more follow. `key` is a history row's `log_file`;
+/// anything that is not one is refused, so the name cannot leave the folder.
+pub fn run_log(
+    dir: &Path,
+    key: &str,
+    from: usize,
+    limit: usize,
+) -> Option<(Vec<serde_json::Value>, bool)> {
+    let valid = key.split_once('-').is_some_and(|(ms, id)| {
+        !ms.is_empty()
+            && !id.is_empty()
+            && ms.bytes().all(|b| b.is_ascii_digit())
+            && id.bytes().all(|b| b.is_ascii_digit())
+    });
+    if !valid {
+        return None;
+    }
+    let text = std::fs::read_to_string(dir.join(LOGS_DIR).join(format!("{key}.jsonl"))).ok()?;
+    let mut lines = text
+        .lines()
+        .skip(from)
+        .filter_map(|line| serde_json::from_str(line).ok());
+    let page: Vec<serde_json::Value> = lines.by_ref().take(limit).collect();
+    let more = lines.next().is_some();
+    Some((page, more))
 }
 
 /// A store's finished runs, newest first, at most [`HISTORY_KEEP`].
@@ -1432,7 +1608,11 @@ impl Store {
     /// not finished is never dropped.
     fn begin_run(&self, id: u64, paths: Vec<PathBuf>, kind: RunKind) {
         let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
-        runs.push(RunState::new(id, paths, kind));
+        let mut run = RunState::new(id, paths, kind);
+        let key = format!("{}-{id}", now_ms());
+        run.log_file = Some(self.dir.join(LOGS_DIR).join(format!("{key}.jsonl")));
+        run.log_key = Some(key);
+        runs.push(run);
         while runs.len() > RUN_HISTORY {
             match runs.iter().position(|run| run.status.finished()) {
                 Some(at) => {
@@ -1847,6 +2027,7 @@ impl Store {
                 ("saves", serde_json::json!(run.saves)),
                 ("saved_at", serde_json::json!(run.saved_at)),
                 ("save_ms", serde_json::json!(run.save_ms)),
+                ("log_file", serde_json::json!(run.log_key)),
             ] {
                 object.insert(key.to_string(), value);
             }
@@ -5929,6 +6110,37 @@ mod tests {
         assert!(admission.held().is_empty());
         admission.finish(ids[2]);
         assert_eq!(admission.running(), 1, "then the queue moves");
+    }
+
+    /// Embedding and index saves say themselves on the log, every line also
+    /// lands in the run's file, and the history route pages that file and
+    /// refuses a name that is not a run's.
+    #[test]
+    fn every_stage_is_logged_and_the_whole_log_is_kept_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = RunState::new(3, Vec::new(), RunKind::Run);
+        run.log_file = Some(dir.path().join(LOGS_DIR).join("1700000000000-3.jsonl"));
+        run.log_key = Some("1700000000000-3".into());
+        run.absorb(&serde_json::json!({ "event": "file", "outcome": "indexing", "path": "/r/a.md", "why": "4 chunks", "rows": 4 }));
+        run.absorb(&serde_json::json!({ "event": "progress", "chunks": 4, "rows": 4 }));
+        run.absorb(&serde_json::json!({ "event": "phase", "phase": "save" }));
+        run.absorb(&serde_json::json!({ "event": "phase", "phase": "embed" }));
+        run.absorb(&serde_json::json!({ "event": "done", "indexed": 1, "chunks": 4 }));
+        let events: Vec<&str> = run.log.iter().filter_map(|l| l["event"].as_str()).collect();
+        assert!(events.contains(&"embed"), "{events:?}");
+        assert!(events.contains(&"write"), "{events:?}");
+        assert_eq!(events.last(), Some(&"done"), "{events:?}");
+
+        let (all, more) = run_log(dir.path(), "1700000000000-3", 0, 100).unwrap();
+        assert!(!more);
+        assert_eq!(all.len(), run.log.len(), "the file holds every line");
+        let (page, more) = run_log(dir.path(), "1700000000000-3", 1, 2).unwrap();
+        assert_eq!(page.len(), 2);
+        assert!(more);
+        assert_eq!(page[0]["seq"], all[1]["seq"]);
+        for bad in ["../x", "1-2/../../a", "abc-1", "17", ""] {
+            assert!(run_log(dir.path(), bad, 0, 10).is_none(), "{bad}");
+        }
     }
 
     /// The card's rate is the chunks of the last ten active seconds over

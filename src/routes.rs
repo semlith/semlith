@@ -151,6 +151,7 @@ fn dispatch(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/doctor") => doctor(state),
         (true, _, "/api/index/runs") => index_runs(state),
         (true, _, "/api/index/log") => index_log(state, request),
+        (true, _, "/api/index/history/log") => history_log(state, request),
         (true, _, "/api/projects") => projects(request),
         (true, _, "/api/changes") => changes(state),
         (true, _, "/api/refused") if request.query("decisions") == Some("1") => {
@@ -4180,6 +4181,40 @@ fn index_log(state: &Arc<State>, request: &Request) -> Response {
         .and_then(Value::as_u64)
         .or(after);
     Response::json(&json!({ "store": name, "run": run, "lines": lines, "cursor": last }))
+}
+
+/// One run's whole log, as its file beside the store keeps it: every line the
+/// live log showed, paged so a run of a hundred thousand files is not one
+/// response. `log` is the run's `log_file`; `from` and `limit` page it.
+fn history_log(state: &Arc<State>, request: &Request) -> Response {
+    let Some(name) = request.query("store") else {
+        return Response::error(400, "missing store");
+    };
+    let Some(store) = state.store(name) else {
+        return Response::error(404, &format!("no store called {name} is open"));
+    };
+    let Some(key) = request.query("log") else {
+        return Response::error(400, "missing log");
+    };
+    let from = request
+        .query("from")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let limit = request
+        .query("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(5_000)
+        .clamp(1, 20_000);
+    match crate::daemon::run_log(&store.dir, key, from, limit) {
+        Some((lines, more)) => Response::json(&json!({
+            "store": name,
+            "log": key,
+            "from": from,
+            "lines": lines,
+            "more": more,
+        })),
+        None => Response::error(404, "no log is kept for that run"),
+    }
 }
 
 /// The projects directly under a directory, for the Index page's checklist.
