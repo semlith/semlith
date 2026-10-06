@@ -6012,7 +6012,10 @@ def _(d):
 
 @finding("rc4.1", "a run's bar follows what is read and embedded, not 99 % from the start")
 def _(d):
-    open_clean(d, "", fresh=True)
+    run = wait_for_run(d, a_store(d))
+    if run.get("progress") != 1.0:
+        fail("a finished run reports progress %r, not 1.0" % run.get("progress"))
+    open_clean(d, "stores", fresh=True)
     # The 0.37.0-rc.3 shape: an eighth of the files read, embedding keeping
     # up, so pending_share is 0.002 and the bar read 99 %.
     early = d.eval(
@@ -6031,9 +6034,6 @@ def _(d):
     )
     if full >= 100:
         fail("a running run reads %r %%" % full)
-    run = wait_for_run(d, a_store(d))
-    if run.get("progress") != 1.0:
-        fail("a finished run reports progress %r, not 1.0" % run.get("progress"))
     no_console_errors(d, "run progress")
 
 
