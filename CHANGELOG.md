@@ -11,16 +11,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- A run's bar no longer sits at 99 % from its first second. The portal took
-  how far a run was from the share of written chunks still waiting for a
-  vector, which ignores every file not read yet, so on a machine whose
-  embedding keeps up with its reading a 4,349-file run read 99 % and "almost
-  done" at file 561. The daemon's runs answer now carries `progress`, the share
-  read times the share of what was written that is embedded, and the bar, the
-  header and the time left all follow it. `semlith index -v` had the same
-  fault the other way round: once every file was read it said `~0s left`
-  while embedding still had minutes to go. It takes the same figure, and says
-  `estimating…` under 2 %.
+- **An index run tells the truth about itself, everywhere it is shown.** The
+  owner's walk of this release found the run view guessed at almost
+  everything: Start sat on "Starting…" with nothing behind it, the stage pills
+  were thresholds on the file count, the log only ever said "indexing", and
+  time left swung from 22 h to 1 h 34 within six percent. Now:
+  - The engine says every phase it enters — finding files, reading and
+    chunking, starting a lane, embedding, loading the image model, finishing
+    embeddings in flight, writing the index, finishing up — with a sentence
+    and its timing, and the run card draws them as a timeline, each step held
+    on screen long enough to read but never ahead of what happened. The log
+    carries the same phase lines.
+  - Progress is the work itself: files read, chunks embedded and images
+    embedded, against an expected total the scan counts exactly and each file
+    corrects as it is chunked. The bar only climbs and reaches 100 % only at
+    the end.
+  - Time left is that work over a smoothed rate, seeded by what this
+    machine's lanes have managed (remembered per lane in `lane-rates.json`,
+    first measured by embedding the known-answer fixture in batches). It moves
+    at most a quarter in ten seconds, holds while a lane loads or the index is
+    written, and follows the work when the work changes. The wizard's Index
+    step estimates before Start, for the lanes ticked.
+  - Start lands on the run view at once and shows each request it makes; a
+    person's decisions are recorded with the run and applied as its first
+    phase. A decision on hundreds of files in the store's Review tab is one
+    request per hundred, with a progress line, and the files it lets in are
+    indexed as a run of their own.
+  - The scan before a review is a run that reports its walk, the files read,
+    hashed and checked, and the rules, so the Review card follows it.
+  - The wizard and the store's Runs tab draw the same run card.
+  - Lanes stay loaded between a run's slices: on the walk the Neural Engine's
+    worker went idle during each slice's drain and save, and every slice
+    waited two minutes for it to load again.
+  - `semlith index -v` prints the phases and the same figures.
 - A failed accelerator lane is tried again on the first run ten minutes after
   it failed, and the failure is written to the daemon's log. One transient
   load failure of the Neural Engine lane had left every run on the CPU until
