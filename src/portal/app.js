@@ -1678,15 +1678,18 @@ function activeRun(name) {
 
 // How far a run is, over all of it. Reading finishes long before embedding
 // does, so a bar on bytes read reached 100 % and then sat there (or went back
-// to 0 when embedding began). The daemon's pending_share is the part of the
-// whole run still to do; the bar is the rest, never moving backwards within a
-// run and never reaching 100 % before the run is done.
+// to 0 when embedding began). The daemon's progress is the share read times
+// the share of what was written that is embedded; the bar never moves
+// backwards within a run and never reaches 100 % before the run is done.
+// pending_share alone (rc.3) ignored the files not read yet, so a run whose
+// embedding kept up sat at 99 % from its first second.
 const RUN_HIGH = new Map();
 function runPct(run) {
   if (!run) return 0;
   if (run.status === "done") return 100;
   let p;
-  if (typeof run.pending_share === "number") p = (1 - run.pending_share) * 100;
+  if (typeof run.progress === "number") p = run.progress * 100;
+  else if (typeof run.pending_share === "number") p = (1 - run.pending_share) * 100;
   else if (run.bytes_total) p = (run.bytes / run.bytes_total) * 50;
   else p = run.total ? (run.scanned / run.total) * 50 : 0;
   const key = `${run.store}:${run.id}:${run.started_at || run.submitted || ""}`;

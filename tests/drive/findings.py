@@ -6010,6 +6010,33 @@ def _(d):
     no_console_errors(d, "Settings › About")
 
 
+@finding("rc4.1", "a run's bar follows what is read and embedded, not 99 % from the start")
+def _(d):
+    open_clean(d, "", fresh=True)
+    # The 0.37.0-rc.3 shape: an eighth of the files read, embedding keeping
+    # up, so pending_share is 0.002 and the bar read 99 %.
+    early = d.eval(
+        "runPct({store: 'rc4', id: 1, started_at: 'a', status: 'running', progress: 0.125,"
+        " pending_share: 0.002, bytes: 125, bytes_total: 1000, scanned: 561, total: 4349})"
+    )
+    if not 12 <= early <= 13:
+        fail("an eighth read reads %r %%, not about 12 %%" % early)
+    later = d.eval(
+        "runPct({store: 'rc4', id: 1, started_at: 'a', status: 'running', progress: 0.1})"
+    )
+    if later < early:
+        fail("the bar went backwards within a run: %r then %r" % (early, later))
+    full = d.eval(
+        "runPct({store: 'rc4', id: 2, started_at: 'b', status: 'running', progress: 0.999})"
+    )
+    if full >= 100:
+        fail("a running run reads %r %%" % full)
+    run = wait_for_run(d, a_store(d))
+    if run.get("progress") != 1.0:
+        fail("a finished run reports progress %r, not 1.0" % run.get("progress"))
+    no_console_errors(d, "run progress")
+
+
 @finding("v6.shots", "every v6 view, in light and dark, at 1440px and 390px")
 def _(d):
     """The release record's evidence: one screenshot per view per theme per

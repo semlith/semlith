@@ -671,6 +671,31 @@ impl RunState {
     /// whenever the run is not moving: the first seconds of a run carry the
     /// model load and whichever file happened to come first, and a figure
     /// taken from them swings by minutes between polls.
+    /// The whole run's share done: the share read (bytes, or files when the
+    /// walk found no bytes) times the share of the rows written so far that
+    /// are embedded. Below 1 until the run says it is done, so a bar never
+    /// reads full while anything is left; `None` for a run that ended without
+    /// finishing.
+    fn progress(&self) -> Option<f64> {
+        let share = |part: u64, whole: u64| (part.min(whole) as f64) / (whole.max(1) as f64);
+        match self.status {
+            RunStatus::Done => return Some(1.0),
+            RunStatus::Stopped | RunStatus::Failed => return None,
+            _ => {}
+        }
+        let read = if self.bytes_total > 0 {
+            share(self.bytes, self.bytes_total)
+        } else {
+            share(self.scanned, self.total)
+        };
+        let embedded = if self.rows > 0 {
+            share(self.chunks, self.rows)
+        } else {
+            1.0
+        };
+        Some(((read * embedded * 1000.0).round() / 1000.0).min(0.999))
+    }
+
     fn eta_ms(&self) -> Option<u64> {
         if !matches!(self.status, RunStatus::Running) || self.bytes_total == 0 {
             return None;
@@ -1564,6 +1589,9 @@ impl Store {
             // Walk, read+hash, extract+scan, parse+chunk, tokenize, the wait
             // on each lane, and write, summing to the run's wall time.
             "stages": run.stages,
+            // The whole run's share done, reading and embedding both: what a
+            // run's bar shows. See `RunState::progress`.
+            "progress": run.progress(),
             // The share of the store the vector half does not cover yet: rows
             // this run wrote that it has not embedded, over what the store
             // holds with them. Null outside a running run.
@@ -5460,6 +5488,57 @@ mod tests {
             None,
             "a paused run has no time left to count down"
         );
+    }
+
+    /// A run's progress is the share read times the share of what it wrote
+    /// that is embedded. rc.3's bar took only the second half (pending_share)
+    /// and sat at 99 % from the first second of a 4,349-file run whose
+    /// embedding kept up with its reading.
+    #[test]
+    fn progress_counts_unread_files_and_the_embed_backlog() {
+        let mut run = RunState::new(1, Vec::new(), RunKind::Run);
+        assert_eq!(run.progress(), Some(0.0), "queued");
+        run.status = RunStatus::Running;
+        assert_eq!(
+            run.progress(),
+            Some(0.0),
+            "the walk has not counted anything"
+        );
+
+        run.bytes_total = 10_000_000;
+        run.total = 4_349;
+        assert!(run.progress().unwrap() < 0.10, "nothing read yet");
+
+        // An eighth read, every chunk written so far embedded: an eighth.
+        run.bytes = 1_250_000;
+        run.scanned = 561;
+        run.rows = 25_134;
+        run.chunks = 25_134;
+        let early = run.progress().unwrap();
+        assert!((0.12..0.13).contains(&early), "{early}");
+
+        // Everything read, half embedded: half, never done.
+        run.bytes = 10_000_000;
+        run.scanned = 4_349;
+        run.rows = 100_000;
+        run.chunks = 50_000;
+        assert_eq!(run.progress(), Some(0.5));
+
+        // Everything read and embedded, but the run has not said it is done.
+        run.chunks = 100_000;
+        assert!(run.progress().unwrap() < 1.0);
+
+        // Files but no byte total: files read stand in for bytes.
+        let mut by_files = RunState::new(2, Vec::new(), RunKind::Run);
+        by_files.status = RunStatus::Running;
+        by_files.total = 10;
+        by_files.scanned = 3;
+        assert_eq!(by_files.progress(), Some(0.3));
+
+        run.status = RunStatus::Done;
+        assert_eq!(run.progress(), Some(1.0));
+        run.status = RunStatus::Failed;
+        assert_eq!(run.progress(), None, "a failed run has no share done");
     }
 
     /// The plan's estimate is on the card from the first batch, before the
