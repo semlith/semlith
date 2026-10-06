@@ -508,10 +508,22 @@ fn measure_the_store_at_scale() {
 
             let mut server = McpServer::start_with(binary, std::slice::from_ref(&store), None);
             server.handshake();
-            let idle = server.rss_kb();
+            let mut idles = vec![server.rss_kb()];
             let median = server.median_search();
             let busy = server.rss_kb();
             server.stop();
+            // One open's idle RSS is bimodal on hosted runners (#199): the
+            // 700-chunk figure landed at 193 MB or 215 MB on the same code,
+            // and the growth assertion below measured that noise. The median
+            // of five fresh opens is the store's figure.
+            for _ in 0..4 {
+                let mut again = McpServer::start_with(binary, std::slice::from_ref(&store), None);
+                again.handshake();
+                idles.push(again.rss_kb());
+                again.stop();
+            }
+            idles.sort_unstable();
+            let idle = idles[idles.len() / 2];
             println!(
                 "{label}: idle RSS {} MB, searching RSS {} MB, median search {:.1}ms",
                 idle / 1024,
