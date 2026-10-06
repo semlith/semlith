@@ -4105,7 +4105,7 @@ impl Semlith {
                         progress::Phase::Save,
                         Some(format!(
                             "checkpoint: writing the index to disk ({} chunks still embedding carry on)",
-                            report.rows.saturating_sub(report.embedded)
+                            progress::grouped(report.rows.saturating_sub(report.embedded) as u64)
                         )),
                     );
                     completed.append(&mut self.landed);
@@ -4128,7 +4128,10 @@ impl Semlith {
                         progress::Phase::Drain,
                         Some(format!(
                             "{} chunks still embedding",
-                            (report.rows + window.ids.len()).saturating_sub(report.embedded)
+                            progress::grouped(
+                                (report.rows + window.ids.len()).saturating_sub(report.embedded)
+                                    as u64
+                            )
                         )),
                     );
                 }
@@ -4183,7 +4186,10 @@ impl Semlith {
                     &report,
                     total,
                     progress::Phase::Drain,
-                    Some(format!("{images_out} images still with the image model")),
+                    Some(format!(
+                        "{} images still with the image model",
+                        progress::grouped(images_out as u64)
+                    )),
                 );
             }
             while images_out > 0 {
