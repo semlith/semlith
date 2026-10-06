@@ -70,6 +70,29 @@ const START_CAP: Duration = Duration::from_secs(60 * 60);
 /// it.
 const WORKER_IDLE: Duration = Duration::from_secs(60);
 
+/// Unix seconds until which an idle worker is kept anyway: a run between two
+/// of its slices. Its last slice drains and writes the index for about a
+/// minute with nothing for the lanes, and on the owner's walk the Neural
+/// Engine's worker went in that minute, so every slice after waited two
+/// minutes for it to load again with the card saying nothing.
+static WARM_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Keep idle workers for `for_` more: a run has more slices to come.
+pub fn keep_warm(for_: Duration) {
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        + for_.as_secs();
+    WARM_UNTIL.fetch_max(until, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn kept_warm() -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    WARM_UNTIL.load(std::sync::atomic::Ordering::Relaxed) > now
+}
+
 /// Batches a worker holds at once: one it is computing and the next already
 /// in its pipe, so it never waits on the round trip for its next batch.
 const WORKER_DEPTH: usize = 2;
@@ -974,11 +997,30 @@ pub fn note_rate(lane: &str, per_s: f64) {
     save_rates(&all);
 }
 
-/// A lane's known-answer speed, kept only until a run measures the lane.
+/// How much faster a lane embeds a run's batches than its known-answer
+/// check, which embeds one chunk at a time. Measured on the owner's M1 and a
+/// rented NVIDIA L4 (2026-10-06): the CPU's int8 check 2.7 chunks/s against
+/// about 25 in a run, the Neural Engine 7.1 against about 230, CUDA 110
+/// against about 400, TensorRT 19 against about 400. A first estimate on any
+/// machine is these factors times its own check, until a run measures it.
+fn batch_factor(lane: &str) -> f64 {
+    match lane {
+        "cpu" => 9.0,
+        "ane" => 30.0,
+        "cuda" => 3.6,
+        "trt" => 20.0,
+        "gpu" => 8.0,
+        _ => 4.0,
+    }
+}
+
+/// A lane's known-answer speed, scaled to a run's batches, kept only until a
+/// run measures the lane.
 pub fn note_known_answer(lane: &str, per_s: f64) {
     if !per_s.is_finite() || per_s <= 0.0 {
         return;
     }
+    let per_s = per_s * batch_factor(lane);
     let mut all = rates();
     if all
         .get(lane)
@@ -1289,6 +1331,10 @@ fn dispatch(lane: Arc<Lane>, jobs: mpsc::Receiver<Job>) {
                     // written, the system's compiler went on with it anyway,
                     // and the next start compiled it again.
                     if worker.is_some() && matches!(lane.id, "ane" | "gpu") && coreml_compiling() {
+                        continue;
+                    }
+                    // Nor between a run's slices.
+                    if worker.is_some() && kept_warm() {
                         continue;
                     }
                     // Idle: the worker goes, and its device memory with it.

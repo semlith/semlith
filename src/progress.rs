@@ -78,6 +78,20 @@ pub struct Work {
     pub chunks: (u64, u64),
     /// Images embedded, of the images found.
     pub images: (u64, u64),
+    /// What an image weighs in chunks; [`IMAGE_UNITS`] until measured. See
+    /// [`image_units`].
+    pub image_weight: f64,
+}
+
+/// What an image weighs against a chunk on this machine: the lanes' chunks
+/// per second over the image model's images per second, once both have been
+/// measured or checked here, and [`IMAGE_UNITS`] until then.
+pub fn image_units() -> f64 {
+    let rates = crate::accel::rates();
+    match (crate::accel::expected_rate(), rates.get("clip")) {
+        (Some(chunks), Some(clip)) if clip.per_s > 0.0 => (chunks / clip.per_s).clamp(1.0, 200.0),
+        _ => IMAGE_UNITS,
+    }
 }
 
 impl Work {
@@ -86,9 +100,13 @@ impl Work {
         let (f, ft) = self.files;
         let (c, ct) = self.chunks;
         let (i, it) = self.images;
-        let done =
-            c.min(ct) as f64 + i.min(it) as f64 * IMAGE_UNITS + f.min(ft) as f64 * FILE_UNITS;
-        let all = ct as f64 + it as f64 * IMAGE_UNITS + ft as f64 * FILE_UNITS;
+        let w = if self.image_weight > 0.0 {
+            self.image_weight
+        } else {
+            IMAGE_UNITS
+        };
+        let done = c.min(ct) as f64 + i.min(it) as f64 * w + f.min(ft) as f64 * FILE_UNITS;
+        let all = ct as f64 + it as f64 * w + ft as f64 * FILE_UNITS;
         (done, all)
     }
 
@@ -165,6 +183,9 @@ pub struct Eta {
     recent: VecDeque<(f64, f64)>,
     shown: Option<(f64, f64)>,
     prior: Option<f64>,
+    /// The work left at the last estimate, to tell the work changing from
+    /// the rate changing.
+    work: Option<f64>,
 }
 
 impl Eta {
@@ -222,9 +243,22 @@ impl Eta {
     /// Milliseconds left for `remaining` units at `at`, and a low and high
     /// bound from the last minute's spread. `hold` keeps the shown figure
     /// where it is.
+    ///
+    /// The cap is on how the rate moves the figure, not on how the work does:
+    /// when the work left grows or shrinks by more than the cap allows (a walk
+    /// finishing, a decision letting files in) the figure follows the work,
+    /// so a first reading taken before the total was known is never what the
+    /// rest of the run is held to.
     pub fn left(&mut self, at: f64, remaining: f64, hold: bool) -> Option<(u64, (u64, u64))> {
         let rate = self.rate()?;
         let raw = remaining.max(0.0) / rate;
+        let rescoped = self
+            .work
+            .is_some_and(|w| w > 0.0 && ((remaining / w).ln().abs() > STEP.ln()));
+        if rescoped {
+            self.shown = None;
+        }
+        self.work = Some(remaining.max(1.0));
         let value = match self.shown {
             Some((t, shown)) => {
                 let dt = (at - t).max(0.0);
@@ -268,6 +302,7 @@ mod tests {
             files: (10, 100),
             chunks: (500, 1_000),
             images: (2, 4),
+            image_weight: IMAGE_UNITS,
         };
         let (done, all) = w.units();
         assert_eq!(done, 500.0 + 16.0 + 5.0);
@@ -313,7 +348,12 @@ mod tests {
                 shown.push((t, ms as f64 / 1000.0));
             }
         }
-        for pair in shown.windows(11) {
+        // The work grew by half at 120 s: the figure follows the work there,
+        // and the cap holds everywhere else.
+        for pair in shown
+            .windows(11)
+            .filter(|p| !(p[0].0 < 120.0 && p[10].0 >= 120.0))
+        {
             let (t0, a) = pair[0];
             let (t1, b) = pair[10];
             // Never up by more than a quarter, never down by more than a

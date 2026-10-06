@@ -571,6 +571,8 @@ pub struct RunState {
     planned: Option<Arc<std::collections::HashMap<String, u64>>>,
     /// Each lane's ten-second rates through the run, for what it records.
     lane_seen: BTreeMap<String, Vec<f64>>,
+    /// What an image weighs in chunks on this machine, read at the start.
+    image_weight: f64,
 }
 
 /// Unix milliseconds.
@@ -636,6 +638,7 @@ impl RunState {
             shown: None,
             planned: None,
             lane_seen: BTreeMap::new(),
+            image_weight: crate::progress::IMAGE_UNITS,
         }
     }
 
@@ -696,21 +699,12 @@ impl RunState {
             files: (self.scanned, self.total),
             chunks: (self.chunks, self.expected_chunks.max(self.rows)),
             images: (self.images, self.images_total),
+            image_weight: self.image_weight,
         }
     }
 
     /// Fold the counters just read into the share done and the time left.
     fn account(&mut self) {
-        let work = self.work();
-        let (done, all) = work.units();
-        self.high = self.high.max(work.share()).min(0.999);
-        let at = self.elapsed().as_secs_f64();
-        self.eta.observe(at, done);
-        let hold = matches!(
-            self.phase.as_deref(),
-            Some("lane" | "drain" | "save" | "walk" | "decisions")
-        );
-        self.shown = self.eta.left(at, all - done, hold);
         for (lane, rate) in self.lane_rates() {
             if rate > 0.0 {
                 let seen = self.lane_seen.entry(lane).or_default();
@@ -720,6 +714,21 @@ impl RunState {
                 }
             }
         }
+        let work = self.work();
+        let (done, all) = work.units();
+        self.high = self.high.max(work.share()).min(0.999);
+        let at = self.elapsed().as_secs_f64();
+        self.eta.observe(at, done);
+        // No figure before the run knows how much there is.
+        if self.total == 0 || all <= 0.0 {
+            self.shown = None;
+            return;
+        }
+        let hold = matches!(
+            self.phase.as_deref(),
+            Some("lane" | "drain" | "save" | "walk" | "decisions")
+        );
+        self.shown = self.eta.left(at, all - done, hold);
     }
 
     /// What each lane managed through this run, for the machine to remember:
@@ -925,6 +934,13 @@ impl RunState {
                 self.files_before = num("files_before").or(self.files_before);
                 self.chunks_before = num("chunks_before").or(self.chunks_before);
                 self.eta.set_prior(crate::accel::expected_rate());
+                self.image_weight = crate::progress::image_units();
+                // The scan's counters were the scan's: the run counts its own
+                // files from nothing, or the card opens on "3,973 / 3,973".
+                self.scanned = 0;
+                self.total = 0;
+                self.bytes = 0;
+                self.bytes_total = 0;
                 self.unhold();
             }
             Some("phase") => {
@@ -4724,6 +4740,9 @@ fn perform(
                     let slice_stages = tally.stages.clone();
                     let slice_cache = (tally.cache_lookups, tally.cache_hits);
                     if done.remaining > 0 {
+                        // The lanes stay loaded for the next slice: this
+                        // one's drain and save gave them nothing for a minute.
+                        crate::accel::keep_warm(Duration::from_secs(300));
                         // The remainder of the walk, not the roots. Handing the
                         // roots back meant the next slice walked the tree from
                         // the top and re-opened and re-hashed every file the
@@ -5867,7 +5886,12 @@ mod tests {
             "40,000 of about 99,000 chunks: {}",
             run.progress().unwrap()
         );
-        for pair in shown.windows(10) {
+        // The work grew by thirty thousand chunks at 120 s: the figure
+        // follows the work there, and the cap holds everywhere else.
+        for pair in shown
+            .windows(10)
+            .filter(|p| !(p[0].0 < 120 && p[9].0 >= 120))
+        {
             let ((t0, a), (t1, b)) = (pair[0], pair[9]);
             let counted = a.saturating_sub((t1 - t0) * 1_000).max(1_000) as f64;
             assert!(

@@ -1362,6 +1362,7 @@ pub(crate) struct Live {
     pub high: f64,
     pub eta: progress::Eta,
     pub started: std::time::Instant,
+    pub image_weight: f64,
 }
 
 impl Default for Live {
@@ -1372,6 +1373,7 @@ impl Default for Live {
             high: 0.0,
             eta: progress::Eta::default(),
             started: std::time::Instant::now(),
+            image_weight: progress::IMAGE_UNITS,
         }
     }
 }
@@ -1538,9 +1540,14 @@ fn say_file(
         let mut live = report.live.borrow_mut();
         // A lane still loading is the run's to say, not a global's: the
         // writer is waiting on it whatever the run is otherwise doing.
+        // In any phase in which the writer can be waiting on the lanes: a new
+        // slice opens in Read and waits there for a lane that went idle.
         match accel::waiting_for() {
             Some(waiting)
-                if live.phase == progress::Phase::Embed || live.phase == progress::Phase::Lane =>
+                if matches!(
+                    live.phase,
+                    progress::Phase::Read | progress::Phase::Embed | progress::Phase::Lane
+                ) =>
             {
                 live.phase = progress::Phase::Lane;
                 live.detail = Some(waiting);
@@ -1555,6 +1562,7 @@ fn say_file(
             files: (report.scanned as u64, total as u64),
             chunks: (chunks as u64, expected_chunks),
             images: (report.images as u64, images_total as u64),
+            image_weight: live.image_weight,
         };
         let (done, all) = work.units();
         live.high = live.high.max(work.share()).min(0.999);
@@ -2474,7 +2482,7 @@ impl Semlith {
         on(said);
         // From what this machine's lanes manage, in work units; a store's own
         // byte rate only when no lane has a figure yet.
-        let units = plan.chunks as f64 + plan.images as f64 * progress::IMAGE_UNITS;
+        let units = plan.chunks as f64 + plan.images as f64 * progress::image_units();
         plan.eta_ms = match accel::expected_rate() {
             Some(rate) => Some((units / rate * 1000.0) as u64),
             None => store::get_meta(&self.db, "embed_bytes_per_sec")?
@@ -3049,11 +3057,11 @@ impl Semlith {
                 head.clone()
             }
         };
-        report
-            .live
-            .borrow_mut()
-            .eta
-            .set_prior(accel::expected_rate());
+        {
+            let mut live = report.live.borrow_mut();
+            live.eta.set_prior(accel::expected_rate());
+            live.image_weight = progress::image_units();
+        }
         let head_set: std::collections::HashSet<PathBuf> = head.iter().cloned().collect();
 
         // Taken here, after the setup above, so a slice's budget is spent on
