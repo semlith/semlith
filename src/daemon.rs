@@ -600,6 +600,8 @@ pub struct RunState {
     save_ms: Option<u64>,
     /// What an image weighs in chunks on this machine, read at the start.
     image_weight: f64,
+    /// See `progress::Work::parallel`; fixed per run, like the weight.
+    images_parallel: bool,
 }
 
 /// Unix milliseconds.
@@ -673,6 +675,7 @@ impl RunState {
             saved_at: None,
             save_ms: None,
             image_weight: crate::progress::IMAGE_UNITS,
+            images_parallel: false,
         }
     }
 
@@ -744,6 +747,7 @@ impl RunState {
             chunks: (self.chunks, self.expected_chunks.max(self.rows)),
             images: (self.images, self.images_total),
             image_weight: self.image_weight,
+            parallel: self.images_parallel,
         }
     }
 
@@ -980,6 +984,7 @@ impl RunState {
                 self.chunks_before = num("chunks_before").or(self.chunks_before);
                 self.eta.set_prior(crate::accel::expected_rate());
                 self.image_weight = crate::progress::image_units();
+                self.images_parallel = crate::accel::images_beside_text();
                 // The scan's counters were the scan's: the run counts its own
                 // files from nothing, or the card opens on "3,973 / 3,973".
                 self.scanned = 0;

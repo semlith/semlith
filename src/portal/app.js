@@ -2658,7 +2658,11 @@ function wizardScreen() {
       const clip = rates.clip && rates.clip.per_s;
       // An image is 8 chunks' worth until this machine has timed its image model.
       const imageMs = P.images ? (clip > 0 ? P.images / clip : (P.images * 8) / perSec) * 1000 : 0;
-      return { ms: (chunks / perSec) * 1000 + imageMs, knownAnswer };
+      const textMs = (chunks / perSec) * 1000;
+      // The image model runs on the CPU beside a lane off it, so the run
+      // takes the longer of the two; with text on the CPU they take turns.
+      const beside = on.some((l) => l.lane !== "cpu");
+      return { ms: beside ? Math.max(textMs, imageMs) : textMs + imageMs, knownAnswer };
     }
     return P.eta != null ? { ms: P.eta, knownAnswer: false } : null;
   }

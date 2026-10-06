@@ -81,6 +81,10 @@ pub struct Work {
     /// What an image weighs in chunks; [`IMAGE_UNITS`] until measured. See
     /// [`image_units`].
     pub image_weight: f64,
+    /// Whether images embed beside the text rather than taking turns with it
+    /// ([`crate::accel::images_beside_text`]): the run then takes as long as
+    /// the slower of the two, not their sum.
+    pub parallel: bool,
 }
 
 /// What an image weighs against a chunk on this machine: the lanes' chunks
@@ -105,8 +109,17 @@ impl Work {
         } else {
             IMAGE_UNITS
         };
-        let done = c.min(ct) as f64 + i.min(it) as f64 * w + f.min(ft) as f64 * FILE_UNITS;
-        let all = ct as f64 + it as f64 * w + ft as f64 * FILE_UNITS;
+        let files = (f.min(ft) as f64 * FILE_UNITS, ft as f64 * FILE_UNITS);
+        if self.parallel {
+            // The longer of the two paths is the run's: replay 10 took 751 s
+            // where the sum said 1,147.
+            let all = (ct as f64).max(it as f64 * w) + files.1;
+            let left =
+                ((ct - c.min(ct)) as f64).max((it - i.min(it)) as f64 * w) + files.1 - files.0;
+            return (all - left, all);
+        }
+        let done = c.min(ct) as f64 + i.min(it) as f64 * w + files.0;
+        let all = ct as f64 + it as f64 * w + files.1;
         (done, all)
     }
 
@@ -332,11 +345,30 @@ mod tests {
             chunks: (500, 1_000),
             images: (2, 4),
             image_weight: IMAGE_UNITS,
+            parallel: false,
         };
         let (done, all) = w.units();
         assert_eq!(done, 500.0 + 16.0 + 5.0);
         assert_eq!(all, 1_000.0 + 32.0 + 50.0);
         assert!(w.share() < 0.5);
+    }
+
+    /// Images beside the text: the run is as long as the longer path.
+    #[test]
+    fn parallel_work_is_the_longer_path() {
+        let mut w = Work {
+            files: (0, 0),
+            chunks: (500, 1_000),
+            images: (10, 100),
+            image_weight: 8.0,
+            parallel: true,
+        };
+        // All of it is the text's 1,000; left is the images' 90 x 8 = 720,
+        // more than the text's 500.
+        assert_eq!(w.units(), (280.0, 1_000.0));
+        w.images = (100, 100);
+        // Images done; the text's 500 of 1,000 is what is left.
+        assert_eq!(w.units(), (500.0, 1_000.0));
     }
 
     #[test]

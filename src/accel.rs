@@ -1034,6 +1034,23 @@ pub fn note_known_answer(lane: &str, per_s: f64) {
 /// together, or `None` when none of them has a figure yet. The prior a run's
 /// time left starts from.
 pub fn expected_rate() -> Option<f64> {
+    let known = rates();
+    let sum: f64 = run_lanes()
+        .iter()
+        .filter_map(|lane| known.get(*lane).map(|r| r.per_s))
+        .sum();
+    (sum > 0.0).then_some(sum)
+}
+
+/// Whether a run's text embeds off the CPU, so the image model, which runs on
+/// the CPU on a thread of its own, works beside it rather than taking turns.
+pub fn images_beside_text() -> bool {
+    run_lanes().iter().any(|lane| *lane != "cpu")
+}
+
+/// The lanes a run would embed text on, as `for_run` chooses them, among
+/// those with a known rate or usable here.
+fn run_lanes() -> Vec<&'static str> {
     let on = enabled();
     let known = rates();
     let usable = |lane: &&str| on.lane(lane) && unavailable_here(lane).is_none();
@@ -1045,11 +1062,7 @@ pub fn expected_rate() -> Option<f64> {
         .filter(|lane| usable(lane))
         .filter(|lane| !ane || (*lane != "cpu" && (*lane != "gpu" || on.gpu_beside_ane)))
         .collect();
-    let sum: f64 = lanes
-        .iter()
-        .filter_map(|lane| known.get(*lane).map(|r| r.per_s))
-        .sum();
-    (sum > 0.0).then_some(sum)
+    lanes
 }
 
 /// The names `semlith accel on|off` takes.

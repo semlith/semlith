@@ -1375,6 +1375,7 @@ pub(crate) struct Live {
     pub eta: progress::Eta,
     pub started: std::time::Instant,
     pub image_weight: f64,
+    pub images_parallel: bool,
 }
 
 impl Default for Live {
@@ -1386,6 +1387,7 @@ impl Default for Live {
             eta: progress::Eta::default(),
             started: std::time::Instant::now(),
             image_weight: progress::IMAGE_UNITS,
+            images_parallel: false,
         }
     }
 }
@@ -1606,6 +1608,7 @@ fn say_file(
             chunks: (chunks as u64, expected_chunks),
             images: (report.images as u64, images_total as u64),
             image_weight: live.image_weight,
+            parallel: live.images_parallel,
         };
         let (done, all) = work.units();
         live.high = live.high.max(work.share()).min(0.999);
@@ -2547,7 +2550,12 @@ impl Semlith {
         on(said);
         // From what this machine's lanes manage, in work units; a store's own
         // byte rate only when no lane has a figure yet.
-        let units = plan.chunks as f64 + plan.images as f64 * progress::image_units();
+        let images = plan.images as f64 * progress::image_units();
+        let units = if accel::images_beside_text() {
+            (plan.chunks as f64).max(images)
+        } else {
+            plan.chunks as f64 + images
+        };
         plan.eta_ms = match accel::expected_rate() {
             Some(rate) => Some((units / rate * 1000.0) as u64),
             None => store::get_meta(&self.db, "embed_bytes_per_sec")?
@@ -3134,6 +3142,7 @@ impl Semlith {
             let mut live = report.live.borrow_mut();
             live.eta.set_prior(accel::expected_rate());
             live.image_weight = progress::image_units();
+            live.images_parallel = accel::images_beside_text();
         }
         let head_set: std::collections::HashSet<PathBuf> = head.iter().cloned().collect();
 
