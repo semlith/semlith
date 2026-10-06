@@ -571,6 +571,11 @@ pub struct RunState {
     planned: Option<Arc<std::collections::HashMap<String, u64>>>,
     /// Each lane's ten-second rates through the run, for what it records.
     lane_seen: BTreeMap<String, Vec<f64>>,
+    /// Times the run has written its index to disk, and the last one: when
+    /// it ended (unix ms) and how long it took. The Write lane of the card.
+    saves: u64,
+    saved_at: Option<u64>,
+    save_ms: Option<u64>,
     /// What an image weighs in chunks on this machine, read at the start.
     image_weight: f64,
 }
@@ -638,6 +643,9 @@ impl RunState {
             shown: None,
             planned: None,
             lane_seen: BTreeMap::new(),
+            saves: 0,
+            saved_at: None,
+            save_ms: None,
             image_weight: crate::progress::IMAGE_UNITS,
         }
     }
@@ -657,6 +665,11 @@ impl RunState {
             && last["until"].is_null()
         {
             last["until"] = serde_json::json!(at);
+            if last["phase"] == "save" {
+                self.saves += 1;
+                self.saved_at = Some(at);
+                self.save_ms = last["at"].as_u64().map(|from| at.saturating_sub(from));
+            }
         }
         self.phases.push(serde_json::json!({
             "phase": phase,
@@ -688,6 +701,11 @@ impl RunState {
             && last["until"].is_null()
         {
             last["until"] = serde_json::json!(at);
+            if last["phase"] == "save" {
+                self.saves += 1;
+                self.saved_at = Some(at);
+                self.save_ms = last["at"].as_u64().map(|from| at.saturating_sub(from));
+            }
         }
         self.phase = None;
         self.phase_detail = None;
@@ -1815,6 +1833,12 @@ impl Store {
                     serde_json::json!(run.rows.saturating_sub(run.chunks)),
                 ),
                 ("eta_range_ms", serde_json::json!(run.eta_range_ms())),
+                // Chunks written (the Chunk lane), and the Write lane: index
+                // saves so far, the last one's end and length.
+                ("rows", serde_json::json!(run.rows)),
+                ("saves", serde_json::json!(run.saves)),
+                ("saved_at", serde_json::json!(run.saved_at)),
+                ("save_ms", serde_json::json!(run.save_ms)),
             ] {
                 object.insert(key.to_string(), value);
             }

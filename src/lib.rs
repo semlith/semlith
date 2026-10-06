@@ -3887,13 +3887,18 @@ impl Semlith {
                 // Not yet through it: its bytes are counted as its chunks embed.
                 let file_end = report.bytes;
                 report.bytes = bytes_before;
+                // Said with what reading made of it, so the log reads "12
+                // chunks" against the file rather than only that it started.
                 say_file(
                     &mut on_file,
                     &report,
                     total,
                     &path,
                     FileOutcome::Indexing,
-                    None,
+                    Some(match chunks.len() {
+                        1 => "1 chunk".to_string(),
+                        n => format!("{n} chunks"),
+                    }),
                 );
 
                 // Replacing a file: evict its old vectors before adding new ones.
