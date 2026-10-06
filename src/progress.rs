@@ -248,6 +248,18 @@ impl Eta {
         self.last = Some((at, done));
     }
 
+    /// [`Eta::observe`], except while `held`: then the time and work are only
+    /// noted, so the next reading's rate starts from here. Replay 11 read
+    /// files at a crawl for 135 s while the Neural Engine lane started, and
+    /// that crawl, sampled, put time left 110 % over for minutes after.
+    pub fn observe_unless(&mut self, held: bool, at: f64, done: f64) {
+        if held {
+            self.last = Some((at, done));
+        } else {
+            self.observe(at, done);
+        }
+    }
+
     fn rate(&self) -> Option<f64> {
         let measured = self.rate.filter(|r| *r > 0.0);
         match (measured, self.prior) {
@@ -351,6 +363,27 @@ mod tests {
         assert_eq!(done, 500.0 + 16.0 + 5.0);
         assert_eq!(all, 1_000.0 + 32.0 + 50.0);
         assert!(w.share() < 0.5);
+    }
+
+    /// A held stretch is not sampled: files trickling in while a lane
+    /// starts do not become the run's rate.
+    #[test]
+    fn a_held_stretch_does_not_drag_the_rate() {
+        let mut held = Eta::with_prior(Some(100.0));
+        let mut sampled = Eta::with_prior(Some(100.0));
+        // 135 s of a crawl, then a minute at the lanes' real pace.
+        for t in 0..135 {
+            held.observe_unless(true, t as f64, t as f64 * 0.1);
+            sampled.observe(t as f64, t as f64 * 0.1);
+        }
+        for t in 135..195 {
+            let done = 13.5 + (t - 135) as f64 * 100.0;
+            held.observe_unless(false, t as f64, done);
+            sampled.observe(t as f64, done);
+        }
+        let (h, s) = (held.rate().unwrap(), sampled.rate().unwrap());
+        assert!(h > 90.0, "held {h}");
+        assert!(h > s, "held {h} sampled {s}");
     }
 
     /// Images beside the text: the run is as long as the longer path.

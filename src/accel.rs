@@ -460,6 +460,8 @@ impl Lane {
         let phase = |s: &Status| match s {
             Status::Compiling { .. } => 1,
             Status::Downloading { .. } => 2,
+            // Timed too, so a run waiting on a start says for how long.
+            Status::Starting => 3,
             _ => 0,
         };
         let (was, now) = (phase(&current), phase(&status));
@@ -789,7 +791,15 @@ pub fn waiting_for() -> Option<String> {
             "waiting for the {label} lane to download: {percent} %{}",
             left(eta_ms)
         ),
-        _ => format!("waiting for the {label} lane to start"),
+        // Seconds so far, so a long first start after an update (Core ML
+        // compiling the model again, two minutes on replay 11) still moves.
+        _ => match *lane.began.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some((start, _, _)) if start.elapsed() >= Duration::from_secs(5) => format!(
+                "waiting for the {label} lane to start: {} s so far",
+                start.elapsed().as_secs()
+            ),
+            _ => format!("waiting for the {label} lane to start"),
+        },
     })
 }
 

@@ -1613,7 +1613,6 @@ fn say_file(
         let (done, all) = work.units();
         live.high = live.high.max(work.share()).min(0.999);
         let at = live.started.elapsed().as_secs_f64();
-        live.eta.observe(at, done);
         // Held only while nothing the estimate counts can move: a lane
         // loading, the index being written, the walk. A drain is the lanes
         // finishing the embedding, which is the work itself, and counts down.
@@ -1621,6 +1620,7 @@ fn say_file(
             live.phase,
             progress::Phase::Lane | progress::Phase::Save | progress::Phase::Walk
         );
+        live.eta.observe_unless(hold, at, done);
         let eta = live.eta.left(at, all - done, hold);
         (
             live.phase,

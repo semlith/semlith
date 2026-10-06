@@ -49,6 +49,11 @@ const EVENT_HISTORY: usize = 20;
 /// to the watcher. The same budget `semlith_index` has always had.
 const SLICE: Duration = Duration::from_secs(45);
 
+/// How long a run keeps the writer while only file changes wait for it. A
+/// yield drains the lanes, so this bounds that cost to a small share of the
+/// run; an edit made during a long run is searchable within it.
+const EVENTS_SLICE: Duration = Duration::from_secs(300);
+
 /// The budget a slice is handed: long, because the slice ends at `SLICE` only
 /// when the control finds something waiting (see `perform`).
 const RUN_BUDGET: Duration = Duration::from_secs(24 * 3600);
@@ -766,17 +771,17 @@ impl RunState {
         let (done, all) = work.units();
         self.high = self.high.max(work.share()).min(0.999);
         let at = self.elapsed().as_secs_f64();
-        self.eta.observe(at, done);
-        // No figure before the run knows how much there is.
-        if self.total == 0 || all <= 0.0 {
-            self.shown = None;
-            return;
-        }
         let hold = matches!(
             self.phase.as_deref(),
             // Not a drain: that is the embedding's tail, and counts down.
             Some("lane" | "save" | "walk" | "decisions")
         );
+        self.eta.observe_unless(hold, at, done);
+        // No figure before the run knows how much there is.
+        if self.total == 0 || all <= 0.0 {
+            self.shown = None;
+            return;
+        }
         self.shown = self.eta.left(at, all - done, hold);
     }
 
@@ -4815,13 +4820,19 @@ fn perform(
                     // on this store's queue. With nothing waiting it carries on,
                     // because every slice end drains the lanes and saves, and on
                     // the owner's walk that cost a minute per 45 s slice.
-                    if slice_began.elapsed() >= SLICE
-                        && (store.events_waiting.load(Ordering::Relaxed)
-                            || !store
-                                .queue
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .is_empty())
+                    //
+                    // File changes wait longer than a job: a person saving in
+                    // the folder being indexed (replay 11: screenshots landing
+                    // in it) gave up the writer every 45 s, and each yield
+                    // drains.
+                    let spent = slice_began.elapsed();
+                    if (spent >= SLICE
+                        && !store
+                            .queue
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .is_empty())
+                        || (spent >= EVENTS_SLICE && store.events_waiting.load(Ordering::Relaxed))
                     {
                         return crate::Flow::Yield;
                     }
