@@ -214,7 +214,8 @@ fn every_walked_file_produces_exactly_one_verdict() {
 
     let mut paths: Vec<PathBuf> = events
         .iter()
-        .filter(|e| e.outcome != FileOutcome::Indexing)
+        // A phase is the run saying what it is doing, not a file's verdict.
+        .filter(|e| !matches!(e.outcome, FileOutcome::Indexing | FileOutcome::Phase))
         .map(|e| e.path.clone())
         .collect();
     let before = paths.len();

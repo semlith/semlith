@@ -4535,7 +4535,10 @@ def _(d):
         d.open_view("store/%s/runs" % store)
         d.wait_for("(() => { const c = %s; return !!c && /left|almost done|estimating/.test(c.innerText); })()" % CARD,
                    timeout=20, what="%s's card to show the time left" % store)
-        text = d.eval("(%s).innerText" % CARD)
+        # The card without its log: since 0.37.0-rc.4 the log sits inside the
+        # card (one run card everywhere), and its lines carry the wall-clock
+        # time they were said, which is a label, not a clock counting up.
+        text = d.eval("(() => { const c = (%s).cloneNode(true); c.querySelectorAll('.log').forEach((l) => l.remove()); return c.innerText; })()" % CARD)
         if re.search(r"\b\d{2}:\d{2}\b", text):
             fail("the running card still shows a clock: %r" % text[:200])
     finally:
