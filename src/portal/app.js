@@ -4449,7 +4449,7 @@ function runStatsRow(r) {
   // sub-line drawn even when empty: a patch in place only edits words.
   const tiles = [
     ["FILES READ", r.total ? `${n(r.scanned)} / ${n(r.total)}` : "counting…", r.bytes_total ? `${bytes(r.bytes || 0)} of ${bytes(r.bytes_total)} read` : "Files read and hashed; embedding follows, counted in chunks", ""],
-    ["CHUNKS", chunksOf(r), r.expected_chunks ? "Embedded of those expected; the total firms up as each file is chunked" : null, r.backlog ? `${n(r.backlog)} waiting for a lane` : ""],
+    ["CHUNKS", chunksOf(r), r.expected_chunks ? "Embedded of those expected; the total firms up as each file is chunked" : null, r.backlog ? `${n(r.backlog)} still embedding` : ""],
     ["IMAGES", `${n(r.images || 0)} / ${n(r.images_total || 0)}`, "Images embedded with CLIP", "", !r.images_total],
     ["RATE", paused ? "paused" : r.rate != null ? `${perSecond(r.rate)} chunks/s` : "—", lanes, paused ? "" : lanes],
     ["TIME LEFT", paused ? "—" : r.status === "running" ? runLeftText(r) : r.status, runRangeTip(r), r.elapsed_ms ? `${spellTook(r.elapsed_ms)} elapsed` : ""],
