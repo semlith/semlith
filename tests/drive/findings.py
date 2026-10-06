@@ -4524,7 +4524,9 @@ def _(d):
         run = None
         while time.time() < deadline:
             run = run_by_id(d, run_id)
-            if not run or run.get("status") in TERMINAL or run.get("eta_ms") is not None:
+            # Both: a run-truth daemon has a time left as soon as the files
+            # are counted, which can be a poll before the first byte is read.
+            if not run or run.get("status") in TERMINAL or (run.get("eta_ms") is not None and run.get("bytes")):
                 break
             time.sleep(0.5)
         if not run or run.get("status") in TERMINAL:

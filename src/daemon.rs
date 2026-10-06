@@ -1208,10 +1208,9 @@ impl RunState {
             };
             if let Some(line) = line {
                 // ponytail: an open and append per line, about 20 µs; a
-                // held handle if a run's lines ever cost that much.
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
+                // held handle if a run's lines ever cost that much. Never
+                // creating the folder here: a stop that deleted the store
+                // would see it made again by the lines that follow.
                 let _ = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -1610,7 +1609,11 @@ impl Store {
         let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
         let mut run = RunState::new(id, paths, kind);
         let key = format!("{}-{id}", now_ms());
-        run.log_file = Some(self.dir.join(LOGS_DIR).join(format!("{key}.jsonl")));
+        let logs = self.dir.join(LOGS_DIR);
+        if std::fs::create_dir_all(&logs).is_ok() {
+            crate::home::tighten_dir(&logs);
+            run.log_file = Some(logs.join(format!("{key}.jsonl")));
+        }
         run.log_key = Some(key);
         runs.push(run);
         while runs.len() > RUN_HISTORY {
@@ -6119,6 +6122,7 @@ mod tests {
     fn every_stage_is_logged_and_the_whole_log_is_kept_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let mut run = RunState::new(3, Vec::new(), RunKind::Run);
+        std::fs::create_dir_all(dir.path().join(LOGS_DIR)).unwrap();
         run.log_file = Some(dir.path().join(LOGS_DIR).join("1700000000000-3.jsonl"));
         run.log_key = Some("1700000000000-3".into());
         run.absorb(&serde_json::json!({ "event": "file", "outcome": "indexing", "path": "/r/a.md", "why": "4 chunks", "rows": 4 }));
