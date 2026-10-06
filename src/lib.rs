@@ -1863,11 +1863,13 @@ pub struct Semlith {
     /// chunks and images. Taken by the next pass instead of sizing every
     /// remaining file again.
     pub expect_rest: Option<(u64, usize)>,
-    /// Files whose rows are written and whose vectors are still with the
-    /// lanes: chunks to go and the hash to commit once none are left. A
-    /// checkpoint commits only files that have left this map, so it no longer
-    /// waits for every window in flight (#203).
-    awaiting: std::collections::HashMap<i64, (usize, String)>,
+    /// Files being written or whose vectors are still with the lanes: chunks
+    /// not landed yet, the hash to commit, and whether every row is written
+    /// (sealed). A file leaves for `landed` once it is sealed and none are
+    /// left. A checkpoint commits only those, so it no longer waits for every
+    /// window in flight (#203). Counted per chunk as each is inserted, since a
+    /// window handed over mid-file can land before its file is finished.
+    awaiting: std::collections::HashMap<i64, (usize, String, bool)>,
     /// Which file each in-flight chunk belongs to.
     file_of: std::collections::HashMap<u64, i64>,
     /// Files whose last vector has landed since the last commit of hashes.
@@ -3991,6 +3993,7 @@ impl Semlith {
                 let mut spans: Vec<(u32, u32, i64)> = Vec::with_capacity(chunks.len());
                 let mut halted = false;
                 let count = chunks.len();
+                self.awaiting.insert(file_id, (0, hash.clone(), false));
                 for (((ord, c), piece), hash) in chunks.iter().enumerate().zip(pieces).zip(hashes) {
                     let timed = std::time::Instant::now();
                     let id = store::insert_chunk(
@@ -4003,6 +4006,10 @@ impl Semlith {
                     )?;
                     self.write_parts.add("rows", timed);
                     spans.push((c.start_line, c.end_line, id));
+                    self.file_of.insert(id as u64, file_id);
+                    if let Some(left) = self.awaiting.get_mut(&file_id) {
+                        left.0 += 1;
+                    }
                     report.rows += 1;
                     report.current_rows += 1;
                     window.ids.push(id as u64);
@@ -4064,10 +4071,16 @@ impl Semlith {
                 report.edges += edges;
 
                 // Committed once its last vector lands (see `land`), not now:
-                // its rows are written, its vectors are still with the lanes.
-                self.awaiting.insert(file_id, (count, hash));
-                for (_, _, id) in &spans {
-                    self.file_of.insert(*id as u64, file_id);
+                // its rows are written, its vectors may still be with the lanes.
+                // A file with no chunks, or whose last window already landed,
+                // is done here.
+                if let Some(entry) = self.awaiting.get_mut(&file_id) {
+                    entry.2 = true;
+                    if entry.0 == 0
+                        && let Some((_, hash, _)) = self.awaiting.remove(&file_id)
+                    {
+                        self.landed.push((file_id, hash));
+                    }
                 }
                 report.indexed += 1;
                 report.chunks += count;
@@ -4097,7 +4110,47 @@ impl Semlith {
                     // files whose every chunk has landed are recorded as indexed.
                     // A file still embedding stays pending, which is what a
                     // crash here must leave it as. Waiting for every window cost
-                    // the owner's walk a minute per checkpoint.
+                    // the owner's walk a minute per checkpoint. The window being
+                    // filled is handed over now, not waited for, so the chunks
+                    // of a small corpus reach a lane before the run ends.
+                    if !window.ids.is_empty()
+                        && !self.hand_over(
+                            scope,
+                            &mut stage,
+                            &mut window,
+                            &cpu_back,
+                            &paused,
+                            &ask,
+                            &mut clock,
+                            &mut |n| {
+                                report.batched = n;
+                                say_file(
+                                    &mut on_file,
+                                    &report,
+                                    total,
+                                    &path,
+                                    FileOutcome::Progress,
+                                    None,
+                                )
+                            },
+                        )?
+                    {
+                        report.remaining = prefetch.len().0 - seen - 1;
+                        report.stopped = true;
+                        break;
+                    }
+                    // What has landed meanwhile, into the index before it is
+                    // written.
+                    if let Some(stage) = stage.as_mut() {
+                        while let Some(done) = stage.next(std::time::Duration::ZERO) {
+                            self.land(
+                                done.map_err(anyhow::Error::msg)?,
+                                &mut report,
+                                &mut run_lanes,
+                                &mut cached,
+                            )?;
+                        }
+                    }
                     say_phase(
                         &mut on_file,
                         &report,
@@ -4906,7 +4959,8 @@ impl Semlith {
             {
                 left.0 = left.0.saturating_sub(1);
                 if left.0 == 0
-                    && let Some((_, hash)) = self.awaiting.remove(&file)
+                    && left.2
+                    && let Some((_, hash, _)) = self.awaiting.remove(&file)
                 {
                     self.landed.push((file, hash));
                 }
