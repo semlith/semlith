@@ -1097,6 +1097,11 @@ a.kpi:hover {
   background: var(--chip);
   box-shadow: none;
 }
+/* Toggles that can each be on or off (graph edge kinds): off reads off. */
+.seg.toggles > button[aria-pressed="false"] {
+  text-decoration: line-through;
+  opacity: 0.55;
+}
 .seg > button:disabled {
   opacity: 0.45;
 }

@@ -7646,13 +7646,16 @@ function exploreTab(picker) {
       ),
       el(
         "div",
-        { class: "seg panel" },
+        { class: "seg panel toggles", role: "group", "aria-label": "Edges shown" },
         [
           ["calls", "calls"],
           ["imports", "imports"],
           ["inferred", "inferred"],
           ["ambiguous", "ambiguous"],
-        ].map(([k, label]) => btn({ "aria-pressed": String(!gr.off[k]), onclick: () => ((gr.off[k] = !gr.off[k]), paint()) }, label)),
+        ].map(([k, label]) =>
+          // paint() redraws the canvas only, so the chip shows its own state.
+          btn({ "aria-pressed": String(!gr.off[k]), "data-tip": `${label} edges · click to ${gr.off[k] ? "show" : "hide"}`, onclick: (e) => ((gr.off[k] = !gr.off[k]), e.currentTarget.setAttribute("aria-pressed", String(!gr.off[k])), e.currentTarget.setAttribute("data-tip", `${label} edges · click to ${gr.off[k] ? "show" : "hide"}`), paint()) }, label),
+        ),
       ),
       el("span", { class: "spacer" }),
       picker,
