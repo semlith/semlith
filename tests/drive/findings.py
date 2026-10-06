@@ -70,8 +70,9 @@ CHECKS = []
 # repeated because several checks share them and a guessed selector that
 # matches nothing turns a check into a check of nothing.
 
-#: A live run's card on a store's Runs tab — `sdRuns()` draws one
-#: `card blue-edge pad` per run that is not finished, above the History card.
+#: A live run's card on a store's Runs tab — `sdRuns()` draws one `runCard()`
+#: (`card run-card blue-edge`, the wizard's card too) per run that is not
+#: finished, above the History card.
 LIVE_CARD = "#main .card.blue-edge"
 
 #: One finished run on a store's Runs tab — `sdRuns()`'s History rows, one per
@@ -4092,8 +4093,11 @@ new Promise(done => {
     const word = (card.querySelector('.pill') || {}).textContent || '';
     if (!/indexing|catching up/.test(word)) return;
     rates.samples++;
-    const line = (card.querySelector('.t-mono-sm') || {}).textContent || '';
-    const m = /(—|[\d.,]+) chunks\/s/.exec(line);
+    // The RATE tile of the one run card (0.37.0-rc.4, W8): "N chunks/s",
+    // or "—" before the first batch.
+    const tile = [...card.querySelectorAll('.run-stats > div')].find(t => /RATE/.test((t.querySelector('.eyebrow') || {}).textContent || ''));
+    const line = ((tile && tile.querySelector('.v')) || {}).textContent || '';
+    const m = /^(—|[\d.,]+)(?: chunks\/s)?$/.exec(line.trim());
     if (!m) rates.missing.push(line.slice(0, 80) || '(empty)');
     else if (m[1] === '—' && rates.numbered) rates.lapsed.push(line.slice(0, 80));
     else if (m[1] !== '—') rates.numbered = true;
@@ -4158,7 +4162,10 @@ def _(d):
         d.reset_viewport()
         still_open(d, STILL_VIEWPORT, "store/%s/runs" % store)
         d.wait_for("!!%s" % CARD, what="the live run's card")
-        seen = observe(d, CARD, ".log", 20000, rate=True)
+        # 0.37.0-rc.4 owner decision (W8): the live card is the wizard's run
+        # card, whose timeline grows a step per phase the way its log grows a
+        # line per file. Both may grow; nothing else on the tab may be rebuilt.
+        seen = observe(d, CARD, ".log, .tl", 20000, rate=True)
         if seen["loading"]:
             fail("the loader appeared %d time(s) on the Runs tab during a live run" % seen["loading"])
         if seen["count"]:
@@ -6137,6 +6144,8 @@ def _(d):
         final = wait_for_run(d, held["store"], run_id=held["id"])
         if final.get("status") != "done":
             fail("the started run ended %s" % final.get("status"))
+        # The card holds each last step for its dwell, then gives way.
+        d.wait_for("!!document.querySelector('.wz-body .done-banner')", timeout=30, what="the done card after the run's last steps")
         seen = d.eval("window.__tl")
         labels = seen["order"]
         for want_label in ("Recording 2 decisions", "Saving the store's settings", "Starting the run"):
@@ -6315,7 +6324,9 @@ def _(d):
         fail("the bulk decision did not end on a done line: %r" % seen["lines"][-1])
     kept = [r for s in d.api("/api/refused")["stores"] if s["store"] == store for r in s["rows"] if r.get("accepted") in ("refused", "kept")]
     want("files kept out", len(kept), 150)
+    no_console_errors(d, "the store's bulk decision")
     # The wizard records locally, at once, and says so in the same place.
+    d.clear_console()
     root = review_tree(d, "rc4wzbulk")
     wizard_to(d, 3, root=root)
     held = held_run(d, root)
@@ -6334,7 +6345,59 @@ def _(d):
         release_held(d, held)
 
 
-@finding("rc4.6", "the Index step's estimate is this machine's lanes over the plan, and moves as a lane is switched")
+#: A card's shape: every element's tag and first class, depth first, leaving
+#: out what grows (the timeline's steps, the log's lines).
+CARD_SHAPE = r"""
+(sel => {
+  const card = document.querySelector(sel);
+  if (!card) return null;
+  const out = [];
+  const walk = (n, depth) => {
+    out.push(depth + ':' + n.tagName.toLowerCase() + '.' + ((n.getAttribute('class') || '').split(' ')[0]));
+    if (n.matches('.tl, .log')) return;
+    for (const k of n.children) if (k.tagName !== 'svg') walk(k, depth + 1);
+  };
+  walk(card, 0);
+  return {shape: out, run: card.getAttribute('data-run'), cls: card.className,
+          stats: [...card.querySelectorAll('.run-stats .eyebrow')].map(e => e.textContent),
+          steps: card.querySelectorAll('.tl .tl-step').length};
+})
+"""
+
+
+@finding("rc4.7", "the wizard's Index step and the store's Runs tab draw a live run with the same card")
+def _(d):
+    """W8: the owner wants one run card, the wizard's, wherever a live run is
+    shown in full. The same run is read on both pages while it is live."""
+    d.clear_console()
+    root = d.fixtures.unique("rc4same", count=1500)
+    name = wizard_to(d, 4, root=root)
+    press_text(d, ".wz-foot button", "Start indexing", "Start indexing")
+    d.wait_for("!!document.querySelector('.wz-body .run-card[data-run]')", timeout=60, what="the wizard's run card")
+    wizard = d.eval("(%s)('.wz-body .run-card[data-run]')" % CARD_SHAPE)
+    store, run_id = wizard["run"].rsplit(":", 1)
+    try:
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("!!document.querySelector('#main .run-card[data-run=%s]')" % json.dumps(wizard["run"]), timeout=30,
+                   what="the same run's card on the Runs tab")
+        tab = d.eval("(%s)('#main .run-card[data-run=%s]')" % (CARD_SHAPE, json.dumps(wizard["run"]).replace("'", "\\'")))
+        live = run_by_id(d, int(run_id))
+        if not live or live.get("status") in TERMINAL:
+            skip("the run finished before the Runs tab was read; the machine is faster than the corpus")
+        want("the card's classes on the two pages", tab["cls"], wizard["cls"])
+        want("the card's counters on the two pages", tab["stats"], wizard["stats"])
+        if tab["shape"] != wizard["shape"]:
+            diff = [(a, b) for a, b in zip(wizard["shape"], tab["shape"]) if a != b][:4]
+            fail("the two pages draw the run differently (wizard vs Runs tab): %r" % (diff or (len(wizard["shape"]), len(tab["shape"]))))
+        if not tab["steps"]:
+            fail("the Runs tab's card draws no timeline")
+        no_console_errors(d, "the run card on two pages")
+    finally:
+        stop_quietly(d, store)
+    del name
+
+
+@finding("rc4.6","the Index step's estimate is this machine's lanes over the plan, and moves as a lane is switched")
 def _(d):
     accel = d.api("/api/accel")
     rates = accel.get("rates")
@@ -6343,7 +6406,7 @@ def _(d):
     d.clear_console()
     wizard_to(d, 4)
     lanes = [l for l in accel["lanes"] if (l.get("status") or {}).get("state") != "unavailable"]
-    other = next((l for l in lanes if l["lane"] != "cpu" and (rates.get(l["lane"]) or {}).get("chunks_per_s")), None)
+    other = next((l for l in lanes if l["lane"] != "cpu" and (rates.get(l["lane"]) or {}).get("per_s")), None)
     if not other:
         skip("no lane besides the CPU has a rate here, so switching one cannot move the estimate")
 

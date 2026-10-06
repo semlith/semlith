@@ -3468,9 +3468,13 @@ button.gl-row:hover,
   color: var(--ink);
   border-color: var(--blue);
 }
+/* The dividers are the grid's 1px gaps over a line-coloured track, so they
+ * stay right whichever tile is hidden and however the tiles wrap. */
 .run-stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line-soft);
   border-top: 1px solid var(--line-soft);
   border-bottom: 1px solid var(--line-soft);
 }
@@ -3479,17 +3483,20 @@ button.gl-row:hover,
   display: flex;
   flex-direction: column;
   gap: 2px;
-  border-right: 1px solid var(--line-soft);
+  background: var(--panel);
   min-width: 0;
 }
-.run-stats > div:last-child {
-  border-right: 0;
+.run-stats > div[hidden] {
+  display: none;
 }
 .run-stats .v {
   font: 13.5px var(--mono);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.run-stats .s:empty {
+  display: none;
 }
 .run-stats .s {
   font-size: 11.5px;
@@ -5037,9 +5044,6 @@ button.gl-row:hover,
   .run-stats.five {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .run-stats > div:nth-child(2n) {
-    border-right: 0;
-  }
   .span2 {
     grid-row: auto;
   }
@@ -5201,9 +5205,6 @@ button.gl-row:hover,
   .check4 > button {
     border-right: 0;
     border-bottom: 1px solid var(--line-soft);
-  }
-  .run-stats > div {
-    border-right: 0;
   }
 }
 

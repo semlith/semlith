@@ -1812,31 +1812,39 @@ const SHOWN = new Map();
 function dwell(key, steps, now) {
   const at = now || Date.now();
   if (!steps.length) return { steps, behind: false };
-  let s = SHOWN.get(key);
-  if (!s) SHOWN.set(key, (s = { i: 0, since: at }));
   const last = steps.length - 1;
+  // A step is only put up if it can stay its full dwell inside the lag: one
+  // whose successor began too long ago is passed over, never flashed.
+  const fits = (j) => j >= last || at - steps[j + 1].at <= LAG_MS - DWELL_MS;
+  const show = (j) => {
+    let k = j;
+    while (!fits(k)) k += 1;
+    s.i = k;
+    s.since = at;
+  };
+  let s = SHOWN.get(key);
+  if (!s) {
+    SHOWN.set(key, (s = { i: 0, since: at }));
+    show(0);
+  }
   s.i = Math.min(s.i, last);
-  while (s.i < last && at - steps[s.i + 1].at > LAG_MS) {
-    s.i += 1;
-    s.since = at;
-  }
-  if (s.i < last && at - s.since >= DWELL_MS) {
-    s.i += 1;
-    s.since = at;
-  }
-  return { steps: steps.slice(0, s.i + 1), behind: s.i < last };
+  if (s.i < last && (at - s.since >= DWELL_MS || at - steps[s.i + 1].at > LAG_MS)) show(s.i + 1);
+  s.behind = s.i < last;
+  return { steps: steps.slice(0, s.i + 1), behind: s.behind };
 }
 
 /** Steps as a timeline: label, when it began, how long it took, its counters;
  * the last one pulses while the run is live. */
 function timeline(steps, live) {
   const now = Date.now();
+  const t0 = steps.length ? steps[0].at : now;
   return el(
     "ol",
     { class: "tl" },
     steps.map((s, i) => {
       const cur = live && i === steps.length - 1;
-      const took = s.until != null ? s.until - s.at : now - s.at;
+      const began = s.began ?? s.at;
+      const took = (s.until != null ? s.until : now) - began;
       return el(
         "li",
         { class: `tl-step${cur ? " cur" : ""}` },
@@ -1844,7 +1852,9 @@ function timeline(steps, live) {
         el(
           "div",
           { class: "tl-body" },
-          el("div", { class: "tl-head" }, el("span", { class: "tl-label", text: s.label }), el("span", { class: "tl-when", text: `${s.at ? new Date(s.at).toTimeString().slice(0, 8) : ""} · ${spellTook(Math.max(0, took))}` })),
+          // When it began, from the first step (its clock time on hover; a
+          // running card shows no clock, 9.1), then how long it took.
+          el("div", { class: "tl-head" }, el("span", { class: "tl-label", text: s.label }), el("span", { class: "tl-when", "data-tip": began ? `began ${new Date(began).toTimeString().slice(0, 8)}` : null, text: `+${spellTook(Math.max(0, began - t0))} · ${s.until != null ? `took ${spellTook(Math.max(0, took))}` : `${spellTook(Math.max(0, took))} so far`}` })),
           s.detail ? el("div", { class: "tl-detail", text: s.detail }) : null,
         ),
       );
@@ -2251,12 +2261,13 @@ function paintChrome() {
   const pillNode = shell.runPill;
   if (run) {
     const p = Math.floor(runPct(run));
-    const word = { paused: "Paused", pausing: "Pausing", queued: "Queued", review: "Waiting for review", stopping: "Stopping", held: "Held" }[run.status] || (run.kind === "compact" ? "Compacting" : "Indexing");
+    const word = { paused: "Paused", pausing: "Pausing", queued: "Queued", scanning: "Scanning", review: "Waiting for review", stopping: "Stopping", held: "Held" }[run.status] || (run.kind === "compact" ? "Compacting" : "Indexing");
     pillNode.hidden = false;
     pillNode.dataset.store = run.store;
     pillNode.className = `run-pill hide-xs${run.status === "review" || run.status === "paused" ? " amber" : ""}`;
     fill(pillNode, dot(run.status === "review" || run.status === "paused" ? "amber" : "green", run.status === "running"), `${word} ${run.store}${run.status === "review" ? "" : ` · ${p}%`}`, bar(p, "w46"));
     pillNode.setAttribute("data-tip", "Open this store's runs");
+    pillNode.setAttribute("data-tip-rows", rows([["now", phaseText(run)], ["time left", run.status === "running" ? runLeftText(run) : ""]]));
   } else pillNode.hidden = true;
   const stores = liveStores().length;
   const agents = connectedCount();
@@ -2644,14 +2655,14 @@ function wizardScreen() {
     let knownAnswer = false;
     for (const l of on) {
       const r = rates[l.lane];
-      const v = r && r.chunks_per_s > 0 ? r.chunks_per_s : l.rate > 0 ? l.rate : 0;
-      if (r && r.chunks_per_s > 0 && r.source === "known-answer") knownAnswer = true;
+      const v = r && r.per_s > 0 ? r.per_s : l.rate > 0 ? l.rate : 0;
+      if (r && r.per_s > 0 && r.source === "known-answer") knownAnswer = true;
       perSec += v;
     }
     // ponytail: 1 KB a chunk is the bench median (spec §1.2); only an older daemon needs it.
     const chunks = P.chunks != null ? P.chunks : P.embedBytes ? P.embedBytes / 1024 : null;
     if (perSec > 0 && chunks != null) {
-      const clip = rates.clip && rates.clip.images_per_s;
+      const clip = rates.clip && rates.clip.per_s;
       return { ms: (chunks / perSec) * 1000 + (P.images && clip > 0 ? (P.images / clip) * 1000 : 0), knownAnswer };
     }
     return P.eta != null ? { ms: P.eta, knownAnswer: false } : null;
@@ -2691,13 +2702,25 @@ function wizardScreen() {
         danger: true,
       });
       if (del) {
-        for (const s of scanRuns()) await post("/api/index/control", { store: s.store, run: s.id, action: "stop", delete: true }).catch(() => {});
-        await act(() => post("/api/store/delete", { store: w.created }), `Deleted ${w.created}`);
+        const scans = scanRuns();
+        for (const s of scans) await post("/api/index/control", { store: s.store, run: s.id, action: "stop", delete: true }).catch(() => {});
+        // A scan stopped with `delete` takes its store with it once it has
+        // ended; deleting it while it ends is refused (409). So: wait for the
+        // scans to end, bounded, and delete only what is still there.
+        const ids = new Set(scans.map((s) => s.id));
+        for (let i = 0; i < 25 && ids.size; i++) {
+          await load("runs", true);
+          if ((data.runs?.runs || []).every((r) => !ids.has(r.id) || !LIVE_RUN.has(r.status))) break;
+          await new Promise((ok) => setTimeout(ok, 200));
+        }
+        await load("stores", true);
+        if (store(w.created)) await act(() => post("/api/store/delete", { store: w.created }), `Deleted ${w.created}`);
+        else toast(`Deleted ${w.created}`);
         await load("stores", true);
       } else {
         // A scan held for review is dropped either way: leaving is not a
         // decision to index what it found.
-        for (const s of scanRuns().filter((x) => x.status === "review")) await post("/api/index/control", { store: s.store, run: s.id, action: "stop" }).catch(() => {});
+        for (const s of scanRuns().filter((x) => x.status === "review" || x.status === "scanning")) await post("/api/index/control", { store: s.store, run: s.id, action: "stop" }).catch(() => {});
       }
     }
     state.wz = null;
@@ -3429,7 +3452,7 @@ function wizardScreen() {
       const counter = {
         walk: total ? `${plural(total, "file")} found` : "looking…",
         read: total ? `${n(scanned)} / ${n(total)}` : "reading…",
-        credentials: runs.some((r) => r.phase === "credentials") && total ? `${n(scanned)} / ${n(total)} checked` : "content + names",
+        credentials: runs.some((r) => r.flagged != null) ? `${plural(sum("flagged"), "file")} flagged` : "content + names",
         rules: ".gitignore · build",
       };
       const frac = shown === real && SCAN_STAGES[shown] && SCAN_STAGES[shown][0] === "read" && total ? scanned / total : 0;
@@ -3743,6 +3766,9 @@ function wizardScreen() {
     if (!R.length) return w.startSteps ? startingCard() : preRun();
     const live = R.find((x) => LIVE_RUN.has(x.status));
     if (live) return runningCard(live, R);
+    // A run over in a blink still shows each of its last steps for their
+    // dwell before the done card takes its place.
+    if (w.startKey && (SHOWN.get(w.startKey) || {}).behind) return runningCard(R[R.length - 1], R, true);
     return doneCard(R);
   }
 
@@ -3876,7 +3902,9 @@ function wizardScreen() {
       if (held.length) {
         await step(`Starting ${held.length === 1 ? "the run" : plural(held.length, "run")}`, "the daemon to take the run", async () => {
           for (const r of held) {
-            await post("/api/index/control", { store: r.store, run: r.id, action: "start" });
+            // The count the run logs as its first phase, "decisions".
+            const decisions = P.items.filter((d) => d.store === r.store && w.decisions[d.path]).length;
+            await post("/api/index/control", { store: r.store, run: r.id, action: "start", ...(decisions ? { decisions } : {}) });
             started.push(r.id);
           }
         });
@@ -3916,10 +3944,10 @@ function wizardScreen() {
       return { label: s.label, at: s.at, until: s.until || (s.error ? s.at + waited : null), detail: s.error ? `Failed: ${s.error}` : !s.until && waited > 2000 ? `Waiting for ${s.waits} — ${Math.round(waited / 1000)} s so far` : "" };
     });
     const live = w.busy;
-    const shown = shownSteps(w.startKey, steps);
+    const shown = shownOf(w.startKey, steps, wizAgain);
     return el(
       "div",
-      { class: "card run-card" },
+      { class: "card run-card blue-edge" },
       el(
         "div",
         { class: "card-b" },
@@ -3930,69 +3958,12 @@ function wizardScreen() {
     );
   }
 
-  // The steps the dwell queue lets through now; while it is behind the real
-  // ones, the step is painted again shortly so each comes in on time.
-  let dwellTimer = null;
-  function shownSteps(key, steps) {
-    const shown = dwell(key, steps);
-    if (shown.behind && !dwellTimer) {
-      dwellTimer = setTimeout(() => {
-        dwellTimer = null;
-        if (host.isConnected && w.step === 4) paint();
-      }, 200);
-    }
-    return shown.steps;
-  }
-
-  function runningCard(r, all) {
-    const p = runPct(r);
-    const paused = r.status === "paused" || r.status === "pausing";
-    // Start's own steps, then the run's: the decisions it applies, its place
-    // in the queue, the lane starting, and on to the end.
+  function runningCard(r, all, tail) {
+    // Start's own steps come first, then the run's own.
     const pre = w.startSteps && w.startKey ? w.startSteps.map((s) => ({ label: s.label, at: s.at, until: s.until, detail: "" })) : [];
-    // A run held for review began at its scan: what it did then is the scan
-    // card's, and a step still going is drawn as starting after Start's.
-    const from = pre.length ? pre[pre.length - 1].at : 0;
-    const own = runSteps(r)
-      .filter((s) => s.until == null || s.until >= from)
-      .map((s) => (s.at < from ? { ...s, at: from } : s));
-    const shown = shownSteps(w.startKey || `${r.store}:${r.id}:${r.submitted || ""}`, pre.concat(own));
-    const log = el("div", { class: "log", "data-scroll-keep": "wzlog" });
-    followLog(r, log);
-    return el(
-      "div",
-      { class: "card run-card" },
-      el(
-        "div",
-        { class: "card-b" },
-        el(
-          "div",
-          { class: "row" },
-          el("span", { class: "mono t-b", text: r.store }),
-          pill(paused ? "paused" : r.status === "queued" ? `queued${r.position ? ` · ${r.position} in line` : ""}` : "indexing", paused || r.status === "queued" ? "amber" : "green", { pulse: !paused }),
-          all.length > 1 ? meta(`${all.filter((x) => !LIVE_RUN.has(x.status)).length} of ${all.length} done`) : null,
-          el("span", { class: "spacer" }),
-          btn({ class: "btn", onclick: () => runControl(r, paused ? "resume" : "pause") }, paused ? "Resume" : "Pause"),
-          btn({ class: "btn danger-soft", onclick: () => stopRun(r) }, "Stop…"),
-        ),
-        el(
-          "div",
-          { class: "row nowrap gap12" },
-          (() => {
-            const b = bar(p, "h8 accent grow");
-            b.setAttribute("data-tip", `Index run · ${Math.floor(p)}%`);
-            b.setAttribute("data-tip-rows", runRows(r));
-            return b;
-          })(),
-          el("span", { class: "mono t-b", text: `${Math.floor(p)}%` }),
-        ),
-        timeline(shown, !paused),
-      ),
-      runStatsRow(r),
-      log,
-      el("div", { class: "lives" }, el("span", { class: "dot green" }), "The run lives in the daemon. Leave this page, close the tab — it keeps going and the header shows its progress."),
-    );
+    return runCard(r, { pre, key: w.startKey, meta: all.length > 1 ? `${all.filter((x) => !LIVE_RUN.has(x.status)).length} of ${all.length} done` : "", again: wizAgain, live: tail });
   }
+  const wizAgain = () => host.isConnected && w.step === 4 && paint();
 
   function doneCard(R) {
     const failed = R.filter((r) => r.status === "failed" || r.status === "stopped");
@@ -4462,17 +4433,93 @@ function runRows(r) {
 function runStatsRow(r) {
   const paused = r.status === "paused" || r.status === "pausing";
   const lanes = laneRatesText(r);
+  // Five tiles always, the images one hidden when there are none, and every
+  // sub-line drawn even when empty: a patch in place only edits words.
   const tiles = [
-    ["FILES READ", r.total ? `${n(r.scanned)} / ${n(r.total)}` : "counting…", r.bytes_total ? `${bytes(r.bytes || 0)} of ${bytes(r.bytes_total)} read` : "Files read and hashed; embedding follows, counted in chunks"],
-    ["CHUNKS", chunksOf(r), r.expected_chunks ? "Embedded of those expected; the total firms up as each file is chunked" : null, r.backlog ? `${n(r.backlog)} waiting for a lane` : null],
-    r.images_total ? ["IMAGES", `${n(r.images || 0)} / ${n(r.images_total)}`, "Images embedded with CLIP"] : null,
-    ["RATE", paused ? "paused" : r.rate != null ? `${perSecond(r.rate)} chunks/s` : "—", lanes, paused ? null : lanes],
-    ["TIME LEFT", paused ? "—" : r.status === "running" ? runLeftText(r) : r.status, runRangeTip(r), r.elapsed_ms ? `${spellTook(r.elapsed_ms)} elapsed` : null],
-  ].filter(Boolean);
+    ["FILES READ", r.total ? `${n(r.scanned)} / ${n(r.total)}` : "counting…", r.bytes_total ? `${bytes(r.bytes || 0)} of ${bytes(r.bytes_total)} read` : "Files read and hashed; embedding follows, counted in chunks", ""],
+    ["CHUNKS", chunksOf(r), r.expected_chunks ? "Embedded of those expected; the total firms up as each file is chunked" : null, r.backlog ? `${n(r.backlog)} waiting for a lane` : ""],
+    ["IMAGES", `${n(r.images || 0)} / ${n(r.images_total || 0)}`, "Images embedded with CLIP", "", !r.images_total],
+    ["RATE", paused ? "paused" : r.rate != null ? `${perSecond(r.rate)} chunks/s` : "—", lanes, paused ? "" : lanes],
+    ["TIME LEFT", paused ? "—" : r.status === "running" ? runLeftText(r) : r.status, runRangeTip(r), r.elapsed_ms ? `${spellTook(r.elapsed_ms)} elapsed` : ""],
+  ];
   return el(
     "div",
-    { class: `run-stats${tiles.length > 4 ? " five" : ""}` },
-    tiles.map(([k, v, t, s]) => el("div", { "data-tip": t || null }, el("span", { class: "eyebrow sm wide", text: k }), el("span", { class: "v", text: v }), s ? el("span", { class: "s", text: s }) : null)),
+    { class: `run-stats${r.images_total ? " five" : ""}` },
+    tiles.map(([k, v, t, s, hide]) => el("div", { "data-tip": t || null, hidden: hide || null }, el("span", { class: "eyebrow sm wide", text: k }), el("span", { class: "v", text: v }), el("span", { class: "s", text: s || "" }))),
+  );
+}
+
+/* The steps the dwell queue lets through now; while it is behind the real
+ * ones, `again` (a repaint) is called shortly so each comes in on time. */
+let dwellTimer = null;
+function shownOf(key, steps, again) {
+  // Once more after it catches up too, so whatever waits on the queue (the
+  // wizard's done card) is drawn without waiting for a poll.
+  const was = (SHOWN.get(key) || {}).behind;
+  const shown = dwell(key, steps);
+  if ((shown.behind || was) && !dwellTimer) {
+    dwellTimer = setTimeout(() => {
+      dwellTimer = null;
+      (again || repaint)();
+    }, 200);
+  }
+  return shown.steps;
+}
+
+/* One card for a live run, wherever one is shown in full (W8): the wizard's
+ * Index step and a store's Runs tab draw this, the same nodes in the same
+ * order. Every part is drawn and hidden when it does not apply, so a patch in
+ * place (morph) edits words and only the timeline and the log grow.
+ * `o.pre` steps come before the run's own (the wizard's Start), `o.key` names
+ * the dwell queue, `o.meta` is a note beside the pill, `o.again` repaints. */
+function runCard(r, o) {
+  const opts = o || {};
+  const p = runPct(r);
+  const paused = r.status === "paused" || r.status === "pausing";
+  const pre = opts.pre || [];
+  // A run held for review began at its scan: what it did before Start is the
+  // scan card's. A step still going, or one that began while Start's own
+  // requests were out, is queued after Start's steps so the order holds.
+  const from = pre.length ? pre[0].at : 0;
+  const after = pre.length ? pre[pre.length - 1].at : 0;
+  const own = runSteps(r)
+    .filter((s) => s.until == null || s.at >= from)
+    .map((s) => (s.at < after ? { ...s, at: after, began: s.at } : s));
+  const shown = shownOf(opts.key || `${r.store}:${r.id}:${r.submitted || ""}`, pre.concat(own), opts.again);
+  const review = r.status === "review";
+  const queued = r.status === "queued";
+  const head = queued ? "Waiting to start" : review ? "Held for review" : r.status === "scanning" ? "Scanning" : "Running now";
+  const word = !LIVE_RUN.has(r.status) ? "finishing" : r.status === "pausing" ? "pausing" : paused ? "paused" : review ? "waiting for review" : r.status === "scanning" ? "scanning" : queued ? `queued${r.position ? ` · ${r.position} in line` : ""}` : r.kind === "compact" ? "compacting" : r.kind === "catch-up" ? "catching up" : "indexing";
+  const b = bar(p, "h8 accent grow");
+  b.setAttribute("data-tip", `Index run · ${Math.floor(p)}%`);
+  b.setAttribute("data-tip-rows", runRows(r));
+  const log = el("div", { class: "log", "data-scroll-keep": `log-${r.id}`, "data-morph-keep": `log-${r.id}` });
+  followLog(r, log);
+  return el(
+    "div",
+    { class: "card run-card blue-edge", "data-run": `${r.store}:${r.id}` },
+    el(
+      "div",
+      { class: "card-b" },
+      el(
+        "div",
+        { class: "row" },
+        el("span", { class: "card-t", text: head }),
+        el("span", { class: "mono t-b", text: r.store }),
+        pill(word, paused || review || queued ? "amber" : "green", { pulse: r.status === "running" }),
+        meta(opts.meta || ""),
+        el("span", { class: "spacer" }),
+        btn({ class: "btn primary", hidden: review ? null : true, onclick: () => go("store", r.store, "review") }, "Review and start"),
+        btn({ class: "btn", hidden: review ? null : true, onclick: () => runControl(r, "start") }, "Start indexing"),
+        btn({ class: "btn", hidden: ["running", "paused", "pausing"].includes(r.status) ? null : true, "data-keep": `run-ctl-${r.id}`, onclick: () => runControl(r, paused ? "resume" : "pause") }, paused ? "Resume" : "Pause"),
+        btn({ class: "btn danger-soft", hidden: LIVE_RUN.has(r.status) ? null : true, "data-keep": `run-stop-${r.id}`, onclick: () => stopRun(r) }, queued ? "Take out of the queue" : "Stop…"),
+      ),
+      el("div", { class: "row nowrap gap12" }, b, el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
+      timeline(shown, opts.live || ["running", "scanning", "queued", "stopping"].includes(r.status)),
+    ),
+    runStatsRow(r),
+    log,
+    el("div", { class: "lives" }, el("span", { class: "dot green" }), "The run lives in the daemon. Leave this page, close the tab — it keeps going and the header shows its progress."),
   );
 }
 
@@ -4597,6 +4644,7 @@ function storeState(s) {
     const p = Math.floor(runPct(r));
     if (r.status === "review") return { state: "waiting for review", tone: "amber" };
     if (r.status === "queued") return { state: "queued", tone: "blue" };
+    if (r.status === "scanning") return { state: "scanning", tone: "blue", pulse: true };
     if (r.status === "paused" || r.status === "pausing") return { state: `paused ${p}%`, tone: "amber" };
     return { state: `${r.kind === "compact" ? "compacting" : "indexing"} ${p}%`, tone: "blue", pulse: true };
   }
@@ -5989,39 +6037,7 @@ function sdRuns(s, holder) {
     ...doneHere.filter((r) => !(data.runs?.history || []).some((h) => h.store === s.name && same(h, r))),
   ].sort((a, b) => (b.finished || b.finished_at || 0) - (a.finished || a.finished_at || 0));
   const host = el("div", { class: "stack" });
-  for (const r of live) {
-    const paused = r.status === "paused" || r.status === "pausing";
-    const p = runPct(r);
-    const b = bar(p, "h8 accent grow");
-    b.setAttribute("data-tip", `Indexing · ${Math.floor(p)}%`);
-    b.setAttribute("data-tip-rows", runRows(r));
-    const log = el("div", { class: "log rounded", "data-scroll-keep": `log-${r.id}`, "data-morph-keep": `log-${r.id}` });
-    followLog(r, log);
-    host.append(
-      el(
-        "div",
-        { class: "card blue-edge pad" },
-        el(
-          "div",
-          { class: "row" },
-          el("span", { class: "card-t", text: r.status === "queued" ? "Waiting to start" : r.status === "review" ? "Held for review" : "Running now" }),
-          pill(r.status === "pausing" ? "pausing" : paused ? "paused" : r.status === "review" ? "waiting for review" : r.status === "queued" ? `queued${r.position ? ` · ${r.position} in line` : ""}` : r.kind === "compact" ? "compacting" : r.kind === "catch-up" ? "catching up" : "indexing", paused || r.status === "review" || r.status === "queued" ? "amber" : "green", { pulse: r.status === "running" }),
-          el("span", { class: "spacer" }),
-          // Every control is drawn and hidden when it does not apply, so the
-          // card keeps its shape across states and a live patch never moves
-          // the button someone just pressed.
-          btn({ class: "btn sm primary", hidden: r.status === "review" ? null : true, onclick: () => go("store", s.name, "review") }, "Review and start"),
-          btn({ class: "btn sm", hidden: r.status === "review" ? null : true, onclick: () => runControl(r, "start") }, "Start indexing"),
-          btn({ class: "btn sm", hidden: ["running", "paused", "pausing"].includes(r.status) ? null : true, "data-keep": `run-ctl-${r.id}`, onclick: () => runControl(r, paused ? "resume" : "pause") }, paused ? "Resume" : "Pause"),
-          btn({ class: "btn sm danger-soft", "data-keep": `run-stop-${r.id}`, onclick: () => stopRun(r) }, r.status === "queued" ? "Take out of the queue" : "Stop…"),
-        ),
-        el("div", { class: "row nowrap gap12" }, b, el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
-        el("div", { class: "t-mono-sm", "data-tip": runRangeTip(r), text: [r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "", `${chunksOf(r)} chunks`, r.images_total ? `${n(r.images || 0)} / ${n(r.images_total)} images` : "", r.rate != null ? `${perSecond(r.rate)} chunks/s` : "", laneRatesText(r), r.backlog ? `${n(r.backlog)} waiting` : "", r.status === "running" ? (truthRun(r) && r.eta_ms != null && r.eta_ms >= 10000 ? `${runLeftText(r)} left` : runLeftText(r)) : ""].filter(Boolean).join(" · ") }),
-        el("div", { class: "muted t-sm", text: phaseText(r), hidden: r.phase ? null : true }),
-        log,
-      ),
-    );
-  }
+  for (const r of live) host.append(runCard(r));
   host.append(
     el(
       "div",
