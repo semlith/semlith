@@ -771,7 +771,6 @@ impl RunState {
             }
         }
         let work = self.work();
-        let (done, all) = work.units();
         self.high = self.high.max(work.share()).min(0.999);
         let at = self.elapsed().as_secs_f64();
         let hold = matches!(
@@ -779,6 +778,7 @@ impl RunState {
             // Not a drain: that is the embedding's tail, and counts down.
             Some("lane" | "save" | "walk" | "decisions")
         );
+        let (done, all) = work.eta_units();
         self.eta.observe_unless(hold, at, done);
         // No figure before the run knows how much there is.
         if self.total == 0 || all <= 0.0 {

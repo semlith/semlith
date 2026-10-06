@@ -1613,7 +1613,6 @@ fn say_file(
             image_weight: live.image_weight,
             parallel: live.images_parallel,
         };
-        let (done, all) = work.units();
         live.high = live.high.max(work.share()).min(0.999);
         let at = live.started.elapsed().as_secs_f64();
         // Held only while nothing the estimate counts can move: a lane
@@ -1623,8 +1622,11 @@ fn say_file(
             live.phase,
             progress::Phase::Lane | progress::Phase::Save | progress::Phase::Walk
         );
+        let (done, all) = work.eta_units();
         live.eta.observe_unless(hold, at, done);
-        let eta = live.eta.left(at, all - done, hold);
+        let eta = (all > 0.0)
+            .then(|| live.eta.left(at, all - done, hold))
+            .flatten();
         (
             live.phase,
             live.detail.clone(),
