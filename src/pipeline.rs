@@ -210,6 +210,14 @@ impl WriteParts {
         }
     }
 
+    /// Charge `ms` milliseconds to `part`: work timed on another thread.
+    pub fn add_ms(&self, part: &str, ms: u64) {
+        if let Some(at) = WRITE_PARTS.iter().position(|p| *p == part) {
+            let cell = &self.micros[at];
+            cell.set(cell.get() + ms * 1000);
+        }
+    }
+
     /// Every part's milliseconds, and the counters back to zero.
     pub fn take(&self) -> BTreeMap<String, u64> {
         WRITE_PARTS

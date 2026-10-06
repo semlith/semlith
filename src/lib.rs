@@ -1392,6 +1392,29 @@ impl Default for Live {
 
 /// What an index call puts into the vector cache and takes out of it, by the
 /// hash of each chunk's embedded text and the variant of its vector.
+/// One image for the image lane: its bytes and what the writer needs to
+/// record it once its vector comes back.
+struct ImageJob {
+    path: PathBuf,
+    key: String,
+    bytes: Vec<u8>,
+    hash: String,
+    width: u32,
+    height: u32,
+}
+
+/// An image the image lane has finished, or failed on its bytes.
+struct ImageDone {
+    job: ImageJob,
+    vector: std::result::Result<Vec<f32>, String>,
+    ms: u64,
+}
+
+/// Image bytes the writer may have waiting for the image lane before it waits
+/// itself. The image model is slower than reading, and a folder of
+/// screenshots would otherwise sit in memory whole.
+const IMAGE_BYTES_IN_FLIGHT: u64 = 256 * 1024 * 1024;
+
 #[derive(Default)]
 struct CacheWrites {
     fresh: Vec<([u8; 32], &'static str, Vec<f32>)>,
@@ -1840,6 +1863,15 @@ pub struct Semlith {
     /// chunks and images. Taken by the next pass instead of sizing every
     /// remaining file again.
     pub expect_rest: Option<(u64, usize)>,
+    /// Files whose rows are written and whose vectors are still with the
+    /// lanes: chunks to go and the hash to commit once none are left. A
+    /// checkpoint commits only files that have left this map, so it no longer
+    /// waits for every window in flight (#203).
+    awaiting: std::collections::HashMap<i64, (usize, String)>,
+    /// Which file each in-flight chunk belongs to.
+    file_of: std::collections::HashMap<u64, i64>,
+    /// Files whose last vector has landed since the last commit of hashes.
+    landed: Vec<(i64, String)>,
     /// Size, mtime and content hash of each file the scan phase read, so the
     /// embed pass that follows it does not read an unchanged file twice.
     prehashed: std::collections::HashMap<PathBuf, (u64, i64, String)>,
@@ -1945,6 +1977,9 @@ impl Semlith {
             vector_cache: None,
             planned: None,
             expect_rest: None,
+            awaiting: Default::default(),
+            file_of: Default::default(),
+            landed: Vec::new(),
             prehashed: Default::default(),
             scrub: false,
         })
@@ -3150,6 +3185,9 @@ impl Semlith {
         let mut cached = CacheWrites::default();
         let mut clock = pipeline::WriterClock::start(walk_ms);
         self.write_parts.take();
+        self.awaiting.clear();
+        self.file_of.clear();
+        self.landed.clear();
         let sealed = pending_walk.is_none();
         let mut run_lanes: std::collections::BTreeMap<String, usize> = Default::default();
         let (cpu_back, cpu_returned) = std::sync::mpsc::channel();
@@ -3158,6 +3196,20 @@ impl Semlith {
 
         std::thread::scope(|scope| -> Result<()> {
             let prefetch = pipeline::Prefetch::start(scope, first, sealed, &ctx, prepare_threads);
+            // The image lane (#203): the image model on a thread of its own,
+            // started at the first image, so the text lanes keep embedding
+            // while it works. It was the writer's own call, and on the owner's
+            // walk a stretch of screenshots left the Neural Engine idle for
+            // minutes. The writer records each image when its vector returns.
+            let (image_send, image_jobs) = std::sync::mpsc::channel::<ImageJob>();
+            let (image_back, image_done) = std::sync::mpsc::channel::<ImageDone>();
+            let mut image_send = Some(image_send);
+            let mut image_jobs = Some(image_jobs);
+            let mut image_lane: Option<std::thread::ScopedJoinHandle<'_, image::Clip>> = None;
+            let mut clip = Some(std::mem::take(&mut self.clip));
+            let quiet = self.quiet;
+            let mut images_out = 0usize;
+            let mut image_bytes_out = 0u64;
             // The walk of the whole tree, when the pass started on its head.
             let mut walker = pending_walk.map(|(roots, accepted)| {
                 scope.spawn(move || {
@@ -3335,6 +3387,23 @@ impl Semlith {
                         report.remaining = prefetch.len().0 - seen;
                         report.stopped = true;
                         break;
+                    }
+                }
+                // Whatever the image lane has finished, into the store.
+                while let Ok(done) = image_done.try_recv() {
+                    images_out -= 1;
+                    image_bytes_out = image_bytes_out.saturating_sub(done.job.bytes.len() as u64);
+                    if let Some((failed_path, why)) =
+                        self.land_image(done, &mut report, &mut written, &mut completed)?
+                    {
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &failed_path,
+                            FileOutcome::Failed,
+                            Some(why),
+                        );
                     }
                 }
                 // Whatever the embed stage has finished, into the index.
@@ -3621,76 +3690,56 @@ impl Semlith {
                             FileOutcome::Image,
                             None,
                         );
-                        let back = if self.clip.loaded() {
-                            None
-                        } else {
-                            let back = report.live.borrow().phase;
-                            say_phase(
-                                &mut on_file,
-                                &report,
-                                total,
-                                progress::Phase::Images,
-                                Some("loading the image model (CLIP)".to_string()),
-                            );
-                            Some(back)
-                        };
-                        // The one call in the image path that can fail on this
-                        // file's own bytes — a header the dimension reader
-                        // accepted and the decoder did not. Caught here, before a
-                        // single row is written, so the file leaves the store
-                        // exactly as it found it and the next file is embedded.
-                        // Everything after this line is the store's, and a
-                        // failure there is the run's.
-                        // The image model runs on the writer: while it does,
-                        // the text lanes wait, and the card says why.
+                        if image_lane.is_none()
+                            && let (Some(jobs), Some(mut model)) = (image_jobs.take(), clip.take())
                         {
-                            let images_total = report.images + report.images_left + 1;
-                            let mut live = report.live.borrow_mut();
-                            if live.phase != progress::Phase::Images {
-                                live.detail = Some(format!(
-                                    "embedding images with the image model: {} of {}",
-                                    report.images + 1,
-                                    images_total
-                                ));
-                            }
+                            let back = image_back.clone();
+                            image_lane = Some(scope.spawn(move || {
+                                for job in jobs {
+                                    let started = std::time::Instant::now();
+                                    let vector = model
+                                        .embed_image(&job.path, &job.bytes, quiet)
+                                        .map_err(|e| format!("{e:#}"));
+                                    let ms = started.elapsed().as_millis() as u64;
+                                    if back.send(ImageDone { job, vector, ms }).is_err() {
+                                        break;
+                                    }
+                                }
+                                model
+                            }));
                         }
-                        let timed = std::time::Instant::now();
-                        let embedded = self.clip.embed_image(&path, &bytes, self.quiet);
-                        self.write_parts.add("images", timed);
-                        if let Some(back) = back {
-                            say_phase(&mut on_file, &report, total, back, None);
-                        }
-                        let vector = match embedded {
-                            Ok(vector) => vector,
-                            Err(e) => {
-                                failed(&mut report, &path, &e);
+                        // Held back while the lane is far behind, landing what
+                        // it has finished meanwhile.
+                        while image_bytes_out > IMAGE_BYTES_IN_FLIGHT && images_out > 0 {
+                            let Ok(done) = image_done.recv() else { break };
+                            images_out -= 1;
+                            image_bytes_out =
+                                image_bytes_out.saturating_sub(done.job.bytes.len() as u64);
+                            if let Some((path, why)) =
+                                self.land_image(done, &mut report, &mut written, &mut completed)?
+                            {
                                 say_file(
                                     &mut on_file,
                                     &report,
                                     total,
                                     &path,
                                     FileOutcome::Failed,
-                                    Some(format!("{e:#}")),
+                                    Some(why),
                                 );
-                                continue;
                             }
-                        };
-                        // Replacing an image: its old vector goes before the new
-                        // one arrives, and the row goes with the file's cascade.
-                        for id in store::image_ids_of(&self.db, &key)? {
-                            self.images.remove(id as u64)?;
                         }
-                        for id in store::delete_file(&self.db, &key, now())? {
-                            self.index.remove(id)?;
+                        image_bytes_out += bytes.len() as u64;
+                        images_out += 1;
+                        if let Some(send) = &image_send {
+                            let _ = send.send(ImageJob {
+                                path: path.clone(),
+                                key: key.clone(),
+                                bytes,
+                                hash,
+                                width,
+                                height,
+                            });
                         }
-                        let file_id =
-                            store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
-                        written.push(key.clone());
-                        let image_id = store::insert_image(&self.db, file_id, width, height)?;
-                        self.images.add(&vector, &[image_id as u64])?;
-                        completed.push((file_id, hash));
-                        report.indexed += 1;
-                        report.images += 1;
                         continue;
                     }
                     // A reader that panics on one file's bytes is that file's
@@ -4003,7 +4052,12 @@ impl Semlith {
                 report.symbols += symbols;
                 report.edges += edges;
 
-                completed.push((file_id, hash));
+                // Committed once its last vector lands (see `land`), not now:
+                // its rows are written, its vectors are still with the lanes.
+                self.awaiting.insert(file_id, (count, hash));
+                for (_, _, id) in &spans {
+                    self.file_of.insert(*id as u64, file_id);
+                }
                 report.indexed += 1;
                 report.chunks += count;
                 // Written in full: its rows stand for it now.
@@ -4027,70 +4081,23 @@ impl Semlith {
                 // windows every time and so are its vectors.
                 since_checkpoint += 1;
                 if checkpointing && since_checkpoint >= every {
-                    // Said before and after, because the work between these two
-                    // lines is the longest thing a run does without reading a
-                    // file: every window in flight is waited for and the shards
-                    // are rewritten.
-                    say_phase(
-                        &mut on_file,
-                        &report,
-                        total,
-                        progress::Phase::Drain,
-                        Some(format!(
-                            "checkpoint: {} chunks still embedding, then the index is written to disk",
-                            report.rows.saturating_sub(report.embedded)
-                        )),
-                    );
-                    let drained = self.hand_over(
-                        scope,
-                        &mut stage,
-                        &mut window,
-                        &cpu_back,
-                        &paused,
-                        &ask,
-                        &mut clock,
-                        &mut |n| {
-                            report.batched = n;
-                            say_file(
-                                &mut on_file,
-                                &report,
-                                total,
-                                &path,
-                                FileOutcome::Progress,
-                                None,
-                            )
-                        },
-                    )? && self.drain(
-                        &mut stage,
-                        &mut report,
-                        &mut run_lanes,
-                        &mut cached,
-                        &paused,
-                        &ask,
-                        &mut clock,
-                        &mut |report: &IndexReport| {
-                            say_file(
-                                &mut on_file,
-                                report,
-                                total,
-                                &path,
-                                FileOutcome::Progress,
-                                None,
-                            )
-                        },
-                    )?;
-                    if !drained {
-                        report.remaining = prefetch.len().0 - seen - 1;
-                        report.stopped = true;
-                        break;
-                    }
+                    // No drain (#203): the windows in flight carry on, the index
+                    // is written with every vector that has landed, and only the
+                    // files whose every chunk has landed are recorded as indexed.
+                    // A file still embedding stays pending, which is what a
+                    // crash here must leave it as. Waiting for every window cost
+                    // the owner's walk a minute per checkpoint.
                     say_phase(
                         &mut on_file,
                         &report,
                         total,
                         progress::Phase::Save,
-                        Some("checkpoint: writing the index to disk".to_string()),
+                        Some(format!(
+                            "checkpoint: writing the index to disk ({} chunks still embedding carry on)",
+                            report.rows.saturating_sub(report.embedded)
+                        )),
                     );
+                    completed.append(&mut self.landed);
                     self.checkpoint(&mut completed)?;
                     since_checkpoint = 0;
                     say_phase(&mut on_file, &report, total, progress::Phase::Embed, None);
@@ -4154,6 +4161,48 @@ impl Semlith {
                 )?;
                 if !drained {
                     report.stopped = true;
+                }
+            }
+            // The image lane finishes what it was given; each lands, and on a
+            // stop the undo takes them out with the rest of the run's files.
+            image_send = None;
+            if images_out > 0 {
+                say_phase(
+                    &mut on_file,
+                    &report,
+                    total,
+                    progress::Phase::Drain,
+                    Some(format!("{images_out} images still with the image model")),
+                );
+            }
+            while images_out > 0 {
+                let Ok(done) = image_done.recv() else { break };
+                images_out -= 1;
+                if let Some((failed_path, why)) =
+                    self.land_image(done, &mut report, &mut written, &mut completed)?
+                {
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &failed_path,
+                        FileOutcome::Failed,
+                        Some(why),
+                    );
+                }
+            }
+            drop(image_send);
+            drop(image_back);
+            match image_lane.take() {
+                Some(lane) => {
+                    if let Ok(model) = lane.join() {
+                        self.clip = model;
+                    }
+                }
+                None => {
+                    if let Some(model) = clip.take() {
+                        self.clip = model;
+                    }
                 }
             }
             // A stop gives up on what is in flight: those windows' rows are
@@ -4263,6 +4312,10 @@ impl Semlith {
             self.write_parts.add("save", timed);
         }
 
+        // Every window has landed or been given up by now: the files whose
+        // vectors all arrived are indexed; any left waiting were stopped mid-
+        // embed and stay pending for the undo or the next run.
+        completed.append(&mut self.landed);
         self.commit_hashes(&mut completed)?;
         // The cache write, the sweep and the last save come after the clock
         // settled, and are the writer's too.
@@ -4772,6 +4825,45 @@ impl Semlith {
     /// breath and from the same values, so the two cannot describe different
     /// vectors. A failure to write the sidecar fails the pass rather than
     /// leaving a store whose rescoring silently reorders by a stale vector.
+    /// One image back from the image lane, recorded: its old vector and rows
+    /// replaced, its new ones written. `Some((path, why))` when the image
+    /// model could not read its bytes, which is that file's failure.
+    fn land_image(
+        &mut self,
+        done: ImageDone,
+        report: &mut IndexReport,
+        written: &mut Vec<String>,
+        completed: &mut Vec<(i64, String)>,
+    ) -> Result<Option<(PathBuf, String)>> {
+        let ImageDone { job, vector, ms } = done;
+        self.write_parts.add_ms("images", ms);
+        let vector = match vector {
+            Ok(vector) => vector,
+            Err(why) => {
+                failed(report, &job.path, &anyhow::anyhow!("{why}"));
+                return Ok(Some((job.path, why)));
+            }
+        };
+        self.tx_begin()?;
+        // Replacing an image: its old vector goes before the new one arrives,
+        // and the row goes with the file's cascade.
+        for id in store::image_ids_of(&self.db, &job.key)? {
+            self.images.remove(id as u64)?;
+        }
+        for id in store::delete_file(&self.db, &job.key, now())? {
+            self.index.remove(id)?;
+        }
+        let file_id =
+            store::insert_file(&self.db, &job.key, PENDING, job.bytes.len() as u64, now())?;
+        written.push(job.key.clone());
+        let image_id = store::insert_image(&self.db, file_id, job.width, job.height)?;
+        self.images.add(&vector, &[image_id as u64])?;
+        completed.push((file_id, job.hash));
+        report.indexed += 1;
+        report.images += 1;
+        Ok(None)
+    }
+
     fn land(
         &mut self,
         done: pipeline::Embedded,
@@ -4791,6 +4883,18 @@ impl Semlith {
         self.index.add(&flat, &done.ids)?;
         self.exact.append(&flat, &done.ids)?;
         self.write_parts.add("vectors", timed);
+        for id in &done.ids {
+            if let Some(file) = self.file_of.remove(id)
+                && let Some(left) = self.awaiting.get_mut(&file)
+            {
+                left.0 = left.0.saturating_sub(1);
+                if left.0 == 0
+                    && let Some((_, hash)) = self.awaiting.remove(&file)
+                {
+                    self.landed.push((file, hash));
+                }
+            }
+        }
         self.record_variants(&done.variants)?;
         for (lane, n) in &done.lanes {
             self.note_lane(lane, *n);

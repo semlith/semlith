@@ -49,6 +49,10 @@ const EVENT_HISTORY: usize = 20;
 /// to the watcher. The same budget `semlith_index` has always had.
 const SLICE: Duration = Duration::from_secs(45);
 
+/// The budget a slice is handed: long, because the slice ends at `SLICE` only
+/// when the control finds something waiting (see `perform`).
+const RUN_BUDGET: Duration = Duration::from_secs(24 * 3600);
+
 /// How many of a run's log lines the daemon keeps for a page to catch up on.
 ///
 /// A ring rather than a log, for the same reason [`EVENT_HISTORY`] is one: the
@@ -1334,6 +1338,9 @@ pub struct Store {
     /// forwarded `semlith_index` lands on — stopping it would make the store
     /// unwritable, which is not what "stop watching" means.
     pub watch_events: AtomicBool,
+    /// Raised by the watcher while file changes wait for the writer: one of
+    /// the two things a long run gives its turn up for (see `perform`).
+    pub events_waiting: Arc<AtomicBool>,
     /// The store's `gitignore` setting, read by the writer between jobs.
     pub gitignore: AtomicBool,
 }
@@ -1396,6 +1403,7 @@ impl Store {
             expecting_run_until: AtomicUsize::new(expecting_run_until),
             stopped_because: Mutex::new(None),
             watch_events: AtomicBool::new(true),
+            events_waiting: Arc::new(AtomicBool::new(false)),
             gitignore: AtomicBool::new(true),
         }
     }
@@ -4343,6 +4351,7 @@ fn tend(
         watch::Held {
             catch_up: false,
             roots_now: &|| store.watched(),
+            events: Some(Arc::clone(&store.events_waiting)),
             waiting: &|| false,
             // A burst larger than a save is admitted like a run, so a `git
             // checkout` of thousands of files waits its turn and shows as a
@@ -4572,9 +4581,25 @@ fn perform(
                 let admission = Arc::clone(admission);
                 let told = std::sync::atomic::AtomicBool::new(false);
                 let held = std::sync::atomic::AtomicBool::new(false);
+                let slice_began = std::time::Instant::now();
                 move || {
                     if store.cancelled.load(Ordering::Relaxed) {
                         return crate::Flow::Stop;
+                    }
+                    // A slice gives the writer back after its budget only when
+                    // something wants it: file changes for the watcher, or a job
+                    // on this store's queue. With nothing waiting it carries on,
+                    // because every slice end drains the lanes and saves, and on
+                    // the owner's walk that cost a minute per 45 s slice.
+                    if slice_began.elapsed() >= SLICE
+                        && (store.events_waiting.load(Ordering::Relaxed)
+                            || !store
+                                .queue
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .is_empty())
+                    {
+                        return crate::Flow::Yield;
                     }
                     // The daemon is shutting down: keep what is done and
                     // step aside now, as the slice budget would in 45 s,
@@ -4703,11 +4728,11 @@ fn perform(
             };
             let outcome = match work {
                 Work::Roots(ref roots) => {
-                    writer.index_within_held_under(roots, SLICE, &control, on_file)
+                    writer.index_within_held_under(roots, RUN_BUDGET, &control, on_file)
                 }
                 Work::Rest(rest) => writer.index_rest_held_under(
                     rest,
-                    SLICE,
+                    RUN_BUDGET,
                     (bytes_total_before > 0).then_some(bytes_total_before),
                     &control,
                     on_file,
