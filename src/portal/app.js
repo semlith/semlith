@@ -73,8 +73,12 @@ function morph(a, b) {
   }
   const keep = a.getAttribute("data-morph-keep");
   if (keep && keep === b.getAttribute("data-morph-keep")) return;
-  for (const { name } of [...a.attributes]) if (!b.hasAttribute(name)) a.removeAttribute(name);
-  for (const { name, value } of [...b.attributes]) if (a.getAttribute(name) !== value) a.setAttribute(name, value);
+  // `style` goes through the CSSOM: the CSP drops a style attribute written
+  // with setAttribute, so a patched bar kept its first width while its
+  // percentage climbed (walk 3).
+  for (const { name } of [...a.attributes]) if (name !== "style" && !b.hasAttribute(name)) a.removeAttribute(name);
+  for (const { name, value } of [...b.attributes]) if (name !== "style" && a.getAttribute(name) !== value) a.setAttribute(name, value);
+  if (a.style && b.style && a.style.cssText !== b.style.cssText) a.style.cssText = b.style.cssText;
   if ("value" in b && a !== document.activeElement && a.value !== b.value) a.value = b.value;
   if ("checked" in b && a.checked !== b.checked) a.checked = b.checked;
   for (const [type, fn] of Object.entries(b.__h || {})) listen(a, type, fn);
