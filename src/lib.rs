@@ -1239,6 +1239,10 @@ pub struct IndexProgress {
     /// Time left, and a low and high bound, from [`progress::Eta`].
     pub eta_ms: Option<u64>,
     pub eta_range_ms: Option<(u64, u64)>,
+    /// What an image weighs in chunks in this run: fixed for the run, from
+    /// this machine's measured image-model and lane rates. Re-measured as a
+    /// run went, it moved the units already done and the time left with them.
+    pub image_weight: f64,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -1347,6 +1351,14 @@ pub struct IndexReport {
     /// reached yet: the estimate a continuation slice starts from.
     pub expected_left: u64,
     pub images_left: usize,
+    /// The file in hand's estimate and the rows it has written so far: the
+    /// rest of its estimate stays in the expected total until it is written,
+    /// so a large file does not take its whole estimate out at its first row.
+    #[serde(skip)]
+    pub(crate) current_est: u64,
+    #[serde(skip)]
+    pub(crate) current_rows: u64,
+
     /// What the pass is doing, its share-done high water and its time-left
     /// estimate. Behind a cell because every progress line reads it through
     /// a shared reference.
@@ -1534,9 +1546,11 @@ fn say_file(
         outcome.as_str()
     );
     let chunks = report.embedded.max(report.batched);
-    let expected_chunks = report.rows as u64 + report.expected_left;
+    let expected_chunks = report.rows as u64
+        + report.expected_left
+        + report.current_est.saturating_sub(report.current_rows);
     let images_total = report.images + report.images_left;
-    let (phase, phase_detail, share, eta) = {
+    let (phase, phase_detail, share, eta, image_weight) = {
         let mut live = report.live.borrow_mut();
         // A lane still loading is the run's to say, not a global's: the
         // writer is waiting on it whatever the run is otherwise doing.
@@ -1582,7 +1596,13 @@ fn say_file(
             progress::Phase::Lane | progress::Phase::Save | progress::Phase::Walk
         );
         let eta = live.eta.left(at, all - done, hold);
-        (live.phase, live.detail.clone(), live.high, eta)
+        (
+            live.phase,
+            live.detail.clone(),
+            live.high,
+            eta,
+            live.image_weight,
+        )
     };
     on_file(
         path,
@@ -1610,6 +1630,7 @@ fn say_file(
             progress: share,
             eta_ms: eta.map(|(ms, _)| ms),
             eta_range_ms: eta.map(|(_, range)| range),
+            image_weight,
         },
     );
 }
@@ -2468,9 +2489,11 @@ impl Semlith {
                     }
                 }
                 keyscan::Decision::Refuse(rule) => {
-                    // Counted in case a person accepts it; not in the total.
+                    // Counted for the page, in case a person accepts it; not in
+                    // the total, nor in the run's per-file counts, where a file
+                    // kept out would hold the expected total up until the run
+                    // reached it. An accepted one is estimated by its size.
                     let n = planned_chunks(&path, &text);
-                    plan.counts.insert(key.clone(), n);
                     let live: Vec<keyscan::Match> =
                         found.into_iter().filter(|m| m.dummy.is_none()).collect();
                     let confidence = live.iter().map(|m| m.confidence).max();
@@ -3331,12 +3354,44 @@ impl Semlith {
                 }
 
                 let waiting = std::time::Instant::now();
-                let prepared = prefetch.take(seen);
+                let prepared = prefetch.take_ticking(seen, &mut || {
+                    // Said every two seconds the pool keeps this file: which
+                    // one, and how big, rather than a card that stands still.
+                    let size = embeddable_bytes(path.metadata().ok());
+                    let name = path.file_name().map_or_else(
+                        || path.display().to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
+                    report.live.borrow_mut().detail = Some(format!(
+                        "reading and chunking {name} ({})",
+                        human_bytes(size as i64)
+                    ));
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &path,
+                        FileOutcome::Progress,
+                        None,
+                    );
+                });
                 clock.waited_on_prepare(waiting);
-                // This file's estimate leaves the expected total; whatever it
-                // really holds arrives as rows (or an image) below.
+                {
+                    let mut live = report.live.borrow_mut();
+                    if live
+                        .detail
+                        .as_deref()
+                        .is_some_and(|d| d.starts_with("reading and chunking"))
+                    {
+                        live.detail = None;
+                    }
+                }
+                // This file's estimate leaves the expected total as its rows
+                // arrive (`current_est`); an image's arrives as an image.
                 let (estimated, image) = expected_one(&path, self.planned.as_deref());
                 report.expected_left = report.expected_left.saturating_sub(estimated);
+                report.current_est = estimated;
+                report.current_rows = 0;
                 if image {
                     report.images_left = report.images_left.saturating_sub(1);
                 } else {
@@ -3884,6 +3939,7 @@ impl Semlith {
                     self.write_parts.add("rows", timed);
                     spans.push((c.start_line, c.end_line, id));
                     report.rows += 1;
+                    report.current_rows += 1;
                     window.ids.push(id as u64);
                     window.pieces.push(piece);
                     window.hashes.push(hash);
@@ -3945,6 +4001,9 @@ impl Semlith {
                 completed.push((file_id, hash));
                 report.indexed += 1;
                 report.chunks += count;
+                // Written in full: its rows stand for it now.
+                report.current_est = 0;
+                report.current_rows = 0;
                 // Rows reach readers when they are committed, and a window can
                 // take seconds to fill on a store of small files. Committed at
                 // least this often, so a store filling from cold answers
@@ -6757,7 +6816,9 @@ fn expected_one(
     planned: Option<&std::collections::HashMap<String, u64>>,
 ) -> (u64, bool) {
     let bytes = embeddable_bytes(path.metadata().ok());
-    let planned = planned.and_then(|p| p.get(path.to_string_lossy().as_ref()).copied());
+    // With a plan, a file it did not count is one it found unchanged or
+    // will not index: nothing to embed. Images are never in its counts.
+    let planned = planned.map(|p| p.get(path.to_string_lossy().as_ref()).copied().unwrap_or(0));
     progress::estimate(path, bytes, planned)
 }
 

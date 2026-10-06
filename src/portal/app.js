@@ -2651,6 +2651,11 @@ function wizardScreen() {
     const lanes = (accel.lanes || []).filter((l) => (l.status?.state || "") !== "unavailable");
     const on = lanes.filter((l) => l.enabled);
     if (accel.cpu_fallback && !on.some((l) => l.lane === "cpu")) on.push(...lanes.filter((l) => l.lane === "cpu"));
+    // The lanes a run would use, as the daemon chooses them: with the Neural
+    // Engine on, the CPU steps aside and the GPU joins only when asked to.
+    if (on.some((l) => l.lane === "ane" && rates.ane)) {
+      for (let i = on.length - 1; i >= 0; i--) if (on[i].lane === "cpu" || (on[i].lane === "gpu" && !accel.gpu_beside_ane)) on.splice(i, 1);
+    }
     let perSec = 0;
     let knownAnswer = false;
     for (const l of on) {
@@ -2663,7 +2668,9 @@ function wizardScreen() {
     const chunks = P.chunks != null ? P.chunks : P.embedBytes ? P.embedBytes / 1024 : null;
     if (perSec > 0 && chunks != null) {
       const clip = rates.clip && rates.clip.per_s;
-      return { ms: (chunks / perSec) * 1000 + (P.images && clip > 0 ? (P.images / clip) * 1000 : 0), knownAnswer };
+      // An image is 8 chunks' worth until this machine has timed its image model.
+      const imageMs = P.images ? (clip > 0 ? P.images / clip : (P.images * 8) / perSec) * 1000 : 0;
+      return { ms: (chunks / perSec) * 1000 + imageMs, knownAnswer };
     }
     return P.eta != null ? { ms: P.eta, knownAnswer: false } : null;
   }

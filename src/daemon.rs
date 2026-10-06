@@ -994,6 +994,7 @@ impl RunState {
                 self.expected_chunks = num("expected_chunks").unwrap_or(self.expected_chunks);
                 self.images = num("images").unwrap_or(self.images);
                 self.images_total = num("images_total").unwrap_or(self.images_total);
+
                 // From the first file embedding starts on, so the walk of
                 // unchanged files before it is not part of either rate.
                 let embedding = self.first_sample.is_some()

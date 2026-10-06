@@ -160,11 +160,15 @@ pub fn estimate(path: &Path, bytes: u64, planned: Option<u64>) -> (u64, bool) {
 /// How much a shown time left may move in ten seconds, either way.
 const STEP: f64 = 1.25;
 
-/// How long the rate is averaged over, in seconds.
-const TAU: f64 = 30.0;
+/// How long the rate is averaged over, in seconds. A mixed corpus changes
+/// pace every minute or so (a stretch of images, a dense log, a slice's drain);
+/// thirty seconds followed each turn and read it as the whole run's pace.
+const TAU: f64 = 90.0;
 
 /// Seconds of measured progress before the measurement replaces the prior.
-const SETTLE: f64 = 20.0;
+/// A lane's first minute runs below its rate (models warming, the first
+/// windows filling), and twenty seconds of it read as the whole run's pace.
+const SETTLE: f64 = 60.0;
 
 /// Time left from a run's units, smoothed so it is worth reading.
 ///
@@ -217,7 +221,10 @@ impl Eta {
             self.rate = Some(match self.rate {
                 Some(r) if moved > 0.0 || self.measured > 0.0 => r + w * (now - r),
                 Some(r) => r,
-                None if moved > 0.0 => now,
+                // Seeded with what this machine is known to manage, so a slow
+                // first minute (lanes warming, the first slice's drain) moves
+                // the figure by its weight rather than becoming it.
+                None if moved > 0.0 => self.prior.map_or(now, |p| p + w * (now - p)),
                 None => return self.last = Some((at, done)),
             });
             self.recent.push_back((at, now));

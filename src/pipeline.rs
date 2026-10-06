@@ -815,6 +815,51 @@ impl Prefetch {
         list.0.get(i..).map(<[PathBuf]>::to_vec).unwrap_or_default()
     }
 
+    /// [`Prefetch::take`], calling `tick` every two seconds it waits: a
+    /// large file can take the pool tens of seconds, and a run that says
+    /// nothing for that long reads as hung.
+    pub fn take_ticking(&self, i: usize, tick: &mut dyn FnMut()) -> Prepared {
+        let mut last = Instant::now();
+        loop {
+            if let Some(prepared) = self.try_take(i, Duration::from_millis(250)) {
+                return prepared;
+            }
+            if last.elapsed() >= Duration::from_secs(2) {
+                tick();
+                last = Instant::now();
+            }
+        }
+    }
+
+    /// The file at `i` if it is ready within `wait`.
+    fn try_take(&self, i: usize, wait: Duration) -> Option<Prepared> {
+        let until = Instant::now() + wait;
+        let mut done = self.shared.done.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(prepared) = done.0.remove(&i) {
+                done.1 = done.1.max(i + 1);
+                self.shared.room.notify_all();
+                return Some(prepared);
+            }
+            if Arc::strong_count(&self.shared) == 1 {
+                return Some(Prepared::Failed {
+                    error: anyhow::anyhow!("the prepare stage lost this file"),
+                    file_bytes: 0,
+                });
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            done = self
+                .shared
+                .ready
+                .wait_timeout(done, left.min(Duration::from_millis(50)))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
     /// The file at `i`, waiting for it if the pool has not got there yet.
     pub fn take(&self, i: usize) -> Prepared {
         let mut done = self.shared.done.lock().unwrap_or_else(|e| e.into_inner());

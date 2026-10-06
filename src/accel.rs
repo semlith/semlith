@@ -1036,9 +1036,17 @@ pub fn note_known_answer(lane: &str, per_s: f64) {
 pub fn expected_rate() -> Option<f64> {
     let on = enabled();
     let known = rates();
-    let sum: f64 = ["cpu", "ane", "gpu", "cuda", "trt", "openvino", "llama"]
+    let usable = |lane: &&str| on.lane(lane) && unavailable_here(lane).is_none();
+    // The lanes a run would use, as `for_run` chooses them: with the Neural
+    // Engine on, the CPU steps aside and the GPU joins only when asked to.
+    let ane = usable(&"ane") && known.contains_key("ane");
+    let lanes: Vec<&str> = ["cpu", "ane", "gpu", "cuda", "trt", "openvino", "llama"]
+        .into_iter()
+        .filter(|lane| usable(lane))
+        .filter(|lane| !ane || (*lane != "cpu" && (*lane != "gpu" || on.gpu_beside_ane)))
+        .collect();
+    let sum: f64 = lanes
         .iter()
-        .filter(|lane| on.lane(lane))
         .filter_map(|lane| known.get(*lane).map(|r| r.per_s))
         .sum();
     (sum > 0.0).then_some(sum)

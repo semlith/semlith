@@ -4042,10 +4042,16 @@ fn print_plan(plan: &semlith::Plan) {
         .eta_ms
         .map(|ms| format!(" · about {} to embed", human_duration(ms as f32 / 1000.0)))
         .unwrap_or_default();
+    let images = if plan.images > 0 {
+        format!(", {} images", plan.images)
+    } else {
+        String::new()
+    };
     eprintln!(
-        "plan: {} to embed ({}{}) · {} unchanged · {not} not indexed · {} need review{eta} · scanned in {:.2}s",
+        "plan: {} to embed ({}, {} chunks{images}{}) · {} unchanged · {not} not indexed · {} need review{eta} · scanned in {:.2}s",
         plan.embed,
         semlith::human_bytes(plan.embed_bytes as i64),
+        plan.chunks,
         if langs.is_empty() {
             String::new()
         } else {
