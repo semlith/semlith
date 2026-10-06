@@ -2999,6 +2999,12 @@ pub struct State {
     /// agent's index freezing the portal for as long as the slice lasts. A
     /// reader that is never used costs a SQLite handle and no vectors.
     pub mcp_fleet: Mutex<Option<Fleet>>,
+    /// Set when a store joins or leaves: the readers are rebuilt on their next
+    /// use. A flag rather than taking their locks, which a search or a graph
+    /// holds for as long as it runs: a store created during one waited for it,
+    /// past 30 s on a busy runner (drive rc4.5, rc4.6 on Ubuntu).
+    readers_stale: AtomicBool,
+    mcp_stale: AtomicBool,
     /// Whether retrievals are recorded into each store's `retrievals` table.
     ///
     /// On unless `--no-ledger` or `SEMLITH_LEDGER=0` says otherwise, which
@@ -3824,6 +3830,9 @@ impl State {
     /// The reader forwarded MCP calls answer from, opened on first use.
     pub fn open_mcp_fleet(&self) -> Result<()> {
         let mut fleet = self.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner());
+        if self.mcp_stale.swap(false, Ordering::SeqCst) {
+            *fleet = None;
+        }
         if fleet.is_some() {
             return Ok(());
         }
@@ -3920,14 +3929,29 @@ impl State {
     /// and doing that while holding the lock would stall whichever request
     /// happened to be next. The reader is opened on demand anyway.
     fn reopen_readers(&self) {
-        *self.fleet.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.readers_stale.store(true, Ordering::SeqCst);
+        self.mcp_stale.store(true, Ordering::SeqCst);
+        // Dropped now when nothing is reading, so the files of a store being
+        // deleted are let go of at once (Windows refuses to delete an open one).
+        if let Ok(mut fleet) = self.fleet.try_lock()
+            && self.readers_stale.swap(false, Ordering::SeqCst)
+        {
+            *fleet = None;
+        }
+        if let Ok(mut fleet) = self.mcp_fleet.try_lock()
+            && self.mcp_stale.swap(false, Ordering::SeqCst)
+        {
+            *fleet = None;
+        }
     }
 
     /// The reader every read route answers from, opened on first use and
     /// reopened after a store joins.
     pub fn open_fleet(&self) -> Result<()> {
         let mut fleet = self.fleet.lock().unwrap_or_else(|e| e.into_inner());
+        if self.readers_stale.swap(false, Ordering::SeqCst) {
+            *fleet = None;
+        }
         if fleet.is_some() {
             return Ok(());
         }
@@ -4313,6 +4337,8 @@ pub fn run(
         proxies: Mutex::new(BTreeMap::new()),
         clients: Mutex::new(BTreeMap::new()),
         mcp_fleet: Mutex::new(None),
+        readers_stale: AtomicBool::new(false),
+        mcp_stale: AtomicBool::new(false),
         ledger,
         schedules: crate::schedule::Runner::new(),
         gone: Mutex::new(Vec::new()),
@@ -6359,6 +6385,8 @@ mod tests {
             proxies: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
             mcp_fleet: Mutex::new(None),
+            readers_stale: AtomicBool::new(false),
+            mcp_stale: AtomicBool::new(false),
             ledger: false,
             schedules: crate::schedule::Runner::new(),
             gone: Mutex::new(Vec::new()),
