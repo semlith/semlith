@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0-rc.4] - 2026-10-06
+
+### Fixed
+
+- A run's bar no longer sits at 99 % from its first second. The portal took
+  how far a run was from the share of written chunks still waiting for a
+  vector, which ignores every file not read yet, so on a machine whose
+  embedding keeps up with its reading a 4,349-file run read 99 % and "almost
+  done" at file 561. The daemon's runs answer now carries `progress`, the share
+  read times the share of what was written that is embedded, and the bar, the
+  header and the time left all follow it. `semlith index -v` had the same
+  fault the other way round: once every file was read it said `~0s left`
+  while embedding still had minutes to go. It takes the same figure, and says
+  `estimating…` under 2 %.
+- A failed accelerator lane is tried again on the first run ten minutes after
+  it failed, and the failure is written to the daemon's log. One transient
+  load failure of the Neural Engine lane had left every run on the CPU until
+  the daemon restarted (#188).
+- A scoped search is no slower than an unscoped one on a large store: a
+  `<repo>/**` scope is a range of a path index rather than a GLOB over every
+  path, and the eight most recent resolved scopes are kept, so an agent moving
+  between repositories does not resolve each one again (#183).
+- A file that became empty, too large or unreadable is evicted, so its old
+  chunks stop answering searches; an unusable image's vectors go with its rows.
+- A query longer than CLIP's 77 tokens is never a confident image match. A
+  screenshot of text had ranked first for 57 of 102 SWE-bench issues.
+- A key-like secret whose random part happens to open on `FAKE` or `DUMMY` is
+  no longer taken for a declared test dummy.
+- Long log lines, attention rows and feed entries in the portal wrap instead of
+  cutting off the reason.
+- `measure_the_store_at_scale` takes each size's idle RSS as the median of five
+  fresh opens, so a bimodal first figure on a hosted runner no longer fails the
+  release suite (#199).
+
+### Changed
+
+- `semlith index -v` splits the writer's time by part: rows and their keyword
+  index, eviction, graph, vectors, commits, saves, hashes and the vector cache
+  (#198). On a rented NVIDIA L4 the writer was about 30 % of a 93,563-chunk run,
+  the same on the container's local disk as on its network volume, and nearly
+  all of it SQLite: chunk rows, symbols and edges, and commits. The writer's
+  per-row inserts now reuse prepared statements, which cut its time by 6–8 %
+  there.
+- A failed known-answer check names every chunk under the floor, not only the
+  worst (#197).
+- `semlith setup` says what `--hook-mode gate` buys where the choice is made,
+  and the README records the measurement behind it (#189).
+
+### Security
+
+- rustls 0.23.45, past RUSTSEC-2026-0285 (TLS 1.3 handshake messages accepted
+  across encryption levels).
+
 ## [0.37.0-rc.3] - 2026-10-05
 
 ### Added

@@ -2660,7 +2660,7 @@ dependencies = [
 
 [[package]]
 name = "semlith"
-version = "0.37.0-rc.3"
+version = "0.37.0-rc.4"
 dependencies = [
  "anyhow",
  "blake3",
