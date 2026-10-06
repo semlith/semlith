@@ -1824,8 +1824,28 @@ pub struct Check {
     pub variant: String,
     /// The lowest cosine against the fp32 fixture over all 32 chunks.
     pub cosine: f32,
+    /// Every chunk under the floor, by its place in the fixture: whether a
+    /// failure is one long chunk or spread over all of them (#197).
+    pub low: Vec<(usize, f32)>,
     pub chunks_per_s: f64,
     pub passed: bool,
+}
+
+impl Check {
+    /// `3 of 32 chunks below the floor: #4 0.9989, #17 0.9991, #30 0.9989`.
+    pub fn low_line(&self) -> String {
+        let each: Vec<String> = self
+            .low
+            .iter()
+            .map(|(at, cosine)| format!("#{at} {cosine:.4}"))
+            .collect();
+        format!(
+            "{} of {} chunks below the floor: {}",
+            self.low.len(),
+            fixture().0.len(),
+            each.join(", ")
+        )
+    }
 }
 
 /// Embed the fixture with `embed` and score it against the committed vectors.
@@ -1838,14 +1858,6 @@ pub fn known_answer(
     let (texts, expected) = fixture();
     // Each chunk alone, as the fixture was made: padding would change the
     // answer and it is the device being checked, not the batching.
-    let started = Instant::now();
-    let mut worst = 1.0f32;
-    for (text, want) in texts.iter().zip(&expected) {
-        let got = embed(std::slice::from_ref(text))?;
-        let got = got.first().context("no vector came back")?;
-        worst = worst.min(crate::index::cosine(got, want));
-    }
-    let elapsed = started.elapsed().as_secs_f64().max(1e-6);
     // Every variant but the CPU's int8 is full or half precision, and held to
     // the fp16 floor: llama.cpp's GGUF and OpenVINO's are too.
     let floor = if variant == "int8-cpu" {
@@ -1853,11 +1865,25 @@ pub fn known_answer(
     } else {
         MIN_COSINE_FP16
     };
+    let started = Instant::now();
+    let mut worst = 1.0f32;
+    let mut low = Vec::new();
+    for (at, (text, want)) in texts.iter().zip(&expected).enumerate() {
+        let got = embed(std::slice::from_ref(text))?;
+        let got = got.first().context("no vector came back")?;
+        let cosine = crate::index::cosine(got, want);
+        worst = worst.min(cosine);
+        if cosine < floor {
+            low.push((at, cosine));
+        }
+    }
+    let elapsed = started.elapsed().as_secs_f64().max(1e-6);
     Ok(Check {
         lane: lane.to_string(),
         device: device.to_string(),
         variant: variant.to_string(),
         cosine: worst,
+        low,
         chunks_per_s: (texts.len() as f64 / elapsed * 10.0).round() / 10.0,
         passed: worst >= floor,
     })
@@ -1957,8 +1983,8 @@ pub fn worker_main(lane: &str, dir: Option<&Path>, adapter: Option<&str>) -> i32
                 serde_json::json!({
                     "ok": false,
                     "reason": format!(
-                        "{} failed the known-answer check: cosine {:.4} against the fp32 fixture",
-                        check.device, check.cosine
+                        "{} failed the known-answer check: cosine {:.4} against the fp32 fixture ({})",
+                        check.device, check.cosine, check.low_line()
                     ),
                 }),
             );
@@ -2052,6 +2078,35 @@ pub fn component_dir(cache: &Path, lane: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failed check names every chunk under the floor, not only the worst
+    /// (#197: the NVIDIA report gave the minimum and nothing else).
+    #[test]
+    fn a_failed_check_names_every_chunk_under_the_floor() {
+        let (texts, expected) = fixture();
+        let mut at = 0;
+        let check = known_answer("gpu", "test", "fp16-webgpu", |_| {
+            let mut v = expected[at].clone();
+            // Two chunks bent off their fixture vector, the rest exact.
+            if at == 3 || at == 17 {
+                v[0] += 0.3;
+                v[1] -= 0.3;
+            }
+            at += 1;
+            Ok(vec![v])
+        })
+        .unwrap();
+        assert!(!check.passed);
+        assert_eq!(
+            check.low.iter().map(|l| l.0).collect::<Vec<_>>(),
+            vec![3, 17]
+        );
+        let line = check.low_line();
+        assert!(
+            line.starts_with(&format!("2 of {} chunks below the floor: #3 ", texts.len())),
+            "{line}"
+        );
+    }
 
     /// The Core ML worker is a copy made once and reused, whatever binary asks
     /// for it next, and an earlier protocol's copy goes.
