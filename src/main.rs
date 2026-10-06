@@ -4128,10 +4128,12 @@ const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2)
 
 /// Where the run is, how fast it is going, and how much longer it has.
 ///
-/// The estimate is the rate so far applied to the files not yet reached, which
-/// is wrong whenever the rest of the corpus does not look like the part already
-/// walked — so it is printed as an approximation and never as a countdown. A
-/// wrong estimate is still worth far more than a silent hour.
+/// The estimate is the time so far over the share done (read and embedded,
+/// [`semlith::share_done`]), applied to the share left, which is wrong whenever
+/// the rest of the corpus does not look like the part already done — so it is
+/// printed as an approximation and never as a countdown. Taken from files read
+/// alone, it read `~0s left` once every file was read and embedding still had
+/// minutes to go.
 fn predict(p: semlith::IndexProgress, elapsed: std::time::Duration) -> String {
     // A run waiting for a lane has no rate to give: it says what it waits for.
     if let Some(waiting) = semlith::accel::waiting_for() {
@@ -4142,14 +4144,17 @@ fn predict(p: semlith::IndexProgress, elapsed: std::time::Duration) -> String {
     }
     let secs = elapsed.as_secs_f32().max(0.001);
     let rate = p.chunks as f32 / secs;
-    let left = p.total.saturating_sub(p.scanned);
-    let per_file = secs / p.scanned.max(1) as f32;
+    // Under 2 % done, the time so far says nothing about the rest: the first
+    // file can be the model loading.
+    let done = p.share_done() as f32;
+    let left = if done < 0.02 {
+        "estimating…".to_string()
+    } else {
+        format!("~{} left", human_duration(secs * (1.0 - done) / done))
+    };
     format!(
-        "{}/{} files, {} chunks, {rate:.0} chunks/s, ~{} left",
-        p.scanned,
-        p.total,
-        p.chunks,
-        human_duration(left as f32 * per_file),
+        "{}/{} files, {} chunks, {rate:.0} chunks/s, {left}",
+        p.scanned, p.total, p.chunks,
     )
 }
 

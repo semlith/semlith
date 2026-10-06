@@ -677,23 +677,17 @@ impl RunState {
     /// reads full while anything is left; `None` for a run that ended without
     /// finishing.
     fn progress(&self) -> Option<f64> {
-        let share = |part: u64, whole: u64| (part.min(whole) as f64) / (whole.max(1) as f64);
         match self.status {
             RunStatus::Done => return Some(1.0),
             RunStatus::Stopped | RunStatus::Failed => return None,
             _ => {}
         }
-        let read = if self.bytes_total > 0 {
-            share(self.bytes, self.bytes_total)
-        } else {
-            share(self.scanned, self.total)
-        };
-        let embedded = if self.rows > 0 {
-            share(self.chunks, self.rows)
-        } else {
-            1.0
-        };
-        Some(((read * embedded * 1000.0).round() / 1000.0).min(0.999))
+        let done = crate::share_done(
+            (self.bytes, self.bytes_total),
+            (self.scanned, self.total),
+            (self.chunks, self.rows),
+        );
+        Some(((done * 1000.0).round() / 1000.0).min(0.999))
     }
 
     fn eta_ms(&self) -> Option<u64> {

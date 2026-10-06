@@ -79,6 +79,10 @@ pub struct Stages {
     pub write_ms: u64,
     pub embed_wait_ms: BTreeMap<String, u64>,
     pub prepare_cpu_ms: BTreeMap<String, u64>,
+    /// What the writer's own time went on, by part (#198): `write_ms` is the
+    /// rest of the wall once every wait is taken out, and on a fast GPU it is
+    /// most of the run, so the part that dominates is the one worth cutting.
+    pub write_parts_ms: BTreeMap<String, u64>,
 }
 
 impl Stages {
@@ -96,6 +100,9 @@ impl Stages {
         }
         for (part, ms) in &other.prepare_cpu_ms {
             *self.prepare_cpu_ms.entry(part.clone()).or_default() += ms;
+        }
+        for (part, ms) in &other.write_parts_ms {
+            *self.write_parts_ms.entry(part.clone()).or_default() += ms;
         }
     }
 
@@ -125,7 +132,21 @@ impl Stages {
             format!("tokenize {}", secs(self.tokenize_ms)),
         ];
         parts.extend(waits);
-        parts.push(format!("write {}", secs(self.write_ms)));
+        let split: Vec<String> = self
+            .write_parts_ms
+            .iter()
+            .filter(|(_, ms)| **ms > 0)
+            .map(|(part, ms)| format!("{part} {}", secs(*ms)))
+            .collect();
+        if split.is_empty() {
+            parts.push(format!("write {}", secs(self.write_ms)));
+        } else {
+            parts.push(format!(
+                "write {} ({})",
+                secs(self.write_ms),
+                split.join(", ")
+            ));
+        }
         format!("stages over {}: {}", secs(self.wall_ms), parts.join(", "))
     }
 }
@@ -161,6 +182,50 @@ impl Clocks {
             self.parse.load(Ordering::Relaxed),
             self.tokenize.load(Ordering::Relaxed),
         ]
+    }
+}
+
+/// The writer's own work, timed by part. Cells, because the parts are timed
+/// inside methods that only borrow the store; the store is never shared
+/// between threads.
+#[derive(Debug, Default)]
+pub struct WriteParts {
+    micros: [std::cell::Cell<u64>; WRITE_PARTS.len()],
+}
+
+/// The parts, in the order `index -v` names them: rows and their keyword
+/// index, a replaced file's eviction, symbols and edges, vectors into the
+/// index and its sidecar, row commits, shard saves, indexed-file hashes, and
+/// the vector cache.
+pub const WRITE_PARTS: [&str; 8] = [
+    "rows", "evict", "graph", "vectors", "commit", "save", "hashes", "cache",
+];
+
+impl WriteParts {
+    /// Charge the time since `since` to `part`, one of [`WRITE_PARTS`].
+    pub fn add(&self, part: &str, since: Instant) {
+        if let Some(at) = WRITE_PARTS.iter().position(|p| *p == part) {
+            let cell = &self.micros[at];
+            cell.set(cell.get() + since.elapsed().as_micros() as u64);
+        }
+    }
+
+    /// Every part's milliseconds, and the counters back to zero.
+    pub fn take(&self) -> BTreeMap<String, u64> {
+        WRITE_PARTS
+            .iter()
+            .zip(&self.micros)
+            .map(|(part, cell)| (part.to_string(), cell.replace(0) / 1000))
+            .collect()
+    }
+}
+
+/// Charges the time from its making to its drop to one part.
+pub struct Charge<'a>(pub &'a WriteParts, pub &'static str, pub Instant);
+
+impl Drop for Charge<'_> {
+    fn drop(&mut self) {
+        self.0.add(self.1, self.2);
     }
 }
 

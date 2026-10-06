@@ -1218,6 +1218,35 @@ pub struct IndexProgress {
     pub rows: usize,
 }
 
+impl IndexProgress {
+    /// The run's share done so far, reading and embedding both. See
+    /// [`share_done`].
+    pub fn share_done(&self) -> f64 {
+        share_done(
+            (self.bytes, self.bytes_total),
+            (self.scanned as u64, self.total as u64),
+            (self.chunks as u64, self.rows as u64),
+        )
+    }
+}
+
+/// A run's share done, in [0, 1]: the share read (bytes, or files when the
+/// walk counted no bytes) times the share of the rows written so far that are
+/// embedded. Either half alone lies: reading finishes long before embedding
+/// on a slow lane, and the embed backlog is near nothing on a fast one while
+/// most files are still unread, which is how 0.37.0-rc.3's portal showed 99 %
+/// from a run's first second.
+pub fn share_done(bytes: (u64, u64), files: (u64, u64), embedded: (u64, u64)) -> f64 {
+    let share = |(part, whole): (u64, u64)| (part.min(whole) as f64) / (whole.max(1) as f64);
+    let read = if bytes.1 > 0 {
+        share(bytes)
+    } else {
+        share(files)
+    };
+    let embedded = if embedded.1 > 0 { share(embedded) } else { 1.0 };
+    read * embedded
+}
+
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct IndexReport {
     pub scanned: usize,
@@ -1606,6 +1635,8 @@ pub struct Semlith {
     /// When this store last embedded anything, so a daemon can drop an idle
     /// writer's session and the arena that comes with it.
     last_embed: Option<std::time::Instant>,
+    /// The writer's time by part over the index pass in progress (#198).
+    write_parts: pipeline::WriteParts,
     /// The budget generation this store's indexes were last fitted to.
     budget_generation: u64,
     /// Chunks each lane embedded for this store since it was opened, which a
@@ -1734,6 +1765,7 @@ impl Semlith {
             batches: 0,
             last_variant: embed::Variant::Int8.name(),
             last_embed: None,
+            write_parts: Default::default(),
             budget_generation: index::budget_generation(),
             lane_chunks: std::collections::BTreeMap::new(),
             tokenizer: None,
@@ -2875,6 +2907,7 @@ impl Semlith {
         };
         let mut cached = CacheWrites::default();
         let mut clock = pipeline::WriterClock::start(walk_ms);
+        self.write_parts.take();
         let sealed = pending_walk.is_none();
         let mut run_lanes: std::collections::BTreeMap<String, usize> = Default::default();
         let (cpu_back, cpu_returned) = std::sync::mpsc::channel();
@@ -3507,10 +3540,13 @@ impl Semlith {
                 );
 
                 // Replacing a file: evict its old vectors before adding new ones.
+                let timed = std::time::Instant::now();
                 for id in store::delete_file(&self.db, &key, now())? {
                     self.index.remove(id)?;
                 }
+                self.write_parts.add("evict", timed);
 
+                let timed = std::time::Instant::now();
                 let file_id = store::insert_file(&self.db, &key, PENDING, len, now())?;
                 // Written down the moment it has a row, not when it is finished:
                 // a stop can now land inside a file, and the undo has to take the
@@ -3529,10 +3565,12 @@ impl Semlith {
                 if let Some(units) = units {
                     store::set_file_units(&self.db, file_id, units)?;
                 }
+                self.write_parts.add("rows", timed);
                 let mut spans: Vec<(u32, u32, i64)> = Vec::with_capacity(chunks.len());
                 let mut halted = false;
                 let count = chunks.len();
                 for (((ord, c), piece), hash) in chunks.iter().enumerate().zip(pieces).zip(hashes) {
+                    let timed = std::time::Instant::now();
                     let id = store::insert_chunk(
                         &self.db,
                         file_id,
@@ -3541,6 +3579,7 @@ impl Semlith {
                         c.end_line,
                         &c.text,
                     )?;
+                    self.write_parts.add("rows", timed);
                     spans.push((c.start_line, c.end_line, id));
                     report.rows += 1;
                     window.ids.push(id as u64);
@@ -3595,7 +3634,9 @@ impl Semlith {
                 // earlier run had them deleted by `delete_file` above, along with
                 // its chunks and the edges leaving them, so this writes a whole
                 // fresh set rather than reconciling one.
+                let timed = std::time::Instant::now();
                 let (symbols, edges) = self.write_graph(extraction, file_id, &spans)?;
+                self.write_parts.add("graph", timed);
                 report.symbols += symbols;
                 report.edges += edges;
 
@@ -3758,6 +3799,7 @@ impl Semlith {
         }
         self.tx_commit()?;
         report.stages = clock.stages(&ctx.clocks, &run_lanes);
+        let tail = std::time::Instant::now();
         report.threads = self.index_threads();
         report.cache_lookups = ctx.lookups.load(std::sync::atomic::Ordering::Relaxed) as usize;
         report.cache_hits = ctx.hits.load(std::sync::atomic::Ordering::Relaxed) as usize;
@@ -3780,7 +3822,9 @@ impl Semlith {
                 .iter()
                 .map(|(hash, variant)| scope.key(hash, variant))
                 .collect();
+            let timed = std::time::Instant::now();
             let _ = cache.record(&fresh, &hits, report.cache_lookups as u64);
+            self.write_parts.add("cache", timed);
         }
 
         // A stopped slice still commits what it embedded. Undoing is the
@@ -3820,10 +3864,18 @@ impl Semlith {
         // sees plenty of events on files whose bytes are identical, and each
         // rewrite is the whole index.
         if report.indexed > 0 || report.removed > 0 || !self.index.exists() {
+            let timed = std::time::Instant::now();
             self.save()?;
+            self.write_parts.add("save", timed);
         }
 
         self.commit_hashes(&mut completed)?;
+        // The cache write, the sweep and the last save come after the clock
+        // settled, and are the writer's too.
+        let tail = tail.elapsed().as_millis() as u64;
+        report.stages.wall_ms += tail;
+        report.stages.write_ms += tail;
+        report.stages.write_parts_ms = self.write_parts.take();
 
         // The byte rate this store embeds at, for the next scan phase's
         // estimate: a plan can say how long before the model has loaded.
@@ -4031,7 +4083,9 @@ impl Semlith {
         if completed.is_empty() {
             return Ok(());
         }
+        let timed = std::time::Instant::now();
         self.save()?;
+        self.write_parts.add("save", timed);
         self.commit_hashes(completed)
     }
 
@@ -4195,6 +4249,7 @@ impl Semlith {
         if completed.is_empty() {
             return Ok(());
         }
+        let _charged = pipeline::Charge(&self.write_parts, "hashes", std::time::Instant::now());
         let tx = self.db.unchecked_transaction()?;
         for (file_id, hash) in completed.iter() {
             tx.execute(
@@ -4338,8 +4393,10 @@ impl Semlith {
             done.ids.len()
         );
         self.follow_budget();
+        let timed = std::time::Instant::now();
         self.index.add(&flat, &done.ids)?;
         self.exact.append(&flat, &done.ids)?;
+        self.write_parts.add("vectors", timed);
         self.record_variants(&done.variants)?;
         for (lane, n) in &done.lanes {
             self.note_lane(lane, *n);
@@ -4419,6 +4476,7 @@ impl Semlith {
     }
 
     fn tx_commit(&self) -> Result<()> {
+        let _charged = pipeline::Charge(&self.write_parts, "commit", std::time::Instant::now());
         if !self.db.is_autocommit() {
             self.db.execute_batch("COMMIT")?;
         }
