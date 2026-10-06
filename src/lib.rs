@@ -1552,6 +1552,12 @@ fn say_file(
                 live.phase = progress::Phase::Lane;
                 live.detail = Some(waiting);
             }
+            // Embedding has begun inside a long file, between the writer's
+            // turns at the top of its loop: say so then, not after the file.
+            None if live.phase == progress::Phase::Read && chunks > 0 => {
+                live.phase = progress::Phase::Embed;
+                live.detail = None;
+            }
             None if live.phase == progress::Phase::Lane => {
                 live.phase = progress::Phase::Embed;
                 live.detail = None;
@@ -3333,6 +3339,15 @@ impl Semlith {
                 report.expected_left = report.expected_left.saturating_sub(estimated);
                 if image {
                     report.images_left = report.images_left.saturating_sub(1);
+                } else {
+                    let mut live = report.live.borrow_mut();
+                    if live
+                        .detail
+                        .as_deref()
+                        .is_some_and(|d| d.starts_with("embedding images"))
+                    {
+                        live.detail = None;
+                    }
                 }
 
                 let key = path.to_string_lossy().into_owned();
@@ -3571,6 +3586,19 @@ impl Semlith {
                         // exactly as it found it and the next file is embedded.
                         // Everything after this line is the store's, and a
                         // failure there is the run's.
+                        // The image model runs on the writer: while it does,
+                        // the text lanes wait, and the card says why.
+                        {
+                            let images_total = report.images + report.images_left + 1;
+                            let mut live = report.live.borrow_mut();
+                            if live.phase != progress::Phase::Images {
+                                live.detail = Some(format!(
+                                    "embedding images with the image model: {} of {}",
+                                    report.images + 1,
+                                    images_total
+                                ));
+                            }
+                        }
                         let timed = std::time::Instant::now();
                         let embedded = self.clip.embed_image(&path, &bytes, self.quiet);
                         self.write_parts.add("images", timed);
