@@ -4497,7 +4497,7 @@ function runCard(r, o) {
   const shown = shownOf(opts.key || `${r.store}:${r.id}:${r.submitted || ""}`, pre.concat(own), opts.again);
   const review = r.status === "review";
   const queued = r.status === "queued";
-  const head = queued ? "Waiting to start" : review ? "Held for review" : r.status === "scanning" ? "Scanning" : "Running now";
+  const head = !LIVE_RUN.has(r.status) ? "Finishing" : queued ? "Waiting to start" : review ? "Held for review" : r.status === "scanning" ? "Scanning" : "Running now";
   const word = !LIVE_RUN.has(r.status) ? "finishing" : r.status === "pausing" ? "pausing" : paused ? "paused" : review ? "waiting for review" : r.status === "scanning" ? "scanning" : queued ? `queued${r.position ? ` · ${r.position} in line` : ""}` : r.kind === "compact" ? "compacting" : r.kind === "catch-up" ? "catching up" : "indexing";
   const b = bar(p, "h8 accent grow");
   b.setAttribute("data-tip", `Index run · ${Math.floor(p)}%`);
