@@ -6519,17 +6519,25 @@ def _(d):
         fail("the estimate is not labelled as this machine's: %r" % before)
     was = other["enabled"]
     label = other.get("label") or other["lane"]
-    try:
-        if not d.eval("(() => { const c = [...document.querySelectorAll('.wz-body .pick-card')].find(c =>"
-                      " ((c.querySelector('.t') || {}).textContent || '').trim() === %s); if (!c) return false; c.click(); return true; })()"
-                      % json.dumps(label)):
+    card = ("[...document.querySelectorAll('.wz-body .pick-card')].find(c =>"
+            " ((c.querySelector('.t') || {}).textContent || '').trim() === %s)" % json.dumps(label))
+
+    def switch(on):
+        """Press the lane's card and read the estimate once the daemon's
+        answer is drawn, so both readings come from the same rates."""
+        if not d.eval("(() => { const c = %s; if (!c) return false; c.click(); return true; })()" % card):
             fail("the Index step offers no %s lane card" % label)
-        d.wait_for("(() => { const k = [...document.querySelectorAll('.wz-body .kpi')].find(k => /Estimate/i.test(k.innerText));"
-                   " return k && Number(k.getAttribute('data-estimate-ms')) !== %d; })()" % before["ms"],
-                   timeout=10, what="the estimate to move with %s switched" % label)
-        after = reading()
-        if was and after["ms"] <= before["ms"]:
-            fail("switching %s off made the estimate shorter: %r then %r" % (label, before["ms"], after["ms"]))
+        d.wait_for("(() => { const c = %s; return !!c && c.getAttribute('aria-pressed') === %s; })()" % (card, json.dumps(str(on).lower())),
+                   timeout=15, what="%s to read %s" % (label, "on" if on else "off"))
+        pause(d, 1500)
+        return reading()
+
+    try:
+        first = switch(not was)
+        second = switch(was)
+        off, on = (first, second) if was else (second, first)
+        if off["ms"] <= on["ms"]:
+            fail("the estimate with %s off (%r ms) is not longer than with it on (%r ms)" % (label, off["ms"], on["ms"]))
     finally:
         now = next((l for l in d.api("/api/accel")["lanes"] if l["lane"] == other["lane"]), {})
         if now.get("enabled") != was:
