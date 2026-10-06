@@ -726,7 +726,8 @@ impl RunState {
         }
         let hold = matches!(
             self.phase.as_deref(),
-            Some("lane" | "drain" | "save" | "walk" | "decisions")
+            // Not a drain: that is the embedding's tail, and counts down.
+            Some("lane" | "save" | "walk" | "decisions")
         );
         self.shown = self.eta.left(at, all - done, hold);
     }
