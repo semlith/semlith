@@ -2428,11 +2428,10 @@ impl Semlith {
                     continue;
                 }
             };
-            // Counted with the chunker the run uses, without the symbols the
-            // run's parse would add as cut points: close, and corrected file
-            // by file as the run chunks it.
+            // Counted as the run will chunk it, symbols and all, so the run's
+            // expected total starts where it will end.
             let count = |plan: &mut Plan, key: &str| {
-                let n = chunk::chunk_file(&path, &text, &[]).len() as u64;
+                let n = planned_chunks(&path, &text);
                 plan.chunks += n;
                 plan.counts.insert(key.to_string(), n);
             };
@@ -2464,7 +2463,7 @@ impl Semlith {
                 }
                 keyscan::Decision::Refuse(rule) => {
                     // Counted in case a person accepts it; not in the total.
-                    let n = chunk::chunk_file(&path, &text, &[]).len() as u64;
+                    let n = planned_chunks(&path, &text);
                     plan.counts.insert(key.clone(), n);
                     let live: Vec<keyscan::Match> =
                         found.into_iter().filter(|m| m.dummy.is_none()).collect();
@@ -6694,6 +6693,19 @@ fn bytes_of(paths: &[PathBuf]) -> u64 {
         .iter()
         .map(|p| embeddable_bytes(p.metadata().ok()))
         .sum()
+}
+
+/// The chunks a file's text makes, cut where the run will cut it: at the
+/// symbols the parser finds, as `pipeline::take_ready` does. Without them a
+/// JSON or code file counted a fraction of what it wrote.
+fn planned_chunks(path: &Path, text: &str) -> u64 {
+    let symbols = contained(|| graph::extract(path, text))
+        .ok()
+        .and_then(|r| r.ok())
+        .flatten()
+        .map(|e| e.symbols)
+        .unwrap_or_default();
+    chunk::chunk_file(path, text, &symbols).len() as u64
 }
 
 /// The chunks and images a list of files is expected to hold. See
