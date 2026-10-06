@@ -64,6 +64,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Neural Engine idle through a stretch of screenshots (#203).
 - A run admitted behind another job on its store's writer can be taken out of
   the queue; the button said "nothing waiting in the queue".
+- Time left counts the embedding alone. Files read stayed in its rate, and
+  reading runs ahead of the lanes in bursts, so a 1,500-file run embedding at
+  18 chunks/s with 6,000 chunks left said "about 3 min". A held phase (a lane
+  starting, a save) is no longer sampled into the rate either: a Core ML first
+  start of 135 s after an update had put it 110 % over for minutes. While a
+  lane starts, the line counts its seconds.
+- The images total counts images with the image model and, on a reviewed run,
+  the plan's from the first second (it read 1 / 34, then 2 / 18, then 55 / 55);
+  the drain's "still embedding" no longer counts the window being filled twice.
+- A long run gives the writer to file changes in its folders every five
+  minutes rather than every 45 seconds, since each hand-over drains the lanes;
+  a queued job still waits at most 45 seconds.
+- Creating or deleting a store no longer waits for a search or graph in
+  progress to finish.
+- A phase said again with nothing new is logged once; under a stage filter the
+  log folds a phase line that repeats the last one shown.
+- The run log has one reader per run, shared by every card that shows it: the
+  wizard's rebuilt card added every line twice.
 - A progress bar redrawn in place moves: the page patched its width as a style
   attribute, which the portal's content-security policy drops, so the bar kept
   its first width while its percentage climbed.
@@ -94,6 +112,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `measure_the_store_at_scale` takes each size's idle RSS as the median of five
   fresh opens, so a bimodal first figure on a hosted runner no longer fails the
   release suite (#199).
+
+### Added
+
+- The portal matches Semlith Cloud on what the two share: full text on hover
+  for anything cut off and a tip on every progress bar; sortable columns marked;
+  filters and tabs kept across a reload, and the setup wizard too; a busy
+  wizard button that says what it is doing; search store chips, the budget tip
+  and the store before each result path; the ledger's read bars on one scale
+  (a session that sent more than the whole file overflowed), its savings tables
+  and chain footer; a "chain verified" chip on reports; a store error card and
+  nav badge, an empty Stores state and a Sources table in Inside the index; the
+  Review tab's loading state and the wizard's "nothing in the grey zone" note.
 
 ### Changed
 
