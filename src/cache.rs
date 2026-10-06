@@ -13,6 +13,11 @@
 //! them. Store compaction never touches it and its eviction never touches a
 //! store. Bounded by a size cap with least-recently-used eviction; 0 turns it
 //! off. Deleting the file is safe: it is a cache.
+//!
+//! A caller of the library may give a store a cache of its own instead (a
+//! [`Location`] on [`crate::Semlith::vector_cache`]): Semlith Cloud gives each
+//! organisation one, so no customer's run reads another's vectors. The binary
+//! never sets one and keeps the machine's.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -44,6 +49,51 @@ pub fn path() -> Result<PathBuf> {
     Ok(crate::home::home_or_error()?
         .join("cache")
         .join("vectors.db"))
+}
+
+/// Where one store's vectors are cached, and the cap that cache keeps to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Location {
+    pub path: PathBuf,
+    /// In bytes; 0 turns this cache off for the stores given it.
+    pub cap: u64,
+}
+
+impl Location {
+    /// A cache of the caller's own, capped at `cap_mb` megabytes.
+    pub fn at(path: impl Into<PathBuf>, cap_mb: u64) -> Self {
+        Self {
+            path: path.into(),
+            cap: cap_mb.saturating_mul(1024 * 1024),
+        }
+    }
+
+    /// The machine's cache under the semlith home, at the cap in force; none
+    /// when that cap is 0 or there is no home.
+    pub fn machine() -> Option<Self> {
+        let cap = cap_bytes();
+        (cap > 0)
+            .then(path)
+            .and_then(Result::ok)
+            .map(|path| Self { path, cap })
+    }
+}
+
+/// Delete one cache, its write-ahead log and shared memory with it. A cache
+/// that was never written is already clear.
+pub fn clear(at: &Location) -> Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = at.path.clone().into_os_string();
+        name.push(suffix);
+        match std::fs::remove_file(&name) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(e)
+                    .with_context(|| format!("removing {}", PathBuf::from(name).display()));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// What decides a vector besides its text, folded into every key.
@@ -103,16 +153,27 @@ impl Scope {
 /// that fails.
 pub struct Cache {
     db: Connection,
+    /// The cap this cache evicts to, in bytes.
+    cap: u64,
 }
 
 impl Cache {
+    /// The machine's cache.
     pub fn open() -> Option<Self> {
-        if cap_bytes() == 0 {
-            return None;
-        }
-        Self::open_at(&path().ok()?).ok()
+        Self::open_in(&Location::machine()?)
     }
 
+    /// The cache at `at`, or nothing when its cap is 0 or it cannot be opened.
+    pub fn open_in(at: &Location) -> Option<Self> {
+        if at.cap == 0 {
+            return None;
+        }
+        let mut cache = Self::open_at(&at.path).ok()?;
+        cache.cap = at.cap;
+        Some(cache)
+    }
+
+    /// The cache file at `path`, at the machine's cap.
     pub fn open_at(path: &std::path::Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -153,7 +214,10 @@ impl Cache {
             )?;
         }
         crate::home::tighten_file(path);
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            cap: cap_bytes(),
+        })
     }
 
     fn rows(&self) -> Result<u64> {
@@ -218,7 +282,7 @@ impl Cache {
             count.execute(params!["rows", added])?;
         }
         tx.commit()?;
-        self.evict(cap_bytes())
+        self.evict(self.cap)
     }
 
     /// Drop the least recently used rows until the cache is under 90 % of
@@ -246,7 +310,7 @@ impl Cache {
 
     /// Rows, bytes they are counted at, and the lifetime hit rate.
     pub fn stats(&self) -> Result<Stats> {
-        stats_of(&self.db)
+        stats_of(&self.db, self.cap)
     }
 }
 
@@ -261,12 +325,12 @@ fn count(db: &Connection, k: &str) -> Result<u64> {
         .max(0) as u64)
 }
 
-fn stats_of(db: &Connection) -> Result<Stats> {
+fn stats_of(db: &Connection, cap: u64) -> Result<Stats> {
     let rows = count(db, "rows")?;
     Ok(Stats {
         rows,
         bytes: rows * ROW_BYTES,
-        cap: cap_bytes(),
+        cap,
         hits: count(db, "hits")?,
         lookups: count(db, "lookups")?,
     })
@@ -319,19 +383,10 @@ pub fn stats() -> Stats {
         cap,
         ..Stats::default()
     };
-    if cap == 0 {
+    let Some(at) = Location::machine() else {
         return off;
-    }
-    let Ok(path) = path() else { return off };
-    if !path.exists() {
-        return off;
-    }
-    let read = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(anyhow::Error::from)
-        .and_then(|db| {
-            db.busy_timeout(std::time::Duration::from_millis(200))?;
-            stats_of(&db)
-        });
+    };
+    let read = read_stats(&at);
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
     match read {
         Ok(stats) => {
@@ -340,6 +395,28 @@ pub fn stats() -> Stats {
         }
         Err(_) => last.clone().unwrap_or(off),
     }
+}
+
+/// One cache's figures, as [`stats`] gives the machine's: read-only, zeros
+/// with its cap when it is off, never written, or busy.
+pub fn stats_at(at: &Location) -> Stats {
+    read_stats(at).unwrap_or(Stats {
+        cap: at.cap,
+        ..Stats::default()
+    })
+}
+
+fn read_stats(at: &Location) -> Result<Stats> {
+    let off = Stats {
+        cap: at.cap,
+        ..Stats::default()
+    };
+    if at.cap == 0 || !at.path.exists() {
+        return Ok(off);
+    }
+    let db = Connection::open_with_flags(&at.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    db.busy_timeout(std::time::Duration::from_millis(200))?;
+    stats_of(&db, at.cap)
 }
 
 #[cfg(test)]
@@ -406,6 +483,69 @@ mod tests {
         assert!(cache.get(&keys[0]).is_some());
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.lookups, 11);
+    }
+
+    fn fill(cache: &mut Cache, n: usize, hits: &[[u8; 32]]) -> Vec<[u8; 32]> {
+        let scope = Scope {
+            model: "m".into(),
+            chunker: 1,
+            truncation: 1,
+        };
+        let v: Vec<f32> = (0..384).map(|i| i as f32).collect();
+        let keys: Vec<[u8; 32]> = (0..n)
+            .map(|i| scope.key(&Scope::text(&i.to_string()), "x"))
+            .collect();
+        let fresh: Vec<([u8; 32], &'static str, &[f32])> =
+            keys.iter().map(|k| (*k, "x", v.as_slice())).collect();
+        cache.record(&fresh, hits, (n + hits.len()) as u64).unwrap();
+        keys
+    }
+
+    #[test]
+    fn two_instance_caches_keep_apart_and_each_reports_its_own_figures() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Location::at(dir.path().join("org-a/vectors.db"), 64);
+        let b = Location::at(dir.path().join("org-b/vectors.db"), 64);
+        let keys = fill(&mut Cache::open_in(&a).unwrap(), 10, &[]);
+        let cb = Cache::open_in(&b).unwrap();
+        assert!(
+            keys.iter().all(|k| cb.get(k).is_none()),
+            "b saw a's vectors"
+        );
+        let sa = stats_at(&a);
+        assert_eq!((sa.rows, sa.cap), (10, 64 * 1024 * 1024));
+        assert_eq!(stats_at(&b).rows, 0);
+        let mut cb = cb;
+        fill(&mut cb, 3, &[]);
+        assert_eq!(stats_at(&b).rows, 3);
+        assert_eq!(stats_at(&a).rows, 10, "b's rows landed in a");
+    }
+
+    #[test]
+    fn a_cap_of_zero_turns_one_instance_cache_off_and_reads_as_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let off = Location::at(dir.path().join("v.db"), 0);
+        assert!(Cache::open_in(&off).is_none());
+        assert!(!off.path.exists(), "an off cache wrote a file");
+        assert_eq!(stats_at(&off).line(), "off (vector cache cap is 0)");
+    }
+
+    #[test]
+    fn an_instance_cache_evicts_to_its_own_cap_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        // Room for 5 rows at ROW_BYTES: a run of 10 evicts to 90 % of it, 4.
+        let at = Location {
+            path: dir.path().join("v.db"),
+            cap: 5 * ROW_BYTES,
+        };
+        let mut cache = Cache::open_in(&at).unwrap();
+        fill(&mut cache, 10, &[]);
+        assert_eq!(stats_at(&at).rows, 4);
+        drop(cache);
+        clear(&at).unwrap();
+        assert!(!at.path.exists());
+        assert_eq!(stats_at(&at).rows, 0);
+        clear(&at).unwrap();
     }
 
     /// The cap is counted in rows at `ROW_BYTES`; the file has to be about

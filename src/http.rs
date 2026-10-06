@@ -166,6 +166,7 @@ impl Refusal {
 }
 
 /// One parsed request.
+#[derive(Clone)]
 pub struct Request {
     pub method: String,
     /// Path with the query string removed, percent-decoded.
@@ -272,6 +273,20 @@ impl Response {
             "application/json; charset=utf-8",
             serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec()),
         )
+    }
+
+    /// The status this response will be sent with.
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// The body as JSON, when it is a whole body that is JSON. A streamed
+    /// response has no body to read here.
+    pub fn json_value(&self) -> Option<serde_json::Value> {
+        match &self.body {
+            Body::Bytes(bytes) => serde_json::from_slice(bytes).ok(),
+            Body::Stream(_) => None,
+        }
     }
 
     /// A refusal a handler decided on: still JSON, because the portal shows it.

@@ -125,6 +125,14 @@ pub struct Session {
     /// `clientInfo.version`, empty until the handshake gives one.
     pub version: String,
     pub id: String,
+    /// The app that started the client's `semlith mcp`, as `clientid` names
+    /// it, when something has said so: this process's own ancestry when it is
+    /// the stdio server, the proxy's `Semlith-Host` header when the call came
+    /// over HTTP, and nothing for an embedder that does not pass one. Never
+    /// the ancestry of a process that is only serving a request — a daemon
+    /// started from a terminal would file every HTTP client under that
+    /// terminal's app.
+    pub host: Option<String>,
 }
 
 impl Session {
@@ -133,6 +141,7 @@ impl Session {
             client: "mcp".to_string(),
             version: String::new(),
             id: id.into(),
+            host: None,
         }
     }
 
@@ -237,6 +246,9 @@ pub fn serve(
     // One connection is one conversation, so the id is made once here and every
     // row this client writes carries it.
     let mut session = Session::new(format!("stdio-{}", std::process::id()));
+    // This process is the stdio server, so the app that started it is the
+    // client's host.
+    session.host = crate::clientid::host().map(str::to_string);
 
     for line in input.lines() {
         let line = line?;
@@ -390,7 +402,7 @@ fn without_stores(
             let info = params.get("clientInfo");
             session.client = crate::clientid::label(
                 info.and_then(|c| c.get("name")).and_then(Value::as_str),
-                crate::clientid::host(),
+                session.host.as_deref(),
             );
             let name = info.and_then(|c| c.get("name")).and_then(Value::as_str);
             if let Some(version) = info
@@ -803,15 +815,161 @@ fn all_tool_defs(open: &str) -> Value {
     ])
 }
 
+/// Hits a search fetched from remote stores, to merge with the local ones.
+struct Remote {
+    fetched: crate::cloud::Fetched,
+    /// The call named only remote stores, so no local store is searched.
+    skip_local: bool,
+}
+
 fn call_tool(
     stores: &mut Fleet,
     writer: Option<&dyn Writer>,
     params: &Value,
     session: &Session,
 ) -> Result<Value, Fail> {
+    // One registry read. Nobody who never connected a remote store goes any
+    // further than this, so their answers are exactly what they were.
+    let remotes = crate::cloud::remote_stores();
+    if remotes.is_empty() {
+        return call_local(stores, writer, params, session, None);
+    }
+    call_with_remotes(stores, writer, params, session, &remotes)
+}
+
+/// A tool call on a machine with remote stores.
+///
+/// Search names a remote store or no store at all: the remote hits are
+/// fetched and merged with the local ones by score under the same `k` and
+/// budget. Any other tool naming a remote store is forwarded to that store's
+/// MCP endpoint and its text appended, store by store. A store that cannot be
+/// asked costs one line saying so; the local answer stays whole.
+fn call_with_remotes(
+    stores: &mut Fleet,
+    writer: Option<&dyn Writer>,
+    params: &Value,
+    session: &Session,
+    remotes: &[(String, crate::home::Remote)],
+) -> Result<Value, Fail> {
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    let named = strings(&args, "store");
+    let is_remote = |n: &String| remotes.iter().any(|(r, _)| r == n);
+    let (remote_named, local_named): (Vec<String>, Vec<String>) =
+        named.iter().cloned().partition(is_remote);
+    let skip_local = !named.is_empty() && local_named.is_empty();
+    let who = crate::cloud::Who {
+        client: &session.client,
+        session: &session.id,
+    };
+    // The same call, with only the local stores named.
+    let local_params = || {
+        let mut p = params.clone();
+        if !named.is_empty() {
+            p["arguments"]["store"] = json!(local_named);
+        }
+        p
+    };
+    let exact = args.get("exact").and_then(Value::as_bool) == Some(true);
+    let targets: Vec<(String, crate::home::Remote)> = remotes
+        .iter()
+        .filter(|(r, _)| {
+            if named.is_empty() {
+                name == "semlith_search"
+            } else {
+                remote_named.contains(r)
+            }
+        })
+        .cloned()
+        .collect();
+    if targets.is_empty()
+        || matches!(
+            name,
+            "semlith_index" | "semlith_forget" | "semlith_add" | "semlith_stats"
+        )
+    {
+        return call_local(stores, writer, params, session, None);
+    }
+
+    if name == "semlith_search" && !exact {
+        let Some(query) = args.get("query").and_then(Value::as_str) else {
+            return Err((-32602, "missing required argument: query".into(), None));
+        };
+        let k = args.get("k").and_then(Value::as_u64).unwrap_or(8) as usize;
+        let fetched = crate::cloud::search(
+            &targets,
+            &crate::cloud::Query {
+                query,
+                k: k.clamp(1, 50),
+                path: &strings(&args, "path"),
+                ext: &strings(&args, "ext"),
+                lang: &strings(&args, "lang"),
+                prefer: args.get("prefer").and_then(Value::as_str),
+            },
+            &who,
+        );
+        let remote = Remote {
+            fetched,
+            skip_local,
+        };
+        return call_local(stores, writer, &local_params(), session, Some(&remote));
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut failed = false;
+    if !skip_local {
+        let local = call_local(stores, writer, &local_params(), session, None)?;
+        failed = local["isError"] == json!(true);
+        parts.push(text_of(&local));
+    }
+    let mut skipped = Vec::new();
+    for (store, remote) in &targets {
+        match crate::cloud::forward_tool(store, remote, name, &args, &who) {
+            Ok(text) => parts.push(format!("{store} ({})\n{text}", crate::cloud::badge(remote))),
+            Err(why) => skipped.push(why),
+        }
+    }
+    if let Some(line) = crate::cloud::skipped_line(&skipped) {
+        parts.push(line);
+    }
+    let mut out = json!({ "content": [{ "type": "text", "text": parts.join("\n\n") }] });
+    if failed && skip_local {
+        out["isError"] = json!(true);
+    }
+    Ok(out)
+}
+
+/// The text of a tool result.
+fn text_of(result: &Value) -> String {
+    result["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn call_local(
+    stores: &mut Fleet,
+    writer: Option<&dyn Writer>,
+    params: &Value,
+    session: &Session,
+    remote: Option<&Remote>,
+) -> Result<Value, Fail> {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
     let started = std::time::Instant::now();
+
+    // A write tool naming a remote store gets the sentence that says why,
+    // not "no store called …".
+    if matches!(name, "semlith_index" | "semlith_forget" | "semlith_add") {
+        for store in strings(&args, "store") {
+            if let Err(e) = crate::home::refuse_remote(&store) {
+                return Ok(tool_error(&e.to_string()));
+            }
+        }
+    }
 
     let body = match name {
         "semlith_search" => {
@@ -835,7 +993,7 @@ fn call_tool(
             // should widen the filter, not conclude the corpus is empty. A
             // failure here is a broken store, not an empty selection, and must
             // not be reported as one.
-            let selected = if filter.is_empty() {
+            let selected = if filter.is_empty() || remote.is_some() {
                 1
             } else {
                 match stores.matching_files(&filter) {
@@ -889,7 +1047,31 @@ fn call_tool(
                     [one] => stores.lean(one).unwrap_or_default(),
                     _ => crate::Prefer::default(),
                 });
-                match stores.search_leaning(Some(&only), query, k.clamp(1, 50), &filter, asked) {
+                let found = match remote {
+                    Some(r) if r.skip_local => Ok(Vec::new()),
+                    _ => stores.search_leaning(Some(&only), query, k.clamp(1, 50), &filter, asked),
+                };
+                // Remote hits join here, by score, before the budget cuts: one
+                // list, one `k`, one renderer.
+                let found = match (found, remote) {
+                    (Ok(hits), Some(r)) => {
+                        let label = (stores.len() == 1)
+                            .then(|| stores.labels().first().map(|l| l.to_string()))
+                            .flatten();
+                        Ok(crate::cloud::merge(
+                            hits,
+                            label.as_deref(),
+                            &r.fetched.hits,
+                            k.clamp(1, 50),
+                        ))
+                    }
+                    (found, _) => found,
+                };
+                let skipped = remote.and_then(|r| crate::cloud::skipped_line(&r.fetched.skipped));
+                let answer = match found {
+                    Ok(hits) if hits.is_empty() && remote.is_some_and(|r| r.skip_local) => {
+                        "No match in the remote stores.".to_string()
+                    }
                     Ok(hits) if hits.is_empty() => stores.no_match_reason(&filter),
                     Ok(hits) if excerpts => {
                         format!("{}\n{}", reading(query, prefer), render(&hits))
@@ -898,6 +1080,10 @@ fn call_tool(
                     // Tool failures are reported in-band so the agent can react,
                     // rather than as a protocol-level error.
                     Err(e) => return Ok(tool_error(&e.to_string())),
+                };
+                match skipped {
+                    Some(line) => format!("{answer}\n{line}"),
+                    None => answer,
                 }
             }
         }
@@ -1209,6 +1395,15 @@ fn call_tool(
                 } else {
                     body
                 });
+            }
+            // Remote stores, by name and badge: what they hold is the cloud's
+            // to say, through `semlith_files` or a search naming them.
+            for (store, remote) in crate::cloud::remote_stores() {
+                lines.push(format!(
+                    "{store}: {}, answered by {}",
+                    crate::cloud::badge(&remote),
+                    crate::cloud::host_name(&remote.host)
+                ));
             }
             // The lanes that embed, once for the whole answer, experimental
             // ones said so.
@@ -1784,7 +1979,11 @@ fn call_tool(
         other => return Err((-32602, format!("unknown tool: {other}"), None)),
     };
 
-    record(stores, session, name, &args, &body, started.elapsed());
+    // A search that asked only remote stores read nothing here, so there is
+    // no local row to write; the cloud records its own.
+    if !remote.is_some_and(|r| r.skip_local) {
+        record(stores, session, name, &args, &body, started.elapsed());
+    }
     Ok(json!({ "content": [{ "type": "text", "text": body }] }))
 }
 
@@ -2129,6 +2328,11 @@ pub fn brief_reply(fleet: &Fleet, brief: &crate::brief::Brief, filter: &crate::F
     paths.with_header(render_brief(brief, &|p| paths.short(p)))
 }
 
+/// One hit's best line for `query`, as a locate row shows it.
+pub(crate) fn line_for(text: &str, query: &str) -> String {
+    best_line(text, &query_terms(query))
+}
+
 fn query_terms(query: &str) -> Vec<String> {
     query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -2398,7 +2602,7 @@ fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -
     out
 }
 
-fn render(hits: &[crate::Hit]) -> String {
+pub(crate) fn render(hits: &[crate::Hit]) -> String {
     let mut out = String::new();
     for (i, h) in hits.iter().enumerate() {
         // The store, when there is more than one, goes in front of the path:
@@ -2463,9 +2667,155 @@ fn reply(id: &Value, result: Result<Value, Fail>) -> Value {
     }
 }
 
+/// What a typical answer from each tool costs an agent, before it asks.
+///
+/// Fixed estimates, in tokens, for a machine whose ledger has fewer than
+/// [`TYPICAL_MIN_ROWS`] rows for a tool: a locate search at its default
+/// budget, a brief at its default budget, a definition read whole, and the
+/// graph and housekeeping tools' short replies. Rough on purpose and labelled
+/// `estimate` beside every figure; the ledger's own median replaces each as
+/// soon as there are rows enough to take one from.
+pub const TYPICAL_ESTIMATES: &[(&str, &str, i64)] = &[
+    (
+        "semlith_search",
+        "where something is: one line per hit",
+        700,
+    ),
+    (
+        "semlith_brief",
+        "how something works: spans, text and callers",
+        1800,
+    ),
+    ("semlith_read", "one span or definition, whole", 900),
+    (
+        "semlith_pattern",
+        "every place one syntax shape occurs",
+        600,
+    ),
+    ("semlith_stats", "what is indexed, per store", 150),
+    (
+        "semlith_languages",
+        "which languages filter and carry a graph",
+        300,
+    ),
+    ("semlith_files", "what a folder holds", 450),
+    (
+        "semlith_index",
+        "a folder indexed, and what was skipped",
+        120,
+    ),
+    ("semlith_add", "one URL fetched and indexed", 80),
+    ("semlith_forget", "one file taken out", 40),
+    (
+        "semlith_symbol",
+        "where a name is defined and what touches it",
+        300,
+    ),
+    ("semlith_neighbors", "who calls it and what it calls", 350),
+    ("semlith_report", "one of the five reports", 1200),
+    ("semlith_impact", "every caller a change would reach", 450),
+    (
+        "semlith_trace",
+        "the chain from A to B, a line per hop",
+        400,
+    ),
+    ("semlith_path", "whether A reaches B, and how", 200),
+];
+
+/// Ledger rows a tool needs before its median replaces the estimate.
+pub const TYPICAL_MIN_ROWS: usize = 5;
+
+/// Every tool with what it answers and a typical answer's size. `seen` is the
+/// ledger's excerpt tokens per tool, by short name (`search`); a tool with
+/// [`TYPICAL_MIN_ROWS`] of them shows their median, the rest the labelled
+/// estimate. The local portal and Semlith Cloud's Agents page both draw this.
+pub fn tool_catalog(seen: &mut std::collections::BTreeMap<String, Vec<i64>>) -> Vec<Value> {
+    let listed = listed_names();
+    tool_list()
+        .into_iter()
+        .map(|(name, about)| {
+            let short = name.strip_prefix("semlith_").unwrap_or(&name).to_string();
+            let offered = listed.contains(&name);
+            let (answers, estimate) = TYPICAL_ESTIMATES
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .map(|(_, answers, tokens)| (answers.to_string(), *tokens))
+                .unwrap_or_else(|| (about.clone(), 300));
+            let (typical, source) = match seen.get_mut(&short) {
+                Some(rows) if rows.len() >= TYPICAL_MIN_ROWS => {
+                    rows.sort_unstable();
+                    (rows[rows.len() / 2], "ledger")
+                }
+                _ => (estimate, "estimate"),
+            };
+            json!({
+                "name": name,
+                "about": about,
+                "answers": answers,
+                "typical_tokens": typical,
+                "typical_source": source,
+                // Whether `tools/list` sends it. A client offers its agent
+                // only those; the rest are the CLI's and the portal's.
+                "listed": offered,
+            })
+        })
+        .collect()
+}
+
+/// What the tool list costs a session, in tokens, counted by `counter`.
+///
+/// Once per session, before the agent has asked anything: it is the standing
+/// charge for having semlith connected at all, and a user should be able to
+/// read it rather than capture traffic to discover it.
+pub fn tool_list_tokens(counter: &crate::ledger::Counter) -> i64 {
+    // The listed tools only: their bytes are what `tool_list_bytes` counts,
+    // and a ratio of sixteen tools' prose to eight tools' bytes is neither.
+    let listed = listed_names();
+    let text = tool_list()
+        .into_iter()
+        .filter(|(name, _)| listed.contains(name))
+        .map(|(name, about)| format!("{name} {about}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let count = counter.count(&text);
+    // The whole payload, not only the prose: the schemas are what an agent is
+    // sent. The prose is what a tokenizer can be run over honestly, so the
+    // count is scaled by the payload's share of it rather than estimated twice.
+    let bytes = tool_list_bytes() as i64;
+    let prose = text.len().max(1) as i64;
+    count * bytes / prose
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session served over HTTP or by an embedder is labelled by the host it
+    /// was handed, never by the ancestry of the process serving it: a daemon
+    /// started from a terminal used to file every client as that terminal's
+    /// app ("flow-test (Claude Code)").
+    #[test]
+    fn initialize_labels_by_the_host_it_was_handed_not_the_serving_process() {
+        let hello = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "clientInfo": { "name": "flow-test", "version": "1" } }
+        });
+        let mut fleet = Fleet::empty();
+        let mut session = Session::new("s");
+        answer(&mut fleet, None, &hello, &mut session).expect("an answer");
+        assert_eq!(
+            session.client,
+            crate::clientid::label(Some("flow-test"), None)
+        );
+
+        let mut proxied = Session::new("p");
+        proxied.host = Some("Claude Desktop".to_string());
+        answer(&mut fleet, None, &hello, &mut proxied).expect("an answer");
+        assert_eq!(
+            proxied.client,
+            crate::clientid::label(Some("flow-test"), Some("Claude Desktop"))
+        );
+    }
 
     /// The walk stop of 0.30.0 found 604 bytes with three roots: the budget
     /// held room for " and 1 more" but the tail says " and 1 more folder".

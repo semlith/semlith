@@ -1494,6 +1494,10 @@ const state = {
 
 const store = (name) => (data.stores?.stores || []).find((s) => s.name === name);
 const liveStores = () => (data.stores?.stores || []).filter((s) => !s.missing && !s.unopened);
+// Semlith Cloud stores this machine reads and never writes: listed beside the
+// local ones with their badge, never among them, since nothing that totals,
+// opens or writes a store applies to one.
+const remoteStores = () => data.stores?.remote || [];
 
 // ---------------------------------------------------------------- data cache
 
@@ -1516,6 +1520,7 @@ const SOURCES = {
   prices: "/api/prices",
   replay: "/api/ledger/replay",
   languages: "/api/languages",
+  cloud: "/api/cloud",
   graphpeek: () => `/api/graph?${new URLSearchParams({ store: (graphPeekFor = graphStore()), limit: "12" })}`,
   graphmap: () => `/api/map?${new URLSearchParams({ store: (graphMapFor = graphStore()), shown: "12" })}`,
   coverage: "/api/stores?coverage=1",
@@ -2108,7 +2113,8 @@ function paintChrome() {
   const stores = liveStores().length;
   const agents = connectedCount();
   const rec = recordingWord();
-  fill(shell.daemonFacts, `${location.host} · sole writer`, el("br"), `${plural(stores, "store")} · ${agents ? `${plural(agents, "agent")} connected` : `${plural(registeredClients().length, "agent")} registered`} · ledger ${rec}`);
+  const cloudOrgs = (data.about?.cloud?.orgs || []).map((o) => o.org);
+  fill(shell.daemonFacts, `${location.host} · sole writer`, el("br"), `${plural(stores, "store")} · ${agents ? `${plural(agents, "agent")} connected` : `${plural(registeredClients().length, "agent")} registered`} · ledger ${rec}${cloudOrgs.length ? ` · cloud: ${cloudOrgs.join(", ")}` : ""}`);
   const railDaemon = shell.rail.querySelector(".rail-daemon");
   if (railDaemon) railDaemon.setAttribute("data-tip-rows", rows([["address", location.host], ["role", "sole writer"], ["stores", String(stores)], ["agents", String(agents)], ["ledger", rec]]));
 }
@@ -4788,6 +4794,22 @@ function storesList() {
         pager(view, pages, changed),
       ),
     ),
+    remoteStores().length
+      ? el(
+          "div",
+          { class: "card" },
+          el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Remote stores" }), meta("read through Semlith Cloud · never written from here")),
+          remoteStores().map((r) =>
+            el(
+              "div",
+              { class: "dl-row" },
+              el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: r.name }), el("span", { class: "muted t-xs", text: `${r.host_name} · searched with the local stores; change it in the cloud app` })),
+              pill(r.badge, "blue", { dot: false }),
+            ),
+          ),
+          el("div", { class: "card-foot" }, el("span", { class: "grow", text: "Settings › Cloud has their sources, revisions and lag" }), btn({ class: "btn xs", onclick: () => go("settings", "cloud") }, "Open Cloud")),
+        )
+      : null,
   );
 }
 
@@ -5913,6 +5935,7 @@ VIEWS.search = {
     const scopeItems = () => [
       { label: "All stores", hint: plural(liveStores().length, "store"), checked: !sr.store, onclick: () => ((sr.store = ""), repaint(), sr.query && runSearch()) },
       ...liveStores().map((s) => ({ label: s.name, hint: s.files ? `${n(s.files)} files` : "empty", checked: sr.store === s.name, onclick: () => ((sr.store = s.name), (sr.prefer = s.lean || sr.prefer), repaint(), sr.query && runSearch()) })),
+      ...remoteStores().map((r) => ({ label: r.name, hint: r.badge, checked: sr.store === r.name, onclick: () => ((sr.store = r.name), repaint(), sr.query && runSearch()) })),
     ];
     setTimeout(() => input.focus(), 0);
     const langs = (data.languages?.languages || []).map((l) => l.name);
@@ -6157,7 +6180,7 @@ function rankedView(r) {
   for (const [i, h] of hits.entries()) {
     const key = `${h.store || ""}\n${h.path}`;
     let g = groups.find((x) => x.key === key);
-    if (!g) groups.push((g = { key, path: h.path, store: h.store, spans: [] }));
+    if (!g) groups.push((g = { key, path: h.path, store: h.store, remote: h.remote ? h : null, spans: [] }));
     g.spans.push({ ...h, i });
   }
   const tokens = r.tokens || 0;
@@ -6176,12 +6199,20 @@ function rankedView(r) {
         "div",
         { class: "sr-list", "data-scroll-keep": "sr-list" },
         unreadable(r.failed),
+        r.remote_skipped ? el("div", { class: "notice amber" }, el("span", { class: "sub", text: `${r.remote_skipped}. The local stores answered in full.` })) : null,
         (r.pending || []).length ? el("div", { class: "notice amber" }, el("span", { class: "sub", text: `Still embedding: ${r.pending.map((p) => `${p.store} ${Math.round(p.share * 100)}% not yet ranked by meaning`).join(", ")}. Keyword and graph already cover it.` })) : null,
         groups.map((g) =>
           el(
             "div",
             { class: "card hit-group" },
-            el("div", { class: "hit-head" }, pathSpan(hitPath(g), "p", g.path), el("span", { class: "t-mono-sm grow", text: g.store || "" }), el("span", { class: "t-mono-sm nowrap", text: g.spans.length > 1 ? `${g.spans.length} spans` : `${g.spans[0].start_line}-${g.spans[0].end_line}` })),
+            el(
+              "div",
+              { class: "hit-head" },
+              pathSpan(hitPath(g), "p", g.path),
+              el("span", { class: "t-mono-sm grow", text: g.store || "" }),
+              g.remote ? pill(g.remote.badge, "blue", { dot: false, sm: true, tip: `${g.remote.revision ? `indexed at ${g.remote.revision}` : "revision not stated"} · ${lagWord(g.remote.behind_seconds)}` }) : null,
+              el("span", { class: "t-mono-sm nowrap", text: g.spans.length > 1 ? `${g.spans.length} spans` : `${g.spans[0].start_line}-${g.spans[0].end_line}` }),
+            ),
             g.spans.map((h) =>
               btn(
                 { class: `hit${sr.sel === h.i ? " on" : ""}`, onclick: () => openHit(h) },
@@ -6220,6 +6251,13 @@ async function openHit(h) {
   sr.sel = h.i;
   sr.whole = false;
   sr.detail = { hit: h, span: null, hops: null };
+  // A remote row arrived with its text: shown from that, with no second
+  // request to the host.
+  if (h.remote) {
+    sr.detail.span = { text: h.text || h.line || "", start_line: h.start_line, end_line: h.end_line, fresh: h.fresh };
+    if (current.view === VIEWS.search) searchView.paintBody();
+    return;
+  }
   if (current.view === VIEWS.search) searchView.paintBody();
   const p = new URLSearchParams({ target: `${h.path}:${h.start_line}-${h.end_line}` });
   if (h.store) p.append("store", h.store);
@@ -7832,7 +7870,7 @@ function agHealth(a) {
 const lg = { tab: "sessions", filter: null, q: "", store: "all", tier: "all", zero: false, replay: null };
 
 VIEWS.ledger = {
-  needs: (route) => ["ledger", "stores"].concat((route.parts[0] || "sessions") === "replay" ? ["replay"] : []),
+  needs: (route) => ["ledger", "stores", "cloud"].concat((route.parts[0] || "sessions") === "replay" ? ["replay"] : []),
   live: ["ledger"],
   render(route) {
     lg.tab = route.parts[0] || "sessions";
@@ -7851,7 +7889,7 @@ VIEWS.ledger = {
       el(
         "div",
         { class: "head" },
-        el("div", { class: "titles" }, el("div", { class: "row nowrap gap10" }, el("div", { class: "h1", text: "Retrieval ledger" }), pill(rec === "on" ? "recording" : rec === "paused" ? "paused" : "off", rec === "on" ? "green" : "grey", { pulse: rec === "on" })), el("div", { class: "lead", text: "Every query an agent ran and what it was sent — recorded on this machine, hash-chained, never uploaded." })),
+        el("div", { class: "titles" }, el("div", { class: "row nowrap gap10" }, el("div", { class: "h1", text: "Retrieval ledger" }), pill(rec === "on" ? "recording" : rec === "paused" ? "paused" : "off", rec === "on" ? "green" : "grey", { pulse: rec === "on" })), el("div", { class: "lead", text: data.cloud?.signed_in ? "Every query an agent ran and what it was sent — recorded on this machine, hash-chained; the stores you sync send their rows, never the text." : "Every query an agent ran and what it was sent — recorded on this machine, hash-chained, never uploaded." }), syncLine()),
         toggle(
           rec === "on",
           rec === "on" ? "Recording" : lockedOff ? `Off — ${recState.reason === "env" ? "SEMLITH_LEDGER=0" : "--no-ledger"}` : "Recording paused",
@@ -8521,7 +8559,7 @@ VIEWS.privacy = {
           ["Assets", "inside the binary", "this page is compiled in, include_bytes!"],
           ["Ledger", "local table", "in each store's own database"],
           ["Model cache", shortPath(P.model_cache || "", 30), P.model_cached ? "read once, then offline" : "empty until the first run"],
-          ["Cloud", "not connected", "no cloud command, no connection to any host"],
+          cloudFact(P.cloud),
         ].map(([k, v, d]) => el("div", { class: "fact-card" }, el("span", { class: "eyebrow sm", text: k }), el("span", { class: "v", text: v }), el("span", { class: "d", text: d }))),
       ),
       el(
@@ -8549,6 +8587,7 @@ VIEWS.privacy = {
             el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Everything semlith ever fetches" }), meta(`${downloads.length + 2} things, each on your say-so`)),
             downloads.map((d) => el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: cap(plainWhat(d.what)) }), el("span", { class: "muted t-xs", text: `${d.source} · ${bytes(d.bytes)} · ${d.when}` })), pill(d.cached ? "on disk" : "never fetched", d.cached ? "green" : "grey", { dot: false }))),
             el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "A URL you add to a store" }), el("span", { class: "muted t-xs", text: "one https request for exactly that URL · only when you press Fetch" })), pill("on request", "grey", { dot: false })),
+            el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "Semlith Cloud" }), el("span", { class: "muted t-xs", text: P.cloud?.signed_in ? `${(P.cloud.orgs || []).map((o) => o.host_name).join(", ")} · a search naming a remote store, the ledger rows of the stores you sync, and what you push or send · never the token anywhere else` : "nothing, until you run semlith cloud login" })), pill(P.cloud?.signed_in ? "signed in" : "never contacted", P.cloud?.signed_in ? "blue" : "grey", { dot: false })),
             el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "The release check and the price table" }), el("span", { class: "muted t-xs", text: "github.com and models.dev · only when you press the button in Settings or Reports" })), pill("on request", "grey", { dot: false })),
             outbound.recent && outbound.recent.length ? el("div", { class: "card-foot", text: `last ${outbound.recent.length}: ${outbound.recent.slice(0, 4).map((r) => `${clock(r.at)} ${r.what} → ${r.host}`).join(" · ")}` }) : null,
           ),
@@ -8631,7 +8670,7 @@ async function fixRule(id) {
 VIEWS.settings = {
   needs: (route) => {
     const sec = route.parts[0] || "perf";
-    return sec === "perf" ? ["runs", "accel"] : sec === "access" ? ["about", "agents", "privacy"] : sec === "about" ? ["about", "languages", "prices"] : ["about"];
+    return sec === "perf" ? ["runs", "accel"] : sec === "access" ? ["about", "agents", "privacy"] : sec === "about" ? ["about", "languages", "prices"] : sec === "cloud" ? ["about", "cloud", "stores", "replay"] : ["about"];
   },
   live: ["runs"],
   morph: (route) => (route.parts[0] || "perf") === "perf",
@@ -8648,7 +8687,7 @@ VIEWS.settings = {
     const sections = [
       ["perf", "Performance", machine ? `${machine.logical_cores} cores` : ""],
       ["access", "Agent access", "key · token"],
-      ["cloud", "Cloud", "off"],
+      ["cloud", "Cloud", (data.about?.cloud?.orgs || []).map((o) => o.org).join(", ") || "off"],
       ["about", "About", state.version],
     ];
     const body = { perf: sePerf, access: seAccess, cloud: seCloud, about: seAbout }[sec] || sePerf;
@@ -8944,18 +8983,65 @@ async function setLogin(on) {
   if (out) await load("about", true), repaint();
 }
 
+// Settings › Cloud. Not signed in: what the cloud adds and the two commands,
+// no price. Signed in: per org its header, whether the host answered, a card
+// per remote store, ledger sync per local store, and what leaves the machine.
+const cloudUi = { status: null, loading: false, report: null, kind: "savings", format: "md", session: "", dirs: {} };
+
+async function loadCloudStatus(force) {
+  if (cloudUi.loading || (cloudUi.status && !force)) return;
+  cloudUi.loading = true;
+  repaint();
+  try {
+    cloudUi.status = await api("/api/cloud/status");
+  } catch (e) {
+    cloudUi.status = { orgs: [], error: e.message };
+  }
+  cloudUi.loading = false;
+  repaint();
+}
+
+function lagWord(s) {
+  if (s === null || s === undefined) return "no lag known";
+  if (s < 120) return `${s} s behind`;
+  if (s < 7200) return `${Math.round(s / 60)} min behind`;
+  return `${Math.round(s / 3600)} h behind`;
+}
+
+function cloudFact(C) {
+  if (!C || !C.signed_in) return ["Cloud", "not signed in", "no cloud call and no connection, until semlith cloud login"];
+  const sync = (C.sync?.on || []).length;
+  return ["Cloud", (C.orgs || []).map((o) => o.org).join(", "), `${(C.orgs || []).map((o) => o.host_name).join(", ")} only · ledger sync on ${plural(sync, "store")} · searches naming a remote store go there`];
+}
+
+function syncLine() {
+  const C = data.cloud;
+  if (!C || !C.signed_in) return null;
+  const S = C.sync || {};
+  const on = (S.on || []).length;
+  const last = S.last_sent ? `last sent ${ago(S.last_sent)} (${plural(S.last_rows || 0, "row")} from ${S.last_store})` : on ? "nothing sent yet" : "nothing is sent";
+  return el("div", { class: "muted t-sm", text: `syncing ${on} of ${plural(S.stores || 0, "store")} · ${last}${S.last_error ? ` · last try: ${S.last_error}` : ""}` });
+}
+
 function seCloud() {
+  const C = data.cloud || {};
+  if (!C.signed_in) return seCloudOff();
+  if (!cloudUi.status && !cloudUi.loading) setTimeout(() => loadCloudStatus(), 0);
+  return [...(C.orgs || []).map((o) => cloudOrgCard(o, C)), cloudSyncCard(C), cloudLeavesCard(C), cloudSendCard(C)];
+}
+
+function seCloudOff() {
   return el(
     "div",
     { class: "card" },
     el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Semlith Cloud" }), pill("not connected", "grey", { dot: false })),
-    el("div", { class: "card-b line-row muted t13 pretty", text: "One hosted store for a whole organisation: every repository a root of it, indexed on push, served over MCP to any agent, with a pull-request impact check and a team ledger. This binary works without it and contacts nothing until you log in." }),
+    el("div", { class: "card-b line-row muted t13 pretty", text: "An organisation's stores, hosted: every repository and document set indexed on push, served over MCP to any agent, with a pull-request impact check and a team ledger. This binary works without it and contacts nothing until you sign in." }),
     el(
       "div",
       { class: "auto-fit m200 gap0" },
       [
-        ["One URL for cloud agents", "Cloud sessions and CI can't reach a laptop; they can reach an org store."],
-        ["The whole organisation in one index", "Cross-repository paths, and documents beside code."],
+        ["One URL for cloud agents", "Cloud sessions and CI can't reach a laptop; they can reach an org's stores."],
+        ["Its stores beside yours", "Connected, they answer with the local ones, in one ranked list, each row badged."],
         ["A pull-request check", "States what the graph proves, with no model and no guess."],
       ].map(([t, d]) => el("div", { class: "point" }, el("span", { class: "t-b t13", text: t }), el("span", { class: "muted t-xs", text: d }))),
     ),
@@ -8963,11 +9049,185 @@ function seCloud() {
       "div",
       { class: "card-b" },
       [
-        ["semlith cloud login", "Not in this release. It will store an org token under ~/.semlith/ and send it to that host only."],
-        ["semlith cloud connect <org>", "Will add the org's store beside the local ones, with a remote badge."],
-      ].map(([c, note]) => el("div", { class: "col gap4" }, copyField(c, { noCopy: true }), el("span", { class: "muted t-xs", text: note }))),
+        ["semlith cloud login <org>", "Approve a code in the browser. The org token is kept in ~/.semlith/cloud.json and sent to that host only."],
+        ["semlith cloud connect <org>", "Adds the org's stores beside the local ones, with a remote badge. Nothing in them is written from here."],
+      ].map(([c, note]) => el("div", { class: "col gap4" }, copyField(c), el("span", { class: "muted t-xs", text: note }))),
     ),
   );
+}
+
+function cloudOrgCard(o, C) {
+  const st = (cloudUi.status?.orgs || []).find((x) => x.org === o.org && x.host === o.host);
+  const reach = st ? st.reach : "checking";
+  const tone = { connected: "green", unreachable: "amber", refused: "red" }[reach] || "grey";
+  const org = st?.status?.org || {};
+  const remote = (C.remote || []).filter((r) => r.org === o.org && r.host === o.host);
+  const listed = st?.status?.stores || [];
+  return el(
+    "div",
+    { class: "card" },
+    el(
+      "div",
+      { class: "card-h" },
+      el("span", { class: "card-t grow", text: org.name ? `${org.name} · ${o.org}` : o.org }),
+      pill(org.plan || o.plan || "plan not known yet", "blue", { dot: false }),
+      el("span", { class: "mono t-xs muted", "data-tip": "The token's prefix; the token itself is never shown", text: `${o.prefix}…` }),
+      btn({ class: "btn xs", onclick: () => disconnectCloud(o) }, "Disconnect"),
+    ),
+    el(
+      "div",
+      { class: "card-b" },
+      el(
+        "div",
+        { class: "row gap8" },
+        pill(reach, tone, { pulse: reach === "checking" }),
+        el("span", { class: "muted t-sm grow pretty", text: st ? `${st.why}${st.version ? ` · cloud ${st.version}` : ""}` : `Asking ${o.host_name}…` }),
+        btn({ class: "btn xs", disabled: cloudUi.loading ? true : null, onclick: () => loadCloudStatus(true) }, "Check again"),
+      ),
+    ),
+    remote.length
+      ? remote.map((r) => remoteStoreBlock(r, listed.find((x) => x.name === r.store), reach === "connected" ? o.org : null))
+      : el("div", { class: "card-b col gap6" }, el("span", { class: "muted t-sm", text: "No store of this org is connected on this machine." }), el("div", { class: "row" }, btn({ class: "btn sm", onclick: () => connectCloud(o) }, "Connect its stores"))),
+  );
+}
+
+function remoteStoreBlock(r, s, answeredBy) {
+  const freshDot = (state) => ({ fresh: "green", indexing: "amber", queued: "amber", paused: "", error: "red" })[state] || "";
+  const input = el("input", {
+    value: cloudUi.dirs[r.name] || "",
+    placeholder: "Folder to push, e.g. ~/work/infra",
+    "aria-label": `Folder to push to ${r.name}`,
+    "data-keep": `push-${r.name}`,
+    oninput: (e) => (cloudUi.dirs[r.name] = e.target.value),
+  });
+  return el(
+    "div",
+    { class: "card-b col gap6" },
+    el("div", { class: "row gap8" }, el("span", { class: "t-m t13", text: r.name }), pill(r.badge, "blue", { dot: false, sm: true }), el("span", { class: "muted t-xs grow", text: s ? `${s.state} · ${n(s.files || 0)} files · ${n(s.chunks || 0)} chunks` : answeredBy ? `${answeredBy} no longer offers this store: deleted, renamed, or out of this token's reach` : "not in the host's answer yet" })),
+    (s?.sources || []).map((src) =>
+      el(
+        "div",
+        { class: "dl-row" },
+        el("span", { class: "row gap6" }, el("span", { class: `dot ${freshDot(src.state)}`, "data-tip": src.state }), el("span", { class: "t-sm", text: src.label })),
+        el("span", { class: "muted t-xs mono", text: `${src.kind} · ${src.revision || "—"} · ${lagWord(src.behind_seconds)}` }),
+      ),
+    ),
+    el("div", { class: "row gap6" }, el("div", { class: "box grow" }, input), btn({ class: "btn xs", onclick: () => pushCloud(r) }, "Push")),
+  );
+}
+
+function cloudSyncCard(C) {
+  const orgs = C.orgs || [];
+  const on = new Map((C.sync?.on || []).map((x) => [x.store, x]));
+  return el(
+    "div",
+    { class: "card" },
+    el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Ledger sync" }), meta("off until you turn it on, per store")),
+    el("div", { class: "card-b muted t-sm pretty", text: "A synced store sends each retrieval's time, client, session, tool and token count to the org's ledger, once a minute while the daemon runs. Never the query text, never what was read." }),
+    liveStores().map((s) =>
+      el(
+        "div",
+        { class: "dl-row" },
+        el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: s.name }), el("span", { class: "muted t-xs", text: on.has(s.name) ? `to ${on.get(s.name).org} since ${clock(on.get(s.name).since)}` : "stays on this machine" })),
+        toggle(on.has(s.name), on.has(s.name) ? "syncing" : "off", (v) => setCloudSync(s.name, v, orgs[0] && orgs[0].org)),
+      ),
+    ),
+    el("div", { class: "card-foot sans" }, syncLine()),
+  );
+}
+
+function cloudLeavesCard(C) {
+  const hosts = (C.orgs || []).map((o) => o.host_name).join(", ");
+  return el(
+    "div",
+    { class: "card" },
+    el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "What leaves this machine" }), meta(`to ${hosts} and nowhere else`)),
+    [
+      ["A search or tool naming a remote store", "the query and its filters, when you or an agent asks; a search naming no store asks the connected ones too"],
+      ["Ledger sync", "time, client, session, tool and token count of each retrieval from a synced store; never the text"],
+      ["Push", "the files of the folder you name, after semlith's own refusals: secrets, files over 1 MB, vendored trees, .gitignore"],
+      ["Report and replay", "a report request, and the one transcript you pick, only when you press the button"],
+      ["The token", "in the Authorization header to its own host; its prefix is all this page shows"],
+    ].map(([k, v]) => el("div", { class: "kv sm" }, el("span", { class: "k", text: k }), el("span", { class: "v", text: v }))),
+  );
+}
+
+function cloudSendCard(C) {
+  const org = (C.orgs || [])[0];
+  if (!org) return null;
+  const sessions = data.replay?.sessions || [];
+  return el(
+    "div",
+    { class: "card" },
+    el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Reports and replay" }), meta(org.org)),
+    el(
+      "div",
+      { class: "card-b" },
+      el(
+        "div",
+        { class: "row gap8" },
+      dropdown({ label: "Report", value: cloudUi.kind, options: ["savings", "audit", "brief", "health", "gaps"].map((k) => [k, k]), onChange: (v) => ((cloudUi.kind = v), repaint()) }),
+      dropdown({ label: "Format", value: cloudUi.format, options: ["md", "csv", "json", "html"].map((k) => [k, k]), onChange: (v) => ((cloudUi.format = v), repaint()) }),
+      btn({ class: "btn sm", onclick: () => fetchCloudReport(org) }, "Fetch report"),
+      ),
+    ),
+    cloudUi.report ? el("pre", { class: "code wrap sm", text: cloudUi.report }) : null,
+    el(
+      "div",
+      { class: "card-b" },
+      el(
+        "div",
+        { class: "row gap8" },
+      sessions.length
+        ? dropdown({ label: "Session", value: cloudUi.session || sessions[0].id, options: sessions.map((x) => [x.id, `${x.project} · ${plural(x.answers, "answer")}`]), onChange: (v) => ((cloudUi.session = v), repaint()) })
+        : el("span", { class: "muted t-sm grow", text: data.replay?.enabled === false ? "Session replay is off on the Privacy page, so no transcript is read." : "No transcript with a semlith call in it yet." }),
+      sessions.length ? btn({ class: "btn sm", onclick: () => sendReplay(org, cloudUi.session || sessions[0].id) }, "Send this session") : null,
+      ),
+    ),
+  );
+}
+
+async function connectCloud(o) {
+  const out = await act(() => post("/api/cloud/connect", { org: o.org }), (x) => `Connected ${plural((x && x.connected || []).length, "store")} of ${o.org}`);
+  if (out) await loadMany(["cloud", "stores", "about"], true), loadCloudStatus(true);
+}
+
+async function disconnectCloud(o) {
+  const ok = await ask({ title: `Disconnect ${o.org}?`, body: `Its remote stores leave this machine and its token is forgotten here. Nothing in the cloud changes; sign in again with semlith cloud login ${o.org}.`, ok: "Disconnect", danger: true });
+  if (!ok) return;
+  const out = await act(() => post("/api/cloud/disconnect", { org: o.org }), `Disconnected ${o.org}`);
+  if (out) (cloudUi.status = null), await loadMany(["cloud", "stores", "about"], true), repaint();
+}
+
+async function setCloudSync(name, on, org) {
+  const out = await act(() => post("/api/cloud/sync", { store: name, on, org }), on ? `${name} syncs its ledger rows` : `${name} stopped syncing`);
+  if (out) await load("cloud", true), repaint();
+}
+
+async function pushCloud(r) {
+  const dir = (cloudUi.dirs[r.name] || "").trim();
+  if (!dir) return toast("Name the folder to push", true);
+  const done = (x) => `${plural(x.files, "file")} in the manifest · ${x.sent} sent · ${x.removed} removed · job ${x.job}${x.position != null ? `, ${x.position} ahead of it` : ""}`;
+  try {
+    toast(done(await post("/api/cloud/push", { store: r.name, dir })));
+  } catch (e) {
+    // The cloud refuses a push that would remove uploads the folder lacks,
+    // naming them; removing them is a separate, confirmed choice.
+    if (!/--prune/.test(e.message)) return toast(e.message, true);
+    const ok = await ask({ title: "Remove these files?", body: e.message.replace(/,? or push again with --prune to remove them\.?/, "."), ok: "Remove and push" });
+    if (ok) await act(() => post("/api/cloud/push", { store: r.name, dir, prune: true }), done);
+  }
+}
+
+async function fetchCloudReport(o) {
+  const out = await act(() => post("/api/cloud/report", { org: o.org, kind: cloudUi.kind, format: cloudUi.format }));
+  if (out) (cloudUi.report = out.text), repaint();
+}
+
+async function sendReplay(o, id) {
+  const ok = await ask({ title: "Send this session?", body: `Every semlith call in ${id}, with what was asked and what the agent did next, goes to ${o.org}'s ledger. Nothing else is sent.`, ok: "Send" });
+  if (!ok) return;
+  await act(() => post("/api/cloud/replay", { org: o.org, session: id }), (x) => `Sent ${plural(x.sent, "answer")}; ${o.org} kept ${x.accepted}`);
 }
 
 function seAbout() {

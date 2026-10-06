@@ -446,6 +446,7 @@ fn long_report() -> Report {
                 rows,
             },
         ],
+        origin: None,
     }
 }
 

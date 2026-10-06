@@ -1033,9 +1033,14 @@ fn collect(
 
         if let (Some((kind, node)), Some(name)) = (span, name) {
             let span = definition_span(node, name);
+            let raw = &text[name.byte_range()];
             defs.push(Def {
                 kind: kind.to_string(),
-                name: text[name.byte_range()].to_string(),
+                name: if kind == "heading" {
+                    crate::chunk::heading_title(raw)
+                } else {
+                    raw.to_string()
+                },
                 owner: rust.and_then(|_| rust_owner(span, text)),
                 start: span.start_byte(),
                 end: span.end_byte(),

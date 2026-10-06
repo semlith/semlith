@@ -184,8 +184,15 @@ pub struct Clip {
 }
 
 impl Clip {
-    /// Embed an image file. 512 floats, comparable with [`Clip::embed_query`].
-    pub fn embed_image(&mut self, path: &Path, quiet: bool) -> Result<Vec<f32>> {
+    /// Embed an image file's bytes. 512 floats, comparable with
+    /// [`Clip::embed_query`].
+    ///
+    /// From the bytes and not the path: decoding by path picks the decoder from
+    /// the extension, and a PNG saved as `.jpg` (as image generators and chat
+    /// apps often save them) then fails as a malformed JPEG. The bytes decide
+    /// the format here, as they already did for [`dimensions`]. `path` only
+    /// names the file in an error.
+    pub fn embed_image(&mut self, path: &Path, bytes: &[u8], quiet: bool) -> Result<Vec<f32>> {
         let vision = match self.vision.as_mut() {
             Some(model) => model,
             None => {
@@ -207,7 +214,7 @@ impl Clip {
             }
         };
         let mut out = vision
-            .embed(vec![path], None)
+            .embed_bytes(&[bytes], None)
             .with_context(|| format!("embedding {}", path.display()))?;
         Ok(out.remove(0))
     }

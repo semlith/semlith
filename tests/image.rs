@@ -119,6 +119,29 @@ fn indexing_records_a_row_and_a_vector_for_every_image() {
     );
 }
 
+/// An image whose extension lies about its format is read by its bytes: a
+/// PNG saved as `.jpg`, as image generators and chat apps save them, is
+/// indexed rather than failed as a malformed JPEG.
+#[test]
+#[ignore = "downloads CLIP and an embedding model on first run"]
+fn a_png_saved_as_jpg_is_indexed_by_its_bytes() {
+    let corpus = tempfile::tempdir().unwrap();
+    shape(corpus.path(), "drawing.png", [220, 20, 20], Shape::Circle);
+    std::fs::rename(
+        corpus.path().join("drawing.png"),
+        corpus.path().join("drawing.jpg"),
+    )
+    .unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let mut s = open(store.path());
+    let report = s
+        .index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    assert!(report.failed.is_empty(), "failed: {:?}", report.failed);
+    assert_eq!(report.images, 1);
+    assert_eq!(s.image_count().unwrap(), 1);
+}
+
 /// The point of the feature: a sentence describing a picture finds the picture,
 /// above text that has nothing to do with it.
 #[test]
