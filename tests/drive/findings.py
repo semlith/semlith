@@ -3970,7 +3970,9 @@ def _(d):
         stores_before = sidebar_stores(d)
         press(d, CARD, "Stop…")
         d.wait_for("!!document.querySelector(%s)" % json.dumps(MODAL), what="the Stop dialog")
-        ticked = d.eval("(document.querySelector('#stop-delete') || {}).checked")
+        # 0.37.0-rc.4 walk 3: the option is the Review table's checkbox
+        # (role=checkbox, aria-checked), not a native input.
+        ticked = d.eval("(() => { const b = document.querySelector('#stop-delete'); return b ? b.getAttribute('aria-checked') === 'true' : null; })()")
         if ticked is not True:
             fail(
                 "the Stop dialog for %s, a store this run is creating, left 'Also "
@@ -5226,7 +5228,7 @@ def _(d):
             fail("the held scan's card does not say it is held for review")
         press_in(d, CARD, "Stop…")
         d.wait_for("!!document.querySelector(%s)" % json.dumps(MODAL), what="the discard confirm")
-        if d.eval("(document.querySelector('#stop-delete') || {}).checked") is not True:
+        if d.eval("(document.querySelector('#stop-delete') || {}).getAttribute?.('aria-checked')") != "true":
             fail("discarding the scan of a new folder does not offer, ticked, to delete its empty store")
         d.modal_press("Stop and undo")
         deadline = time.time() + 20
@@ -6190,7 +6192,7 @@ def _(d):
     del name
 
 
-@finding("rc4.3", "the pipeline names the slowest lane from the run's own phase, and the start line keeps its dwell")
+@finding("rc4.3", "the pipeline's lanes say their numbers on hover, nothing names a slowest step, and every log line has its stage")
 def _(d):
     a_store(d)
     open_clean(d, "stores", fresh=True)
@@ -6204,63 +6206,63 @@ def _(d):
       const late = dwell('rc4.3-late', steps, t0 + 10000).steps.length;
       const one = dwell('rc4.3-one', steps.slice(0, 1), t0 + 9000).steps.length;
       const base = {store: 'x', id: 1, status: 'running', scanned: 3148, total: 3987, rows: 79810,
-        expected_chunks: 90479, chunks: 74742, images: 12, images_total: 451, backlog: 0,
-        lane_rates: {ane: 230.1, cpu: 31}, saves: 3, saved_at: Date.now() - 30000, save_ms: 300};
-      const cases = {
-        lane: {phase: 'lane', phase_detail: 'Neural Engine compiling 40 %'},
-        images: {phase: 'embed', phase_detail: 'embedding images with CLIP'},
-        big: {phase: 'read', phase_detail: 'reading and chunking big.json (80 MB)'},
-        drain: {phase: 'drain', phase_detail: 'x', backlog: 4864},
-        save: {phase: 'save', phase_detail: 'writing'},
-        backlog: {phase: 'embed', phase_detail: 'embedding', backlog: 3100},
-        pace: {phase: 'embed', phase_detail: 'embedding'},
-        done: {status: 'done', elapsed_ms: 872000},
-      };
-      const out2 = {};
-      for (const [k, v] of Object.entries(cases)) {
-        const node = pipeline({...base, ...v});
-        out2[k] = {status: node.querySelector('.pipe-status').textContent,
-          slow: [...node.querySelectorAll('.pipe-row.slow')].map(r => r.getAttribute('data-lane')),
-          rows: [...node.querySelectorAll('.pipe-row')].map(r => [r.getAttribute('data-lane'), r.hidden, r.querySelector('.pipe-v').textContent]),
-          full: [...node.querySelectorAll('.pipe-row .bar > i')].every(i => parseFloat(i.style.width) === 100)};
-      }
-      const noImages = pipeline({...base, images_total: 0, saves: 0}).querySelectorAll('.pipe-row');
+        expected_chunks: 90479, chunks: 74742, images: 12, images_total: 451, backlog: 5000,
+        lane_rates: {ane: 230.1, cpu: 31}, saves: 3, saved_at: Date.now() - 30000, save_ms: 300,
+        phase: 'drain', phase_detail: '4,864 chunks still embedding'};
+      const node = pipeline(base);
+      const done = pipeline({...base, status: 'done', elapsed_ms: 872000});
       const home = {roots: [{path: '/Users/me/notes'}]};
-      return {out, late, one, cases: out2,
-        noImages: [...noImages].map(r => [r.getAttribute('data-lane'), r.hidden, r.querySelector('.pipe-v').textContent]),
-        log: logParts({event: 'phase', phase: 'save', detail: '4,864 chunks still embedding', at: 1791275400}),
-        read: logParts({event: 'file', outcome: 'indexing', path: '/Users/me/notes/a/b.md', why: '12 chunks', scanned: 1, total: 2}, home),
-        image: logParts({event: 'file', outcome: 'image', path: '/Users/me/notes/p.png', scanned: 2, total: 2}, home),
+      const L = (ev) => logLines(ev, home).map(l => [l[0], l[2], l[3]]);
+      return {out, late, one,
+        rows: [...node.querySelectorAll('.pipe-row')].map(r => [r.getAttribute('data-lane'), r.querySelector('.pipe-v').textContent,
+               (r.querySelector('.bar') || {getAttribute: () => null}).getAttribute('data-tip'), r.querySelector('.pipe-v').getAttribute('data-tip')]),
+        slow: node.querySelectorAll('.slow').length,
+        status: node.querySelector('.pipe-status').textContent,
+        done: done.querySelector('.pipe-status').textContent,
+        full: [...done.querySelectorAll('.pipe-row .bar > i')].every(i => parseFloat(i.style.width) === 100),
+        noImages: pipeline({...base, images_total: 0, saves: 0}).querySelectorAll('.pipe-row')[3].hidden,
+        notYet: pipeline({...base, saves: 0}).querySelector('[data-lane=write] .pipe-v').textContent,
+        read: L({event: 'file', outcome: 'indexing', path: '/Users/me/notes/a/b.md', why: '12 chunks', scanned: 1, total: 2}),
+        skipped: L({event: 'file', outcome: 'skipped', path: '/Users/me/notes/x.bin', why: 'binary', scanned: 2, total: 2}),
+        image: L({event: 'file', outcome: 'image', path: '/Users/me/notes/p.png', at: 1791275400}),
+        embed: L({event: 'embed', embedded: 7968, delta: 512, expected: 15666, lanes: {ane: 51}, at: 1791275400}),
+        write: L({event: 'write', saves: 3, ms: 400, embedded: 7968, rows: 8000, at: 1791275400}),
+        phases: ['walk', 'read', 'embed', 'images', 'lane', 'drain', 'save', 'finalize', 'decisions'].map(p => logLines({event: 'phase', phase: p, at: 1791275400})[0][0]),
+        done_line: logLines({event: 'done', indexed: 1, chunks: 4, at: 1791275400})[0][0],
+        embedTime: logLines({event: 'embed', embedded: 1, delta: 1, expected: 2, at: 1791275400})[0][1],
         left: runLeftText({status: 'running', phases: [], eta_ms: 754000, elapsed_ms: 1000, progress: 0.5})};
     })()
     """)
     want("steps shown at 0.2, 0.6, 0.95, 1.65, 2.4 and 2.5 s after four phases in 0.15 s", seen["out"], [1, 1, 2, 3, 4, 4])
     want("steps shown when the page meets the run 10 s late", seen["late"], 4)
     want("steps shown when only one phase has happened", seen["one"], 1)
-    c = seen["cases"]
-    want("the lanes, in order", [r[0] for r in c["pace"]["rows"]], ["read", "chunk", "embed", "images", "write"])
-    want("the lanes' figures", [r[2] for r in c["pace"]["rows"]],
-         ["3,148 / 3,987 files", "79,810 chunks made", "74,742 / 90,479", "12 / 451", "index saved 3 times · last 30 s ago (0.3 s)"])
-    want("a run with no images", [(r[0], r[1]) for r in seen["noImages"]][3], ("images", True))
-    want("Write before the first save", seen["noImages"][4][2], "not yet")
-    expect = {
-        "lane": ("Waiting for the Neural Engine to load — Neural Engine compiling 40 %", ["embed"]),
-        "images": ("The image model is working through images; text waits (12 of 451)", ["embed"]),
-        "big": ("Reading a large file: big.json (80 MB)", ["read"]),
-        "drain": ("Finishing embeddings in flight before saving: 4,864 chunks", ["embed"]),
-        "save": ("Writing the index to disk", ["write"]),
-        "backlog": ("Embed is the slowest step now: Neural Engine 230/s · CPU 31/s · 3,100 chunks waiting", ["embed"]),
-        "pace": ("Reading and embedding keep pace", []),
-        "done": ("done in 14m 32s · 3 saves", []),
-    }
-    for k, (status, slow) in expect.items():
-        want("the status line when %s" % k, c[k]["status"], status)
-        want("the highlighted lane when %s" % k, c[k]["slow"], slow)
-    if not c["done"]["full"]:
+    want("the lanes, in order, with their figures and hover text", seen["rows"], [
+        ["read", "3,148 / 3,987 files", "Read · 3,148 of 3,987 files · 78 %", "3,148 / 3,987 files"],
+        ["chunk", "79,810 chunks made", "Chunk · 79,810 of 90,479 chunks made · 88 %", "79,810 chunks made"],
+        ["embed", "74,742 / 90,479", "Embed · 74,742 of 90,479 chunks · 82 %", "74,742 / 90,479"],
+        ["images", "12 / 451", "images · 12 of 451 images · 2 %", "12 / 451"],
+        ["write", "index saved 3 times · last 30 s ago (0.3 s)", None, "index saved 3 times · last 30 s ago (0.3 s)"],
+    ])
+    # Walk 3: the slowest-step feature is gone — no highlighted lane, no line
+    # naming one; the status line is the run's own phase.
+    want("lanes highlighted as slowest", seen["slow"], 0)
+    want("the status line of a draining run", seen["status"], "Finishing embeddings in flight — 4,864 chunks still embedding")
+    if re.search(r"slowest", seen["status"], re.I):
+        fail("the status line still names a slowest step: %r" % seen["status"])
+    want("a finished run's status line", seen["done"], "done in 14m 32s · 3 saves")
+    if not seen["full"]:
         fail("a finished run's lanes are not all full")
-    want("a phase line in the log", seen["log"][1:3], ["phase", "Writing the index to disk — 4,864 chunks still embedding"])
-    want("a text file's log line", seen["read"][1:3], ["read", "a/b.md — 12 chunks"])
-    want("an image's log line", seen["image"][1:3], ["image", "p.png"])
+    want("a run with no images hides the images row", seen["noImages"], True)
+    want("Write before the first save", seen["notYet"], "not yet")
+    want("a text file's lines (read, then chunk)", seen["read"], [["read", "read", "a/b.md"], ["chunk", "chunk", "a/b.md → 12 chunks"]])
+    want("a skipped file's line", seen["skipped"], [["read", "skipped", "x.bin — binary"]])
+    want("an image's line", seen["image"], [["embed", "image", "p.png"]])
+    want("an embed line", seen["embed"], [["embed", "embed", "+512 chunks · 7,968 / 15,666 · Neural Engine 51/s"]])
+    want("a write line", seen["write"], [["write", "write", "index saved (3rd) in 0.4 s · 7,968 searchable"]])
+    want("the stage of each phase line", seen["phases"], ["read", "read", "embed", "embed", "embed", "embed", "write", "write", None])
+    want("the stage of a done line", seen["done_line"], None)
+    if not re.match(r"^\d\d:\d\d$", seen["embedTime"] or ""):
+        fail("an embed line's first column is not its time: %r" % seen["embedTime"])
     want("a run-truth run's time left", seen["left"], "about 13 min")
     no_console_errors(d, "the pipeline")
 
@@ -6452,7 +6454,7 @@ def _(d):
     d.eval("try { localStorage.removeItem('semlith-run-tab'); } catch (e) {}")
     run_id, store = start_index(d, d.fixtures.unique("rc4tabs", count=1500))
     card = "document.querySelector('#main .run-card')"
-    shown = ("(() => { const c = %s; return c && {pipe: !c.querySelector('.pipe').hidden, log: !c.querySelector('.log').hidden,"
+    shown = ("(() => { const c = %s; return c && {pipe: !c.querySelector('.pipe').hidden, log: !c.querySelector('.log-view').hidden,"
              " tab: (c.querySelector('.run-tabs .tab[aria-selected=true]') || {}).textContent}; })()" % card)
     try:
         d.open_view("store/%s/runs" % store, fresh=True)
@@ -6482,19 +6484,141 @@ def _(d):
             d.set_viewport(width, height, mobile=mobile)
             press_in(d, CARD, "Stop…")
             d.wait_for("!!document.querySelector('#stop-delete')", what="the Stop dialog's delete option")
-            row = d.eval(r"""(() => { const box = document.querySelector('#stop-delete'), label = box.closest('label');
-                const words = label.querySelector('span'), a = box.getBoundingClientRect(), b = words.getBoundingClientRect();
-                const cs = getComputedStyle(label);
+            row = d.eval(r"""(() => { const box = document.querySelector('#stop-delete'), label = box.closest('.opt-check');
+                const words = label.querySelector(':scope > span'), a = box.getBoundingClientRect(), b = words.getBoundingClientRect();
+                const cs = getComputedStyle(label), bs = getComputedStyle(box);
+                const ink = getComputedStyle(document.body).getPropertyValue('--ink').trim();
+                const probe = document.createElement('i'); probe.style.color = ink; document.body.append(probe);
+                const inkRgb = getComputedStyle(probe).color; probe.remove();
                 return {overlap: Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top), beside: b.left >= a.right - 1,
-                        shadow: cs.boxShadow, modalClass: label.classList.contains('modal')}; })()""")
+                        shadow: cs.boxShadow, modalClass: label.classList.contains('modal'),
+                        reviewBox: box.classList.contains('cb') && box.getAttribute('role') === 'checkbox' && box.tagName !== 'INPUT',
+                        fill: bs.backgroundColor, ink: inkRgb, checked: box.getAttribute('aria-checked')}; })()""")
             if row["overlap"] <= 0 or not row["beside"]:
                 fail("at %dpx the checkbox and its words are not on one row: %r" % (width, row))
             if row["shadow"] != "none" or row["modalClass"]:
                 fail("at %dpx the option is drawn as a box with a shadow: %r" % (width, row))
+            if not row["reviewBox"] or row["checked"] != "true" or row["fill"] != row["ink"]:
+                fail("at %dpx the option is not the Review table's checkbox, ticked in ink: %r" % (width, row))
+            # Its words tick it too.
+            d.eval("document.querySelector('#stop-delete').closest('.opt-check').querySelector(':scope > span').click()")
+            want("the option after pressing its words", d.eval("document.querySelector('#stop-delete').getAttribute('aria-checked')"), "false")
             d.modal_press("Keep running")
             d.wait_for("!document.querySelector('#stop-delete')", what="the dialog to close")
     finally:
         d.reset_viewport()
+        stop_quietly(d, store)
+
+
+def log_view_lines(d, scope):
+    """The stage words of every line in the log views under `scope`."""
+    return d.eval("[...document.querySelectorAll(%s)].map(v => [...v.querySelectorAll('.log .ln .b')].map(b => b.textContent))" % json.dumps(scope + " .log-view"))
+
+
+@finding("rc4.10", "a run's log shows every stage, filters by stage on every log at once, and keeps the choice")
+def _(d):
+    d.eval("try { localStorage.removeItem('semlith-log-stage'); localStorage.removeItem('semlith-run-tab'); } catch (e) {}")
+    store = indexed_fixture(d, d.fixtures.unique("rc4log", count=60))
+    try:
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("document.querySelectorAll('#main .hist-open .log-view .log .ln').length > 5", timeout=30,
+                   what="the newest run's whole log in History")
+        words = set(w for v in log_view_lines(d, "#main") for w in v)
+        for word in ("read", "chunk", "embed", "write", "phase", "done"):
+            if word not in words:
+                fail("the run's log has no %r line: %r" % (word, sorted(words)))
+        allowed = {"read": {"read", "skipped", "refused", "failed", "unchanged", "phase"}, "chunk": {"chunk"},
+                   "embed": {"embed", "image", "phase"}, "write": {"write", "phase"}}
+        for stage, label in (("read", "Read"), ("chunk", "Chunk"), ("embed", "Embed"), ("write", "Write")):
+            press_text(d, "#main .log-view .log-bar button", label, "the %s stage" % label)
+            seen = set(w for v in log_view_lines(d, "#main") for w in v)
+            if not seen or not seen <= allowed[stage]:
+                fail("under %s the log shows %r" % (label, sorted(seen)))
+        want("the stage kept", d.eval("localStorage.getItem('semlith-log-stage')"), "write")
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("document.querySelectorAll('#main .hist-open .log-view .log .ln').length > 0", timeout=30, what="the log after a reload")
+        want("the stage pressed after a reload", text_of(d, "#main .log-view .log-bar button[aria-pressed=true]", "the pressed stage"), "Write")
+        press_text(d, "#main .log-view .log-bar button", "All", "the All stage")
+        # Embed and Write lines carry the time, not a file counter.
+        firsts = d.eval("[...document.querySelectorAll('#main .log-view .ln')].filter(l => /^(embed|write)$/.test(l.querySelector('.b').textContent)).map(l => l.querySelector('.a').textContent)")
+        if not firsts or any(not re.match(r"^\d\d:\d\d$", f) for f in firsts):
+            fail("an embed or write line's first column is not a time: %r" % firsts[:5])
+        no_console_errors(d, "the run log's stages")
+    finally:
+        d.eval("try { localStorage.removeItem('semlith-log-stage'); } catch (e) {}")
+
+
+@finding("rc4.11", "History shows a run's whole log from its file, page by page, in the live card's renderer")
+def _(d):
+    store = indexed_fixture(d, d.fixtures.unique("rc4hist", count=3000))
+    hist = [h for h in d.api("/api/index/runs").get("history") or [] if h.get("store") == store]
+    if not hist or not hist[0].get("log_file"):
+        fail("the run's history row carries no log_file: %s" % json.dumps(hist[:1])[:300])
+    key = hist[0]["log_file"]
+    total, more, start = 0, True, 0
+    while more:
+        page = d.api("/api/index/history/log?%s" % urllib.parse.urlencode({"store": store, "log": key, "from": start, "limit": 20000}))
+        total += len(page.get("lines") or [])
+        start += len(page.get("lines") or [])
+        more = page.get("more") and page.get("lines")
+    d.eval("try { localStorage.removeItem('semlith-log-stage'); } catch (e) {}")
+    d.open_view("store/%s/runs" % store, fresh=True)
+    view = "document.querySelector('#main .hist-open .log-view')"
+    d.wait_for("!!%s && %s.__lines().length > 0" % (view, view), timeout=30, what="the history log's first page")
+    pages = 0
+    while d.eval("/Load more/.test((%s.querySelector('.log-foot') || {}).textContent || '')" % view) and pages < 10:
+        d.eval("[...%s.querySelectorAll('.log-foot button')].find(b => /Load more/.test(b.textContent)).click()" % view)
+        d.wait_for("!/Reading the log/.test(%s.querySelector('.log-foot').textContent)" % view, timeout=30, what="the next page")
+        pages += 1
+    want("the lines the history view read", d.eval("%s.__lines().length" % view), total)
+    if total > 5000 and not pages:
+        fail("a %d-line log was shown without a second page" % total)
+    if "the whole log" not in d.eval("%s.querySelector('.log-foot').textContent" % view):
+        fail("the history log does not say it holds the whole log")
+    paths = d.eval("[...%s.querySelectorAll('.ln')].filter(l => l.querySelector('.b').textContent === 'read').slice(0, 5).map(l => l.querySelector('.c').textContent)" % view)
+    if not paths or any(p.startswith("/") for p in paths):
+        fail("the history log's paths are not under the store's root: %r" % paths)
+    no_console_errors(d, "the history log")
+
+
+@finding("rc4.12", "every progress bar and every cut-off figure on a run card says itself in full on hover")
+def _(d):
+    # Eight thousand files: on the Neural Engine fifteen hundred are done in
+    # three seconds, and the log check below needs the run still going.
+    run_id, store = start_index(d, d.fixtures.unique("rc4tips", count=8000))
+    try:
+        running(d, run_id, store)
+        d.eval("try { localStorage.removeItem('semlith-run-tab'); } catch (e) {}")
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("!!document.querySelector('#main .run-card .pipe-row .bar')", timeout=30, what="the run card's pipeline")
+        bars = d.eval("[...document.querySelectorAll('#main .run-card .bar, header .run-pill .bar')].filter(b => b.offsetParent).map(b => b.getAttribute('data-tip'))")
+        if not bars or any(not t or not re.search(r"\d", t) or "%" not in t for t in bars):
+            fail("a run bar says nothing, or no numbers, on hover: %r" % bars)
+        cut = d.eval("[...document.querySelectorAll('#main .run-card .pipe-v, #main .run-card .run-stats .v, #main .run-card .run-stats .s, #main .run-card .pipe-status .grow')]"
+                     ".filter(n => n.offsetParent && n.scrollWidth > n.clientWidth + 1).map(n => [n.textContent, n.getAttribute('data-tip')])")
+        bad = [c for c in cut if not c[1] or not c[1].startswith(c[0])]
+        if bad:
+            fail("cut-off text with no full text on hover: %r" % bad[:4])
+        no_console_errors(d, "the run card's tooltips")
+        # Past the ring's 500 lines, the live log is read whole from the run's
+        # file: a page opened late still holds every line from the first.
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            live = run_by_id(d, run_id) or {}
+            if (live.get("log_from") or 0) > 0 or live.get("status") in TERMINAL:
+                break
+            time.sleep(0.5)
+        if live.get("status") in TERMINAL:
+            fail("the run ended before its log passed the ring's 500 lines, so the whole-log read was not seen; grow the corpus")
+        if (live.get("log_from") or 0) > 0:
+            d.open_view("store/%s/runs" % store, fresh=True)
+            d.wait_for("!!document.querySelector('#main .run-card .log-view')", timeout=30, what="the run card's log")
+            d.wait_for("document.querySelector('#main .run-card .log-view').__lines().length > %d" % (live["log_from"] + 10), timeout=30,
+                       what="the live log to be read from the run's first line (the ring starts at %d)" % live["log_from"])
+            first = d.eval("(document.querySelector('#main .run-card .log-view').__lines()[0] || {}).seq")
+            if first not in (0, 1, None):
+                fail("the live log starts at line %r, not the run's first" % first)
+    finally:
         stop_quietly(d, store)
 
 

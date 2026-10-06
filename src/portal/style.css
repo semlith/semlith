@@ -1670,11 +1670,6 @@ button.dial {
   max-height: 280px;
   overflow-y: auto;
 }
-.log.rounded {
-  border-radius: 6px;
-  padding: 8px 12px;
-  min-height: 0;
-}
 /* Counter or time, outcome, then the words: the first two never wrap. */
 .log .ln {
   display: grid;
@@ -1682,10 +1677,6 @@ button.dial {
   gap: 8px;
   font: 12px/1.6 var(--mono);
   color: var(--code-ink);
-}
-.log.rounded .ln {
-  grid-template-columns: 96px 80px minmax(0, 1fr);
-  font-size: 11.5px;
 }
 .log .ln .a {
   color: var(--code-dim);
@@ -2377,10 +2368,8 @@ button.gl-row:hover,
   color: var(--ink-2);
   cursor: pointer;
 }
-.modal .opt-check input {
-  margin: 0;
-  flex: none;
-  accent-color: var(--accent);
+.modal .opt-check > span {
+  cursor: pointer;
 }
 .modal .opt {
   display: flex;
@@ -3539,8 +3528,29 @@ button.gl-row:hover,
   padding: 12px 16px 14px;
 }
 .pipe[hidden],
-.log[hidden] {
+.log-view[hidden] {
   display: none;
+}
+/* A run's log with its stage selector; a finished run's whole log is taller. */
+.log-bar {
+  display: flex;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.log-foot:empty {
+  display: none;
+}
+.log-foot {
+  padding: 6px 16px;
+  font-size: 12px;
+}
+.log-view.tall .log {
+  max-height: 480px;
+}
+.hist-open .log-view {
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  overflow: hidden;
 }
 .pipe-row {
   display: grid;
@@ -3559,9 +3569,6 @@ button.gl-row:hover,
   padding-left: 12px;
   color: var(--muted);
 }
-.pipe-row.slow {
-  background: var(--amber-soft);
-}
 .pipe-k {
   color: var(--ink-2);
 }
@@ -3579,10 +3586,6 @@ button.gl-row:hover,
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.pipe-row.slow .pipe-v,
-.pipe-row.slow .pipe-k {
-  color: var(--amber-ink);
-}
 .pipe-status {
   display: flex;
   align-items: baseline;
@@ -3595,9 +3598,6 @@ button.gl-row:hover,
 .pipe-status > .dot {
   flex: none;
   transform: translateY(-1px);
-}
-.pipe-status.slow {
-  color: var(--amber-ink);
 }
 .pipe-status .grow {
   overflow-wrap: anywhere;
@@ -5234,7 +5234,7 @@ button.gl-row:hover,
   }
   /* A phone keeps the outcome and the words; the counter is the meters'. */
   .log .ln {
-    grid-template-columns: 7ch minmax(0, 1fr);
+    grid-template-columns: 10ch minmax(0, 1fr);
   }
   .log .ln .a {
     display: none;
@@ -5658,11 +5658,6 @@ button,
   }
   .hist-open {
     padding-left: 14px;
-  }
-  .log.rounded .ln {
-    /* 60px holds "embedded" whole; 54px broke it after the seventh letter. */
-    grid-template-columns: 52px 60px minmax(0, 1fr);
-    gap: 6px;
   }
 }
 @container app (max-width: 759px) {

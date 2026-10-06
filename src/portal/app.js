@@ -73,6 +73,11 @@ function morph(a, b) {
   }
   const keep = a.getAttribute("data-morph-keep");
   if (keep && keep === b.getAttribute("data-morph-keep")) return;
+  // A kept subtree that fills itself (a log) is never patched from another's.
+  if (keep || b.hasAttribute("data-morph-keep")) {
+    a.replaceWith(b);
+    return;
+  }
   // `style` goes through the CSSOM: the CSP drops a style attribute written
   // with setAttribute, so a patched bar kept its first width while its
   // percentage climbed (walk 3).
@@ -147,11 +152,12 @@ function setText(node, value) {
   return node;
 }
 
-/** A bar whose fill is `pct` of its track. The width is set through the CSSOM. */
-function bar(pct, cls) {
+/** A bar whose fill is `pct` of its track. The width is set through the CSSOM.
+ * `tip` says on hover what it measures, with its numbers. */
+function bar(pct, cls, tip) {
   const fillNode = el("i");
   fillNode.style.width = `${Math.max(0, Math.min(100, pct || 0)).toFixed(1)}%`;
-  return el("div", { class: cls ? `bar ${cls}` : "bar" }, fillNode);
+  return el("div", { class: cls ? `bar ${cls}` : "bar", "data-tip": tip || null }, fillNode);
 }
 
 /** Move a bar made by `bar` to a new value without rebuilding it. */
@@ -1841,7 +1847,7 @@ function dwell(key, steps, now) {
  * is, and what it waits for when that takes a while. */
 function startLine(step, live) {
   const t = step ? `${step.label}${live && step.until == null ? "…" : ""}${step.detail ? ` — ${step.detail}` : ""}` : "";
-  return el("div", { class: `pipe-status${live ? " starting" : ""}`, role: "status" }, el("span", { class: `dot ${live ? "blue pulse" : "green"}` }), el("span", { class: "grow", text: t }));
+  return el("div", { class: `pipe-status${live ? " starting" : ""}`, role: "status" }, el("span", { class: `dot ${live ? "blue pulse" : "green"}` }), el("span", { class: "grow", text: t, "data-tip": t || null }));
 }
 
 let lastRunState = {};
@@ -2247,7 +2253,7 @@ function paintChrome() {
     pillNode.hidden = false;
     pillNode.dataset.store = run.store;
     pillNode.className = `run-pill hide-xs${run.status === "review" || run.status === "paused" ? " amber" : ""}`;
-    fill(pillNode, dot(run.status === "review" || run.status === "paused" ? "amber" : "green", run.status === "running"), `${word} ${run.store}${run.status === "review" ? "" : ` · ${p}%`}`, bar(p, "w46"));
+    fill(pillNode, dot(run.status === "review" || run.status === "paused" ? "amber" : "green", run.status === "running"), `${word} ${run.store}${run.status === "review" ? "" : ` · ${p}%`}`, bar(p, "w46", runBarTip(run)));
     pillNode.setAttribute("data-tip", "Open this store's runs");
     pillNode.setAttribute("data-tip-rows", rows([["now", phaseText(run)], ["time left", run.status === "running" ? runLeftText(run) : ""]]));
   } else pillNode.hidden = true;
@@ -3454,7 +3460,7 @@ function wizardScreen() {
         el("div", { class: "row base" }, el("span", { class: "card-t grow", text: `Scanning ${plural(w.sources.filter((s) => s.type !== "url").length, "source")}` }), el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
         (() => {
           const b = bar(p, "h8");
-          b.setAttribute("data-tip", `Scan · ${Math.floor(p)}%`);
+          b.setAttribute("data-tip", `Scan · stage ${Math.min(shown + 1, SCAN_STAGES.length)} of ${SCAN_STAGES.length}${total ? ` · ${n(scanned)} of ${n(total)} files` : ""} · ${Math.floor(p)} %`);
           b.setAttribute("data-tip-rows", stages.map((s) => `${s[0]}::${s[1] ? "done" : s[2] ? s[3] : "waiting"}`).join("||"));
           return b;
         })(),
@@ -3683,7 +3689,7 @@ function wizardScreen() {
         el("span", { class: "why" }, el("b", { text: d.kind || classWord(d.class) }), ` · ${d.why || d.rule || ""}`),
         d.evidence || (d.matches || [])[0] ? el("span", { class: "evidence", text: d.evidence || maskedOf(d.matches[0]) }) : null,
       ),
-      el("div", { class: "col gap4 risk" }, el("div", { class: "row base nowrap gap6" }, el("span", { class: `risk-pct ${b}`, text: `${d.risk}%` }), el("span", { class: "t-mono-sm", text: b })), bar(Math.max(3, d.risk), `h4 ${b === "high" ? "red" : b === "medium" ? "amber" : "green"}`)),
+      el("div", { class: "col gap4 risk" }, el("div", { class: "row base nowrap gap6" }, el("span", { class: `risk-pct ${b}`, text: `${d.risk}%` }), el("span", { class: "t-mono-sm", text: b })), bar(Math.max(3, d.risk), `h4 ${b === "high" ? "red" : b === "medium" ? "amber" : "green"}`, `Risk if indexed · ${d.risk} % (${b})`)),
       el(
         "div",
         { class: "col gap4 acts" },
@@ -4349,56 +4355,57 @@ function wizardScreen() {
   return host;
 }
 
-/* Poll a run's log while its card is on screen, from its own cursor. */
-function followLog(r, logNode) {
+/* Poll a run's log while its card is on screen, from its own cursor, into a
+ * log view. The daemon's ring keeps a run's last 500 lines; a run that has
+ * said more is read whole from its file first (/api/index/history/log). */
+function followLog(r, view) {
   const key = `${r.store}:${r.id}`;
-  const seen = (followLog.cursors[key] = followLog.cursors[key] || { after: r.log_from ?? null, lines: [] });
-  const draw = () => {
-    fill(
-      logNode,
-      seen.lines.slice(-120).map((ev) => {
-        const [a, b, c, tone] = logParts(ev, store(r.store));
-        return el("div", { class: "ln" }, el("span", { class: "a", text: a }), el("span", { class: `b ${tone}`, text: b }), el("span", { class: "c", text: c }));
-      }),
-    );
-    logNode.scrollTop = logNode.scrollHeight;
+  const seen = (followLog.cursors[key] = followLog.cursors[key] || { after: r.log_from ?? null, lines: [], backfilled: false });
+  view.__lines = () => seen.lines;
+  view.__redraw();
+  const backfill = async () => {
+    seen.backfilled = true;
+    if (!r.log_file || !(r.log_from > 0)) return;
+    const all = [];
+    for (let from = 0, more = true; more && all.length < 200000; ) {
+      const out = await api(`/api/index/history/log?${new URLSearchParams({ store: r.store, log: r.log_file, from: String(from), limit: "20000" })}`);
+      all.push(...(out.lines || []));
+      from += (out.lines || []).length;
+      more = out.more && (out.lines || []).length > 0;
+    }
+    // The ring's lines from here on are the ones the file has not got yet.
+    const last = all.length ? all[all.length - 1].seq : null;
+    seen.lines = all.concat(seen.lines.filter((l) => last == null || l.seq == null || l.seq > last));
+    if (last != null && (seen.after == null || last > seen.after)) seen.after = last;
   };
-  draw();
   const tick = async () => {
-    if (!logNode.isConnected) return;
+    if (!view.isConnected) return;
     try {
+      const first = !seen.backfilled;
+      if (first) await backfill();
       const out = await api(`/api/index/log?${new URLSearchParams({ store: r.store, run: String(r.id), ...(seen.after != null ? { after: String(seen.after) } : {}) })}`);
       if (out.lines && out.lines.length) {
         seen.lines.push(...out.lines);
-        if (seen.lines.length > 400) seen.lines.splice(0, seen.lines.length - 400);
+        if (seen.lines.length > 200000) seen.lines.splice(0, seen.lines.length - 200000);
         seen.after = out.cursor;
-        draw();
       }
+      if (first || (out.lines && out.lines.length)) view.__redraw();
     } catch (_) {
       /* the next tick tries again */
     }
     const live = (data.runs?.runs || []).find((x) => x.id === r.id);
     if (live && LIVE_RUN.has(live.status)) setTimeout(tick, 1000);
   };
-  // After the caller has put the box on the page: called while the card is
-  // still being built, the box is not connected yet, and a first tick run now
+  // After the caller has put the view on the page: called while the card is
+  // still being built, it is not connected yet, and a first tick run now
   // would stop at once and the log would stay empty for the whole run.
   setTimeout(tick, 0);
 }
 followLog.cursors = {};
 
-function logParts(ev, home) {
+/** A run event that belongs to no stage, as [time, word, words, tone]. */
+function logParts(ev) {
   const when = ev.at ? clock(msOf(ev.at) / 1000) : "";
-  if (ev.event === "file") {
-    // A text file being read says "read" (its chunks follow in `why`); the
-    // path is under its store's root, so it seldom wraps.
-    const outcome = ev.outcome === "indexing" ? "read" : ev.outcome || "read";
-    const tone = /refus|skip|fail/.test(outcome) ? "bad" : /embed|read|image/.test(outcome) ? "ok" : /unchanged|queued/.test(outcome) ? "" : "info";
-    const path = home ? relTo(home, ev.path || "") : ev.path;
-    return [`${n(ev.scanned)}/${n(ev.total)}`, outcome, ev.why ? `${path} — ${ev.why}` : path, tone];
-  }
-  // A phase line: a short marker in the status column, the words in the wide one.
-  if (ev.event === "phase") return [when, "phase", [phaseLabel(ev.phase, ev.detail, ev.lane), ev.detail].filter(Boolean).join(" — "), "info"];
   const text = {
     submitted: ev.ahead ? `waiting — ${plural(ev.ahead, "run")} ahead of this one` : "submitted",
     queued: ev.ahead ? `waiting for ${ev.store}'s writer — ${plural(ev.ahead, "job")} ahead` : "waiting for the store's writer",
@@ -4449,7 +4456,15 @@ function runStatsRow(r) {
   return el(
     "div",
     { class: `run-stats${r.images_total ? " five" : ""}` },
-    tiles.map(([k, v, t, s, hide]) => el("div", { "data-tip": t || null, hidden: hide || null }, el("span", { class: "eyebrow sm wide", text: k }), el("span", { class: "v", text: v }), el("span", { class: "s", text: s || "" }))),
+    tiles.map(([k, v, t, s, hide]) =>
+      el(
+        "div",
+        { "data-tip": t || null, hidden: hide || null },
+        el("span", { class: "eyebrow sm wide", text: k }),
+        el("span", { class: "v", text: v, "data-tip": t ? `${v} — ${t}` : v }),
+        el("span", { class: "s", text: s || "", "data-tip": s || null }),
+      ),
+    ),
   );
 }
 
@@ -4488,11 +4503,12 @@ function setRunTab(t) {
   for (const card of document.querySelectorAll(".run-card")) {
     for (const tab of card.querySelectorAll(".run-tabs .tab")) tab.setAttribute("aria-selected", String(tab.textContent.trim().toLowerCase() === t));
     const pipe = card.querySelector(".pipe");
-    const log = card.querySelector(".log");
+    const log = card.querySelector(".log-view");
     if (pipe) pipe.hidden = t !== "pipeline";
     if (log) {
       log.hidden = t !== "log";
-      log.scrollTop = log.scrollHeight;
+      const box = log.querySelector(".log");
+      if (box) box.scrollTop = box.scrollHeight;
     }
   }
 }
@@ -4512,7 +4528,17 @@ function tickAgo() {
   if (agoTimer) return;
   agoTimer = setInterval(() => {
     for (const node of document.querySelectorAll("[data-saved-at]")) {
-      setText(node, writeText(Number(node.getAttribute("data-saves")), Number(node.getAttribute("data-saved-at")), Number(node.getAttribute("data-save-ms"))));
+      const text = writeText(Number(node.getAttribute("data-saves")), Number(node.getAttribute("data-saved-at")), Number(node.getAttribute("data-save-ms")));
+      setText(node, text);
+      node.setAttribute("data-tip", text);
+    }
+    // An open tooltip over a figure a poll has moved says the new figure.
+    if (tip.cur && tip.cur.el.isConnected) {
+      const f = tip.find(tip.cur.el);
+      if (f && (f.title !== tip.cur.title || f.rows !== tip.cur.rows)) {
+        tip.cur = f;
+        tip.render(f);
+      }
     }
   }, 1000);
 }
@@ -4522,61 +4548,57 @@ function writeText(saves, at, ms) {
   return `index saved ${saves === 1 ? "once" : `${n(saves)} times`}${at ? ` · last ${agoMs(at)}` : ""}${ms ? ` (${ms < 100 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`})` : ""}`;
 }
 
-/** What is slowest now, and which lane it is (read, chunk, embed, write or
- * none), from the run's phase, its sentence and its backlog. */
-function pipelineStatus(r) {
-  const d = r.phase_detail || "";
-  if (!LIVE_RUN.has(r.status)) return [r.status === "done" ? `done in ${spellTook(r.elapsed_ms || 0)} · ${plural(r.saves || 0, "save")}` : r.status, null];
-  if (r.status === "paused" || r.status === "pausing") return ["Paused between files — the writer is still this run's", null];
-  if (r.status === "queued") return [`Queued — ${r.position > 1 ? `${plural(r.position - 1, "run")} ahead of this one` : "next in line"}`, null];
-  if (r.status === "review") return ["Held for review — nothing is embedded until it starts", null];
-  if (r.status === "scanning") return [`Scanning — ${phaseText(r) || "finding files"}`, "read"];
-  if (r.phase === "lane") {
-    const named = phaseLabel("lane", d).replace(/^Starting /, "");
-    return [`Waiting for ${named === PHASE_LABEL.lane ? "a lane" : named} to load${d ? ` — ${d}` : ""}`, "embed"];
-  }
-  if (/^embedding images/i.test(d)) return [`The image model is working through images; text waits (${n(r.images || 0)} of ${n(r.images_total || 0)})`, "embed"];
-  if (/^reading and chunking/i.test(d)) return [`Reading a large file: ${d.replace(/^reading and chunking:?\s*/i, "")}`, "read"];
-  if (r.phase === "drain") return [`Finishing embeddings in flight before saving: ${plural(r.backlog || 0, "chunk")}`, "embed"];
-  if (r.phase === "save") return ["Writing the index to disk", "write"];
-  if ((r.backlog || 0) > 1000) {
-    const lanes = laneRatesText(r);
-    return [`Embed is the slowest step now: ${lanes ? `${lanes} · ${n(r.backlog)} chunks waiting` : `${n(r.backlog)} chunks waiting for a lane`}`, "embed"];
-  }
-  return ["Reading and embedding keep pace", null];
+/** The pipeline's one status line: what the run is doing, in its own words. */
+function runStatusLine(r) {
+  if (!LIVE_RUN.has(r.status)) return r.status === "done" ? `done in ${spellTook(r.elapsed_ms || 0)} · ${plural(r.saves || 0, "save")}` : r.status;
+  if (r.status === "paused" || r.status === "pausing") return "Paused between files — the writer is still this run's";
+  if (r.status === "queued") return `Queued — ${r.position > 1 ? `${plural(r.position - 1, "run")} ahead of this one` : "next in line"}`;
+  if (r.status === "review") return "Held for review — nothing is embedded until it starts";
+  if (r.status === "scanning") return `Scanning — ${phaseText(r) || "finding files"}`;
+  return phaseText(r) || "Indexing";
+}
+
+/** What the run's own bar measures, with its numbers. */
+function runBarTip(r) {
+  const p = Math.floor(runPct(r));
+  const what = r.expected_chunks ? `${n(r.chunks || 0)} of ${n(r.expected_chunks)} chunks embedded` : r.total ? `${n(r.scanned || 0)} of ${n(r.total)} files read` : "starting";
+  return `${r.store} · index run · ${what} · ${p} %`;
 }
 
 /** The Pipeline panel: four lanes in a fixed order and shape — Read, Chunk,
- * Embed (with images under it), Write — then one line naming what is slowest
- * now, the start sequence's step while it starts. */
+ * Embed (with images under it), Write — then one status line, the start
+ * sequence's step while it starts. Every bar and every cut-off figure says
+ * itself in full on hover. */
 function pipeline(r, startStep) {
   const over = !LIVE_RUN.has(r.status);
-  const [said, slow] = startStep ? [null, null] : pipelineStatus(r);
+  const said = startStep ? null : runStatusLine(r);
   const share = (a, b) => (over ? 100 : b ? Math.min(100, (a / b) * 100) : 0);
-  const lane = (key, label, pctValue, text, opts) =>
-    el(
+  const lane = (key, label, part, whole, unit, text, opts) => {
+    const v = share(part, whole);
+    return el(
       "div",
-      { class: `pipe-row${slow === key ? " slow" : ""}${opts && opts.sub ? " sub" : ""}`, "data-lane": key, hidden: opts && opts.hide ? true : null },
+      { class: `pipe-row${opts && opts.sub ? " sub" : ""}`, "data-lane": key, hidden: opts && opts.hide ? true : null },
       el("span", { class: "pipe-k", text: label }),
-      pctValue === null ? el("span", { class: "pipe-bar none" }) : bar(pctValue, "h6 pipe-bar"),
-      el("span", { class: "pipe-v", text }),
+      whole === null ? el("span", { class: "pipe-bar none" }) : bar(v, "h6 pipe-bar", `${label} · ${n(part)} of ${n(whole)} ${unit} · ${Math.floor(v)} %`),
+      el("span", { class: "pipe-v", text, "data-tip": text }),
     );
-  const write = lane("write", "Write", null, writeText(r.saves || 0, r.saved_at || 0, r.save_ms || 0));
+  };
+  const exp = r.expected_chunks || 0;
+  const write = lane("write", "Write", 0, null, "", writeText(r.saves || 0, r.saved_at || 0, r.save_ms || 0));
   const words = write.querySelector(".pipe-v");
   words.setAttribute("data-saves", String(r.saves || 0));
   words.setAttribute("data-saved-at", String(r.saved_at || 0));
   words.setAttribute("data-save-ms", String(r.save_ms || 0));
   tickAgo();
-  const exp = r.expected_chunks || 0;
   return el(
     "div",
     { class: "pipe", role: "tabpanel", "aria-label": "Pipeline" },
-    lane("read", "Read", share(r.scanned || 0, r.total || 0), r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "counting files…"),
-    lane("chunk", "Chunk", share(r.rows || 0, exp), `${n(r.rows || 0)} chunks made`),
-    lane("embed", "Embed", share(r.chunks || 0, exp), exp ? `${n(r.chunks || 0)} / ${n(exp)}` : n(r.chunks || 0)),
-    lane("images", "images", share(r.images || 0, r.images_total || 0), `${n(r.images || 0)} / ${n(r.images_total || 0)}`, { sub: true, hide: !r.images_total }),
+    lane("read", "Read", r.scanned || 0, r.total || 0, "files", r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "counting files…"),
+    lane("chunk", "Chunk", r.rows || 0, exp, "chunks made", `${n(r.rows || 0)} chunks made`),
+    lane("embed", "Embed", r.chunks || 0, exp, "chunks", exp ? `${n(r.chunks || 0)} / ${n(exp)}` : n(r.chunks || 0)),
+    lane("images", "images", r.images || 0, r.images_total || 0, "images", `${n(r.images || 0)} / ${n(r.images_total || 0)}`, { sub: true, hide: !r.images_total }),
     write,
-    startStep ? startLine(startStep, true) : el("div", { class: `pipe-status${slow ? " slow" : ""}`, role: "status" }, el("span", { class: `dot ${over ? "green" : slow ? "amber" : "blue"}` }), el("span", { class: "grow", text: said })),
+    startStep ? startLine(startStep, true) : el("div", { class: "pipe-status", role: "status" }, el("span", { class: `dot ${over ? "green" : "blue"}` }), el("span", { class: "grow", text: said, "data-tip": said })),
   );
 }
 
@@ -4606,10 +4628,12 @@ function runCard(r, o) {
   const queued = r.status === "queued";
   const head = !LIVE_RUN.has(r.status) ? "Finishing" : queued ? "Waiting to start" : review ? "Held for review" : r.status === "scanning" ? "Scanning" : "Running now";
   const word = !LIVE_RUN.has(r.status) ? (r.status === "done" ? "done" : r.status) : r.status === "pausing" ? "pausing" : paused ? "paused" : review ? "waiting for review" : r.status === "scanning" ? "scanning" : queued ? `queued${r.position ? ` · ${r.position} in line` : ""}` : r.kind === "compact" ? "compacting" : r.kind === "catch-up" ? "catching up" : "indexing";
-  const b = bar(p, "h8 accent grow");
-  b.setAttribute("data-tip", `Index run · ${Math.floor(p)}%`);
+  const b = bar(p, "h8 accent grow", runBarTip(r));
   b.setAttribute("data-tip-rows", runRows(r));
-  const log = el("div", { class: "log", role: "tabpanel", "aria-label": "Log", hidden: RUN_TAB === "log" ? null : true, "data-scroll-keep": `log-${r.id}`, "data-morph-keep": `log-${r.id}` });
+  const log = logView(`${r.store}:${r.id}`, store(r.store), { limit: 1000 });
+  log.setAttribute("role", "tabpanel");
+  log.setAttribute("aria-label", "Log");
+  if (RUN_TAB !== "log") log.hidden = true;
   followLog(r, log);
   const pipe = pipeline(r, starting);
   if (RUN_TAB === "log") pipe.hidden = true;
@@ -4679,18 +4703,25 @@ async function runControl(r, action) {
 
 async function stopRun(r) {
   const fresh = !(r.files_before || r.chunks_before);
-  const del = el("input", { type: "checkbox", id: "stop-delete" });
-  if (fresh) del.checked = true;
+  // The Review table's checkbox (`checkbox()`, ink with a white tick), not a
+  // native input in the accent colour; its words toggle it too.
+  let alsoDelete = fresh;
+  const flip = () => {
+    alsoDelete = !alsoDelete;
+    del.setAttribute("aria-checked", String(alsoDelete));
+  };
+  const del = checkbox(alsoDelete, flip, "Also delete the store");
+  del.id = "stop-delete";
   const ok = await ask({
     title: `Stop ${r.store}'s index run?`,
     body: "What it has embedded so far is undone, so the store is left exactly as it was before the run. The files on disk are untouched.",
-    extra: fresh ? el("label", { class: "opt-check", for: "stop-delete" }, del, el("span", { text: "Also delete the store — it held nothing before this run" })) : null,
+    extra: fresh ? el("div", { class: "opt-check" }, del, el("span", { text: "Also delete the store — it held nothing before this run", onclick: flip })) : null,
     ok: "Stop and undo",
     cancel: "Keep running",
     danger: true,
   });
   if (!ok) return;
-  await act(() => post("/api/index/control", { store: r.store, run: r.id, action: r.status === "queued" ? "dequeue" : "stop", delete: fresh && del.checked }), "Stopping — undoing what it embedded");
+  await act(() => post("/api/index/control", { store: r.store, run: r.id, action: r.status === "queued" ? "dequeue" : "stop", delete: fresh && alsoDelete }), "Stopping — undoing what it embedded");
   await loadMany(["runs", "stores"], true);
   for (const fn of [...runsListeners]) fn();
   paintChrome();
@@ -6054,7 +6085,7 @@ function sdReview(s, holder) {
                     el("span", { class: "why" }, el("b", { text: d.kind || classWord(d.class) }), ` · ${d.why || d.rule}`),
                     d.evidence || (d.matches || [])[0] ? el("span", { class: "evidence", text: d.evidence || maskedOf(d.matches[0]) }) : null,
                   ),
-                  el("div", { class: "col gap4 risk" }, el("div", { class: "row base nowrap gap6" }, el("span", { class: `risk-pct ${b}`, text: `${d.risk}%` }), el("span", { class: "t-mono-sm", text: b })), bar(Math.max(3, d.risk), `h4 ${b === "high" ? "red" : b === "medium" ? "amber" : "green"}`)),
+                  el("div", { class: "col gap4 risk" }, el("div", { class: "row base nowrap gap6" }, el("span", { class: `risk-pct ${b}`, text: `${d.risk}%` }), el("span", { class: "t-mono-sm", text: b })), bar(Math.max(3, d.risk), `h4 ${b === "high" ? "red" : b === "medium" ? "amber" : "green"}`, `Risk if indexed · ${d.risk} % (${b})`)),
                   el(
                     "div",
                     { class: "col gap4 acts" },
@@ -6149,6 +6180,146 @@ function decisionFromRow(r) {
   return { path: r.path, outcome, why: r.rule, by: mine ? "you" : "rules", at: r.last_seen, can_undo: mine };
 }
 
+// ---------------------------------------------------------------- run logs
+
+/* One renderer for a run's log, live or read from its file: each event under
+ * the pipeline stage it belongs to, and a selector — All | Read | Chunk |
+ * Embed | Write — that this viewer keeps and every log on screen follows. */
+const LOG_STAGES = [
+  ["all", "All"],
+  ["read", "Read"],
+  ["chunk", "Chunk"],
+  ["embed", "Embed"],
+  ["write", "Write"],
+];
+let LOG_STAGE = "all";
+try {
+  const kept = localStorage.getItem("semlith-log-stage");
+  if (LOG_STAGES.some(([k]) => k === kept)) LOG_STAGE = kept;
+} catch (_) {
+  /* storage refused: All */
+}
+function setLogStage(stage) {
+  LOG_STAGE = stage;
+  try {
+    localStorage.setItem("semlith-log-stage", stage);
+  } catch (_) {
+    /* kept for this page only */
+  }
+  for (const view of document.querySelectorAll(".log-view")) if (view.__redraw) view.__redraw();
+}
+
+const PHASE_STAGE = { walk: "read", read: "read", embed: "embed", images: "embed", lane: "embed", drain: "embed", save: "write", finalize: "write" };
+
+function ordinal(k) {
+  const v = k % 100;
+  return `${k}${["th", "st", "nd", "rd"][(v - 20) % 10] || ["th", "st", "nd", "rd"][v] || "th"}`;
+}
+
+/** One log event as the lines it draws, each [stage, counter or time, word,
+ * words, tone]; a stage of null shows under All only. A text file read is
+ * two lines, its read and its chunks. Embed and Write lines carry the time. */
+function logLines(ev, home) {
+  if (typeof ev === "string") return [[null, "", "", ev, ""]];
+  if (!ev.event) return [[null, ev.at ? clock(ev.at) : "", ev.level || "", ev.text || "", ev.level === "error" ? "bad" : ev.level === "warn" ? "warn" : "info"]];
+  const when = ev.at ? clock(msOf(ev.at) / 1000) : "";
+  const path = ev.path ? (home ? relTo(home, ev.path) : tilde(ev.path)) : "";
+  const count = ev.total ? `${n(ev.scanned)}/${n(ev.total)}` : when;
+  if (ev.event === "file") {
+    const o = ev.outcome || "read";
+    if (o === "indexing") return [["read", count, "read", path, "ok"]].concat(ev.why ? [["chunk", count, "chunk", `${path} → ${ev.why}`, "ok"]] : []);
+    if (o === "image") return [["embed", when, "image", path, "ok"]];
+    return [["read", count, o, ev.why ? `${path} — ${ev.why}` : path, /refus|skip|fail/.test(o) ? "bad" : /unchanged|queued/.test(o) ? "" : "info"]];
+  }
+  if (ev.event === "phase") return [[PHASE_STAGE[ev.phase] || null, when, "phase", [phaseLabel(ev.phase, ev.detail, ev.lane), ev.detail].filter(Boolean).join(" — "), "info"]];
+  if (ev.event === "embed") {
+    const lanes = Object.entries(ev.lanes || {})
+      .filter(([, v]) => v > 0)
+      .map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`)
+      .join(" · ");
+    const images = ev.images_total ? ` · images ${n(ev.images || 0)} / ${n(ev.images_total)}` : "";
+    return [["embed", when, "embed", `+${plural(ev.delta || 0, "chunk")} · ${n(ev.embedded || 0)} / ${n(ev.expected || 0)}${images}${lanes ? ` · ${lanes}` : ""}`, "ok"]];
+  }
+  if (ev.event === "write") return [["write", when, "write", `index saved (${ordinal(ev.saves || 1)}) in ${((ev.ms || 0) / 1000).toFixed(1)} s · ${n(ev.embedded || 0)} searchable`, "ok"]];
+  const [a, b, c, tone] = logParts(ev);
+  return [[null, a, b, c, tone]];
+}
+
+/** A log view: the stage selector over the lines. `view.__lines()` hands it
+ * the events; `limit` keeps a live view to its newest lines. */
+function logView(key, home, opts) {
+  const o = opts || {};
+  const box = el("div", { class: "log", "data-scroll-keep": `log-${key}` });
+  const foot = el("div", { class: "log-foot" });
+  const stages = seg(LOG_STAGES, LOG_STAGE, setLogStage, { cls: "sm", label: "Log stage" });
+  const view = el("div", { class: "log-view", "data-morph-keep": `logv-${key}` }, el("div", { class: "log-bar" }, stages), box, foot);
+  view.__lines = () => [];
+  view.__redraw = () => {
+    for (const b of stages.querySelectorAll("button")) b.setAttribute("aria-pressed", String(LOG_STAGES[[...stages.children].indexOf(b)][0] === LOG_STAGE));
+    const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+    const entries = view.__lines()
+      .flatMap((ev) => logLines(ev, home))
+      .filter((e) => LOG_STAGE === "all" || e[0] === LOG_STAGE);
+    const shown = o.limit ? entries.slice(-o.limit) : entries;
+    fill(
+      box,
+      shown.length ? shown.map(([, a, b, c, tone]) => el("div", { class: "ln" }, el("span", { class: "a", text: a }), el("span", { class: `b ${tone}`, text: b }), el("span", { class: "c", text: c }))) : el("div", { class: "ln" }, el("span", { class: "a" }), el("span", { class: "b" }), el("span", { class: "c", text: LOG_STAGE === "all" ? "Nothing logged yet." : "Nothing in this stage yet." })),
+    );
+    if (o.live !== false && atEnd) box.scrollTop = box.scrollHeight;
+    if (o.foot) o.foot(foot);
+  };
+  return view;
+}
+
+/* A finished run's whole log from its file, a page at a time: the next page
+ * comes as the reader nears the end, or from "Load more". Pages are kept per
+ * log, so a repaint never reads them again. */
+const HIST_LOGS = new Map();
+function historyLog(s, logFile) {
+  const page = 5000;
+  const st = HIST_LOGS.get(logFile) || { lines: [], more: true, loading: false, error: "" };
+  HIST_LOGS.set(logFile, st);
+  const load = async () => {
+    if (st.loading || !st.more) return;
+    st.loading = true;
+    view.__redraw();
+    try {
+      const out = await api(`/api/index/history/log?${new URLSearchParams({ store: s.name, log: logFile, from: String(st.lines.length), limit: String(page) })}`);
+      st.lines.push(...(out.lines || []));
+      st.more = !!out.more && (out.lines || []).length > 0;
+    } catch (e) {
+      st.error = e.message;
+      st.more = false;
+    }
+    st.loading = false;
+    if (view.isConnected) view.__redraw();
+  };
+  const view = logView(`h-${logFile}`, s, {
+    live: false,
+    foot: (foot) =>
+      fill(
+        foot,
+        st.error ? el("span", { class: "muted t-xs", text: st.error }) : null,
+        st.loading ? el("span", { class: "muted t-xs", text: `Reading the log… ${n(st.lines.length)} lines so far` }) : st.more ? lnk(`Load more · ${n(st.lines.length)} lines read`, load) : el("span", { class: "muted t-xs", text: `${plural(st.lines.length, "line")} · the whole log` }),
+      ),
+  });
+  view.classList.add("tall");
+  view.__lines = () => st.lines;
+  const box = view.querySelector(".log");
+  listen(box, "scroll", () => box.scrollHeight - box.scrollTop - box.clientHeight < 200 && load());
+  view.__redraw();
+  if (!st.lines.length && st.more) setTimeout(load, 0);
+  return view;
+}
+
+/** An older run's stored log lines, in the same renderer. */
+function storedLog(s, key, lines) {
+  const view = logView(`s-${key}`, s, { live: false });
+  view.__lines = () => lines;
+  view.__redraw();
+  return view;
+}
+
 function sdRuns(s, holder) {
   const live = runsOf(s.name).filter((r) => LIVE_RUN.has(r.status));
   // A finished run this daemon still holds says more than its history line
@@ -6199,10 +6370,7 @@ function sdRuns(s, holder) {
                         "div",
                         { class: "hist-open" },
                         h.stages ? el("span", { class: "t-mono-sm", text: stagesText(h.stages) }) : null,
-                        (h.log || []).length ? el("div", { class: "log rounded" }, h.log.slice(-40).map((ev) => {
-                          const [a, b, c, tone] = typeof ev === "string" ? ["", "", ev, ""] : ev.event ? logParts(ev, s) : [ev.at ? clock(ev.at) : "", ev.level || "", ev.text || "", ev.level === "error" ? "bad" : ev.level === "warn" ? "warn" : "info"];
-                          return el("div", { class: "ln" }, el("span", { class: "a", text: a }), el("span", { class: `b ${tone}`, text: b }), el("span", { class: "c", text: c }));
-                        })) : el("span", { class: "muted t-xs", text: "No log was kept for this run." }),
+                        h.log_file ? historyLog(s, h.log_file) : (h.log || []).length ? storedLog(s, key, h.log) : el("span", { class: "muted t-xs", text: "No log was kept for this run." }),
                       )
                     : null,
                 );
@@ -7904,7 +8072,7 @@ function blastResult(imp, headline) {
         { class: "card" },
         el("div", { class: "card-h tight" }, el("span", { class: "card-t sm grow", text: "Files to look at" }), lnk("Copy list", () => copy(files.map((f) => f.path).join("\n"), `Copied ${plural(files.length, "path")}`))),
         files.slice(0, 12).map((f) => {
-          const b2 = bar((f.symbols / top) * 100, "h5 accent");
+          const b2 = bar((f.symbols / top) * 100, "h5 accent", `${f.path} · ${n(f.symbols)} definitions reached, of ${n(top)} at most`);
           return el("div", { class: "file-bar-row", "data-tip": f.path, "data-tip-rows": rows([["definitions reached", String(f.symbols)], ["nearest hop", String(f.nearest)]]) }, pathSpan(tilde(f.path), "", f.path), b2, el("span", { class: "right muted", text: String(f.symbols) }));
         }),
       ),
@@ -8467,7 +8635,7 @@ VIEWS.ledger = {
           el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "By client" }), el("span", { class: "t-mono-sm", text: "MCP, HTTP and CLI" })),
           byClient.length
             ? byClient.slice(0, 7).map(([k, v]) => {
-                const b = bar((v / maxClient) * 100, lg.filter === k ? "accent" : "");
+                const b = bar((v / maxClient) * 100, lg.filter === k ? "accent" : "", `${k} · ${n(v)} queries · ${pct(v, L.queries)} of all`);
                 return btn(
                   { class: `bar-row${lg.filter === k ? " on" : ""}`, "data-tip": k, "data-tip-rows": rows([["queries", n(v)], ["share", pct(v, L.queries)], ["click", lg.filter === k ? "clear the filter" : "filter the tables"]]), onclick: () => ((lg.filter = lg.filter === k ? null : k), repaint()) },
                   el("span", { class: "k ell", text: k }),
