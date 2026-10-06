@@ -44,6 +44,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     worker went idle during each slice's drain and save, and every slice
     waited two minutes for it to load again.
   - `semlith index -v` prints the phases and the same figures.
+  - A reviewed run counts its scan's whole total from its first second. It
+    starts on the recently committed files while the walk finishes, and
+    counted only those 48 until then, so the walk's run said "about 25 min"
+    for an hour's work.
+  - Every stage is on the run's log as its own lines (files read and chunked,
+    embedding every two seconds with each lane's rate, each index save), and
+    the whole log is kept beside the store: the run history shows every line
+    of a finished run, paged by `/api/index/history/log`, where it had kept the
+    last 200.
+- A run no longer stops to drain at each checkpoint (#203). A checkpoint saves
+  what has been embedded and records as indexed only the files whose every
+  chunk has landed, and a long run gives the writer back to the watcher only
+  when the watcher has changes or another job is queued. On the owner's walk
+  each 45-second slice had been followed by 10 to 12 minutes of "finishing
+  embeddings in flight" on the CPU.
+- Images are embedded on a thread of their own, so the text lanes keep
+  embedding while the image model works; it had run on the writer and left the
+  Neural Engine idle through a stretch of screenshots (#203).
+- A run admitted behind another job on its store's writer can be taken out of
+  the queue; the button said "nothing waiting in the queue".
+- A progress bar redrawn in place moves: the page patched its width as a style
+  attribute, which the portal's content-security policy drops, so the bar kept
+  its first width while its percentage climbed.
+- The WebGPU lane runs attention as plain operations, rewritten from the
+  downloaded graph at fetch time and pinned by digest, and a lane that embeds
+  the known-answer fixture at under 2 chunks/s is refused as a software
+  renderer standing in for the card. On rented NVIDIA containers without the
+  graphics capability, Dawn ran on llvmpipe while reporting the card, so the
+  "GPU" lane embedded on the CPU at 0.7 chunks/s (#197).
 - A failed accelerator lane is tried again on the first run ten minutes after
   it failed, and the failure is written to the daemon's log. One transient
   load failure of the Neural Engine lane had left every run on the CPU until
@@ -72,7 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same on the container's local disk as on its network volume, and nearly
   all of it SQLite: chunk rows, symbols and edges, and commits. The writer's
   per-row inserts now reuse prepared statements, which cut its time by 6–8 %
-  there.
+  there, and a chunk's keyword entry is written by its insert rather than a
+  trigger, which cost twice the row's own insert (measured on 8,000 chunks of a
+  real store). An older binary that puts the trigger back is undone at the
+  next write.
 - A failed known-answer check names every chunk under the floor, not only the
   worst (#197).
 - `semlith setup` says what `--hook-mode gate` buys where the choice is made,
