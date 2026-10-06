@@ -1007,6 +1007,12 @@ impl RunState {
                         .get("detail")
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_string);
+                    // Said again with nothing new (the engine re-enters
+                    // embedding after every save and lane check): the log
+                    // already has it, four lines of "Embedding" in a row.
+                    if self.phase.as_deref() == Some(phase) && self.phase_detail == detail {
+                        return;
+                    }
                     self.enter(phase, detail);
                 }
             }
