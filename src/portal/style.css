@@ -1702,10 +1702,9 @@ button.dial {
 .log .ln .b.info {
   color: #86aec7;
 }
+/* A log line's path and reason wrap: the reason is what the reader acts on. */
 .log .ln .c {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .lines {
   padding: 8px 0;
@@ -3614,9 +3613,7 @@ button.gl-row:hover,
 .attn-row .s {
   color: var(--muted);
   font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-wrap: pretty;
 }
 .agent-row {
   display: grid;
@@ -3646,9 +3643,7 @@ button.gl-row:hover,
 }
 .feed .f .m {
   color: var(--ink-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .live-word {
   display: inline-flex;
@@ -5513,7 +5508,8 @@ button,
   }
   .log .ln,
   .log.rounded .ln {
-    grid-template-columns: 52px 54px minmax(0, 1fr);
+    /* 60px holds "embedded" whole; 54px broke it after the seventh letter. */
+    grid-template-columns: 52px 60px minmax(0, 1fr);
     gap: 6px;
   }
 }
