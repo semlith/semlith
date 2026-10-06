@@ -1194,7 +1194,7 @@ function grid(spec) {
               },
             },
             c.label,
-            el("span", { class: `ar${on ? "" : " off"}`, text: on ? (view.dir === "asc" ? "↑" : "↓") : "↕" }),
+            el("span", { class: `ar${on ? "" : " off"}`, text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
           ),
         );
       }),
@@ -1373,7 +1373,7 @@ function sortHead(label, key, view, onChange, cls) {
         },
       },
       label,
-      el("span", { class: `ar${on ? "" : " off"}`, text: on ? (view.dir === "asc" ? "↑" : "↓") : "↕" }),
+      el("span", { class: `ar${on ? "" : " off"}`, text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
     ),
   );
 }
@@ -5470,12 +5470,14 @@ function insideSources() {
     key: "inside:sources",
     caption: "Sources",
     rows: list,
-    sort: "store",
+    // A missing root first, so a problem is on the first page however many
+    // sources there are; then by store.
+    sort: "state",
     dir: "asc",
     empty: "No source yet. Add one to a store and it is measured here.",
     columns: [
       { key: "path", label: "Source", cls: "m t-b", sort: (r) => r.path, render: (r) => pathEl(r.path, 44, "mono t-sm") },
-      { key: "state", label: "State", sort: (r) => (r.present ? 1 : 0), render: (r) => pill(r.present ? "present" : "missing", r.present ? "green" : "red", { dot: false }) },
+      { key: "state", label: "State", sort: (r) => `${r.present ? 1 : 0}:${r.store}`, render: (r) => pill(r.present ? "present" : "missing", r.present ? "green" : "red", { dot: false }) },
       { key: "store", label: "Store", cls: "ms", sort: (r) => r.store, render: (r) => lnk(r.store, () => go("store", r.store)) },
       { key: "files", label: "Store files", cls: "m r", firstDir: "desc", sort: (r) => r.files, render: (r) => (r.files ? n(r.files) : "—") },
       { key: "chunks", label: "Store chunks", cls: "m r", firstDir: "desc", sort: (r) => r.chunks, render: (r) => (r.chunks ? n(r.chunks) : "—") },
@@ -6938,9 +6940,20 @@ function weightWord(w) {
   return w.keyword > w.vector ? "keyword weighted ×2" : "vector and keyword weighted equally";
 }
 
+const STALE_SEARCH = new Error("a newer search was asked");
+
 async function runSearch() {
   const q = sr.query.trim();
   if (!q) return;
+  // Only the newest request's answer is drawn: a restored query asked again
+  // as the page opens, or a filter changed while one was in flight, would
+  // otherwise land last with an older answer.
+  const mine = (runSearch.seq = (runSearch.seq || 0) + 1);
+  const askMine = async (url) => {
+    const out = await api(url);
+    if (mine !== runSearch.seq) throw STALE_SEARCH;
+    return out;
+  };
   sr.busy = true;
   sr.error = "";
   sr.sel = null;
@@ -6962,16 +6975,16 @@ async function runSearch() {
       p.set("question", q);
       p.set("budget", String(sr.budget));
       if (sr.prefer !== "either") p.set("prefer", sr.prefer);
-      sr.result = await api(`/api/brief?${p}`);
+      sr.result = await askMine(`/api/brief?${p}`);
     } else if (sr.mode === "exact") {
       p.set("query", q);
       p.set("exact", "1");
-      sr.result = await api(`/api/search?${p}`);
+      sr.result = await askMine(`/api/search?${p}`);
     } else if (sr.mode === "pattern") {
       if (!sr.patternLang) throw new Error("Pick the language the pattern is written for.");
       p.set("query", q);
       p.set("lang", sr.patternLang);
-      sr.result = await api(`/api/pattern?${p}`);
+      sr.result = await askMine(`/api/pattern?${p}`);
       if (sr.result.error) throw new Error(sr.result.error);
     } else {
       p.set("query", q);
@@ -6979,7 +6992,7 @@ async function runSearch() {
       p.set("format", "locate");
       p.set("max_tokens", String(sr.budget));
       if (sr.prefer !== "either") p.set("prefer", sr.prefer);
-      sr.result = await api(`/api/search?${p}`);
+      sr.result = await askMine(`/api/search?${p}`);
       // An identifier is answered by its definition first; every line that
       // names it is one press away, in Exact.
       if (sr.result.shape_label === "identifier" && !(sr.result.hits || []).length) {
@@ -6990,6 +7003,7 @@ async function runSearch() {
       if (first) openHit(first);
     }
   } catch (e) {
+    if (e === STALE_SEARCH || mine !== runSearch.seq) return;
     sr.result = { error: e.message };
   }
   sr.busy = false;

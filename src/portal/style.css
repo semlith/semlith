@@ -5699,8 +5699,11 @@ button,
 }
 
 /* Parity with the cloud (2026-10-07). */
-.sortable .ar.off,
-th .sort .ar.off {
+/* Drawn, not written: the mark stays out of the header's text, so a screen
+   reader and a check read "Path", not "Path↕". */
+.sortable .ar.off::after,
+th .sort .ar.off::after {
+  content: "↕";
   color: inherit;
 }
 .kpi.accent {
