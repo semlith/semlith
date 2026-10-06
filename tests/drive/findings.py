@@ -6810,8 +6810,13 @@ def _(d):
 def _(d):
     a_store(d)
     d.open_view("stores", fresh=True)
+    # The unsorted mark is drawn by CSS, so it is read from ::after, and the
+    # header's own text stays its label alone.
     heads = d.eval("[...document.querySelectorAll('#main .sortable, #main th .sort')].map(h => { const a = h.querySelector('.ar');"
-                   " return a ? [a.textContent, a.classList.contains('off')] : null; }).filter(Boolean)")
+                   " if (!a) return null; const off = a.classList.contains('off');"
+                   " return [off ? getComputedStyle(a, '::after').content.replace(/\"/g, '') : a.textContent, off, h.textContent.includes('↕')]; }).filter(Boolean)")
+    if any(h[2] for h in heads):
+        fail("a header's text carries the ↕ mark, so it reads as part of the label: %r" % heads)
     if not heads:
         fail("the Stores list has no sortable column headers")
     off = [h for h in heads if h[1]]
@@ -6915,6 +6920,24 @@ def _(d):
     d.open_view("search", fresh=True)
     want("the query after a reload", d.eval("document.querySelector(%s).value" % json.dumps(SEARCH_BOX)), "corpus file")
     d.wait_for("document.querySelectorAll(%s).length > 0" % json.dumps(RESULT_CARD), timeout=30, what="the restored query asked again")
+    # Only the newest request's answer is drawn: an older answer that lands
+    # last (the restored query's re-ask racing a filter, drive 2.7 on
+    # Windows) is dropped.
+    landed = d.eval("""(async () => {
+      const real = window.fetch;
+      window.fetch = (u, o) => /query=older/.test(String(u))
+        ? new Promise(r => setTimeout(r, 1200)).then(() => real(u, o)).then(r => r.json())
+            .then(j => new Response(JSON.stringify({...j, __tag: 'older'}), {status: 200, headers: {'content-type': 'application/json'}}))
+        : real(u, o);
+      try {
+        sr.query = 'older'; runSearch();
+        await new Promise(r => setTimeout(r, 50));
+        sr.query = 'corpus file'; await runSearch();
+        await new Promise(r => setTimeout(r, 1800));
+        return (sr.result && sr.result.__tag) || 'newest';
+      } finally { window.fetch = real; }
+    })()""")
+    want("the answer drawn after an older one landed last", landed, "newest")
     d.eval("sr.store = ''; sr.query = ''; sr.result = null; repaint(); true")
     del b
 
@@ -6980,6 +7003,14 @@ def _(d):
         meta_line = text_of(d, "#main .inside-sources .card-h", "the Sources card head")
         if not meta_line.startswith("Sources") or ("%d source" % want_rows) not in meta_line:
             fail("the Sources card counts %r; the stores hold %d roots" % (meta_line, want_rows))
+        # However many sources there are, a missing one is on the first page:
+        # CI's home held more than ten, and the store sorting after them was
+        # on page two. Drawn here from a cache of twelve, the missing last.
+        first = d.eval("(() => { const keep = data.stores; GRID_VIEWS.delete('inside:sources');"
+                       " data.stores = {stores: Array.from({length: 12}, (_, i) => ({name: 's' + String(i).padStart(2, '0'), files: 1, chunks: 1, roots: [{path: '/r/' + i, present: i !== 11}]}))};"
+                       " try { return insideSources().querySelector('tbody tr').innerText; } finally { data.stores = keep; GRID_VIEWS.delete('inside:sources'); } })()")
+        if "missing" not in first or "s11" not in first:
+            fail("with twelve sources the missing one is not first: %r" % first)
         # With no store at all the router shows Welcome, so the list's own
         # empty state is drawn here from an empty cache.
         empty_list = d.eval("(() => { const keep = data.stores; data.stores = {stores: []}; try { return storesList().innerText; } finally { data.stores = keep; } })()")
