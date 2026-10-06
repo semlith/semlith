@@ -339,10 +339,10 @@ def wait_for_run(d, store_name, timeout=RUN_FINISHES, run_id=None):
     )
 
 
-def indexed_fixture(d, path):
+def indexed_fixture(d, path, timeout=RUN_FINISHES):
     """Index a fixture folder and wait for it, returning the store name."""
     run_id, store_name = start_index(d, path)
-    wait_for_run(d, store_name, run_id=run_id)
+    wait_for_run(d, store_name, run_id=run_id, timeout=timeout)
     return store_name
 
 
@@ -6552,7 +6552,9 @@ def _(d):
 
 @finding("rc4.11", "History shows a run's whole log from its file, page by page, in the live card's renderer")
 def _(d):
-    store = indexed_fixture(d, d.fixtures.unique("rc4hist", count=3000))
+    # Three thousand files, so the log runs past one page: ten minutes for a
+    # hosted Windows runner's CPU, where it embedded past the default four.
+    store = indexed_fixture(d, d.fixtures.unique("rc4hist", count=3000), timeout=600)
     hist = [h for h in d.api("/api/index/runs").get("history") or [] if h.get("store") == store]
     if not hist or not hist[0].get("log_file"):
         fail("the run's history row carries no log_file: %s" % json.dumps(hist[:1])[:300])
