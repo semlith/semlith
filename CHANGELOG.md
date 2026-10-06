@@ -47,6 +47,13 @@ the ledger's real sessions. Data, clones and stores live under
   speed, until it was restarted — switching the lane off and on from the terminal
   never reached it, and nothing was written to its log. A failed lane is tried
   again on the first run ten minutes later, and the failure goes to the log.
+- **A live secret that opens on `FAKE` by chance is no longer a dummy.** A
+  marker of four or five letters at the edge of a segment counted even when
+  the rest of the segment was a generator's output, so about one live Slack
+  token in 3.7 million was read as a placeholder and indexed; the scanner's
+  randomized test failed on it about one run in 700. The marker now counts
+  only when the rest of the segment is a word, one case, or digits:
+  `FAKEtokenvalue` and `1234-fake-token` are still dummies.
 
 ## [0.37.0-rc.3] - 2026-10-05
 
