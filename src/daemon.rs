@@ -596,6 +596,8 @@ pub struct RunState {
     shown: Option<(u64, (u64, u64))>,
     /// The scan's chunk count per file, for the run that follows it.
     planned: Option<Arc<std::collections::HashMap<String, u64>>>,
+    /// The plan's images, beside `planned`'s chunks.
+    planned_images: Option<usize>,
     /// Each lane's ten-second rates through the run, for what it records.
     lane_seen: BTreeMap<String, Vec<f64>>,
     /// Times the run has written its index to disk, and the last one: when
@@ -675,6 +677,7 @@ impl RunState {
             eta: crate::progress::Eta::default(),
             shown: None,
             planned: None,
+            planned_images: None,
             lane_seen: BTreeMap::new(),
             saves: 0,
             saved_at: None,
@@ -1651,6 +1654,7 @@ impl Store {
         if let Some(run) = runs.iter_mut().find(|r| r.id == id) {
             run.plan = serde_json::to_value(plan).ok();
             run.planned = Some(Arc::new(plan.counts.clone()));
+            run.planned_images = Some(plan.images);
             run.plan_eta_ms = plan
                 .eta_ms
                 .or_else(|| seen.map(|rate| (plan.embed_bytes as f64 / rate * 1000.0) as u64));
@@ -1809,6 +1813,15 @@ impl Store {
             .iter()
             .find(|run| run.id == id)
             .and_then(|run| run.planned.clone())
+    }
+
+    fn run_planned_images(&self, id: u64) -> Option<usize> {
+        self.runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|run| run.id == id)
+            .and_then(|run| run.planned_images)
     }
 
     /// What each lane managed through a run, for the machine to remember.
@@ -4983,6 +4996,7 @@ fn perform(
             // files the run has not reached yet.
             writer.force = store.run_kind(run).is_some_and(RunKind::forced);
             writer.planned = store.run_planned(run);
+            writer.planned_images = store.run_planned_images(run);
             writer.expect_rest = match &work {
                 Work::Rest(_) => Some((tally.expected_left, tally.images_left as usize)),
                 Work::Roots(_) => None,
@@ -5001,6 +5015,7 @@ fn perform(
             };
             writer.force = false;
             writer.planned = None;
+            writer.planned_images = None;
             writer.expect_rest = None;
             match outcome {
                 Ok(mut done) => {

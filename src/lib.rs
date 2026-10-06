@@ -1351,6 +1351,9 @@ pub struct IndexReport {
     /// reached yet: the estimate a continuation slice starts from.
     pub expected_left: u64,
     pub images_left: usize,
+    /// Images with the image lane: read, not embedded yet. Counted in the
+    /// total, or the total dropped by each one sent and rose as it landed.
+    pub images_flight: usize,
     /// The file in hand's estimate and the rows it has written so far: the
     /// rest of its estimate stays in the expected total until it is written,
     /// so a large file does not take its whole estimate out at its first row.
@@ -1574,7 +1577,7 @@ fn say_file(
     let expected_chunks = report.rows as u64
         + report.expected_left
         + report.current_est.saturating_sub(report.current_rows);
-    let images_total = report.images + report.images_left;
+    let images_total = report.images + report.images_flight + report.images_left;
     let (phase, phase_detail, share, eta, image_weight) = {
         let mut live = report.live.borrow_mut();
         // A lane still loading is the run's to say, not a global's: the
@@ -1862,6 +1865,8 @@ pub struct Semlith {
     /// Chunks the scan counted for each file it planned, by stored key, so a
     /// run's expected total starts exact rather than estimated.
     pub planned: Option<std::sync::Arc<std::collections::HashMap<String, u64>>>,
+    /// The plan's images, which `planned` (chunks a file) does not count.
+    pub planned_images: Option<usize>,
     /// What a continuation slice has left to embed, from the slice before it:
     /// chunks and images. Taken by the next pass instead of sizing every
     /// remaining file again.
@@ -1981,6 +1986,7 @@ impl Semlith {
             force: false,
             vector_cache: None,
             planned: None,
+            planned_images: None,
             expect_rest: None,
             awaiting: Default::default(),
             file_of: Default::default(),
@@ -3135,6 +3141,9 @@ impl Semlith {
                     report.expected_left = report.expected_left.max(planned.values().sum());
                     total = total.max(planned.len());
                 }
+                if let Some(images) = self.planned_images {
+                    report.images_left = report.images_left.max(images);
+                }
                 head.clone()
             }
         };
@@ -3293,7 +3302,10 @@ impl Semlith {
                 if me.planned.is_none() {
                     report.expected_left += chunks;
                 }
-                report.images_left += images;
+                // Likewise its images, once the plan has counted them.
+                if me.planned_images.is_none() {
+                    report.images_left += images;
+                }
                 prefetch.extend_and_seal(rest);
                 if report.live.borrow().phase == progress::Phase::Walk {
                     say_phase(
@@ -3414,6 +3426,7 @@ impl Semlith {
                 // Whatever the image lane has finished, into the store.
                 while let Ok(done) = image_done.try_recv() {
                     images_out -= 1;
+                    report.images_flight = images_out;
                     image_bytes_out = image_bytes_out.saturating_sub(done.job.bytes.len() as u64);
                     if let Some((failed_path, why)) =
                         self.land_image(done, &mut report, &mut written, &mut completed)?
@@ -3735,6 +3748,7 @@ impl Semlith {
                         while image_bytes_out > IMAGE_BYTES_IN_FLIGHT && images_out > 0 {
                             let Ok(done) = image_done.recv() else { break };
                             images_out -= 1;
+                            report.images_flight = images_out;
                             image_bytes_out =
                                 image_bytes_out.saturating_sub(done.job.bytes.len() as u64);
                             if let Some((path, why)) =
@@ -3752,6 +3766,7 @@ impl Semlith {
                         }
                         image_bytes_out += bytes.len() as u64;
                         images_out += 1;
+                        report.images_flight = images_out;
                         if let Some(send) = &image_send {
                             let _ = send.send(ImageJob {
                                 path: path.clone(),
@@ -4190,10 +4205,9 @@ impl Semlith {
                         progress::Phase::Drain,
                         Some(format!(
                             "{} chunks still embedding",
-                            progress::grouped(
-                                (report.rows + window.ids.len()).saturating_sub(report.embedded)
-                                    as u64
-                            )
+                            // The window's chunks are rows already; adding it
+                            // counted them twice (3,918 of an expected 3,879).
+                            progress::grouped(report.rows.saturating_sub(report.embedded) as u64)
                         )),
                     );
                 }
@@ -4257,6 +4271,7 @@ impl Semlith {
             while images_out > 0 {
                 let Ok(done) = image_done.recv() else { break };
                 images_out -= 1;
+                report.images_flight = images_out;
                 if let Some((failed_path, why)) =
                     self.land_image(done, &mut report, &mut written, &mut completed)?
                 {
