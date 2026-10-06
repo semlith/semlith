@@ -195,10 +195,10 @@ pub struct WriteParts {
 
 /// The parts, in the order `index -v` names them: rows and their keyword
 /// index, a replaced file's eviction, symbols and edges, vectors into the
-/// index and its sidecar, row commits, shard saves, indexed-file hashes, and
-/// the vector cache.
-pub const WRITE_PARTS: [&str; 8] = [
-    "rows", "evict", "graph", "vectors", "commit", "save", "hashes", "cache",
+/// index and its sidecar, row commits, shard saves, indexed-file hashes, the
+/// vector cache, and images, which the image model embeds on the writer.
+pub const WRITE_PARTS: [&str; 9] = [
+    "rows", "evict", "graph", "vectors", "commit", "save", "hashes", "cache", "images",
 ];
 
 impl WriteParts {

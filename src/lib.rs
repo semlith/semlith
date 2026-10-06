@@ -60,6 +60,7 @@ pub mod pipeline;
 pub mod portal;
 pub mod prices;
 pub mod priority;
+pub mod progress;
 pub mod proxy;
 pub mod replay;
 pub mod report;
@@ -953,6 +954,10 @@ pub enum FileOutcome {
     /// batch so a file of thousands of chunks moves the counters, the rate
     /// and the thread count as it goes rather than all at once at its end.
     Progress,
+    /// An image, read for its pixels and embedded by the image model.
+    Image,
+    /// Not a file: the run has entered a phase ([`IndexProgress::phase`]).
+    Phase,
 }
 
 impl FileOutcome {
@@ -967,6 +972,8 @@ impl FileOutcome {
             Self::Refused => "refused",
             Self::Failed => "failed",
             Self::Progress => "progress",
+            Self::Image => "image",
+            Self::Phase => "phase",
         }
     }
 }
@@ -1216,35 +1223,22 @@ pub struct IndexProgress {
     pub bytes_total: u64,
     /// Chunk rows written so far, embedded or not yet.
     pub rows: usize,
-}
-
-impl IndexProgress {
-    /// The run's share done so far, reading and embedding both. See
-    /// [`share_done`].
-    pub fn share_done(&self) -> f64 {
-        share_done(
-            (self.bytes, self.bytes_total),
-            (self.scanned as u64, self.total as u64),
-            (self.chunks as u64, self.rows as u64),
-        )
-    }
-}
-
-/// A run's share done, in [0, 1]: the share read (bytes, or files when the
-/// walk counted no bytes) times the share of the rows written so far that are
-/// embedded. Either half alone lies: reading finishes long before embedding
-/// on a slow lane, and the embed backlog is near nothing on a fast one while
-/// most files are still unread, which is how 0.37.0-rc.3's portal showed 99 %
-/// from a run's first second.
-pub fn share_done(bytes: (u64, u64), files: (u64, u64), embedded: (u64, u64)) -> f64 {
-    let share = |(part, whole): (u64, u64)| (part.min(whole) as f64) / (whole.max(1) as f64);
-    let read = if bytes.1 > 0 {
-        share(bytes)
-    } else {
-        share(files)
-    };
-    let embedded = if embedded.1 > 0 { share(embedded) } else { 1.0 };
-    read * embedded
+    /// What the run is doing now, and in a sentence. See [`progress::Phase`].
+    pub phase: progress::Phase,
+    pub phase_detail: Option<String>,
+    /// The chunks this run is expected to embed in all: rows written so far
+    /// and the estimate for every file not reached yet, which each file
+    /// replaces with its real count as it is chunked.
+    pub expected_chunks: u64,
+    /// Images embedded so far, and images this run expects to embed.
+    pub images: usize,
+    pub images_total: usize,
+    /// The run's share done, in work units ([`progress::Work`]), never moving
+    /// backwards and below 1 until the run is over.
+    pub progress: f64,
+    /// Time left, and a low and high bound, from [`progress::Eta`].
+    pub eta_ms: Option<u64>,
+    pub eta_range_ms: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -1349,6 +1343,37 @@ pub struct IndexReport {
     /// Chunk rows this call wrote, embedded or not yet: what `embedded` is
     /// catching up with, and what a card's pending share is taken from.
     pub rows: usize,
+    /// The chunks and images expected from the files this call has not
+    /// reached yet: the estimate a continuation slice starts from.
+    pub expected_left: u64,
+    pub images_left: usize,
+    /// What the pass is doing, its share-done high water and its time-left
+    /// estimate. Behind a cell because every progress line reads it through
+    /// a shared reference.
+    #[serde(skip)]
+    pub(crate) live: std::cell::RefCell<Live>,
+}
+
+/// The parts of a pass's account that move with every line it says.
+#[derive(Debug, Clone)]
+pub(crate) struct Live {
+    pub phase: progress::Phase,
+    pub detail: Option<String>,
+    pub high: f64,
+    pub eta: progress::Eta,
+    pub started: std::time::Instant,
+}
+
+impl Default for Live {
+    fn default() -> Self {
+        Self {
+            phase: progress::Phase::Read,
+            detail: None,
+            high: 0.0,
+            eta: progress::Eta::default(),
+            started: std::time::Instant::now(),
+        }
+    }
 }
 
 /// What an index call puts into the vector cache and takes out of it, by the
@@ -1390,6 +1415,9 @@ pub struct Review {
     /// evidence, suggest — beside the row, as `/api/refused` carries them.
     #[serde(flatten)]
     pub assessment: serde_json::Map<String, serde_json::Value>,
+    /// Chunks the file would add if a person lets it in, for the estimate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunks: Option<u64>,
 }
 
 impl Review {
@@ -1415,8 +1443,22 @@ impl Review {
             matches,
             confidence,
             assessment,
+            chunks: None,
         }
     }
+}
+
+/// How far a scan has got: `walk`, then `read` (each file read, hashed and
+/// checked for credentials), then `rules` once every file is decided.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ScanProgress {
+    pub phase: &'static str,
+    pub scanned: usize,
+    pub total: usize,
+    pub bytes: u64,
+    pub bytes_total: u64,
+    /// Files held for a person's decision or refused as credentials so far.
+    pub flagged: usize,
 }
 
 /// What a run would do, before it embeds anything (2.7).
@@ -1445,6 +1487,15 @@ pub struct Plan {
     pub eta_ms: Option<u64>,
     /// How long the scan itself took.
     pub seconds: f64,
+    /// Chunks the files to embed hold, counted with the run's own chunker,
+    /// and the images among them with their bytes: what an estimate before
+    /// the run is taken from.
+    pub chunks: u64,
+    pub images: usize,
+    pub image_bytes: u64,
+    /// The same count per file, by stored key, for the run that follows.
+    #[serde(skip)]
+    pub counts: std::collections::HashMap<String, u64>,
 }
 
 /// The size a file counts for in a run's byte totals: its length, or nothing
@@ -1480,6 +1531,45 @@ fn say_file(
         "{} must say why",
         outcome.as_str()
     );
+    let chunks = report.embedded.max(report.batched);
+    let expected_chunks = report.rows as u64 + report.expected_left;
+    let images_total = report.images + report.images_left;
+    let (phase, phase_detail, share, eta) = {
+        let mut live = report.live.borrow_mut();
+        // A lane still loading is the run's to say, not a global's: the
+        // writer is waiting on it whatever the run is otherwise doing.
+        match accel::waiting_for() {
+            Some(waiting)
+                if live.phase == progress::Phase::Embed || live.phase == progress::Phase::Lane =>
+            {
+                live.phase = progress::Phase::Lane;
+                live.detail = Some(waiting);
+            }
+            None if live.phase == progress::Phase::Lane => {
+                live.phase = progress::Phase::Embed;
+                live.detail = None;
+            }
+            _ => {}
+        }
+        let work = progress::Work {
+            files: (report.scanned as u64, total as u64),
+            chunks: (chunks as u64, expected_chunks),
+            images: (report.images as u64, images_total as u64),
+        };
+        let (done, all) = work.units();
+        live.high = live.high.max(work.share()).min(0.999);
+        let at = live.started.elapsed().as_secs_f64();
+        live.eta.observe(at, done);
+        let hold = matches!(
+            live.phase,
+            progress::Phase::Lane
+                | progress::Phase::Drain
+                | progress::Phase::Save
+                | progress::Phase::Walk
+        );
+        let eta = live.eta.left(at, all - done, hold);
+        (live.phase, live.detail.clone(), live.high, eta)
+    };
     on_file(
         path,
         IndexProgress {
@@ -1489,7 +1579,7 @@ fn say_file(
             // Vectors landed, not rows written: the writer runs ahead of the
             // embed stage, and a rate taken from rows would count work not
             // yet done.
-            chunks: report.embedded.max(report.batched),
+            chunks,
             total,
             symbols: report.symbols,
             why,
@@ -1498,7 +1588,41 @@ fn say_file(
             bytes: report.bytes,
             bytes_total: report.bytes_total,
             rows: report.rows,
+            phase,
+            phase_detail,
+            expected_chunks,
+            images: report.images,
+            images_total,
+            progress: share,
+            eta_ms: eta.map(|(ms, _)| ms),
+            eta_range_ms: eta.map(|(_, range)| range),
         },
+    );
+}
+
+/// Enter a phase and say so: one line, no file.
+fn say_phase(
+    on_file: &mut dyn FnMut(&Path, IndexProgress),
+    report: &IndexReport,
+    total: usize,
+    phase: progress::Phase,
+    detail: Option<String>,
+) {
+    {
+        let mut live = report.live.borrow_mut();
+        if live.phase == phase && live.detail == detail {
+            return;
+        }
+        live.phase = phase;
+        live.detail = detail;
+    }
+    say_file(
+        on_file,
+        report,
+        total,
+        Path::new(""),
+        FileOutcome::Phase,
+        None,
     );
 }
 
@@ -1674,6 +1798,13 @@ pub struct Semlith {
     /// only setting, keeps the machine's cache where this process uses it
     /// ([`accel::cache_in_use`]).
     pub vector_cache: Option<cache::Location>,
+    /// Chunks the scan counted for each file it planned, by stored key, so a
+    /// run's expected total starts exact rather than estimated.
+    pub planned: Option<std::sync::Arc<std::collections::HashMap<String, u64>>>,
+    /// What a continuation slice has left to embed, from the slice before it:
+    /// chunks and images. Taken by the next pass instead of sizing every
+    /// remaining file again.
+    pub expect_rest: Option<(u64, usize)>,
     /// Size, mtime and content hash of each file the scan phase read, so the
     /// embed pass that follows it does not read an unchanged file twice.
     prehashed: std::collections::HashMap<PathBuf, (u64, i64, String)>,
@@ -1777,6 +1908,8 @@ impl Semlith {
             gitignore: true,
             force: false,
             vector_cache: None,
+            planned: None,
+            expect_rest: None,
             prehashed: Default::default(),
             scrub: false,
         })
@@ -2132,8 +2265,37 @@ impl Semlith {
     /// hashes it took are kept, so the embed pass that follows reads an
     /// unchanged file once, not twice.
     pub fn plan(&mut self, roots: &[PathBuf]) -> Result<Plan> {
+        self.plan_with(roots, &mut |_| {})
+    }
+
+    /// [`Semlith::plan`], saying how far it has got: the walk, then each file
+    /// read, hashed and checked for credentials, then the rules decided.
+    pub fn plan_with(
+        &mut self,
+        roots: &[PathBuf],
+        on: &mut dyn FnMut(ScanProgress),
+    ) -> Result<Plan> {
         let started = std::time::Instant::now();
+        on(ScanProgress {
+            phase: "walk",
+            ..ScanProgress::default()
+        });
         let walked = self.walk(roots);
+        let total = walked.files.len() + walked.named.len();
+        let bytes_total: u64 = walked
+            .files
+            .iter()
+            .chain(&walked.named)
+            .map(|p| embeddable_bytes(p.metadata().ok()))
+            .sum();
+        let mut said = ScanProgress {
+            phase: "read",
+            total,
+            bytes_total,
+            ..ScanProgress::default()
+        };
+        on(said.clone());
+        let mut last_said = std::time::Instant::now();
         let mut plan = Plan::default();
         let home = crate::home::user_home().ok().map(|h| canonical(&h));
         let rechunk = store::format(&self.db)? < store::CODE_CONTEXT;
@@ -2172,6 +2334,13 @@ impl Semlith {
         }
         let boundary = self.boundary.resolved(home.as_deref());
         for (path, walked) in all {
+            said.scanned += 1;
+            said.bytes += embeddable_bytes(path.metadata().ok());
+            said.flagged = plan.review.len() + plan.credential.len();
+            if last_said.elapsed() >= std::time::Duration::from_millis(100) {
+                on(said.clone());
+                last_said = std::time::Instant::now();
+            }
             let key = path.to_string_lossy().into_owned();
             if let Some(refusal) = boundary.refuses(&path, walked) {
                 if refusal.credential {
@@ -2239,7 +2408,8 @@ impl Semlith {
                     plan.unchanged += 1;
                 } else {
                     plan.embed += 1;
-                    plan.embed_bytes += meta.len();
+                    plan.images += 1;
+                    plan.image_bytes += meta.len();
                 }
                 continue;
             }
@@ -2250,9 +2420,21 @@ impl Semlith {
                     continue;
                 }
             };
+            // Counted with the chunker the run uses, without the symbols the
+            // run's parse would add as cut points: close, and corrected file
+            // by file as the run chunks it.
+            let count = |plan: &mut Plan, key: &str| {
+                let n = chunk::chunk_file(&path, &text, &[]).len() as u64;
+                plan.chunks += n;
+                plan.counts.insert(key.to_string(), n);
+            };
             if self.boundary.allow_secrets {
                 plan.embed += usize::from(!unchanged);
                 plan.unchanged += usize::from(unchanged);
+                if !unchanged {
+                    plan.embed_bytes += meta.len();
+                    count(&mut plan, &key);
+                }
                 continue;
             }
             let found = keyscan::scan(&key, &text);
@@ -2266,30 +2448,40 @@ impl Semlith {
                     } else {
                         plan.embed += 1;
                         plan.embed_bytes += meta.len();
+                        count(&mut plan, &key);
                         if let Some(lang) = filter::language_of_path(&key) {
                             *plan.languages.entry(lang.name.to_string()).or_insert(0) += 1;
                         }
                     }
                 }
                 keyscan::Decision::Refuse(rule) => {
+                    // Counted in case a person accepts it; not in the total.
+                    let n = chunk::chunk_file(&path, &text, &[]).len() as u64;
+                    plan.counts.insert(key.clone(), n);
                     let live: Vec<keyscan::Match> =
                         found.into_iter().filter(|m| m.dummy.is_none()).collect();
                     let confidence = live.iter().map(|m| m.confidence).max();
-                    plan.review.push(Review::new(
-                        key,
-                        store::class::CONTENT,
-                        rule,
-                        live,
-                        confidence,
-                    ));
+                    let mut review =
+                        Review::new(key, store::class::CONTENT, rule, live, confidence);
+                    review.chunks = Some(n);
+                    plan.review.push(review);
                     not(&mut plan, store::class::CONTENT, &path);
                 }
             }
         }
-        plan.eta_ms = store::get_meta(&self.db, "embed_bytes_per_sec")?
-            .and_then(|v| v.parse::<f64>().ok())
-            .filter(|r| *r > 0.0)
-            .map(|rate| (plan.embed_bytes as f64 / rate * 1000.0) as u64);
+        said.phase = "rules";
+        said.flagged = plan.review.len() + plan.credential.len();
+        on(said);
+        // From what this machine's lanes manage, in work units; a store's own
+        // byte rate only when no lane has a figure yet.
+        let units = plan.chunks as f64 + plan.images as f64 * progress::IMAGE_UNITS;
+        plan.eta_ms = match accel::expected_rate() {
+            Some(rate) => Some((units / rate * 1000.0) as u64),
+            None => store::get_meta(&self.db, "embed_bytes_per_sec")?
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|r| *r > 0.0)
+                .map(|rate| ((plan.embed_bytes + plan.image_bytes) as f64 / rate * 1000.0) as u64),
+        };
         plan.seconds = started.elapsed().as_secs_f64();
         Ok(plan)
     }
@@ -2840,14 +3032,28 @@ impl Semlith {
                     self.walk_setup(walked, &boundary, each.is_some(), &mut report, &mut on_file)?;
                 total = counted;
                 report.bytes_total = bytes_known.unwrap_or_else(|| bytes_of(&paths));
+                let (chunks, images) = match self.expect_rest.take().filter(|_| budget.is_some()) {
+                    Some(known) => known,
+                    None => expected_of(&paths, self.planned.as_deref()),
+                };
+                report.expected_left = chunks;
+                report.images_left = images;
                 paths
             }
             None => {
                 total = head.len();
                 report.bytes_total = bytes_of(&head);
+                let (chunks, images) = expected_of(&head, self.planned.as_deref());
+                report.expected_left = chunks;
+                report.images_left = images;
                 head.clone()
             }
         };
+        report
+            .live
+            .borrow_mut()
+            .eta
+            .set_prior(accel::expected_rate());
         let head_set: std::collections::HashSet<PathBuf> = head.iter().cloned().collect();
 
         // Taken here, after the setup above, so a slice's budget is spent on
@@ -2975,11 +3181,46 @@ impl Semlith {
                     rest.into_iter().filter(|p| !head_set.contains(p)).collect();
                 *total = head_set.len() + counted.saturating_sub(head_set.len());
                 report.bytes_total += bytes_of(&rest);
+                let (chunks, images) = expected_of(&rest, me.planned.as_deref());
+                report.expected_left += chunks;
+                report.images_left += images;
                 prefetch.extend_and_seal(rest);
+                if report.live.borrow().phase == progress::Phase::Walk {
+                    say_phase(
+                        on_file,
+                        report,
+                        *total,
+                        progress::Phase::Read,
+                        Some(format!("{} files found", *total)),
+                    );
+                }
                 Ok(())
             };
             let mut next = 0usize;
+            if walker.is_some() {
+                say_phase(
+                    &mut on_file,
+                    &report,
+                    total,
+                    progress::Phase::Walk,
+                    Some(if head_set.is_empty() {
+                        "finding the files under the roots".to_string()
+                    } else {
+                        "finding the files; reading the most recently changed first".to_string()
+                    }),
+                );
+            }
             loop {
+                // Embedding has begun once the embed stage exists.
+                if stage.is_some()
+                    && matches!(
+                        report.live.borrow().phase,
+                        progress::Phase::Read | progress::Phase::Walk
+                    )
+                    && walker.is_none()
+                {
+                    say_phase(&mut on_file, &report, total, progress::Phase::Embed, None);
+                }
                 let seen = next;
                 let (listed, complete) = prefetch.len();
                 if seen >= listed {
@@ -3079,6 +3320,13 @@ impl Semlith {
                 let waiting = std::time::Instant::now();
                 let prepared = prefetch.take(seen);
                 clock.waited_on_prepare(waiting);
+                // This file's estimate leaves the expected total; whatever it
+                // really holds arrives as rows (or an image) below.
+                let (estimated, image) = expected_one(&path, self.planned.as_deref());
+                report.expected_left = report.expected_left.saturating_sub(estimated);
+                if image {
+                    report.images_left = report.images_left.saturating_sub(1);
+                }
 
                 let key = path.to_string_lossy().into_owned();
                 if let pipeline::Prepared::Refused(refusal) = &prepared {
@@ -3293,9 +3541,22 @@ impl Semlith {
                             &report,
                             total,
                             &path,
-                            FileOutcome::Indexing,
+                            FileOutcome::Image,
                             None,
                         );
+                        let back = if self.clip.loaded() {
+                            None
+                        } else {
+                            let back = report.live.borrow().phase;
+                            say_phase(
+                                &mut on_file,
+                                &report,
+                                total,
+                                progress::Phase::Images,
+                                Some("loading the image model (CLIP)".to_string()),
+                            );
+                            Some(back)
+                        };
                         // The one call in the image path that can fail on this
                         // file's own bytes — a header the dimension reader
                         // accepted and the decoder did not. Caught here, before a
@@ -3303,7 +3564,13 @@ impl Semlith {
                         // exactly as it found it and the next file is embedded.
                         // Everything after this line is the store's, and a
                         // failure there is the run's.
-                        let vector = match self.clip.embed_image(&path, &bytes, self.quiet) {
+                        let timed = std::time::Instant::now();
+                        let embedded = self.clip.embed_image(&path, &bytes, self.quiet);
+                        self.write_parts.add("images", timed);
+                        if let Some(back) = back {
+                            say_phase(&mut on_file, &report, total, back, None);
+                        }
+                        let vector = match embedded {
                             Ok(vector) => vector,
                             Err(e) => {
                                 failed(&mut report, &path, &e);
@@ -3665,13 +3932,15 @@ impl Semlith {
                     // lines is the longest thing a run does without reading a
                     // file: every window in flight is waited for and the shards
                     // are rewritten.
-                    say_file(
+                    say_phase(
                         &mut on_file,
                         &report,
                         total,
-                        &path,
-                        FileOutcome::Writing,
-                        Some("writing the index to disk".to_string()),
+                        progress::Phase::Drain,
+                        Some(format!(
+                            "checkpoint: {} chunks still embedding, then the index is written to disk",
+                            report.rows.saturating_sub(report.embedded)
+                        )),
                     );
                     let drained = self.hand_over(
                         scope,
@@ -3716,16 +3985,16 @@ impl Semlith {
                         report.stopped = true;
                         break;
                     }
-                    self.checkpoint(&mut completed)?;
-                    since_checkpoint = 0;
-                    say_file(
+                    say_phase(
                         &mut on_file,
                         &report,
                         total,
-                        &path,
-                        FileOutcome::Indexing,
-                        None,
+                        progress::Phase::Save,
+                        Some("checkpoint: writing the index to disk".to_string()),
                     );
+                    self.checkpoint(&mut completed)?;
+                    since_checkpoint = 0;
+                    say_phase(&mut on_file, &report, total, progress::Phase::Embed, None);
                 }
             }
             let last = prefetch
@@ -3734,6 +4003,18 @@ impl Semlith {
             drop(prefetch);
 
             if !report.stopped {
+                if report.rows > report.embedded || !window.ids.is_empty() {
+                    say_phase(
+                        &mut on_file,
+                        &report,
+                        total,
+                        progress::Phase::Drain,
+                        Some(format!(
+                            "{} chunks still embedding",
+                            (report.rows + window.ids.len()).saturating_sub(report.embedded)
+                        )),
+                    );
+                }
                 let drained = self.hand_over(
                     scope,
                     &mut stage,
@@ -3838,6 +4119,13 @@ impl Semlith {
         // every slice re-read every recorded path once per slice for an answer
         // that could not change until the walk was done.
         if sweep && report.pending.is_empty() && !report.stopped {
+            say_phase(
+                &mut on_file,
+                &report,
+                total,
+                progress::Phase::Finalize,
+                Some("dropping files gone from disk".to_string()),
+            );
             for key in store::all_paths(&self.db)? {
                 if !Path::new(&key).exists() {
                     for id in store::delete_file(&self.db, &key, now())? {
@@ -3864,6 +4152,13 @@ impl Semlith {
         // sees plenty of events on files whose bytes are identical, and each
         // rewrite is the whole index.
         if report.indexed > 0 || report.removed > 0 || !self.index.exists() {
+            say_phase(
+                &mut on_file,
+                &report,
+                total,
+                progress::Phase::Save,
+                Some("writing the index to disk".to_string()),
+            );
             let timed = std::time::Instant::now();
             self.save()?;
             self.write_parts.add("save", timed);
@@ -6391,6 +6686,31 @@ fn bytes_of(paths: &[PathBuf]) -> u64 {
         .iter()
         .map(|p| embeddable_bytes(p.metadata().ok()))
         .sum()
+}
+
+/// The chunks and images a list of files is expected to hold. See
+/// [`progress::estimate`].
+fn expected_of(
+    paths: &[PathBuf],
+    planned: Option<&std::collections::HashMap<String, u64>>,
+) -> (u64, usize) {
+    let mut chunks = 0;
+    let mut images = 0;
+    for path in paths {
+        let (n, image) = expected_one(path, planned);
+        chunks += n;
+        images += usize::from(image);
+    }
+    (chunks, images)
+}
+
+fn expected_one(
+    path: &Path,
+    planned: Option<&std::collections::HashMap<String, u64>>,
+) -> (u64, bool) {
+    let bytes = embeddable_bytes(path.metadata().ok());
+    let planned = planned.and_then(|p| p.get(path.to_string_lossy().as_ref()).copied());
+    progress::estimate(path, bytes, planned)
 }
 
 /// How many recently committed files a pass starts on before its walk is done.

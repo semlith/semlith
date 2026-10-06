@@ -871,11 +871,144 @@ pub fn snapshot() -> serde_json::Value {
         // Said, not implied: the CPU carries the run whatever its switch says
         // while no worker lane can and none is on its way.
         "cpu_fallback": !on.cpu && !accel_ready && !accel_coming,
+        // What each lane has managed here, measured or from its check: what
+        // a page estimates a run from before it starts.
+        "rates": rates(),
     })
 }
 
 fn round(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
+}
+
+// ----------------------------------------------------------------- lane rates
+
+/// The CPU lane's known-answer check, its speed remembered.
+fn check_cpu() -> Result<Check> {
+    let cache = crate::model_cache_dir()?;
+    let mut model = crate::embed::Model::Granite.load(cache, crate::chunk::MAX_CHARS / 2, true)?;
+    let check = known_answer("cpu", &crate::system::cpu_name(), "int8-cpu", |texts| {
+        let mut got = model
+            .embed(texts, Some(1))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        for vector in &mut got {
+            crate::normalize(vector);
+        }
+        Ok(got)
+    })?;
+    if check.passed {
+        note_known_answer("cpu", check.chunks_per_s);
+    }
+    Ok(check)
+}
+
+/// Give the CPU lane a figure if it has none, so the first estimate on a
+/// fresh machine says something rather than nothing: thirty-two chunks, a
+/// second or two, once.
+pub fn seed_cpu_rate() {
+    // Never a download for it: only a model already on this machine.
+    let cached = crate::model_cache_dir().is_ok_and(|cache| crate::embed::is_cached(&cache));
+    if cached && !rates().contains_key("cpu") {
+        let _ = check_cpu();
+    }
+}
+
+/// What one lane has managed on this machine.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, serde::Deserialize)]
+pub struct Rate {
+    /// Chunks per second, or images per second for `clip`.
+    pub per_s: f64,
+    /// `measured` from runs, or `known-answer` from the lane's check, which
+    /// embeds one chunk at a time and so undersells a batched lane.
+    pub source: RateSource,
+    /// Runs the measured figure is an average of.
+    #[serde(default)]
+    pub runs: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RateSource {
+    Measured,
+    KnownAnswer,
+}
+
+/// Every lane's remembered rate, by lane id (`clip` for images).
+pub fn rates() -> std::collections::BTreeMap<String, Rate> {
+    crate::home::lane_rates_path()
+        .ok()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_rates(rates: &std::collections::BTreeMap<String, Rate>) {
+    if let (Ok(path), Ok(bytes)) = (
+        crate::home::lane_rates_path(),
+        serde_json::to_vec_pretty(rates),
+    ) {
+        let _ = crate::home::write_private(&path, &bytes);
+    }
+}
+
+/// A run measured `per_s` on `lane`: folded into the remembered figure, half
+/// old and half new, so one odd run moves it but does not own it.
+pub fn note_rate(lane: &str, per_s: f64) {
+    if !per_s.is_finite() || per_s <= 0.0 {
+        return;
+    }
+    let mut all = rates();
+    let next = match all.get(lane) {
+        Some(old) if old.source == RateSource::Measured => Rate {
+            per_s: (old.per_s + per_s) / 2.0,
+            source: RateSource::Measured,
+            runs: old.runs.saturating_add(1),
+        },
+        _ => Rate {
+            per_s,
+            source: RateSource::Measured,
+            runs: 1,
+        },
+    };
+    all.insert(lane.to_string(), next);
+    save_rates(&all);
+}
+
+/// A lane's known-answer speed, kept only until a run measures the lane.
+pub fn note_known_answer(lane: &str, per_s: f64) {
+    if !per_s.is_finite() || per_s <= 0.0 {
+        return;
+    }
+    let mut all = rates();
+    if all
+        .get(lane)
+        .is_some_and(|r| r.source == RateSource::Measured)
+    {
+        return;
+    }
+    all.insert(
+        lane.to_string(),
+        Rate {
+            per_s,
+            source: RateSource::KnownAnswer,
+            runs: 0,
+        },
+    );
+    save_rates(&all);
+}
+
+/// Chunks per second the lanes switched on here are expected to manage
+/// together, or `None` when none of them has a figure yet. The prior a run's
+/// time left starts from.
+pub fn expected_rate() -> Option<f64> {
+    let on = enabled();
+    let known = rates();
+    let sum: f64 = ["cpu", "ane", "gpu", "cuda", "trt", "openvino", "llama"]
+        .iter()
+        .filter(|lane| on.lane(lane))
+        .filter_map(|lane| known.get(*lane).map(|r| r.per_s))
+        .sum();
+    (sum > 0.0).then_some(sum)
 }
 
 /// The names `semlith accel on|off` takes.
@@ -1275,20 +1408,7 @@ fn reason_of(status: &Status) -> String {
 pub fn check_all(say: impl Fn(&str)) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     say("checking the CPU lane");
-    let cpu = (|| -> Result<Check> {
-        let cache = crate::model_cache_dir()?;
-        let mut model =
-            crate::embed::Model::Granite.load(cache, crate::chunk::MAX_CHARS / 2, true)?;
-        known_answer("cpu", &crate::system::cpu_name(), "int8-cpu", |texts| {
-            let mut got = model
-                .embed(texts, Some(1))
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            for vector in &mut got {
-                crate::normalize(vector);
-            }
-            Ok(got)
-        })
-    })();
+    let cpu = check_cpu();
     out.push(match cpu {
         Ok(check) => serde_json::to_value(check).unwrap_or_default(),
         Err(e) => serde_json::json!({ "lane": "cpu", "passed": false, "reason": format!("{e:#}") }),
@@ -1658,6 +1778,9 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
             bail!("unavailable — {reason}");
         }
         bail!("{reason}");
+    }
+    if let Some(per_s) = hello["chunks_per_s"].as_f64() {
+        note_known_answer(lane.id, per_s);
     }
     if let Some(device) = hello["device"].as_str() {
         *lane.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(device.to_string());

@@ -1598,8 +1598,21 @@ fn run() -> Result<()> {
                     if quiet {
                         return;
                     }
-                    if p.outcome == semlith::FileOutcome::Indexing {
+                    if matches!(
+                        p.outcome,
+                        semlith::FileOutcome::Indexing | semlith::FileOutcome::Image
+                    ) {
                         eprintln!("  + {}", display(path));
+                    }
+                    if p.outcome == semlith::FileOutcome::Phase {
+                        eprintln!(
+                            "  · {}{}",
+                            p.phase.as_str(),
+                            p.phase_detail
+                                .as_deref()
+                                .map(|d| format!(": {d}"))
+                                .unwrap_or_default()
+                        );
                     }
                     if p.outcome == semlith::FileOutcome::Refused {
                         eprintln!("  - {}", display(path));
@@ -4126,35 +4139,30 @@ fn read_fleet(flags: &[PathBuf], cwd: &Path, all: bool) -> Result<Fleet> {
 /// How often an index run says where it has got to.
 const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Where the run is, how fast it is going, and how much longer it has.
-///
-/// The estimate is the time so far over the share done (read and embedded,
-/// [`semlith::share_done`]), applied to the share left, which is wrong whenever
-/// the rest of the corpus does not look like the part already done — so it is
-/// printed as an approximation and never as a countdown. Taken from files read
-/// alone, it read `~0s left` once every file was read and embedding still had
-/// minutes to go.
+/// Where the run is, how fast it is going, and how much longer it has: the
+/// engine's own share done and time left ([`semlith::progress`]), the same
+/// figures the portal and Semlith Cloud show.
 fn predict(p: semlith::IndexProgress, elapsed: std::time::Duration) -> String {
-    // A run waiting for a lane has no rate to give: it says what it waits for.
-    if let Some(waiting) = semlith::accel::waiting_for() {
-        return format!(
-            "{}/{} files, {} chunks, {waiting}",
-            p.scanned, p.total, p.chunks
-        );
-    }
     let secs = elapsed.as_secs_f32().max(0.001);
     let rate = p.chunks as f32 / secs;
-    // Under 2 % done, the time so far says nothing about the rest: the first
-    // file can be the model loading.
-    let done = p.share_done() as f32;
-    let left = if done < 0.02 {
-        "estimating…".to_string()
+    let images = if p.images_total > 0 {
+        format!(", {}/{} images", p.images, p.images_total)
     } else {
-        format!("~{} left", human_duration(secs * (1.0 - done) / done))
+        String::new()
+    };
+    // A run waiting for a lane has no rate to give: it says what it waits for.
+    let left = match (&p.phase, p.eta_ms) {
+        (semlith::progress::Phase::Lane, _) => p.phase_detail.clone().unwrap_or_default(),
+        (_, Some(ms)) => format!("~{} left", human_duration(ms as f32 / 1000.0)),
+        (_, None) => "estimating…".to_string(),
     };
     format!(
-        "{}/{} files, {} chunks, {rate:.0} chunks/s, {left}",
-        p.scanned, p.total, p.chunks,
+        "{}/{} files, {}/{} chunks{images}, {rate:.0} chunks/s, {:.0}%, {left}",
+        p.scanned,
+        p.total,
+        p.chunks,
+        p.expected_chunks,
+        p.progress * 100.0,
     )
 }
 

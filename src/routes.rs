@@ -4501,6 +4501,15 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
     if let Some(id) = run {
         match action {
             Some("start") => {
+                // Decisions a page recorded just before starting (`defer`)
+                // are this run's to apply: said as its first phase.
+                if let Some(n) = body
+                    .get("decisions")
+                    .and_then(Value::as_u64)
+                    .filter(|n| *n > 0)
+                {
+                    state.note_decisions(id, n as usize);
+                }
                 return match state.start_reviewed(id) {
                     Ok(()) => Response::json(&json!({ "started": id })),
                     Err(e) => Response::error(409, &e.to_string()),
@@ -4956,26 +4965,49 @@ fn decide_files(state: &Arc<State>, request: &Request) -> Response {
         Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
-    let results: Vec<Value> = files
+    // Recorded in one writer job, however many; the files a decision lets in
+    // (or puts back on the list) are then indexed as one run with a card of
+    // its own, unless the caller defers that to a run it is about to start.
+    let defer = body.get("defer").and_then(Value::as_bool).unwrap_or(false);
+    let paths: Vec<PathBuf> = files
         .iter()
         .filter_map(Value::as_str)
-        .map(|path| {
-            let progress = match mode {
-                Some(mode) => state.accept(&store, PathBuf::from(path), mode, "portal"),
-                None => state.revoke(&store, PathBuf::from(path)),
-            };
-            match progress.map_err(|e| e.to_string()).and_then(answer_of) {
-                Ok(_) => json!({ "path": path, "ok": true, "decision": decision }),
-                Err(e) => json!({ "path": path, "ok": false, "error": e }),
-            }
+        .map(PathBuf::from)
+        .collect();
+    let answer = match state
+        .decide(&store, paths, mode, "portal")
+        .map_err(|e| e.to_string())
+        .and_then(answer_of)
+    {
+        Ok(answer) => answer,
+        Err(e) => return Response::error(500, &e),
+    };
+    let results: Vec<Value> = answer["results"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut r| {
+            r["decision"] = json!(decision);
+            r
         })
         .collect();
     let failed = results.iter().filter(|r| r["ok"] == json!(false)).count();
+    let applied = results.len() - failed;
+    let to_index: Vec<PathBuf> = results
+        .iter()
+        .filter(|r| r["ok"] == json!(true))
+        .filter_map(|r| r["stored"].as_str().map(PathBuf::from))
+        .collect();
+    let run = (!defer && decision != "out" && !to_index.is_empty())
+        .then(|| state.index_decided(&store, to_index, applied));
     Response::json(&json!({
         "store": store.name,
         "decision": decision,
         "results": results,
         "failed": failed,
+        "applied": applied,
+        "run": run,
     }))
 }
 

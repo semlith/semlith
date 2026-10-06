@@ -192,6 +192,12 @@ impl Clip {
     /// apps often save them) then fails as a malformed JPEG. The bytes decide
     /// the format here, as they already did for [`dimensions`]. `path` only
     /// names the file in an error.
+    /// Whether the vision encoder is in memory: the first image of a run
+    /// waits for it to load, and the run says so.
+    pub fn loaded(&self) -> bool {
+        self.vision.is_some()
+    }
+
     pub fn embed_image(&mut self, path: &Path, bytes: &[u8], quiet: bool) -> Result<Vec<f32>> {
         let vision = match self.vision.as_mut() {
             Some(model) => model,
