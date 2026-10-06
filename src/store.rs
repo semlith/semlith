@@ -311,6 +311,10 @@ fn open_once(path: &Path) -> Result<Connection> {
     // and a file refused after it was indexed -- a secret appeared in it -- is
     // exactly the one whose old text must not linger (#148).
     db.pragma_update(None, "secure_delete", "ON")?;
+    // The writer's inserts run once per chunk, symbol and edge, each through
+    // the statement cache (#198); the default of 16 is shared with every
+    // other cached read.
+    db.set_prepared_statement_cache_capacity(64);
     defensive(&db)?;
     db.execute_batch(SCHEMA)?;
     db.execute_batch(GLOB_INDEX)?;
@@ -886,7 +890,7 @@ pub fn delete_file(db: &Connection, path: &str, now: i64) -> Result<Vec<u64>> {
 /// stopped run's undo, whose files were never the store's to remember.
 pub fn delete_file_unretired(db: &Connection, path: &str) -> Result<Vec<u64>> {
     let ids: Vec<u64> = {
-        let mut stmt = db.prepare(
+        let mut stmt = db.prepare_cached(
             "SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.path = ?1",
         )?;
         let rows = stmt.query_map(params![path], |r| r.get::<_, i64>(0))?;
@@ -895,7 +899,8 @@ pub fn delete_file_unretired(db: &Connection, path: &str) -> Result<Vec<u64>> {
             .map(|i| i as u64)
             .collect()
     };
-    db.execute("DELETE FROM files WHERE path = ?1", params![path])?;
+    db.prepare_cached("DELETE FROM files WHERE path = ?1")?
+        .execute(params![path])?;
     Ok(ids)
 }
 
@@ -909,14 +914,14 @@ pub fn delete_file_unretired(db: &Connection, path: &str) -> Result<Vec<u64>> {
 /// A file with no symbols copies nothing, and a store opened by a binary that
 /// never wrote this table simply has none to copy.
 fn retire_symbols(db: &Connection, path: &str, now: i64) -> Result<()> {
-    db.execute(
+    db.prepare_cached(
         "INSERT INTO symbols_past
              (path, kind, name, qualified, start_line, end_line, content_hash, retired_at)
          SELECT f.path, s.kind, s.name, s.qualified, s.start_line, s.end_line, f.hash, ?2
          FROM symbols s JOIN files f ON f.id = s.file_id
          WHERE f.path = ?1",
-        params![path, now],
-    )?;
+    )?
+    .execute(params![path, now])?;
     Ok(())
 }
 
@@ -1032,10 +1037,8 @@ pub struct PastSymbol {
 }
 
 pub fn insert_file(db: &Connection, path: &str, hash: &str, bytes: u64, now: i64) -> Result<i64> {
-    db.execute(
-        "INSERT INTO files (path, hash, bytes, indexed_at) VALUES (?1, ?2, ?3, ?4)",
-        params![path, hash, bytes as i64, now],
-    )?;
+    db.prepare_cached("INSERT INTO files (path, hash, bytes, indexed_at) VALUES (?1, ?2, ?3, ?4)")?
+        .execute(params![path, hash, bytes as i64, now])?;
     Ok(db.last_insert_rowid())
 }
 
@@ -1047,20 +1050,16 @@ pub fn insert_file(db: &Connection, path: &str, hash: &str, bytes: u64, now: i64
 /// and a file whose language has no grammar both arrive at the store with no
 /// symbols at all.
 pub fn set_file_graph(db: &Connection, file_id: i64, state: &str) -> Result<()> {
-    db.execute(
-        "UPDATE files SET graph = ?1 WHERE id = ?2",
-        params![state, file_id],
-    )?;
+    db.prepare_cached("UPDATE files SET graph = ?1 WHERE id = ?2")?
+        .execute(params![state, file_id])?;
     Ok(())
 }
 
 /// Record a file's units (see `chunk::COUNTED`), by row id or, for a file
 /// whose row is already there, by path.
 pub fn set_file_units(db: &Connection, file_id: i64, units: i64) -> Result<()> {
-    db.execute(
-        "UPDATE files SET units = ?1 WHERE id = ?2",
-        params![units, file_id],
-    )?;
+    db.prepare_cached("UPDATE files SET units = ?1 WHERE id = ?2")?
+        .execute(params![units, file_id])?;
     Ok(())
 }
 
@@ -1237,11 +1236,11 @@ pub fn insert_chunk(
     end_line: u32,
     text: &str,
 ) -> Result<i64> {
-    db.execute(
+    db.prepare_cached(
         "INSERT INTO chunks (file_id, ord, start_line, end_line, text)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![file_id, ord as i64, start_line, end_line, text],
-    )?;
+    )?
+    .execute(params![file_id, ord as i64, start_line, end_line, text])?;
     Ok(db.last_insert_rowid())
 }
 
@@ -1821,19 +1820,19 @@ pub fn insert_symbol(
     chunk_id: Option<i64>,
     symbol: &crate::graph::Symbol,
 ) -> Result<i64> {
-    db.execute(
+    db.prepare_cached(
         "INSERT INTO symbols (file_id, chunk_id, kind, name, qualified, start_line, end_line)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            file_id,
-            chunk_id,
-            symbol.kind,
-            symbol.name,
-            symbol.qualified,
-            symbol.start_line,
-            symbol.end_line
-        ],
-    )?;
+    )?
+    .execute(params![
+        file_id,
+        chunk_id,
+        symbol.kind,
+        symbol.name,
+        symbol.qualified,
+        symbol.start_line,
+        symbol.end_line
+    ])?;
     Ok(db.last_insert_rowid())
 }
 
@@ -1846,11 +1845,11 @@ pub fn insert_edge(
     hint: Option<&str>,
     line: Option<u32>,
 ) -> Result<()> {
-    db.execute(
+    db.prepare_cached(
         "INSERT INTO edges (src, dst, kind, confidence, hint, line)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![src, dst, kind, confidence, hint, line],
-    )?;
+    )?
+    .execute(params![src, dst, kind, confidence, hint, line])?;
     Ok(())
 }
 
