@@ -53,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed known-answer check names every chunk under the floor, not only the
   worst (#197).
 - `semlith setup` says what `--hook-mode gate` buys where the choice is made,
-  and the README records the measurement behind it (#189).
+  and docs/clients.md records the measurement behind it (#189).
 
 ### Security
 

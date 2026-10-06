@@ -458,8 +458,7 @@ failed and the command that shows it, repairs a registration that cannot launch,
 and catches what nothing else does — a server registered at user scope and
 switched off for one directory, which every check run from elsewhere calls
 healthy. `--brief` is one line and an exit code for a shell prompt or a
-session-start hook, and [docs/clients.md](docs/clients.md) has that snippet,
-and why on code only `setup --hook-mode gate` makes agents call semlith (#189).
+session-start hook, and [docs/clients.md](docs/clients.md) has that snippet.
 
 ## What gets indexed
 
