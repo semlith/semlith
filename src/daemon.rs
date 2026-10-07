@@ -3024,6 +3024,10 @@ pub struct State {
     /// past 30 s on a busy runner (drive rc4.5, rc4.6 on Ubuntu).
     readers_stale: AtomicBool,
     mcp_stale: AtomicBool,
+    /// Held while a store is looked up and, if absent, opened: two requests
+    /// for the same new folder raced, and the second found the first's lock
+    /// and was refused with "being indexed by" this daemon (drive rc4.5).
+    opening: Mutex<()>,
     /// Whether retrievals are recorded into each store's `retrievals` table.
     ///
     /// On unless `--no-ledger` or `SEMLITH_LEDGER=0` says otherwise, which
@@ -3883,6 +3887,7 @@ impl State {
     /// that another process might already own.
     pub fn open_store(self: &Arc<Self>, dir: &Path, expect_run: bool) -> Result<Arc<Store>> {
         let dir = crate::canonical(dir);
+        let _opening = self.opening.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(open) = self.stores().into_iter().find(|s| s.dir == dir) {
             return Ok(open);
         }
@@ -4369,6 +4374,7 @@ pub fn run(
         mcp_fleet: Mutex::new(None),
         readers_stale: AtomicBool::new(false),
         mcp_stale: AtomicBool::new(false),
+        opening: Mutex::new(()),
         ledger,
         schedules: crate::schedule::Runner::new(),
         gone: Mutex::new(Vec::new()),
@@ -6419,6 +6425,7 @@ mod tests {
             mcp_fleet: Mutex::new(None),
             readers_stale: AtomicBool::new(false),
             mcp_stale: AtomicBool::new(false),
+            opening: Mutex::new(()),
             ledger: false,
             schedules: crate::schedule::Runner::new(),
             gone: Mutex::new(Vec::new()),
