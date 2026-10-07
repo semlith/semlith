@@ -4665,6 +4665,16 @@ fn print_gpu_checks(checks: &[serde_json::Value]) {
                 check["chunks_per_s"].as_f64().unwrap_or(0.0),
             ),
         }
+        if let Some(att) = check["attestation"].as_object() {
+            println!(
+                "       attestation {}: {}",
+                att.get("state").and_then(|v| v.as_str()).unwrap_or("?"),
+                att.get("summary")
+                    .or(att.get("reason"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+            );
+        }
     }
 }
 

@@ -156,17 +156,23 @@ fn pump(
                     let _ = conn.write_tls(&mut sock);
                     return fail(&incoming, format!("the TLS session: {e}"));
                 }
-                loop {
-                    match conn.reader().read(&mut chunk) {
-                        Ok(0) => return fail(&incoming, "the peer closed the connection".into()),
-                        Ok(n) => received.extend_from_slice(&chunk[..n]),
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                        Err(e) => return fail(&incoming, format!("the connection: {e}")),
-                    }
-                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => return fail(&incoming, format!("the connection: {e}")),
+        }
+        // Every pass, not only after a read: a peer's first frame can arrive
+        // with the last handshake message, and the handshake already decrypted
+        // it into the session's buffer, where no later read would look.
+        loop {
+            match conn.reader().read(&mut chunk) {
+                Ok(0) => return fail(&incoming, "the peer closed the connection".into()),
+                Ok(n) => {
+                    moved = true;
+                    received.extend_from_slice(&chunk[..n]);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return fail(&incoming, format!("the connection: {e}")),
+            }
         }
         // Whole frames out of what has arrived.
         let mut at = 0;
@@ -401,6 +407,18 @@ pub struct Serve {
 
 /// `semlith worker`: serve until killed.
 pub fn serve(opts: Serve) -> Result<()> {
+    // The lane's components fetched now, so a client's first connection does
+    // not wait for a download, and a lane this machine cannot run is said at
+    // start.
+    let lane_args = crate::accel::worker_command(&opts.lane)?;
+    let hello = crate::accel::check_lane(&opts.lane)
+        .with_context(|| format!("the {} lane failed its check on this machine", opts.lane))?;
+    eprintln!(
+        "semlith worker: the {} lane passed its check on {} (cosine {})",
+        opts.lane,
+        hello["device"].as_str().unwrap_or("this machine"),
+        hello["cosine"]
+    );
     let token = std::env::var(TOKEN_ENV)
         .ok()
         .filter(|t| t.len() >= 16)
@@ -430,6 +448,7 @@ pub fn serve(opts: Serve) -> Result<()> {
         &hex(&Sha256::digest(&certificate))[..16]
     );
     let opts = Arc::new(opts);
+    let lane_args = Arc::new(lane_args);
     let token = Arc::new(token);
     let certificate = Arc::new(certificate);
     let open = Arc::new(AtomicUsize::new(0));
@@ -444,16 +463,17 @@ pub fn serve(opts: Serve) -> Result<()> {
             continue;
         }
         open.fetch_add(1, Ordering::SeqCst);
-        let (config, opts, token, certificate, open) = (
+        let (config, opts, lane_args, token, certificate, open) = (
             config.clone(),
             opts.clone(),
+            lane_args.clone(),
             token.clone(),
             certificate.clone(),
             open.clone(),
         );
         std::thread::spawn(move || {
             let started = Instant::now();
-            match connection(sock, config, &opts, &token, &certificate) {
+            match connection(sock, config, &opts, &lane_args, &token, &certificate) {
                 Ok((batches, rows)) => eprintln!(
                     "semlith worker: {peer} done after {:.0} s, {batches} batches, {rows} rows",
                     started.elapsed().as_secs_f64()
@@ -471,6 +491,7 @@ fn connection(
     mut sock: TcpStream,
     config: Arc<rustls::ServerConfig>,
     opts: &Serve,
+    lane_args: &[String],
     token: &str,
     certificate: &[u8],
 ) -> Result<(u64, u64)> {
@@ -547,7 +568,7 @@ fn connection(
 
     // The lane's own worker, exactly as a local run starts it.
     let mut child = std::process::Command::new(std::env::current_exe()?)
-        .args(["__embed-worker", &opts.lane])
+        .args(lane_args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -636,17 +657,17 @@ pub fn config() -> Option<Config> {
 pub fn missing() -> Option<String> {
     let s = settings();
     let absent: Vec<&str> = [
-        ("an endpoint", s.endpoint.is_none()),
-        ("a token", s.token.is_none()),
-        ("an attestation policy", s.policy.is_none()),
+        ("endpoint", s.endpoint.is_none()),
+        ("token", s.token.is_none()),
+        ("attestation policy", s.policy.is_none()),
     ]
     .into_iter()
     .filter_map(|(what, gone)| gone.then_some(what))
     .collect();
     (!absent.is_empty()).then(|| {
         format!(
-            "the remote lane has no {}: semlith accel on remote --endpoint host:port --token-file FILE --policy FILE",
-            absent.join(", no ")
+            "the remote lane is not set up (missing: {}); semlith accel on remote --endpoint host:port --token-file FILE --policy FILE",
+            absent.join(", ")
         )
     })
 }

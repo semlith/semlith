@@ -726,7 +726,6 @@ pub fn unavailable_here(id: &str) -> Option<String> {
             "the {} lane is built for Windows and Linux on x86_64",
             spec(id).map_or(id, |s| s.label)
         )),
-        "remote" => crate::remote::missing(),
         "llama" if !(apple || x86_windows_or_linux) => {
             Some("no llama.cpp build is pinned for this platform".into())
         }
@@ -1144,7 +1143,8 @@ pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) 
         ("gpu", _) => settings.accelerators.gpu = Some(on),
         ("gpu-beside-ane", _) => settings.accelerators.gpu_beside_ane = Some(on),
         ("remote", _) => {
-            if on && let Some(why) = unavailable_here("remote") {
+            // Not this machine's hardware but its settings: said at the switch.
+            if on && let Some(why) = crate::remote::missing() {
                 bail!("{why}");
             }
             settings.accelerators.remote = Some(on);
@@ -1564,6 +1564,8 @@ pub fn check_all(say: impl Fn(&str)) -> Vec<serde_json::Value> {
                 "cosine": hello["cosine"],
                 "chunks_per_s": hello["chunks_per_s"],
                 "passed": true,
+                // What the remote lane's worker proved before the check ran.
+                "attestation": (id == "remote").then(crate::remote::attestation).flatten(),
             })),
             Err(e) => {
                 let text = format!("{e:#}");
@@ -1594,6 +1596,28 @@ fn adapter_choice() -> Option<String> {
 }
 
 /// What a lane's worker is started with: its lane name and a directory.
+/// Start lane `id` once and run its known-answer check: what `semlith worker`
+/// does before it serves anyone, so a lane that cannot run here is said at
+/// start rather than to the first client. The hello on success.
+pub fn check_lane(id: &str) -> Result<serde_json::Value> {
+    let spec = spec(id).with_context(|| format!("there is no lane called {id}"))?;
+    let lane = Arc::new(Lane::new(spec));
+    let (_worker, hello) = start(&lane)?;
+    Ok(hello)
+}
+
+/// The `__embed-worker` arguments for lane `id`, fetching what it needs:
+/// what `semlith worker` starts for each connection, as a local run would.
+pub fn worker_command(id: &str) -> Result<Vec<String>> {
+    let spec = spec(id).with_context(|| format!("there is no lane called {id}"))?;
+    if id == "remote" {
+        bail!("a worker serves a lane of its own machine, not the remote lane");
+    }
+    let mut args = vec!["__embed-worker".to_string()];
+    args.extend(worker_args(&Arc::new(Lane::new(spec)))?);
+    Ok(args)
+}
+
 fn worker_args(lane: &Arc<Lane>) -> Result<Vec<String>> {
     if let Some(why) = unavailable_here(lane.id) {
         bail!("unavailable — {why}");
@@ -1842,7 +1866,7 @@ fn spawn(lane: &Arc<Lane>) -> Result<Worker> {
 }
 
 /// Wait for a started worker's hello, and with it the known-answer check.
-fn hello(lane: &Arc<Lane>, worker: Worker) -> Result<(Worker, serde_json::Value)> {
+fn hello(lane: &Arc<Lane>, mut worker: Worker) -> Result<(Worker, serde_json::Value)> {
     // The hello, and with it the known-answer check. Bounded like a batch
     // once the models are loaded; a first load says how far it has got.
     // The deadline is for silence, not for the whole start: every progress
@@ -1907,7 +1931,16 @@ fn hello(lane: &Arc<Lane>, worker: Worker) -> Result<(Worker, serde_json::Value)
         }
         bail!("{reason}");
     }
-    if let Some(per_s) = hello["batch_per_s"].as_f64() {
+    // The remote worker's own figure was timed beside its GPU, with no
+    // network in it: 1,851 chunks/s on the G4 against about 220 reaching a
+    // laptop over a tunnel, and a time left of "1 s" for a whole run. The
+    // lane times the fixture over its own channel instead.
+    let measured = if lane.id == "remote" {
+        time_fixture(&mut worker)?
+    } else {
+        hello["batch_per_s"].as_f64()
+    };
+    if let Some(per_s) = measured {
         note_known_answer(lane.id, per_s);
     }
     if let Some(device) = hello["device"].as_str() {
@@ -1917,6 +1950,36 @@ fn hello(lane: &Arc<Lane>, worker: Worker) -> Result<(Worker, serde_json::Value)
         *lane.variant.lock().unwrap_or_else(|e| e.into_inner()) = variant;
     }
     Ok((worker, hello))
+}
+
+/// The fixture's 32 chunks as one batch through a started worker, timed: the
+/// lane's first rate, network and all.
+fn time_fixture(worker: &mut Worker) -> Result<Option<f64>> {
+    let cache = crate::model_cache_dir()?;
+    let tokenizer = crate::session::tokenizer(&cache)?;
+    let (texts, _) = fixture();
+    let ids = texts
+        .iter()
+        .map(|text| crate::session::encode(&tokenizer, text))
+        .collect::<Result<Vec<_>>>()?;
+    let started = Instant::now();
+    let stdin = worker
+        .stdin
+        .as_mut()
+        .context("the worker is being let go")?;
+    write_frame(stdin, &encode_ids(&ids)).context("sending the fixture")?;
+    let frame = match worker.answers.recv_timeout(deadline()) {
+        Ok(Ok(frame)) => frame,
+        Ok(Err(e)) => bail!("the worker exited during the fixture: {e}"),
+        Err(_) => bail!(
+            "the worker did not answer the fixture within {} s",
+            deadline().as_secs()
+        ),
+    };
+    decode_vectors(&frame, ids.len())?;
+    Ok(Some(
+        ids.len() as f64 / started.elapsed().as_secs_f64().max(1e-6),
+    ))
 }
 
 /// The slowest batched rate a worker lane may show on the fixture and still be

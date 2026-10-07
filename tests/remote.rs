@@ -56,8 +56,9 @@ impl Worker {
             endpoint,
             log,
         };
-        // Its banner, bounded: it binds before it prints.
-        let banner = worker.wait_for("semlith worker 0.", Duration::from_secs(30));
+        // Its banner, bounded: it checks its lane, then binds and prints. The
+        // check loads a model, which takes a while beside the other tests.
+        let banner = worker.wait_for("semlith worker 0.", Duration::from_secs(180));
         assert!(banner.is_some(), "the worker never said it was listening");
         worker
     }
