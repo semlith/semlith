@@ -187,6 +187,12 @@ pub fn settings_path() -> Result<PathBuf> {
 /// The price table `semlith prices update` downloaded, when it has been run.
 /// Tool-written state like `settings.json`; delete it to go back to the
 /// table built into the binary.
+/// What each embedding lane has managed on this machine, in chunks per
+/// second: what an estimate before a run is taken from.
+pub fn lane_rates_path() -> Result<PathBuf> {
+    Ok(home_or_error()?.join("lane-rates.json"))
+}
+
 pub fn prices_path() -> Result<PathBuf> {
     Ok(home_or_error()?.join("prices.json"))
 }

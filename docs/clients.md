@@ -130,6 +130,13 @@ lookups until the session has made one semlith call, at most twice, then only
 nudges; `--hook-mode hard` always refuses grep, rg and find in an indexed
 folder. `--strict` is kept as the name for `gate`.
 
+Why gate exists: on code, an agent with Grep reaches for Grep. Measured on 50
+held-out code questions with Opus 5.5, no wording of the instructions, the tool
+descriptions or the soft hook moved it (0 to 5 of 50 sessions called semlith).
+Under `gate`, 44 of 50 did, with two more correct answers and about 31 % more
+cost a session. It stays opt-in. On documents it is the other way round: 116 of
+127 sessions called semlith unforced (#189).
+
 ```json hook path=~/.claude/settings.json
 {
   "hooks": {

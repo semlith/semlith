@@ -132,6 +132,7 @@ pub fn run(
             waiting: &|| false,
             defer: &|_| false,
             roots_now: &Vec::new,
+            events: None,
         },
         progress,
         |_| Ok(Vec::new()),
@@ -156,6 +157,10 @@ pub struct Held<'a> {
     /// watched yet and exists is watched from then on, so a folder added to a
     /// running store is followed without a restart (#180).
     pub roots_now: &'a dyn Fn() -> Vec<PathBuf>,
+    /// Raised whenever a change arrives and lowered when the loop is about to
+    /// wait for the next: a run holding the writer reads it to decide whether
+    /// anything is waiting for its turn.
+    pub events: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// [`run`] for a caller that already holds the store's write lock and has work
@@ -177,6 +182,7 @@ pub fn run_held(
     let mut roots: Vec<PathBuf> = roots.iter().map(|r| canonical(r)).collect();
 
     let (tx, rx) = mpsc::channel();
+    let raised = held.events.clone();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         // Dropped here, at the source, so every reader of `rx` sees changes
         // only. See `is_change`.
@@ -184,6 +190,9 @@ pub fn run_held(
             && !is_change(&event.kind)
         {
             return;
+        }
+        if let Some(raised) = &raised {
+            raised.store(true, Ordering::Relaxed);
         }
         // A send failure means the loop is gone, which is a shutdown, not an
         // error worth reporting from inside the backend's thread.
@@ -294,6 +303,11 @@ pub fn run_held(
             continue;
         }
 
+        // Everything that arrived so far is about to be taken: what arrives
+        // after this raises it again.
+        if let Some(events) = &held.events {
+            events.store(false, Ordering::Relaxed);
+        }
         let first = match rx.recv_timeout(IDLE_TICK) {
             Ok(Ok(event)) => event,
             Ok(Err(e)) => {

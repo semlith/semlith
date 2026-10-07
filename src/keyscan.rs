@@ -604,6 +604,11 @@ pub fn dummy_rule(value: &str, body: &str) -> Option<&'static str> {
 /// `-`, `_` or `.` segments, because four letters in one case still turn up by
 /// chance; seven or more (`EXAMPLE`, `REDACTED`) do not, and sit anywhere, as
 /// in `github_pat_11EXAMPLE0…`.
+///
+/// Even at a segment's edge a short marker counts only when the rest of the
+/// segment is not generator-shaped: a live Slack secret opens on `FAKE` about
+/// once in 3.7 million, and read as a dummy it was indexed. `FAKEtokenvalue`,
+/// `FAKE000000000000` and `fake` alone still are markers.
 fn has_marker(body: &str, marker: &str) -> bool {
     let lower = marker.to_ascii_lowercase();
     let segments = || body.split(['-', '_', '.']);
@@ -611,9 +616,23 @@ fn has_marker(body: &str, marker: &str) -> bool {
         if marker.len() >= 7 {
             body.contains(m)
         } else {
-            segments().any(|seg| seg.starts_with(m) || seg.ends_with(m))
+            segments().any(|seg| {
+                seg.strip_prefix(m)
+                    .or_else(|| seg.strip_suffix(m))
+                    .is_some_and(|rest| !generated(rest))
+            })
         }
     })
+}
+
+/// Whether a stretch reads as a generator's output: twelve or more
+/// alphanumerics mixing upper and lower case, or letters and digits.
+fn generated(s: &str) -> bool {
+    let has = |f: fn(&char) -> bool| s.chars().any(|c| f(&c));
+    s.len() >= 12
+        && s.chars().all(|c| c.is_ascii_alphanumeric())
+        && ((has(char::is_ascii_uppercase) && has(char::is_ascii_lowercase))
+            || (has(char::is_ascii_alphabetic) && has(char::is_ascii_digit)))
 }
 
 /// Whether the value has the length its issuer documents, when that is known.
@@ -1310,6 +1329,16 @@ mod tests {
         assert!(dummy_rule("x", "FAKEFAKEFAKEFAKE").is_some());
         assert!(dummy_rule("x", "11EXAMPLE0aaaaaaaaaaaa_aaaa").is_some());
         assert!(dummy_rule("x", "1234-fake-token").is_some());
+        // A random segment that opens or closes on a marker by chance: the
+        // forged Slack value of CI run 37407715809 on Windows.
+        assert!(dummy_rule("x", "FAKEve8w49OZUI0chMPclUPm").is_none());
+        assert!(dummy_rule("x", "ve8w49OZUI0chMPclUPmFAKE").is_none());
+        assert!(dummy_rule("x", "dummyQ3vT8kLm2Rx9wYp").is_none());
+        // Hand-written ones still are: the rest is a word, one case, or digits.
+        assert!(dummy_rule("x", "FAKEtokenvalue").is_some());
+        assert!(dummy_rule("x", "FAKE000000000000").is_some());
+        assert!(dummy_rule("x", "FAKEcccccccccccc").is_some());
+        assert!(dummy_rule("x", "sk_test_DUMMY").is_some());
         let slack = crate::filter::SHAPES
             .iter()
             .position(|s| s.provider == "slack")

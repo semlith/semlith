@@ -73,8 +73,17 @@ function morph(a, b) {
   }
   const keep = a.getAttribute("data-morph-keep");
   if (keep && keep === b.getAttribute("data-morph-keep")) return;
-  for (const { name } of [...a.attributes]) if (!b.hasAttribute(name)) a.removeAttribute(name);
-  for (const { name, value } of [...b.attributes]) if (a.getAttribute(name) !== value) a.setAttribute(name, value);
+  // A kept subtree that fills itself (a log) is never patched from another's.
+  if (keep || b.hasAttribute("data-morph-keep")) {
+    a.replaceWith(b);
+    return;
+  }
+  // `style` goes through the CSSOM: the CSP drops a style attribute written
+  // with setAttribute, so a patched bar kept its first width while its
+  // percentage climbed (walk 3).
+  for (const { name } of [...a.attributes]) if (name !== "style" && !b.hasAttribute(name)) a.removeAttribute(name);
+  for (const { name, value } of [...b.attributes]) if (name !== "style" && a.getAttribute(name) !== value) a.setAttribute(name, value);
+  if (a.style && b.style && a.style.cssText !== b.style.cssText) a.style.cssText = b.style.cssText;
   if ("value" in b && a !== document.activeElement && a.value !== b.value) a.value = b.value;
   if ("checked" in b && a.checked !== b.checked) a.checked = b.checked;
   for (const [type, fn] of Object.entries(b.__h || {})) listen(a, type, fn);
@@ -143,12 +152,48 @@ function setText(node, value) {
   return node;
 }
 
-/** A bar whose fill is `pct` of its track. The width is set through the CSSOM. */
-function bar(pct, cls) {
+/** A bar whose fill is `pct` of its track. The width is set through the CSSOM.
+ * Every bar has a hover tip: `tip` (a title, and `tipRows` as
+ * "label::value||…") when the caller knows what the bar measures, its
+ * percentage otherwise. */
+function bar(pct, cls, tip, tipRows) {
   const fillNode = el("i");
-  fillNode.style.width = `${Math.max(0, Math.min(100, pct || 0)).toFixed(1)}%`;
-  return el("div", { class: cls ? `bar ${cls}` : "bar" }, fillNode);
+  const clamped = Math.max(0, Math.min(100, pct || 0));
+  fillNode.style.width = `${clamped.toFixed(1)}%`;
+  return el("div", { class: cls ? `bar ${cls}` : "bar", "data-tip": tip || `${Math.round(clamped)}%`, "data-tip-rows": tipRows || null }, fillNode);
 }
+
+/* Page state survives a reload. Each page's own state object (filters, tabs,
+ * pages, open rows, toggles) registers here once: it is restored from this
+ * viewer's local storage now and written back whenever the page is redrawn
+ * and when the tab unloads. The address holds the page and tab; this holds
+ * what the reader set on it. Results, fetched data and anything secret are
+ * named in `skip` and never kept. */
+const KEPT = [];
+function keepState(name, obj, skip) {
+  const key = `semlith-ui:${name}`;
+  const omit = new Set(skip || []);
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) || "null");
+    if (saved && typeof saved === "object") for (const [k, v] of Object.entries(saved)) if (!omit.has(k) && k in obj) obj[k] = v;
+  } catch (_) {
+    /* storage refused or a stale shape: the defaults stand */
+  }
+  KEPT.push(() => {
+    try {
+      const out = {};
+      for (const [k, v] of Object.entries(obj)) if (!omit.has(k) && typeof v !== "function" && !(v instanceof Node)) out[k] = v;
+      localStorage.setItem(key, JSON.stringify(out));
+    } catch (_) {
+      /* as above */
+    }
+  });
+  return obj;
+}
+function saveKept() {
+  for (const save of KEPT) save();
+}
+window.addEventListener("pagehide", saveKept);
 
 /** Move a bar made by `bar` to a new value without rebuilding it. */
 function setBar(node, pct) {
@@ -609,7 +654,7 @@ function kpi(label, value, sub, opts) {
   const tag = o.onclick ? "button" : "div";
   const node = el(
     tag,
-    { class: `kpi${o.warn ? " warn" : ""}`, type: o.onclick ? "button" : null, onclick: o.onclick || null, "data-tip": o.tip || null, "data-tip-rows": o.rows || null },
+    { class: `kpi${o.warn ? " warn" : ""}${o.accent ? " accent" : ""}`, type: o.onclick ? "button" : null, onclick: o.onclick || null, "data-tip": o.tip || null, "data-tip-rows": o.rows || null },
     el("span", { class: "eyebrow", text: label }),
     el("span", { class: "v", text: value }),
     sub ? el("span", { class: "s", text: sub }) : null,
@@ -701,7 +746,17 @@ const tip = {
 
   find(target) {
     const host = target && target.closest ? target.closest("[data-tip]") : null;
-    if (!host) return null;
+    // Text cut short with an ellipsis shows the whole of itself on hover,
+    // wherever it is and whoever drew it.
+    if (!host) {
+      for (let node = target, i = 0; node && node.nodeType === 1 && i < 4; node = node.parentElement, i++) {
+        if (node.scrollWidth > node.clientWidth + 1 && getComputedStyle(node).textOverflow === "ellipsis") {
+          const text = (node.textContent || "").trim();
+          return text ? { el: node, title: text, rows: "", color: "", full: true } : null;
+        }
+      }
+      return null;
+    }
     const title = host.getAttribute("data-tip");
     if (!title) return null;
     return {
@@ -1139,7 +1194,7 @@ function grid(spec) {
               },
             },
             c.label,
-            el("span", { class: "ar", text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
+            el("span", { class: `ar${on ? "" : " off"}`, text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
           ),
         );
       }),
@@ -1318,7 +1373,7 @@ function sortHead(label, key, view, onChange, cls) {
         },
       },
       label,
-      el("span", { class: "ar", text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
+      el("span", { class: `ar${on ? "" : " off"}`, text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
     ),
   );
 }
@@ -1532,9 +1587,15 @@ const loadedAt = {};
 
 function load(key, force) {
   if (!force && data[key] !== undefined) return Promise.resolve(data[key]);
-  if (loading[key]) return loading[key];
+  if (loading[key] && !force) return loading[key];
+  // A forced load is a read from now: a request already in flight left
+  // before it, so its answer may predate whatever made the caller force
+  // (a store just created). It waits that request out, so answers still land
+  // in order, then asks again. A plain load shares the one in flight.
+  const before = force && loading[key] ? loading[key].catch(() => {}) : Promise.resolve();
   // A source may depend on the page (the graph's store): then it is a function.
-  const p = api(typeof SOURCES[key] === "function" ? SOURCES[key]() : SOURCES[key])
+  const p = before
+    .then(() => api(typeof SOURCES[key] === "function" ? SOURCES[key]() : SOURCES[key]))
     .then((value) => {
       data[key] = value;
       loadedAt[key] = Date.now();
@@ -1544,7 +1605,7 @@ function load(key, force) {
       return value;
     })
     .finally(() => {
-      delete loading[key];
+      if (loading[key] === p) delete loading[key];
     });
   loading[key] = p;
   return p;
@@ -1665,7 +1726,7 @@ function startLive() {
 }
 
 /** The runs that are not finished, per store. */
-const LIVE_RUN = new Set(["queued", "review", "running", "pausing", "paused", "held", "stopping"]);
+const LIVE_RUN = new Set(["queued", "scanning", "review", "running", "pausing", "paused", "held", "stopping"]);
 
 function runsOf(name) {
   return (data.runs?.runs || []).filter((r) => r.store === name);
@@ -1678,15 +1739,18 @@ function activeRun(name) {
 
 // How far a run is, over all of it. Reading finishes long before embedding
 // does, so a bar on bytes read reached 100 % and then sat there (or went back
-// to 0 when embedding began). The daemon's pending_share is the part of the
-// whole run still to do; the bar is the rest, never moving backwards within a
-// run and never reaching 100 % before the run is done.
+// to 0 when embedding began). The daemon's progress is the share read times
+// the share of what was written that is embedded; the bar never moves
+// backwards within a run and never reaches 100 % before the run is done.
+// pending_share alone (rc.3) ignored the files not read yet, so a run whose
+// embedding kept up sat at 99 % from its first second.
 const RUN_HIGH = new Map();
 function runPct(run) {
   if (!run) return 0;
   if (run.status === "done") return 100;
   let p;
-  if (typeof run.pending_share === "number") p = (1 - run.pending_share) * 100;
+  if (typeof run.progress === "number") p = run.progress * 100;
+  else if (typeof run.pending_share === "number") p = (1 - run.pending_share) * 100;
   else if (run.bytes_total) p = (run.bytes / run.bytes_total) * 50;
   else p = run.total ? (run.scanned / run.total) * 50 : 0;
   const key = `${run.store}:${run.id}:${run.started_at || run.submitted || ""}`;
@@ -1695,13 +1759,149 @@ function runPct(run) {
   return high;
 }
 
-// Time left from the share still to do and the time spent so far, which
-// holds through embedding where the daemon's own estimate covers reading only.
+// A daemon that keeps one account of its runs (run-truth spec, rc.4) sends
+// `phases` and `expected_chunks`; its `eta_ms` covers the whole run.
+const truthRun = (run) => run.phases !== undefined || run.expected_chunks !== undefined;
+
+// Time left. From a run-truth daemon, its own estimate, never extrapolated
+// here. From an older one, the share still to do over the time spent so far,
+// which holds through embedding where its estimate covers reading only.
 function runLeftMs(run) {
   if (!run || run.status !== "running") return null;
+  if (truthRun(run)) return run.eta_ms ?? null;
   const done = runPct(run) / 100;
   if (done < 0.05 || !run.elapsed_ms) return run.eta_ms ?? null;
   return Math.round((run.elapsed_ms - (run.queued_ms || 0)) * (1 - done) / done);
+}
+
+/** "about 12 min", the way an estimate is said: never to the second. */
+function spellAbout(ms) {
+  if (ms === null || ms === undefined) return "estimating…";
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 10) return "almost done";
+  if (seconds < 60) return "under a minute";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `about ${minutes} min`;
+  return `about ${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
+}
+
+/** A running run's time left, in the words its card uses. */
+function runLeftText(run) {
+  return truthRun(run) ? spellAbout(runLeftMs(run)) : spellLeft(runLeftMs(run));
+}
+
+/** The low/high spread of a run's estimate, for a tooltip. */
+function runRangeTip(run) {
+  const range = run.eta_range_ms;
+  return Array.isArray(range) && range.length === 2 ? `Between ${spellTook(range[0])} and ${spellTook(range[1])}, from the spread of the last minute's rate` : null;
+}
+
+// What each phase of a run is called on screen (spec §3.2).
+const PHASE_LABEL = {
+  decisions: "Applying decisions",
+  queued: "Queued",
+  walk: "Finding files",
+  credentials: "Checking for credentials",
+  rules: "Matching rules",
+  read: "Reading and chunking",
+  lane: "Starting a lane",
+  embed: "Embedding",
+  images: "Embedding images",
+  graph: "Writing the graph",
+  drain: "Finishing embeddings in flight",
+  save: "Writing the index to disk",
+  checkpoint: "Checkpoint",
+  finalize: "Finishing up",
+  undo: "Undoing",
+};
+
+function phaseLabel(phase, detail, lane) {
+  if (phase !== "lane") return PHASE_LABEL[phase] || phase;
+  const named = lane ? laneName(lane) : (/^(.+?)\s+(?:is\s+)?(?:loading|compiling|ready|failed|waiting|downloading|starting)/i.exec(detail || "") || [])[1];
+  if (!named) return PHASE_LABEL.lane;
+  return `Starting ${/^the /i.test(named) ? named : `the ${named}`}`;
+}
+
+/** What a run is doing now, in one line: the phase and its sentence. An
+ * older daemon sends a sentence in `phase` itself. */
+function phaseText(run) {
+  if (!run.phase) return "";
+  if (!PHASE_LABEL[run.phase]) return run.phase;
+  return [phaseLabel(run.phase, run.phase_detail, run.lane), run.phase_detail].filter(Boolean).join(" — ");
+}
+
+// A daemon time in milliseconds: phases carry ms, older fields seconds.
+const msOf = (t) => (t > 1e12 ? t : t * 1000);
+
+/* When this page saw a run wait in the queue, per run: the snapshot says a run
+ * is queued, not since when or for how long, and a run held for review was
+ * submitted when its scan began. */
+const QUEUED = new Map();
+
+/** A run's steps from its own events: the queue, then every phase it sent. */
+function runSteps(r, skip) {
+  const steps = [];
+  const queued = r.status === "queued";
+  const key = `${r.store}:${r.id}`;
+  let q = QUEUED.get(key);
+  if (queued && !q) QUEUED.set(key, (q = { at: Date.now(), until: null }));
+  if (q && !queued && q.until == null) q.until = Date.now();
+  if (q) steps.push({ label: "Queued", at: q.at, until: q.until, detail: queued ? (r.position > 1 ? `${plural(r.position - 1, "run")} ahead of this one` : "next in line") : "" });
+  if (queued) return steps;
+  const phases = (r.phases || []).slice(skip || 0);
+  phases.forEach((p, i) => {
+    const current = i === phases.length - 1 && p.until == null;
+    steps.push({
+      label: phaseLabel(p.phase, p.detail, p.lane),
+      at: msOf(p.at),
+      until: p.until != null ? msOf(p.until) : null,
+      detail: (current && r.phase === p.phase && r.phase_detail) || p.detail || (p.count != null ? n(p.count) : ""),
+    });
+  });
+  // An older daemon names no phases: one step, in its own words.
+  if (!r.phases && LIVE_RUN.has(r.status)) steps.push({ label: "Indexing", at: msOf(r.started_at || r.submitted || 0), until: null, detail: r.phase || "" });
+  return steps;
+}
+
+/* The minimum dwell (spec §3.2, W5). A phase that came and went in a blink is
+ * still drawn for DWELL_MS, queued behind the real one; the display never runs
+ * ahead of the events and never more than LAG_MS behind them — past that it
+ * skips to catch up. Kept per run here, so a repaint never resets the queue. */
+const DWELL_MS = 700;
+const LAG_MS = 3000;
+const SHOWN = new Map();
+function dwell(key, steps, now) {
+  const at = now || Date.now();
+  if (!steps.length) return { steps, behind: false };
+  const last = steps.length - 1;
+  // A step is only put up if it can stay its full dwell inside the lag: one
+  // whose successor began too long ago is passed over, never flashed.
+  const fits = (j) => j >= last || at - steps[j + 1].at <= LAG_MS - DWELL_MS;
+  const show = (j) => {
+    let k = j;
+    while (!fits(k)) k += 1;
+    s.i = k;
+    s.since = at;
+  };
+  let s = SHOWN.get(key);
+  if (!s) {
+    SHOWN.set(key, (s = { i: 0, since: at }));
+    show(0);
+  }
+  s.i = Math.min(s.i, last);
+  // A step put up always stays its full dwell; catching up is done by what
+  // comes next skipping the steps that no longer fit (show), never by cutting
+  // the one on screen short (575 ms on a loaded runner, drive rc4.2).
+  if (s.i < last && at - s.since >= DWELL_MS) show(s.i + 1);
+  s.behind = s.i < last;
+  return { steps: steps.slice(0, s.i + 1), behind: s.behind };
+}
+
+/** The one step the start sequence is on, as a single status line: what it
+ * is, and what it waits for when that takes a while. */
+function startLine(step, live) {
+  const t = step ? `${step.label}${live && step.until == null ? "…" : ""}${step.detail ? ` — ${step.detail}` : ""}` : "";
+  return el("div", { class: `pipe-status${live ? " starting" : ""}`, role: "status" }, el("span", { class: `dot ${live ? "blue pulse" : "green"}` }), el("span", { class: "grow", text: t, "data-tip": t || null }));
 }
 
 let lastRunState = {};
@@ -1910,6 +2110,7 @@ function mount(view, route) {
 /* Draw the current view again from the cache, keeping the scroll position and
  * the focused field. Inputs carry `data-keep` so the new copy can be found. */
 function repaint() {
+  saveKept();
   if (!shell.main || !current.view) return;
   const at = shell.main.scrollTop;
   const inner = [...shell.main.querySelectorAll("[data-scroll-keep]")].map((n) => [n.getAttribute("data-scroll-keep"), n.scrollTop]);
@@ -2083,32 +2284,38 @@ function paintChrome() {
   if (!shell.nav) return;
   const reviewN = (data.refused?.stores || []).reduce((a, s) => a + (s.review || 0), 0);
   const noAgent = data.agents ? !registeredClients().length : false;
-  const badges = { stores: reviewN ? String(reviewN) : "", agents: noAgent ? "!" : "" };
+  // Files to review, else a red "!" for a store in error.
+  const errN = (data.stores?.stores || []).filter((s) => storeError(s)).length;
+  const badges = { stores: reviewN ? String(reviewN) : errN ? "!" : "", agents: noAgent ? "!" : "" };
+  const tones = { stores: reviewN ? "amber" : "red", agents: "amber" };
   for (const node of document.querySelectorAll("[data-badge]")) {
-    const b = badges[node.getAttribute("data-badge")] || "";
+    const id = node.getAttribute("data-badge");
+    const b = badges[id] || "";
     node.hidden = !b;
-    node.className = "nav-badge amber";
+    node.className = `nav-badge ${tones[id] || "amber"}`;
     setText(node, b);
   }
   for (const node of document.querySelectorAll("[data-rail-badge]")) {
     const id = node.getAttribute("data-rail-badge");
     node.hidden = !badges[id];
+    node.className = `rb ${badges[id] ? tones[id] || "amber" : ""}`;
     const host = node.parentElement;
     host.setAttribute(
       "data-tip-rows",
-      id === "stores" && badges.stores ? `to review::${badges.stores} files` : id === "agents" && badges.agents ? "status::no agent registered yet" : "",
+      id === "stores" && badges.stores ? (reviewN ? `to review::${badges.stores} files` : `status::${plural(errN, "store")} in error`) : id === "agents" && badges.agents ? "status::no agent registered yet" : "",
     );
   }
   const run = activeRun();
   const pillNode = shell.runPill;
   if (run) {
     const p = Math.floor(runPct(run));
-    const word = { paused: "Paused", pausing: "Pausing", queued: "Queued", review: "Waiting for review", stopping: "Stopping", held: "Held" }[run.status] || (run.kind === "compact" ? "Compacting" : "Indexing");
+    const word = { paused: "Paused", pausing: "Pausing", queued: "Queued", scanning: "Scanning", review: "Waiting for review", stopping: "Stopping", held: "Held" }[run.status] || (run.kind === "compact" ? "Compacting" : "Indexing");
     pillNode.hidden = false;
     pillNode.dataset.store = run.store;
     pillNode.className = `run-pill hide-xs${run.status === "review" || run.status === "paused" ? " amber" : ""}`;
-    fill(pillNode, dot(run.status === "review" || run.status === "paused" ? "amber" : "green", run.status === "running"), `${word} ${run.store}${run.status === "review" ? "" : ` · ${p}%`}`, bar(p, "w46"));
+    fill(pillNode, dot(run.status === "review" || run.status === "paused" ? "amber" : "green", run.status === "running"), `${word} ${run.store}${run.status === "review" ? "" : ` · ${p}%`}`, bar(p, "w46", runBarTip(run)));
     pillNode.setAttribute("data-tip", "Open this store's runs");
+    pillNode.setAttribute("data-tip-rows", rows([["now", phaseText(run)], ["time left", run.status === "running" ? runLeftText(run) : ""]]));
   } else pillNode.hidden = true;
   const stores = liveStores().length;
   const agents = connectedCount();
@@ -2356,6 +2563,14 @@ function pickFolder({ title, ok, hint, start, confirm }) {
  * held for review, step 4 is the run itself, step 5 registers clients. */
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
+// The scan's own phases (spec §2.3), as the wizard's scan card names them.
+const SCAN_STAGES = [
+  ["walk", "Walking the tree"],
+  ["read", "Reading and hashing"],
+  ["credentials", "Checking for credentials"],
+  ["rules", "Matching rules"],
+];
+
 function blankWizard(opts) {
   const o = opts || {};
   return {
@@ -2404,14 +2619,57 @@ function sourcesLine() {
   return added ? `${kept} + ${added}` : kept;
 }
 
+/* The wizard survives a reload: its choices are kept per tab (session
+ * storage) and its store, scan and runs are on the daemon. Never kept: a
+ * folder listing (asked again), a drag in progress, a busy flag, a try-search
+ * answer and a registration result. */
+const WZ_KEY = "semlith-wz";
+function saveWizard(w) {
+  try {
+    const { browse, drag, busy, tried, regResult, reg, decSel, clientSel, dropWait, endedRead, ...keep } = w;
+    const { tick, ...scan } = w.scan || {};
+    sessionStorage.setItem(WZ_KEY, JSON.stringify({ ...keep, scan, browse: { dir: browse.dir, sel: [...browse.sel] }, decSel: [...decSel], clientSel: [...clientSel], reg: reg === "busy" ? "idle" : reg, at: Date.now() }));
+  } catch (_) {
+    /* storage refused: the wizard lasts as long as this document */
+  }
+}
+function restoreWizard() {
+  try {
+    const o = JSON.parse(sessionStorage.getItem(WZ_KEY) || "null");
+    if (!o || Date.now() - (o.at || 0) > 6 * 3600e3) return null;
+    delete o.at;
+    const w = Object.assign(blankWizard({}), o);
+    w.browse = { dir: o.browse?.dir || "", listing: null, sel: new Set(o.browse?.sel || []), error: "" };
+    w.decSel = new Set(o.decSel || []);
+    w.clientSel = new Set(o.clientSel || []);
+    // A start cut short by the reload is shown again from the plan.
+    if (!(w.started || []).length) w.startSteps = null;
+    return w;
+  } catch (_) {
+    return null;
+  }
+}
+function clearWizard() {
+  try {
+    sessionStorage.removeItem(WZ_KEY);
+  } catch (_) {
+    /* as above */
+  }
+  return null;
+}
+
 function openWizard(opts) {
   state.wz = blankWizard(opts);
   go("new");
 }
 
 function wizardScreen() {
-  if (!state.wz) state.wz = blankWizard({});
+  // Restored only when this document has no wizard of its own, which is a
+  // reload mid-wizard: Welcome and New store open a blank one first.
+  const restored = state.wz ? null : restoreWizard();
+  if (!state.wz) state.wz = restored || blankWizard({});
   const w = state.wz;
+  const restoredStore = restored ? w.created : null;
   const host = el("div", { id: "app" });
   const top = el("header", { class: "top wide-pad" });
   const body = el("div", { class: "wz-scroll", "data-scroll-keep": "wz" });
@@ -2419,8 +2677,16 @@ function wizardScreen() {
   host.append(top, body, foot);
   let paintGen = 0;
 
-  // Data the steps read, fetched once.
-  loadMany(["stores", "runs", "accel", "privacy", "agents"]).then(() => paint());
+  // Data the steps read, fetched once. A restored wizard whose store is gone
+  // (deleted elsewhere, or the daemon's home changed) starts over. Only a
+  // restored one, and only while its store is still the one it came back
+  // with: this list may have left before a store the wizard just created
+  // (load() hands a forced reload the request already in flight), and
+  // reading it as "gone" wiped the wizard mid-step.
+  loadMany(["stores", "runs", "accel", "privacy", "agents"]).then(() => {
+    if (restoredStore && state.wz === w && w.created === restoredStore && !w.existing && !store(w.created)) Object.assign(w, blankWizard({ onboarding: w.onboarding }));
+    paint();
+  });
 
   function labels() {
     return ["Name", "Sources", "Review", "Index"].concat(w.onboarding ? ["Connect"] : []);
@@ -2451,11 +2717,17 @@ function wizardScreen() {
     const embedBytes = held.reduce((a, r) => a + (r.plan.embed_bytes || 0), 0);
     const unchanged = held.reduce((a, r) => a + (r.plan.unchanged || 0), 0);
     const eta = held.length && held.every((r) => r.plan.eta_ms != null) ? held.reduce((a, r) => a + r.plan.eta_ms, 0) : null;
+    // A run-truth plan counts its chunks and images; an accepted file adds
+    // its own chunks where the scan counted them.
+    const chunks = held.length && held.every((r) => r.plan.chunks != null) ? held.reduce((a, r) => a + r.plan.chunks, 0) + decided.filter((d) => w.decisions[d.path] !== "out").reduce((a, d) => a + (d.chunks || 0), 0) : null;
+    const images = held.reduce((a, r) => a + (r.plan.images || 0), 0);
     return {
       held,
       items,
       undecided: items.length - decided.length,
       accepted,
+      chunks,
+      images,
       embed,
       embedBytes,
       unchanged,
@@ -2467,6 +2739,49 @@ function wizardScreen() {
     };
   }
 
+  /** The run's estimate before Start (spec §3.3): the plan's chunks over the
+   * summed rates of the lanes that are on, plus its images over CLIP's rate.
+   * Lanes come from /api/accel, so it moves as a lane is switched. An older
+   * daemon counts no chunks: its text bytes over about 1 KB a chunk, or its
+   * own per-store byte rate when no lane has a rate either. */
+  function estimate(P) {
+    const accel = data.accel || {};
+    const rates = accel.rates || {};
+    const lanes = (accel.lanes || []).filter((l) => (l.status?.state || "") !== "unavailable");
+    const on = lanes.filter((l) => l.enabled);
+    if (accel.cpu_fallback && !on.some((l) => l.lane === "cpu")) on.push(...lanes.filter((l) => l.lane === "cpu"));
+    // The lanes a run would use, as the daemon chooses them: with the Neural
+    // Engine on, the CPU steps aside and the GPU joins only when asked to.
+    if (on.some((l) => l.lane === "ane" && rates.ane)) {
+      for (let i = on.length - 1; i >= 0; i--) if (on[i].lane === "cpu" || (on[i].lane === "gpu" && !accel.gpu_beside_ane)) on.splice(i, 1);
+    }
+    let perSec = 0;
+    let knownAnswer = false;
+    for (const l of on) {
+      const r = rates[l.lane];
+      const v = r && r.per_s > 0 ? r.per_s : l.rate > 0 ? l.rate : 0;
+      if (r && r.per_s > 0 && r.source === "known-answer") knownAnswer = true;
+      perSec += v;
+    }
+    // ponytail: 1 KB a chunk is the bench median (spec §1.2); only an older daemon needs it.
+    const chunks = P.chunks != null ? P.chunks : P.embedBytes ? P.embedBytes / 1024 : null;
+    if (perSec > 0 && chunks != null) {
+      const clip = rates.clip && rates.clip.per_s;
+      // An image is 8 chunks' worth until this machine has timed its image model.
+      const imageMs = P.images ? (clip > 0 ? P.images / clip : (P.images * 8) / perSec) * 1000 : 0;
+      const textMs = (chunks / perSec) * 1000;
+      // The image model runs on the CPU beside a lane off it, so the run
+      // takes the longer of the two; with text on the CPU they take turns.
+      const beside = on.some((l) => l.lane !== "cpu");
+      return { ms: beside ? Math.max(textMs, imageMs) : textMs + imageMs, knownAnswer };
+    }
+    return P.eta != null ? { ms: P.eta, knownAnswer: false } : null;
+  }
+
+  function estimateText(e) {
+    return e ? `${e.ms < 60000 ? "under a minute" : spellAbout(e.ms)} on this machine${e.knownAnswer ? " (from the lane's known-answer speed)" : ""}` : null;
+  }
+
   function nameState() {
     const nm = w.name.trim();
     const taken = (data.stores?.stores || []).some((s) => s.name === nm && s.name !== w.created);
@@ -2474,6 +2789,8 @@ function wizardScreen() {
     const ok = fmtOk && !taken;
     const msg = !nm
       ? ["Lowercase letters, digits and dashes. Agents see this name when they choose where to look.", ""]
+      : nm.length > 40
+        ? [`At most 40 characters — this one has ${nm.length}.`, "bad"]
       : !fmtOk
         ? ["Use lowercase letters, digits and dashes — for example research-notes.", "bad"]
         : taken
@@ -2484,7 +2801,7 @@ function wizardScreen() {
 
   async function exit() {
     if (w.onboarding && !w.created) {
-      state.wz = null;
+      state.wz = clearWizard();
       return go("welcome");
     }
     const r = run().find((x) => LIVE_RUN.has(x.status) && x.status !== "review");
@@ -2497,16 +2814,27 @@ function wizardScreen() {
         danger: true,
       });
       if (del) {
-        for (const s of scanRuns()) await post("/api/index/control", { store: s.store, run: s.id, action: "stop", delete: true }).catch(() => {});
-        await act(() => post("/api/store/delete", { store: w.created }), `Deleted ${w.created}`);
+        const scans = scanRuns();
+        for (const s of scans) await post("/api/index/control", { store: s.store, run: s.id, action: "stop", delete: true }).catch(() => {});
+        // A scan stopped with `delete` takes its store with it a moment after
+        // it ends; deleting it meanwhile is refused (409). So: wait, bounded,
+        // for the store to go, and delete only what is still there.
+        for (let i = 0; i < 25 && scans.length; i++) {
+          await load("stores", true);
+          if (!store(w.created)) break;
+          await new Promise((ok) => setTimeout(ok, 200));
+        }
+        await load("stores", true);
+        if (store(w.created)) await act(() => post("/api/store/delete", { store: w.created }), `Deleted ${w.created}`);
+        else toast(`Deleted ${w.created}`);
         await load("stores", true);
       } else {
         // A scan held for review is dropped either way: leaving is not a
         // decision to index what it found.
-        for (const s of scanRuns().filter((x) => x.status === "review")) await post("/api/index/control", { store: s.store, run: s.id, action: "stop" }).catch(() => {});
+        for (const s of scanRuns().filter((x) => x.status === "review" || x.status === "scanning")) await post("/api/index/control", { store: s.store, run: s.id, action: "stop" }).catch(() => {});
       }
     }
-    state.wz = null;
+    state.wz = clearWizard();
     if (w.created && (store(w.created) || w.existing)) go("store", w.created, r ? "runs" : "overview");
     else go(liveStores().length ? "home" : "welcome");
   }
@@ -2551,7 +2879,7 @@ function wizardScreen() {
     const heads = {
       1: ["Name your store", "A store is one index on this machine. You can add more sources to it later, and make as many stores as you like."],
       2: ["Add what it should read", "Drop folders or files, browse to them, or paste a path. Semlith reads them in place and watches them for changes."],
-      3: [plan().undecided ? "Review before anything is indexed" : "Everything is decided", "Semlith checked every file for credentials and generated noise. Nothing has been embedded yet — this is your chance to say no."],
+      3: [w.scan.state === "scanning" || w.scan.state === "idle" ? "Scanning…" : plan().undecided ? "Review before anything is indexed" : "Everything is decided","Semlith checked every file for credentials and generated noise. Nothing has been embedded yet — this is your chance to say no."],
       4: [R.length ? (doneRun ? "Indexed" : `Indexing ${w.created}`) : "Ready to index", R.length ? "Chunking, embedding and writing the graph — all on this machine." : "Where the work runs, and what to keep doing after. The defaults suit this machine."],
       5: ["Connect your agents", `One endpoint, ${data.agents?.endpoint?.url || "on this machine"}, for every client. Semlith writes each client's config for you.`],
     }[step];
@@ -2566,12 +2894,30 @@ function wizardScreen() {
     // list's, are put back once the new body is in.
     const at = body.scrollTop;
     const inner = [...body.querySelectorAll("[data-scroll-keep]")].map((nd) => [nd.getAttribute("data-scroll-keep"), nd.scrollTop]);
+    // A field being typed into keeps its focus and caret across the redraw,
+    // as repaint() keeps them: the runs poll redraws this body, and the
+    // try-it box lost what was typed into it when a redraw landed mid-word.
+    const focus = document.activeElement;
+    const keep = focus && body.contains(focus) && focus.getAttribute ? focus.getAttribute("data-keep") : null;
+    const sel = keep && "selectionStart" in focus ? [focus.selectionStart, focus.selectionEnd] : null;
     fill(body, el("div", { class: "wz-body" }, left, summaryRail()));
     body.scrollTop = at;
     for (const [k, t] of inner) {
       const nd = body.querySelector(`[data-scroll-keep="${k}"]`);
       if (nd) nd.scrollTop = t;
     }
+    if (keep) {
+      const again = body.querySelector(`[data-keep="${keep}"]`);
+      if (again) {
+        again.focus();
+        try {
+          if (sel && again.setSelectionRange) again.setSelectionRange(sel[0], sel[1]);
+        } catch (_) {
+          /* not a text field */
+        }
+      }
+    }
+    if (state.wz === w) saveWizard(w);
     paintFoot();
   }
 
@@ -3189,7 +3535,7 @@ function wizardScreen() {
         candidates.map((c, i) =>
           btn(
             {
-              class: "modal opt",
+              class: "opt",
               onclick: (e) => {
                 picked = c;
                 for (const b of list.children) b.querySelector(".radio").classList.toggle("on", b === e.currentTarget);
@@ -3224,23 +3570,24 @@ function wizardScreen() {
     const runs = scanRuns();
     const scanning = w.scan.state !== "done";
     if (scanning) {
-      const total = runs.reduce((a, r) => a + (r.total || 0), 0);
-      const realScanned = runs.reduce((a, r) => a + (r.scanned || 0), 0);
-      // Shown at the slower of the real scan and a pace of 4-8 seconds: a
-      // scan of a small folder is over in a blink, and a card that flashes
-      // past says nothing about what was checked. A slow scan is never
-      // hurried; the pace only holds a fast one back.
-      const real = w.scan.realDone ? 1 : total ? realScanned / total : 0;
-      const paced = Math.min(1, (Date.now() - (w.scan.began || Date.now())) / (w.scan.pace || 1));
-      const f = Math.min(real, paced);
-      const p = Math.max(3, f * 100);
-      const scanned = total ? Math.min(realScanned || total, Math.round(f * total)) : 0;
-      const stages = [
-        ["Walking the tree", f >= 0.15, f < 0.15, total ? plural(total, "file") : ""],
-        ["Reading and hashing", f >= 0.55, f >= 0.15 && f < 0.55, total ? `${n(scanned)} / ${n(total)}` : ""],
-        ["Checking for credentials", f >= 0.85, f >= 0.55 && f < 0.85, "content + names"],
-        ["Matching rules", f >= 1, f >= 0.85 && f < 1, ".gitignore · build"],
-      ];
+      const sum = (k) => runs.reduce((a, r) => a + (r[k] || 0), 0);
+      const total = sum("total");
+      const scanned = sum("scanned");
+      // The stages are the scan's own phases (spec §2.3), each shown for at
+      // least DWELL_MS so a scan over in a blink still reads as four steps;
+      // the card never runs ahead of the scan.
+      const shown = Math.min(w.scan.shown || 0, SCAN_STAGES.length);
+      const real = scanReal();
+      const counter = {
+        walk: total ? `${plural(total, "file")} found` : "looking…",
+        read: total ? `${n(scanned)} / ${n(total)}` : "reading…",
+        credentials: runs.some((r) => r.flagged != null) ? `${plural(sum("flagged"), "file")} flagged` : "content + names",
+        rules: ".gitignore · build",
+      };
+      const frac = shown === real && SCAN_STAGES[shown] && SCAN_STAGES[shown][0] === "read" && total ? scanned / total : 0;
+      const p = Math.max(3, ((shown + frac) / SCAN_STAGES.length) * 100);
+      const stages = SCAN_STAGES.map(([key, label], k) => [label, k < shown, k === shown, counter[key], key]);
+      const bytesTip = sum("bytes_total") ? `${bytes(sum("bytes"))} of ${bytes(sum("bytes_total"))} read` : null;
       paceScan();
       return el(
         "div",
@@ -3248,14 +3595,21 @@ function wizardScreen() {
         el("div", { class: "row base" }, el("span", { class: "card-t grow", text: `Scanning ${plural(w.sources.filter((s) => s.type !== "url").length, "source")}` }), el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
         (() => {
           const b = bar(p, "h8");
-          b.setAttribute("data-tip", `Scan · ${Math.floor(p)}%`);
+          b.setAttribute("data-tip", `Scan · stage ${Math.min(shown + 1, SCAN_STAGES.length)} of ${SCAN_STAGES.length}${total ? ` · ${n(scanned)} of ${n(total)} files` : ""} · ${Math.floor(p)} %`);
           b.setAttribute("data-tip-rows", stages.map((s) => `${s[0]}::${s[1] ? "done" : s[2] ? s[3] : "waiting"}`).join("||"));
           return b;
         })(),
         el(
           "div",
           { class: "auto-fit m170 gap8" },
-          stages.map(([label, done, cur, m]) => el("div", { class: `stage-box${done ? " done" : cur ? " cur" : ""}` }, el("span", { class: `dot ${done ? "green" : cur ? "blue pulse" : "line"}` }), el("span", { class: "grow", text: label }), el("span", { class: "t-mono-sm", text: done ? "done" : cur ? m : "" }))),
+          stages.map(([label, done, cur, m, key]) =>
+            el(
+              "div",
+              { class: `stage-box${done ? " done" : cur ? " cur" : ""}`, "data-stage": key, "data-tip": key === "read" ? bytesTip : null },
+              el("span", { class: `dot ${done ? "green" : cur ? "blue pulse" : "line"}` }),
+              el("span", { class: "sb-text" }, el("span", { class: "sb-label", text: label }), el("span", { class: "sb-status", text: done ? "done" : cur ? m : "waiting" })),
+            ),
+          ),
         ),
         el("div", { class: "muted t-sm", text: "Names and hashes only. Nothing is embedded until you start the run." }),
       );
@@ -3263,9 +3617,23 @@ function wizardScreen() {
     return reviewPanel();
   }
 
-  // While a scan is shown, the card is redrawn a few times a second so the
-  // paced bar moves; the scan reads as done only when the real scan has
-  // finished and the pace has run its course.
+  /** How far the scan really is, in stages: the least advanced of its runs,
+   * by the phase each names (an older daemon names none: walking until it
+   * has a total, then reading). Every stage once the scan is held. */
+  function scanReal() {
+    if (w.scan.realDone) return SCAN_STAGES.length;
+    const live = scanRuns().filter((r) => r.status !== "review" && LIVE_RUN.has(r.status));
+    if (!live.length) return 0;
+    const at = (r) => {
+      const k = SCAN_STAGES.findIndex(([key]) => key === r.phase);
+      return k >= 0 ? k : r.total ? 1 : 0;
+    };
+    return Math.min(...live.map(at));
+  }
+
+  // While a scan is shown, the card is redrawn a few times a second so each
+  // stage it has reached gets its minimum dwell; the scan reads as done only
+  // when the real scan has finished and every stage has been on screen.
   function paceScan() {
     const scan = w.scan;
     if (scan.tick) return;
@@ -3276,7 +3644,11 @@ function wizardScreen() {
         scan.tick = null;
         return;
       }
-      if (scan.realDone && Date.now() - scan.began >= scan.pace) {
+      if ((scan.shown || 0) < scanReal() && Date.now() - scan.since >= DWELL_MS) {
+        scan.shown = (scan.shown || 0) + 1;
+        scan.since = Date.now();
+      }
+      if (scan.realDone && scan.shown >= SCAN_STAGES.length) {
         clearInterval(scan.tick);
         scan.tick = null;
         scan.state = "done";
@@ -3286,7 +3658,7 @@ function wizardScreen() {
   }
 
   async function startScan() {
-    w.scan = { state: "scanning", runs: [], error: "", began: Date.now(), pace: 4000 + Math.random() * 4000 };
+    w.scan = { state: "scanning", runs: [], error: "", shown: 0, since: Date.now() };
     const paths = w.sources.filter((s) => s.type !== "url").map((s) => s.path);
     if (!paths.length) {
       // Only URLs: nothing to scan. They are fetched when the run starts.
@@ -3324,12 +3696,14 @@ function wizardScreen() {
     const credOnly = (ids) => ids.filter((id) => P.items.find((d) => d.path === id)?.class === "credential");
     const ACT = { out: "Keep out", redact: "Redact & index", in: "Index" };
     const RES = { out: ["Kept out", "grey"], redact: ["Redacted · indexed", "amber"], in: ["Will be indexed", "blue"] };
+    // Recorded here, at once; the run applies them as its first phase. The
+    // selection bar says so in the same words a store's Review tab uses.
     const bulk = (v) => () => {
       if (v && v !== "out" && credOnly(selIds).length) return toast("A credential file can only be kept out", true);
+      w.bulk = { label: v ? ACT[v] : "Reset", total: selIds.length, done: selIds.length, over: true, local: true };
       setDec(selIds, v);
       w.decSel.clear();
       paint();
-      if (v) toast(`${ACT[v]} — applied to ${plural(selIds.length, "file")}`);
     };
     const openShown = shown.filter((d) => !w.decisions[d.path]);
     const cnt = (f) => sorted.filter(f).length;
@@ -3378,8 +3752,8 @@ function wizardScreen() {
                     onclick: () => {
                       openShown.forEach((d) => (w.decisions[d.path] = d.suggest || "out"));
                       w.decSel.clear();
+                      w.bulk = { label: "Suggestions", total: openShown.length, done: openShown.length, over: true, local: true };
                       paint();
-                      toast(`Applied suggestions to ${plural(openShown.length, "file")} — undo any one`);
                     },
                   },
                   `Apply suggestions to ${openShown.length} undecided`,
@@ -3415,7 +3789,9 @@ function wizardScreen() {
                     btn({ class: "btn sm dark", onclick: bulk("in") }, "Index"),
                     selIds.some((id) => w.decisions[id]) ? lnk("Reset", bulk(null)) : null,
                   )
-                : null,
+                : w.bulk
+                  ? bulkLine(w.bulk, () => ((w.bulk = null), paint()))
+                  : null,
               el(
                 "div",
                 { class: "dec-list", "data-scroll-keep": "dec" },
@@ -3427,7 +3803,7 @@ function wizardScreen() {
           el("div", { class: "card-note", text: "Every decision is yours — one file or a selection — and is logged per file. An agent can never decide. Redact & index swaps each match for a typed placeholder before chunking; the value never reaches the index. An acceptance keeps a salted fingerprint of the match, never the value." }),
         ),
       );
-    }
+    } else parts.push(el("div", { class: "done-banner grey-zone" }, el("span", { class: "check-ok" }, icon(I.check, 11, { w: 3 })), el("span", { text: "Nothing in the grey zone. Credential files are left out without asking." })));
     parts.push(leftOutCard(P));
     return el("div", { class: "stack" }, parts);
   }
@@ -3448,7 +3824,7 @@ function wizardScreen() {
         el("span", { class: "why" }, el("b", { text: d.kind || classWord(d.class) }), ` · ${d.why || d.rule || ""}`),
         d.evidence || (d.matches || [])[0] ? el("span", { class: "evidence", text: d.evidence || maskedOf(d.matches[0]) }) : null,
       ),
-      el("div", { class: "col gap4 risk" }, el("div", { class: "row base nowrap gap6" }, el("span", { class: `risk-pct ${b}`, text: `${d.risk}%` }), el("span", { class: "t-mono-sm", text: b })), bar(Math.max(3, d.risk), `h4 ${b === "high" ? "red" : b === "medium" ? "amber" : "green"}`)),
+      el("div", { class: "col gap4 risk" }, el("div", { class: "row base nowrap gap6" }, el("span", { class: `risk-pct ${b}`, text: `${d.risk}%` }), el("span", { class: "t-mono-sm", text: b })), bar(Math.max(3, d.risk), `h4 ${b === "high" ? "red" : b === "medium" ? "amber" : "green"}`, `Risk if indexed · ${d.risk} % (${b})`)),
       el(
         "div",
         { class: "col gap4 acts" },
@@ -3516,9 +3892,20 @@ function wizardScreen() {
   // ---- step 4: index
   function step4() {
     const R = run();
-    if (!R.length) return preRun();
+    if (!R.length) return w.startSteps ? startingCard() : preRun();
     const live = R.find((x) => LIVE_RUN.has(x.status));
     if (live) return runningCard(live, R);
+    // A run over in a blink still shows each of its last steps for their
+    // dwell before the done card takes its place.
+    // The card is drawn with the run's final phases first: while the queue is
+    // still behind them, or the last one has been up under its dwell, it stays.
+    if (w.startKey) {
+      const card = runningCard(R[R.length - 1], R, true);
+      const q = SHOWN.get(w.startKey) || {};
+      const held = q.behind || Date.now() - q.since < DWELL_MS;
+      if (held) setTimeout(wizAgain, DWELL_MS / 2);
+      if (held) return card;
+    }
     return doneCard(R);
   }
 
@@ -3538,7 +3925,12 @@ function wizardScreen() {
         { class: "auto-fit m150" },
         kpi("Files to index", n(files), P.accepted ? `includes ${P.accepted} you accepted` : urls ? `plus ${plural(urls, "URL")} fetched at the start` : "after review"),
         kpi("Text", bytes(P.embedBytes), P.unchanged ? `${n(P.unchanged)} unchanged, skipped by hash` : "read where it sits"),
-        kpi("Estimate", P.eta != null ? spellTook(P.eta) : "—", P.eta != null ? "from this machine's last measured rate" : "measured once the run starts"),
+        (() => {
+          const e = estimate(P);
+          const k = kpi("Estimate", e ? (e.ms < 60000 ? "under a minute" : spellAbout(e.ms)) : "—", e ? `on this machine${e.knownAnswer ? " (from the lane's known-answer speed)" : ""}` : "measured once the run starts");
+          if (e) k.setAttribute("data-estimate-ms", String(Math.round(e.ms)));
+          return k;
+        })(),
       ),
       model && !model.cached
         ? el(
@@ -3588,97 +3980,131 @@ function wizardScreen() {
       const ok = await ask({ title: `Turn ${l.label || l.lane} on?`, body: `It downloads the ${l.label || l.lane} pack first, ${bytes(l.download_bytes)}, once, into this machine's model cache.`, ok: "Download and turn on" });
       if (!ok) return;
     }
+    // Drawn switched at once, so the estimate moves with the press; the
+    // daemon's answer is read back over it.
+    l.enabled = on;
+    paint();
     await act(() => post("/api/accel", { lane: l.lane, action: on ? "on" : "off" }));
     await load("accel", true);
     paint();
   }
 
+  /* Start (spec §3.1, W1) lands on the run view at once and says what each
+   * request is doing; one that takes over two seconds says what it waits for.
+   * The decisions are recorded only (`defer`): the run applies them as its
+   * first phase, so nothing is embedded run-less before it starts. */
   async function startRun() {
     if (w.busy) return;
     w.busy = true;
-    paintFoot();
+    w.startSteps = [];
+    // One display queue for Start's steps and then the run's, so the view
+    // carries on from one to the other without starting its dwell again.
+    w.startKey = `start:${Date.now()}`;
+    const ticker = setInterval(() => host.isConnected && w.step === 4 && !run().length && paint(), 500);
+    const step = async (label, waits, fn) => {
+      const s = { label, waits, at: Date.now(), until: null };
+      w.startSteps.push(s);
+      paint();
+      try {
+        return await fn();
+      } finally {
+        s.until = Date.now();
+      }
+    };
     try {
       const runs = scanRuns();
       const stores = [...new Set(runs.map((r) => r.store).concat(w.created && w.split !== "split" ? [w.created] : []))];
-      // The decisions, applied as the person's, per file, before the run.
       const P = plan();
       const by = {};
+      let count = 0;
       for (const d of P.items) {
         const v = w.decisions[d.path];
         if (!v) continue;
+        count += 1;
         (by[`${d.store}\n${v}`] = by[`${d.store}\n${v}`] || []).push(d.path);
       }
-      for (const [key, files] of Object.entries(by)) {
-        const [st, decision] = key.split("\n");
-        await post("/api/refused/decide", { store: st, files, decision });
+      if (count) {
+        await step(`Recording ${plural(count, "decision")}`, "the daemon to record the decisions", async () => {
+          for (const [key, files] of Object.entries(by)) {
+            const [st, decision] = key.split("\n");
+            for (let i = 0; i < files.length; i += BULK_BATCH) await post("/api/refused/decide", { store: st, files: files.slice(i, i + BULK_BATCH), decision, defer: true });
+          }
+        });
       }
-      for (const st of stores) {
-        await post("/api/store/settings", { store: st, watch: w.watchAfter, record: w.record, kind: w.kind }).catch(() => {});
-      }
+      await step("Saving the store's settings", "the daemon to save the settings", async () => {
+        for (const st of stores) await post("/api/store/settings", { store: st, watch: w.watchAfter, record: w.record, kind: w.kind }).catch(() => {});
+      });
       const started = [];
-      for (const r of runs.filter((x) => x.status === "review")) {
-        await post("/api/index/control", { store: r.store, run: r.id, action: "start" });
-        started.push(r.id);
+      const held = runs.filter((x) => x.status === "review");
+      // The phases a held run already has are its scan's, the scan card's to
+      // show; the run card starts after them. Counted, not timed, so no clock
+      // is compared with the daemon's.
+      w.scanPhases = Object.fromEntries(held.map((r) => [r.id, (r.phases || []).length]));
+      if (held.length) {
+        await step(`Starting ${held.length === 1 ? "the run" : plural(held.length, "run")}`, "the daemon to take the run", async () => {
+          for (const r of held) {
+            // The count the run logs as its first phase, "decisions".
+            const decisions = P.items.filter((d) => d.store === r.store && w.decisions[d.path]).length;
+            await post("/api/index/control", { store: r.store, run: r.id, action: "start", ...(decisions ? { decisions } : {}) });
+            started.push(r.id);
+          }
+        });
       }
-      for (const s of w.sources.filter((x) => x.type === "url")) {
-        const out = await post("/api/add", { url: s.path, store: w.created });
-        for (const r of out.runs || []) started.push(r.run);
+      const urls = w.sources.filter((x) => x.type === "url");
+      if (urls.length) {
+        await step(`Adding ${plural(urls.length, "URL")}`, "the daemon to take the URLs", async () => {
+          for (const s of urls) {
+            const out = await post("/api/add", { url: s.path, store: w.created });
+            for (const r of out.runs || []) started.push(r.run);
+          }
+        });
       }
       // A split run spent the named store on nothing: it is removed rather
       // than left empty beside the stores it was split into.
       if (w.split === "split" && w.created && !w.existing && !(w.scan.stores || []).includes(w.created)) {
         await post("/api/store/delete", { store: w.created }).catch(() => {});
       }
-      w.started = started.length ? started : runs.map((r) => r.id);
-      await loadMany(["runs", "stores"], true);
+      await step("Reading the run back", "the daemon's list of runs", async () => {
+        w.started = started.length ? started : runs.map((r) => r.id);
+        await loadMany(["runs", "stores"], true);
+      });
     } catch (e) {
+      const last = w.startSteps[w.startSteps.length - 1];
+      if (last) last.error = e.message;
       toast(e.message, true);
     }
+    clearInterval(ticker);
     w.busy = false;
     paint();
   }
 
-  function runningCard(r, all) {
-    const p = runPct(r);
-    const paused = r.status === "paused" || r.status === "pausing";
-    const stagesNow = runStages(r);
-    const log = el("div", { class: "log", "data-scroll-keep": "wzlog" });
-    followLog(r, log);
+  /** What Start is doing before the run exists: its own requests, as steps. */
+  function startingCard() {
+    const steps = w.startSteps.map((s) => {
+      const waited = (s.until || Date.now()) - s.at;
+      return { label: s.label, at: s.at, until: s.until || (s.error ? s.at + waited : null), detail: s.error ? `Failed: ${s.error}` : !s.until && waited > 2000 ? `Waiting for ${s.waits} — ${Math.round(waited / 1000)} s so far` : "" };
+    });
+    const live = w.busy;
+    const shown = shownOf(w.startKey, steps, wizAgain);
     return el(
       "div",
-      { class: "card" },
+      { class: "card run-card blue-edge" },
       el(
         "div",
         { class: "card-b" },
-        el(
-          "div",
-          { class: "row" },
-          el("span", { class: "mono t-b", text: r.store }),
-          pill(paused ? "paused" : r.status === "queued" ? `queued${r.position ? ` · ${r.position} in line` : ""}` : "indexing", paused || r.status === "queued" ? "amber" : "green", { pulse: !paused }),
-          all.length > 1 ? meta(`${all.filter((x) => !LIVE_RUN.has(x.status)).length} of ${all.length} done`) : null,
-          el("span", { class: "spacer" }),
-          btn({ class: "btn", onclick: () => runControl(r, paused ? "resume" : "pause") }, paused ? "Resume" : "Pause"),
-          btn({ class: "btn danger-soft", onclick: () => stopRun(r) }, "Stop…"),
-        ),
-        el(
-          "div",
-          { class: "row nowrap gap12" },
-          (() => {
-            const b = bar(p, "h8 accent grow");
-            b.setAttribute("data-tip", `Index run · ${Math.floor(p)}%`);
-            b.setAttribute("data-tip-rows", runRows(r));
-            return b;
-          })(),
-          el("span", { class: "mono t-b", text: `${Math.floor(p)}%` }),
-        ),
-        el("div", { class: "row gap6" }, stagesNow.map(([label, st]) => el("span", { class: `stage-chip ${st}` }, el("span", { class: `dot ${st === "done" ? "green" : st === "cur" ? "blue pulse" : "line"}` }), label))),
-        r.phase ? el("div", { class: "muted t-sm", text: r.phase }) : null,
+        el("div", { class: "row" }, el("span", { class: "mono t-b", text: w.created || "" }), pill(live ? "starting" : "did not start", live ? "amber" : "red", { pulse: live })),
+        startLine(shown[shown.length - 1], live),
+        live ? null : btn({ class: "btn", onclick: () => ((w.startSteps = null), paint()) }, "Back to the plan"),
       ),
-      runStatsRow(r),
-      log,
-      el("div", { class: "lives" }, el("span", { class: "dot green" }), "The run lives in the daemon. Leave this page, close the tab — it keeps going and the header shows its progress."),
     );
   }
+
+  function runningCard(r, all, tail) {
+    // Start's own steps come first, then the run's own.
+    const pre = w.startSteps && w.startKey ? w.startSteps.map((s) => ({ label: s.label, at: s.at, until: s.until, detail: "" })) : [];
+    return runCard(r, { pre, key: w.startKey, skip: (w.scanPhases || {})[r.id] || 0, meta: all.length > 1 ? `${all.filter((x) => !LIVE_RUN.has(x.status)).length} of ${all.length} done` : "", again: wizAgain, live: tail });
+  }
+  const wizAgain = () => host.isConnected && w.step === 4 && paint();
 
   function doneCard(R) {
     const failed = R.filter((r) => r.status === "failed" || r.status === "stopped");
@@ -3868,12 +4294,15 @@ function wizardScreen() {
       ["HOLDS", { code: "Code", docs: "Docs & notes", both: "Code and docs" }[w.kind], !!w.created],
       ["SOURCES", sourcesLine(), w.sources.length > 0 && step > 2, !w.sources.length, true],
       ["REVIEW", step < 3 || w.scan.state !== "done" ? "after the scan" : P.undecided ? `${P.undecided} undecided — they stay out` : `${P.accepted ? `${P.accepted} accepted · ` : ""}all decided`, step > 3, step < 3],
-      [
-        "INDEX",
-        R.length ? (live ? `${Math.floor(runPct(live))}% · ${live.status}` : `${n(R.reduce((a, r) => a + (r.indexed || 0), 0))} files · ready`) : step >= 4 ? `${n(P.embed + P.accepted)} files${P.eta != null ? ` · ${spellTook(P.eta)}` : ""}` : "not started",
-        R.length && !live,
-        !R.length && step < 4,
-      ],
+      // Nothing about the index is known until the scan is done.
+      w.scan.state !== "done"
+        ? ["INDEX", step < 3 ? "not started" : "after the scan", false, true]
+        : [
+            "INDEX",
+            R.length ? (live ? `${Math.floor(runPct(live))}% · ${live.status}` : `${n(R.reduce((a, r) => a + (r.indexed || 0), 0))} files · ready`) : step >= 4 ? `${n(P.embed + P.accepted)} files${estimate(P) ? ` · ${spellAbout(Math.max(60000, estimate(P).ms))}` : ""}` : "not started",
+            R.length && !live,
+            !R.length && step < 4,
+          ],
     ];
     if (w.onboarding) rowsList.push(["AGENTS", w.reg === "done" ? `${(w.regResult?.ok || []).length} connected` : "not yet", w.reg === "done", w.reg !== "done"]);
     const tips = {
@@ -3909,9 +4338,15 @@ function wizardScreen() {
     let on = true;
     let hint = "";
     let sec = null;
+    // The spinner belongs to the action at work (Create, Start). Once the run
+    // exists the button is the next step's, even while Start winds down, and a
+    // busy button ignores presses: "Next: connect agents" drawn busy was
+    // pressed and nothing happened.
+    let spin = false;
     nextFn = null;
     if (step === 1) {
-      label = w.created ? (w.created === ns.nm ? "Continue" : "Rename and continue") : "Create store";
+      spin = w.busy;
+      label = w.busy ? (w.created ? "Saving…" : "Creating…") : w.created ? (w.created === ns.nm ? "Continue" : "Rename and continue") : "Create store";
       on = ns.ok && !w.busy;
       hint = ns.ok ? `Creates an empty store at ~/.semlith/stores/${ns.nm}` : "Pick a name to continue";
       nextFn = createOrRename;
@@ -3923,6 +4358,8 @@ function wizardScreen() {
       nextFn = async () => {
         w.scan = { state: "idle", runs: [], error: "" };
         w.decisions = {};
+        w.bulk = null;
+        w.startSteps = null;
         setStep(3);
       };
     } else if (step === 3) {
@@ -3934,9 +4371,11 @@ function wizardScreen() {
     } else if (step === 4) {
       if (!R.length) {
         const P = plan();
+        spin = w.busy;
         label = w.busy ? "Starting…" : "Start indexing";
         on = !w.busy;
-        hint = `${plural(P.embed + P.accepted, "file")}${P.eta != null ? ` · about ${spellTook(P.eta)}` : ""}`;
+        const e = estimateText(estimate(P));
+        hint = w.busy ? "Starting — each step is on the left" : `${plural(P.embed + P.accepted, "file")}${e ? ` · ${e}` : ""}`;
         nextFn = startRun;
       } else if (live) {
         if (w.onboarding) {
@@ -3947,7 +4386,7 @@ function wizardScreen() {
           label = "Run in background";
           nextFn = async () => {
             const name = w.created || live.store;
-            state.wz = null;
+            state.wz = clearWizard();
             go("store", name, "runs");
           };
           hint = "Watch it from the store's Runs tab or the header";
@@ -3960,7 +4399,7 @@ function wizardScreen() {
           label = "Open store";
           nextFn = async () => {
             const name = w.created || R[0].store;
-            state.wz = null;
+            state.wz = clearWizard();
             go("store", name);
           };
         }
@@ -3969,7 +4408,7 @@ function wizardScreen() {
     } else if (step === 5) {
       const done = w.reg === "done";
       const finish = async () => {
-        state.wz = null;
+        state.wz = clearWizard();
         await load("stores", true);
         go("home");
       };
@@ -3986,7 +4425,7 @@ function wizardScreen() {
         nextFn = register;
       }
     }
-    const backOn = step > 1 && !(step === 4 && live) && !(step === 2 && w.existing);
+    const backOn = step > 1 && !(step === 4 && live) && !(step === 2 && w.existing) && !w.busy;
     fill(
       foot,
       el(
@@ -3995,7 +4434,8 @@ function wizardScreen() {
         btn({ class: "btn md", disabled: backOn ? null : true, hidden: step === 1 ? true : null, onclick: () => backOn && setStep(step - 1) }, icon(I.back, 14, { w: 1.8 }), "Back"),
         el("span", { class: "hint hide-sm", text: hint }),
         sec ? btn({ class: "btn md", onclick: sec[1] }, sec[0]) : null,
-        btn({ class: "btn md primary", disabled: on ? null : true, onclick: next }, label, icon(I.arrow, 14, { w: 2 })),
+        // Busy says so with the spinner every pending button shows.
+        btn({ class: `btn md primary${spin ? " busy" : ""}`, "aria-busy": spin ? "true" : null, disabled: on ? null : true, onclick: next }, label, icon(I.arrow, 14, { w: 2 })),
       ),
     );
     paintRail();
@@ -4031,15 +4471,15 @@ function wizardScreen() {
   const offRuns = onRunsChange(() => {
     if (!host.isConnected) return offRuns();
     const scans = scanRuns();
-    if (w.scan.state === "scanning" && scans.length && scans.every((r) => r.status !== "running" && r.status !== "queued")) {
-      // A failure shows at once; a success waits for the paced card to
-      // reach its end (paceScan), unless the pace is already over.
+    if (w.scan.state === "scanning" && scans.length && scans.every((r) => !["running", "queued", "scanning"].includes(r.status))) {
+      // A failure shows at once; a success waits for the card to have shown
+      // every stage (paceScan), unless it already has.
       if (scans.some((r) => r.status === "failed")) {
         w.scan.state = "error";
         w.scan.error = "The scan failed. Its log is on the store's Runs tab.";
       } else {
         w.scan.realDone = true;
-        if (!w.scan.began || Date.now() - w.scan.began >= (w.scan.pace || 0)) w.scan.state = "done";
+        if ((w.scan.shown ?? SCAN_STAGES.length) >= SCAN_STAGES.length) w.scan.state = "done";
       }
     }
     // When the started runs end, the store's own totals are read once more,
@@ -4058,51 +4498,70 @@ function wizardScreen() {
   return host;
 }
 
-/* Poll a run's log while its card is on screen, from its own cursor. */
-function followLog(r, logNode) {
+/* Poll a run's log while a card showing it is on screen, from its own cursor,
+ * into every log view showing that run. The daemon's ring keeps a run's last
+ * 500 lines; a run that has said more is read whole from its file first
+ * (/api/index/history/log). One follower per run, shared by every card: two
+ * cards each polling (the wizard rebuilds its card as the run starts) read
+ * from one cursor at once and appended the same lines twice. */
+function followLog(r, view) {
   const key = `${r.store}:${r.id}`;
-  const seen = (followLog.cursors[key] = followLog.cursors[key] || { after: r.log_from ?? null, lines: [] });
-  const draw = () => {
-    fill(
-      logNode,
-      seen.lines.slice(-120).map((ev) => {
-        const [a, b, c, tone] = logParts(ev);
-        return el("div", { class: "ln" }, el("span", { class: "a", text: a }), el("span", { class: `b ${tone}`, text: b }), el("span", { class: "c", text: c }));
-      }),
-    );
-    logNode.scrollTop = logNode.scrollHeight;
+  const seen = (followLog.cursors[key] = followLog.cursors[key] || { after: r.log_from ?? null, lines: [], backfilled: false, views: new Set(), running: false });
+  view.__lines = () => seen.lines;
+  view.__redraw();
+  seen.views.add(view);
+  if (seen.running) return;
+  seen.running = true;
+  const redraw = () => {
+    for (const v of seen.views) v.__redraw();
   };
-  draw();
+  const backfill = async () => {
+    seen.backfilled = true;
+    if (!r.log_file || !(r.log_from > 0)) return;
+    const all = [];
+    for (let from = 0, more = true; more && all.length < 200000; ) {
+      const out = await api(`/api/index/history/log?${new URLSearchParams({ store: r.store, log: r.log_file, from: String(from), limit: "20000" })}`);
+      all.push(...(out.lines || []));
+      from += (out.lines || []).length;
+      more = out.more && (out.lines || []).length > 0;
+    }
+    // The ring's lines from here on are the ones the file has not got yet.
+    const last = all.length ? all[all.length - 1].seq : null;
+    seen.lines = all.concat(seen.lines.filter((l) => last == null || l.seq == null || l.seq > last));
+    if (last != null && (seen.after == null || last > seen.after)) seen.after = last;
+  };
   const tick = async () => {
-    if (!logNode.isConnected) return;
+    // Cards that left the page drop out; with none left the follower stops,
+    // and the next card to show this run starts it again from its cursor.
+    for (const v of [...seen.views]) if (!v.isConnected) seen.views.delete(v);
+    if (!seen.views.size) return void (seen.running = false);
     try {
+      const first = !seen.backfilled;
+      if (first) await backfill();
       const out = await api(`/api/index/log?${new URLSearchParams({ store: r.store, run: String(r.id), ...(seen.after != null ? { after: String(seen.after) } : {}) })}`);
       if (out.lines && out.lines.length) {
         seen.lines.push(...out.lines);
-        if (seen.lines.length > 400) seen.lines.splice(0, seen.lines.length - 400);
+        if (seen.lines.length > 200000) seen.lines.splice(0, seen.lines.length - 200000);
         seen.after = out.cursor;
-        draw();
       }
+      if (first || (out.lines && out.lines.length)) redraw();
     } catch (_) {
       /* the next tick tries again */
     }
     const live = (data.runs?.runs || []).find((x) => x.id === r.id);
     if (live && LIVE_RUN.has(live.status)) setTimeout(tick, 1000);
+    else seen.running = false;
   };
-  // After the caller has put the box on the page: called while the card is
-  // still being built, the box is not connected yet, and a first tick run now
+  // After the caller has put the view on the page: called while the card is
+  // still being built, it is not connected yet, and a first tick run now
   // would stop at once and the log would stay empty for the whole run.
   setTimeout(tick, 0);
 }
 followLog.cursors = {};
 
+/** A run event that belongs to no stage, as [time, word, words, tone]. */
 function logParts(ev) {
-  const when = ev.at ? clock(ev.at) : "";
-  if (ev.event === "file") {
-    const outcome = ev.outcome || "read";
-    const tone = /refus|skip|fail/.test(outcome) ? "bad" : /embed|index/.test(outcome) ? "ok" : /unchanged|queued/.test(outcome) ? "" : "info";
-    return [`${n(ev.scanned)}/${n(ev.total)}`, outcome, ev.why ? `${ev.path} — ${ev.why}` : ev.path, tone];
-  }
+  const when = ev.at ? clock(msOf(ev.at) / 1000) : "";
   const text = {
     submitted: ev.ahead ? `waiting — ${plural(ev.ahead, "run")} ahead of this one` : "submitted",
     queued: ev.ahead ? `waiting for ${ev.store}'s writer — ${plural(ev.ahead, "job")} ahead` : "waiting for the store's writer",
@@ -4116,54 +4575,258 @@ function logParts(ev) {
   return [when, ev.event || "", text || ev.text || "", ev.event === "error" ? "bad" : ev.event === "done" ? "ok" : "info"];
 }
 
-function runStages(r) {
-  const finished = r.status === "done";
-  const total = r.total || 0;
-  const read = total && r.scanned >= total;
-  const embedding = (r.chunks || 0) > 0;
-  const list = [
-    ["Walk", total > 0 || finished],
-    ["Read & hash", read || finished],
-    ["Scan", read || finished],
-    ["Parse & chunk", read || finished],
-    ["Embed", finished],
-    ["Write graph", finished],
-  ];
-  let curSet = false;
-  return list.map(([label, done]) => {
-    if (done) return [label, "done"];
-    if (!curSet && (label !== "Embed" || embedding || read)) {
-      curSet = true;
-      return [label, "cur"];
-    }
-    return [label, ""];
-  });
+/** Chunks embedded, of those the run expects once a run-truth daemon says. */
+function chunksOf(r) {
+  return r.expected_chunks ? `${n(r.chunks || 0)} / ${n(r.expected_chunks)}` : n(r.chunks || 0);
+}
+
+function laneRatesText(r) {
+  return Object.entries(r.lane_rates || {})
+    .filter(([, v]) => v > 0)
+    .map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`)
+    .join(" · ");
 }
 
 function runRows(r) {
   return rows([
     ["files", r.total ? `${n(r.scanned)} / ${n(r.total)}` : ""],
-    ["chunks", n(r.chunks || 0)],
+    ["chunks", chunksOf(r)],
+    ["images", r.images_total ? `${n(r.images || 0)} / ${n(r.images_total)}` : ""],
     ["rate", r.rate != null ? `${perSecond(r.rate)} chunks/s` : ""],
-    ["time left", r.status === "running" ? spellLeft(runLeftMs(r)) : ""],
+    ["time left", r.status === "running" ? runLeftText(r) : ""],
   ]);
 }
 
 function runStatsRow(r) {
   const paused = r.status === "paused" || r.status === "pausing";
-  const lanes = Object.entries(r.lane_rates || {})
-    .filter(([, v]) => v > 0)
-    .map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`)
-    .join(" · ");
+  const lanes = laneRatesText(r);
+  // Five tiles always, the images one hidden when there are none, and every
+  // sub-line drawn even when empty: a patch in place only edits words.
+  const tiles = [
+    ["FILES READ", r.total ? `${n(r.scanned)} / ${n(r.total)}` : "counting…", r.bytes_total ? `${bytes(r.bytes || 0)} of ${bytes(r.bytes_total)} read` : "Files read and hashed; embedding follows, counted in chunks", ""],
+    ["CHUNKS", chunksOf(r), r.expected_chunks ? "Embedded of those expected; the total firms up as each file is chunked" : null, r.backlog ? `${n(r.backlog)} still embedding` : ""],
+    ["IMAGES", `${n(r.images || 0)} / ${n(r.images_total || 0)}`, "Images embedded with CLIP", "", !r.images_total],
+    ["RATE", paused ? "paused" : r.rate != null ? `${perSecond(r.rate)} chunks/s` : "—", lanes, paused ? "" : lanes],
+    ["TIME LEFT", paused ? "—" : r.status === "running" ? runLeftText(r) : r.status, runRangeTip(r), r.elapsed_ms ? `${spellTook(r.elapsed_ms)} elapsed` : ""],
+  ];
   return el(
     "div",
-    { class: "run-stats" },
-    [
-      ["FILES READ", r.total ? `${n(r.scanned)} / ${n(r.total)}` : "counting…", "Files read and hashed; embedding follows, counted in chunks"],
-      ["CHUNKS", n(r.chunks || 0)],
-      ["RATE", paused ? "paused" : r.rate != null ? `${perSecond(r.rate)} chunks/s` : "—", lanes],
-      ["TIME LEFT", paused ? "—" : r.status === "running" ? spellLeft(runLeftMs(r)) : r.status],
-    ].map(([k, v, t]) => el("div", { "data-tip": t || null }, el("span", { class: "eyebrow sm wide", text: k }), el("span", { class: "v", text: v }))),
+    { class: `run-stats${r.images_total ? " five" : ""}` },
+    tiles.map(([k, v, t, s, hide]) =>
+      el(
+        "div",
+        { "data-tip": t || null, hidden: hide || null },
+        el("span", { class: "eyebrow sm wide", text: k }),
+        el("span", { class: "v", text: v, "data-tip": t ? `${v} — ${t}` : v }),
+        el("span", { class: "s", text: s || "", "data-tip": s || null }),
+      ),
+    ),
+  );
+}
+
+/* The steps the dwell queue lets through now; while it is behind the real
+ * ones, `again` (a repaint) is called shortly so each comes in on time. */
+let dwellTimer = null;
+function shownOf(key, steps, again) {
+  // Once more after it catches up too, so whatever waits on the queue (the
+  // wizard's done card) is drawn without waiting for a poll.
+  const was = (SHOWN.get(key) || {}).behind;
+  const shown = dwell(key, steps);
+  if ((shown.behind || was) && !dwellTimer) {
+    dwellTimer = setTimeout(() => {
+      dwellTimer = null;
+      (again || repaint)();
+    }, 200);
+  }
+  return shown.steps;
+}
+
+/* Which panel run cards show, Pipeline or Log: this viewer's, kept. */
+let RUN_TAB = "pipeline";
+try {
+  RUN_TAB = localStorage.getItem("semlith-run-tab") === "log" ? "log" : "pipeline";
+} catch (_) {
+  /* storage refused: the default it is */
+}
+function setRunTab(t) {
+  RUN_TAB = t;
+  try {
+    localStorage.setItem("semlith-run-tab", t);
+  } catch (_) {
+    /* kept for this page only */
+  }
+  // Every run card on screen at once; the next paint reads RUN_TAB.
+  for (const card of document.querySelectorAll(".run-card")) {
+    for (const tab of card.querySelectorAll(".run-tabs .tab")) tab.setAttribute("aria-selected", String(tab.textContent.trim().toLowerCase() === t));
+    const pipe = card.querySelector(".pipe");
+    const log = card.querySelector(".log-view");
+    if (pipe) pipe.hidden = t !== "pipeline";
+    if (log) {
+      log.hidden = t !== "log";
+      const box = log.querySelector(".log");
+      if (box) box.scrollTop = box.scrollHeight;
+    }
+  }
+}
+
+/** How long ago, to the second, for a line that ticks: "30 s ago". */
+function agoMs(at) {
+  const s = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (s < 60) return `${s} s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  return `${Math.floor(s / 3600)} h ago`;
+}
+
+/* The Write lane's "last 30 s ago" moves between polls: one clock for every
+ * such node, editing its words only. */
+let agoTimer = null;
+function tickAgo() {
+  if (agoTimer) return;
+  agoTimer = setInterval(() => {
+    for (const node of document.querySelectorAll("[data-saved-at]")) {
+      const text = writeText(Number(node.getAttribute("data-saves")), Number(node.getAttribute("data-saved-at")), Number(node.getAttribute("data-save-ms")));
+      setText(node, text);
+      node.setAttribute("data-tip", text);
+    }
+    // An open tooltip over a figure a poll has moved says the new figure.
+    if (tip.cur && tip.cur.el.isConnected) {
+      const f = tip.find(tip.cur.el);
+      if (f && (f.title !== tip.cur.title || f.rows !== tip.cur.rows)) {
+        tip.cur = f;
+        tip.render(f);
+      }
+    }
+  }, 1000);
+}
+
+function writeText(saves, at, ms) {
+  if (!saves) return "not yet";
+  return `index saved ${saves === 1 ? "once" : `${n(saves)} times`}${at ? ` · last ${agoMs(at)}` : ""}${ms ? ` (${ms < 100 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`})` : ""}`;
+}
+
+/** The pipeline's one status line: what the run is doing, in its own words. */
+function runStatusLine(r) {
+  if (!LIVE_RUN.has(r.status)) return r.status === "done" ? `done in ${spellTook(r.elapsed_ms || 0)} · ${plural(r.saves || 0, "save")}` : r.status;
+  if (r.status === "paused" || r.status === "pausing") return "Paused between files — the writer is still this run's";
+  if (r.status === "queued") return `Queued — ${r.position > 1 ? `${plural(r.position - 1, "run")} ahead of this one` : "next in line"}`;
+  if (r.status === "review") return "Held for review — nothing is embedded until it starts";
+  if (r.status === "scanning") return `Scanning — ${phaseText(r) || "finding files"}`;
+  return phaseText(r) || "Indexing";
+}
+
+/** What the run's own bar measures, with its numbers. */
+function runBarTip(r) {
+  const p = Math.floor(runPct(r));
+  const what = r.expected_chunks ? `${n(r.chunks || 0)} of ${n(r.expected_chunks)} chunks embedded` : r.total ? `${n(r.scanned || 0)} of ${n(r.total)} files read` : "starting";
+  return `${r.store} · index run · ${what} · ${p} %`;
+}
+
+/** The Pipeline panel: four lanes in a fixed order and shape — Read, Chunk,
+ * Embed (with images under it), Write — then one status line, the start
+ * sequence's step while it starts. Every bar and every cut-off figure says
+ * itself in full on hover. */
+function pipeline(r, startStep) {
+  const over = !LIVE_RUN.has(r.status);
+  const said = startStep ? null : runStatusLine(r);
+  const share = (a, b) => (over ? 100 : b ? Math.min(100, (a / b) * 100) : 0);
+  const lane = (key, label, part, whole, unit, text, opts) => {
+    const v = share(part, whole);
+    return el(
+      "div",
+      { class: `pipe-row${opts && opts.sub ? " sub" : ""}`, "data-lane": key, hidden: opts && opts.hide ? true : null },
+      el("span", { class: "pipe-k", text: label }),
+      whole === null ? el("span", { class: "pipe-bar none" }) : bar(v, "h6 pipe-bar", `${label} · ${n(part)} of ${n(whole)} ${unit} · ${Math.floor(v)} %`),
+      el("span", { class: "pipe-v", text, "data-tip": text }),
+    );
+  };
+  const exp = r.expected_chunks || 0;
+  const write = lane("write", "Write", 0, null, "", writeText(r.saves || 0, r.saved_at || 0, r.save_ms || 0));
+  const words = write.querySelector(".pipe-v");
+  words.setAttribute("data-saves", String(r.saves || 0));
+  words.setAttribute("data-saved-at", String(r.saved_at || 0));
+  words.setAttribute("data-save-ms", String(r.save_ms || 0));
+  tickAgo();
+  return el(
+    "div",
+    { class: "pipe", role: "tabpanel", "aria-label": "Pipeline" },
+    lane("read", "Read", r.scanned || 0, r.total || 0, "files", r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "counting files…"),
+    lane("chunk", "Chunk", r.rows || 0, exp, "chunks made", `${n(r.rows || 0)} chunks made`),
+    lane("embed", "Embed", r.chunks || 0, exp, "chunks", exp ? `${n(r.chunks || 0)} / ${n(exp)}` : n(r.chunks || 0)),
+    lane("images", "images", r.images || 0, r.images_total || 0, "images", `${n(r.images || 0)} / ${n(r.images_total || 0)}`, { sub: true, hide: !r.images_total }),
+    write,
+    startStep ? startLine(startStep, true) : el("div", { class: "pipe-status", role: "status" }, el("span", { class: `dot ${over ? "green" : "blue"}` }), el("span", { class: "grow", text: said, "data-tip": said })),
+  );
+}
+
+/* One card for a run, wherever one is shown in full (W8): the wizard's Index
+ * step and a store's Runs tab draw this, the same nodes in the same order —
+ * header, bar, meters, a Pipeline | Log strip and its panel. Every part is
+ * drawn and hidden when it does not apply, so a patch in place (morph) edits
+ * words; only the log grows.
+ * `o.pre` steps come before the run's own (the wizard's Start), `o.key` names
+ * the dwell queue, `o.meta` is a note beside the pill, `o.again` repaints. */
+function runCard(r, o) {
+  const opts = o || {};
+  const p = runPct(r);
+  const paused = r.status === "paused" || r.status === "pausing";
+  const pre = opts.pre || [];
+  // The start sequence — Start's own steps, the queue, the decisions — shows
+  // as one line in the pipeline's status place, each step for its dwell.
+  // `o.skip`: the phases a held run had before Start, its scan's.
+  const after = pre.length ? pre[pre.length - 1].at : 0;
+  const own = runSteps(r, opts.skip || 0).map((s) => (s.at < after ? { ...s, at: after, began: s.at } : s));
+  const shown = shownOf(opts.key || `${r.store}:${r.id}:${r.submitted || ""}`, pre.concat(own), opts.again);
+  const cur = shown[shown.length - 1];
+  // A run over in a blink still shows its start steps first (`o.live`: the
+  // wizard holds its card while they have their dwell).
+  const starting = cur && (LIVE_RUN.has(r.status) || opts.live) && (shown.length <= pre.length || cur.label === "Queued" || cur.label === PHASE_LABEL.decisions) ? cur : null;
+  const review = r.status === "review";
+  const queued = r.status === "queued";
+  const head = !LIVE_RUN.has(r.status) ? "Finishing" : queued ? "Waiting to start" : review ? "Held for review" : r.status === "scanning" ? "Scanning" : "Running now";
+  const word = !LIVE_RUN.has(r.status) ? (r.status === "done" ? "done" : r.status) : r.status === "pausing" ? "pausing" : paused ? "paused" : review ? "waiting for review" : r.status === "scanning" ? "scanning" : queued ? `queued${r.position ? ` · ${r.position} in line` : ""}` : r.kind === "compact" ? "compacting" : r.kind === "catch-up" ? "catching up" : "indexing";
+  const b = bar(p, "h8 accent grow", runBarTip(r));
+  b.setAttribute("data-tip-rows", runRows(r));
+  const log = logView(`${r.store}:${r.id}`, store(r.store), { limit: 1000 });
+  log.setAttribute("role", "tabpanel");
+  log.setAttribute("aria-label", "Log");
+  if (RUN_TAB !== "log") log.hidden = true;
+  followLog(r, log);
+  const pipe = pipeline(r, starting);
+  if (RUN_TAB === "log") pipe.hidden = true;
+  return el(
+    "div",
+    { class: "card run-card blue-edge", "data-run": `${r.store}:${r.id}` },
+    el(
+      "div",
+      { class: "card-b" },
+      el(
+        "div",
+        { class: "row" },
+        el("span", { class: "card-t", text: head }),
+        el("span", { class: "mono t-b", text: r.store }),
+        pill(word, paused || review || queued ? "amber" : "green", { pulse: r.status === "running" }),
+        meta(opts.meta || ""),
+        el("span", { class: "spacer" }),
+        btn({ class: "btn primary", hidden: review ? null : true, onclick: () => go("store", r.store, "review") }, "Review and start"),
+        btn({ class: "btn", hidden: review ? null : true, onclick: () => runControl(r, "start") }, "Start indexing"),
+        btn({ class: "btn", hidden: ["running", "paused", "pausing"].includes(r.status) ? null : true, "data-keep": `run-ctl-${r.id}`, onclick: () => runControl(r, paused ? "resume" : "pause") }, paused ? "Resume" : "Pause"),
+        btn({ class: "btn danger-soft", hidden: LIVE_RUN.has(r.status) ? null : true, "data-keep": `run-stop-${r.id}`, onclick: () => stopRun(r) }, queued ? "Take out of the queue" : "Stop…"),
+      ),
+      el("div", { class: "row nowrap gap12" }, b, el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
+    ),
+    runStatsRow(r),
+    tabs(
+      [
+        ["pipeline", "Pipeline"],
+        ["log", "Log"],
+      ],
+      RUN_TAB,
+      setRunTab,
+      { cls: "in-card run-tabs" },
+    ),
+    pipe,
+    log,
+    el("div", { class: "lives" }, el("span", { class: "dot green" }), "The run lives in the daemon. Leave this page, close the tab — it keeps going and the header shows its progress."),
   );
 }
 
@@ -4196,18 +4859,25 @@ async function runControl(r, action) {
 
 async function stopRun(r) {
   const fresh = !(r.files_before || r.chunks_before);
-  const del = el("input", { type: "checkbox", id: "stop-delete" });
-  if (fresh) del.checked = true;
+  // The Review table's checkbox (`checkbox()`, ink with a white tick), not a
+  // native input in the accent colour; its words toggle it too.
+  let alsoDelete = fresh;
+  const flip = () => {
+    alsoDelete = !alsoDelete;
+    del.setAttribute("aria-checked", String(alsoDelete));
+  };
+  const del = checkbox(alsoDelete, flip, "Also delete the store");
+  del.id = "stop-delete";
   const ok = await ask({
     title: `Stop ${r.store}'s index run?`,
     body: "What it has embedded so far is undone, so the store is left exactly as it was before the run. The files on disk are untouched.",
-    extra: fresh ? el("label", { class: "modal opt", for: "stop-delete" }, del, el("span", { text: "Also delete the store — it held nothing before this run" })) : null,
+    extra: fresh ? el("div", { class: "opt-check" }, del, el("span", { text: "Also delete the store — it held nothing before this run", onclick: flip })) : null,
     ok: "Stop and undo",
     cancel: "Keep running",
     danger: true,
   });
   if (!ok) return;
-  await act(() => post("/api/index/control", { store: r.store, run: r.id, action: r.status === "queued" ? "dequeue" : "stop", delete: fresh && del.checked }), "Stopping — undoing what it embedded");
+  await act(() => post("/api/index/control", { store: r.store, run: r.id, action: r.status === "queued" ? "dequeue" : "stop", delete: fresh && alsoDelete }), "Stopping — undoing what it embedded");
   await loadMany(["runs", "stores"], true);
   for (const fn of [...runsListeners]) fn();
   paintChrome();
@@ -4288,6 +4958,7 @@ function storeState(s) {
     const p = Math.floor(runPct(r));
     if (r.status === "review") return { state: "waiting for review", tone: "amber" };
     if (r.status === "queued") return { state: "queued", tone: "blue" };
+    if (r.status === "scanning") return { state: "scanning", tone: "blue", pulse: true };
     if (r.status === "paused" || r.status === "pausing") return { state: `paused ${p}%`, tone: "amber" };
     return { state: `${r.kind === "compact" ? "compacting" : "indexing"} ${p}%`, tone: "blue", pulse: true };
   }
@@ -4300,6 +4971,19 @@ function storeState(s) {
   if (review) return { state: `${review} to review`, tone: "amber" };
   if (s.watching === false && s.watch !== false && s.stopped_because) return { state: "not watching", tone: "amber", tip: s.stopped_because };
   return { state: "fresh", tone: "green" };
+}
+
+/** What is wrong with a store, or null: its directory, database or a root is
+ * gone, or its newest finished run failed and nothing has run since. The
+ * reason is the last error line that run logged. */
+function storeError(s) {
+  if (!s || activeRun(s.name)) return null;
+  const st = storeState(s);
+  if (st.tone === "red") return { title: st.state === "root missing" ? "A folder this store reads is gone" : `This store is ${st.state}`, detail: st.tip || ((s.roots || []).filter((r) => !r.present).map((r) => r.path).join("\n") || "No reason was recorded."), runs: false };
+  const last = (data.runs?.history || []).filter((h) => h.store === s.name && h.kind !== "compact").sort((a, b) => (b.finished || b.finished_at || 0) - (a.finished || a.finished_at || 0))[0];
+  if (!last || (last.result || last.status) !== "failed") return null;
+  const why = [...(last.log || [])].reverse().find((l) => l.level === "error");
+  return { title: "The last run stopped with an error", detail: (why && why.text) || "No reason was recorded.", runs: true };
 }
 
 function statePill(s) {
@@ -4497,7 +5181,7 @@ VIEWS.home = {
                   el("span", { class: "num-dim", text: s.last_write ? ago(s.last_write) : "never" }),
                 ),
               )
-            : empty("No store yet."),
+            : el("div", { class: "empty" }, "No store yet. ", lnk("Create one", () => openWizard({}))),
         ),
       ),
       el("div", { class: "card-foot", text: `${plural(all.length, "store")} · ${n(files)} files · ${n(chunks)} chunks${disk ? ` · ${bytes(disk)} on disk` : ""}` }),
@@ -4652,7 +5336,7 @@ function savePrefs(patch) {
 
 // -------------------------------------------------------------------- stores
 
-const storesUi = { filter: "", kind: "all" };
+const storesUi = keepState("stores", { filter: "", kind: "all" });
 
 VIEWS.stores = {
   needs: (route) => (route.parts[0] === "inside" ? ["stores", "coverage", "corpus", "ledger"] : ["stores", "runs", "refused"]),
@@ -4756,7 +5440,7 @@ function storesList() {
         sortHead("WRITTEN", "last", view, changed, "c-written right"),
         el("span"),
       ),
-      !shown.length ? el("div", { class: "empty lg" }, "No store matches. ", lnk("Clear the filter", () => ((storesUi.filter = ""), (storesUi.kind = "all"), repaint()))) : null,
+      !shown.length ? el("div", { class: "empty lg" }, all.length ? ["No store matches. ", lnk("Clear the filter", () => ((storesUi.filter = ""), (storesUi.kind = "all"), repaint()))] : ["No store yet. ", lnk("Create one", () => openWizard({}))]) : null,
       shown.map((s) =>
         el(
           "div",
@@ -4817,6 +5501,33 @@ function storesList() {
 
 const PALETTE = ["#F0A43C", "#4C7088", "#3E9A6E", "#2F4F68", "#B07A2A", "#8A9DAB"];
 
+/** Every source (a root folder or file) of every store, as the cloud lists
+ * its sources. The daemon counts files and chunks per store, not per root,
+ * so the counts are the store's. */
+function insideSources() {
+  const storesAll = data.stores?.stores || [];
+  const list = storesAll.flatMap((st) => (st.roots || []).map((r) => ({ path: r.path, present: r.present, store: st.name, files: st.files || 0, chunks: st.chunks || 0, last: st.last_write || 0 })));
+  const g = grid({
+    key: "inside:sources",
+    caption: "Sources",
+    rows: list,
+    // A missing root first, so a problem is on the first page however many
+    // sources there are; then by store.
+    sort: "state",
+    dir: "asc",
+    empty: "No source yet. Add one to a store and it is measured here.",
+    columns: [
+      { key: "path", label: "Source", cls: "m t-b", sort: (r) => r.path, render: (r) => pathEl(r.path, 44, "mono t-sm") },
+      { key: "state", label: "State", sort: (r) => `${r.present ? 1 : 0}:${r.store}`, render: (r) => pill(r.present ? "present" : "missing", r.present ? "green" : "red", { dot: false }) },
+      { key: "store", label: "Store", cls: "ms", sort: (r) => r.store, render: (r) => lnk(r.store, () => go("store", r.store)) },
+      { key: "files", label: "Store files", cls: "m r", firstDir: "desc", sort: (r) => r.files, render: (r) => (r.files ? n(r.files) : "—") },
+      { key: "chunks", label: "Store chunks", cls: "m r", firstDir: "desc", sort: (r) => r.chunks, render: (r) => (r.chunks ? n(r.chunks) : "—") },
+      { key: "last", label: "Written", cls: "ms nowrap", firstDir: "desc", sort: (r) => r.last, render: (r) => (r.last ? el("span", { "data-tip": dayClock(r.last), text: ago(r.last) }) : "never") },
+    ],
+  });
+  return el("div", { class: "card inside-sources" }, el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Sources" }), meta(`${plural(list.length, "source")} · ${plural(storesAll.length, "store")}`)), g.node);
+}
+
 function insideIndex() {
   const corpus = (data.corpus?.stores || []).filter((c) => !c.error && !c.measuring);
   const measuring = (data.corpus?.stores || []).filter((c) => c.measuring);
@@ -4871,6 +5582,7 @@ function insideIndex() {
     el("div", { class: "muted t-sm", text: `Measured from the stores themselves, again after every change, not estimated — ${plural(corpus.length, "store")}, ${n(files)} files.` }),
     measuring.length ? el("div", { class: "notice" }, el("span", { class: "sub", text: `Measuring ${measuring.map((m) => m.store).join(", ")} — the figures appear here when it is done.` })) : null,
     errs.length ? el("div", { class: "notice red" }, el("span", { class: "sub", text: `${errs.map((e) => e.store).join(", ")} could not be measured: ${errs[0].error}` })) : null,
+    insideSources(),
     el(
       "div",
       { class: "q4" },
@@ -5022,7 +5734,7 @@ function monthName(ym) {
 
 // --------------------------------------------------------------- store detail
 
-const sdUi = { glob: "", type: "all", lang: "all", view: "list", decQ: "", decOut: "all", decBy: "all", histOpen: {}, rename: {} };
+const sdUi = keepState("store", { glob: "", type: "all", lang: "all", view: "list", decQ: "", decOut: "all", decBy: "all", histOpen: {}, rename: {} }, ["rename"]);
 
 VIEWS.store = {
   needs: () => ["stores", "runs", "refused", "decisions", "detail", "ledger"],
@@ -5083,6 +5795,17 @@ VIEWS.store = {
         ),
       );
     }
+    const err = tab === "overview" ? storeError(s) : null;
+    if (err)
+      page.append(
+        el(
+          "div",
+          { class: "card amber-edge pad stack gap8 store-error" },
+          el("div", { class: "row" }, el("span", { class: "card-t grow", text: err.title }), err.runs ? btn({ class: "btn sm", onclick: () => go("store", name, "runs") }, "See its run") : null, btn({ class: "btn sm", disabled: rootsGone(s) || s.missing ? true : null, onclick: () => reindexStore(name) }, "Re-index")),
+          el("div", { class: "code sm", text: err.detail }),
+          el("span", { class: "muted t-sm", text: s.files ? "What was indexed before the error is still searchable." : "Nothing from this store is searchable yet." }),
+        ),
+      );
     const body = { overview: sdOverview, files: sdFiles, review: sdReview, runs: sdRuns, settings: sdSettings }[tab] || sdOverview;
     page.append(body(s, holder));
     return page;
@@ -5422,7 +6145,62 @@ function detailOf(s) {
 
 const OUTCOME_TONE = { accepted: "blue", "never indexed": "red", "redacted · indexed": "amber", "read as image": "green", "kept out": "grey", skipped: "grey" };
 
+/* One bulk decision pattern for the wizard's Review step and a store's Review
+ * tab (spec §3.5, W6): while it is applied the selection bar is its progress
+ * line, and it ends on a done or an error line. `b` is
+ * { label, total, done, over, error, local, runs }. */
+const BULK_BATCH = 100;
+
+function bulkLine(b, dismiss, extra) {
+  if (!b.over) {
+    return el("div", { class: "selbar bulk", role: "status", "aria-live": "polite" }, el("span", { class: "dot blue pulse" }), el("span", { class: "what", text: `Applying '${b.label}' to ${plural(b.total, "file")}… ${n(b.done)} / ${n(b.total)}` }));
+  }
+  if (b.error) {
+    return el("div", { class: "selbar bulk bad", role: "alert" }, icon(I.x, 13, { w: 2.6 }), el("span", { class: "what", text: `'${b.label}' stopped at ${n(b.done)} / ${n(b.total)}: ${b.error}` }), el("span", { class: "spacer" }), lnk("Dismiss", dismiss));
+  }
+  return el(
+    "div",
+    { class: "selbar bulk ok", role: "status", "aria-live": "polite" },
+    icon(I.check, 13, { w: 2.6 }),
+    el("span", { class: "what", text: b.local ? `'${b.label}' recorded for ${plural(b.total, "file")} — applied when the run starts` : `'${b.label}' applied to ${plural(b.total, "file")}` }),
+    extra || null,
+    el("span", { class: "spacer" }),
+    lnk("Dismiss", dismiss),
+  );
+}
+
+/** Send `groups` ([decision, files]) in batches, moving `b` along; `step` is
+ * called after each batch so the page can redraw the line. */
+async function decideInBatches(store, groups, b, step) {
+  b.runs = b.runs || [];
+  try {
+    for (const [decision, files] of groups) {
+      for (let i = 0; i < files.length; i += BULK_BATCH) {
+        const part = files.slice(i, i + BULK_BATCH);
+        const out = await post("/api/refused/decide", { store, files: part, decision });
+        if (out && out.run != null) b.runs.push(out.run);
+        b.done += part.length - ((out && out.failed) || 0);
+        if (out && out.failed) throw new Error(`${plural(out.failed, "file")} could not be decided`);
+        step();
+      }
+    }
+  } catch (e) {
+    b.error = e.message;
+  }
+  b.over = true;
+  step();
+}
+
 function sdReview(s, holder) {
+  // Not read yet (the daemon answered before it could open the store, or the
+  // cache was dropped): a spinner while it is asked once more.
+  if (!(data.refused?.stores || []).some((x) => x.store === s.name) && !sdReview.asked[s.name]) {
+    sdReview.asked[s.name] = true;
+    loadMany(["refused", "decisions"], true)
+      .catch(() => {})
+      .finally(() => current.view === VIEWS.store && repaint());
+    return el("div", { class: "stack" }, el("div", { class: "empty lg row gap10 review-loading", role: "status" }, el("span", { class: "spinner" }), "Reading what waits for you…"));
+  }
   const entry = decisionsOf(s.name);
   const rowsAll = entry.rows || [];
   const pending = rowsAll.filter((r) => r.reviewable && !r.accepted && !r.kept_out).map((r) => ({ ...r, risk: riskOf(r) })).sort((a, b) => b.risk - a.risk);
@@ -5439,18 +6217,28 @@ function sdReview(s, holder) {
   const shown = pending.filter((d) => risk === "any" || band(d.risk) === risk);
   const cnt = (b) => pending.filter((d) => b === "any" || band(d.risk) === b).length;
   const SUGGEST = { out: "Keep it out", redact: "Redact & index", in: "Index it" };
-  const applySuggestions = async () => {
-    const by = {};
-    for (const d of shown) (by[d.suggest || "out"] = by[d.suggest || "out"] || []).push(d.path);
-    for (const [decision, files] of Object.entries(by)) {
-      const out = await act(() => post("/api/refused/decide", { store: s.name, files, decision }), null);
-      if (!out) break;
-    }
-    toast(`Applied suggestions to ${plural(shown.length, "file")} — undo any one below`);
+  // A selection or every suggestion, sent in batches with its progress in
+  // the selection bar; the table is inert until it is over.
+  const WORD = { out: "Keep out", redact: "Redact & index", in: "Index" };
+  const bulk = sdReview.bulk[s.name];
+  const busy = bulk && !bulk.over;
+  const runBulk = async (label, groups) => {
+    if (sdReview.bulk[s.name] && !sdReview.bulk[s.name].over) return;
+    const b = (sdReview.bulk[s.name] = { label, total: groups.reduce((a, [, f]) => a + f.length, 0), done: 0, over: false });
     sel.clear();
+    repaint();
+    await decideInBatches(s.name, groups, b, repaint);
     await loadMany(["refused", "decisions", "stores", "runs"], true);
     repaint();
   };
+  const applySuggestions = () => {
+    const by = {};
+    for (const d of shown) (by[d.suggest || "out"] = by[d.suggest || "out"] || []).push(d.path);
+    return runBulk("Suggestions", Object.entries(by));
+  };
+  const bulkBar = bulk
+    ? bulkLine(bulk, () => (delete sdReview.bulk[s.name], repaint()), bulk.over && bulk.runs && bulk.runs.length ? lnk(bulk.runs.length === 1 ? "See its run" : `See its ${bulk.runs.length} runs`, () => go("store", s.name, "runs")) : null)
+    : null;
   const pendingCard = pending.length
     ? el(
         "div",
@@ -5458,7 +6246,7 @@ function sdReview(s, holder) {
         el("div", { class: "card-h amber" }, el("span", { class: "card-t grow amber-ink", text: "Waiting for your decision" }), el("span", { class: "card-meta amber-ink", text: `${plural(pending.length, "file")} · refused until you decide` })),
         el(
           "div",
-          { class: "filterbar" },
+          { class: "filterbar", inert: busy || null },
           seg(
             [
               ["any", "Any risk", cnt("any")],
@@ -5470,7 +6258,7 @@ function sdReview(s, holder) {
             (v) => ((sdReview.risk[s.name] = v), sel.clear(), repaint()),
           ),
           el("span", { class: "spacer" }),
-          shown.length ? btn({ class: "btn sm", onclick: applySuggestions, "data-tip": "Each file takes the decision suggested beside it; every one is logged and can be undone" }, `Apply suggestions to ${n(shown.length)}`) : null,
+          shown.length ? btn({ class: "btn sm", disabled: busy || null, onclick: applySuggestions, "data-tip": "Each file takes the decision suggested beside it; every one is logged and can be undone" }, `Apply suggestions to ${n(shown.length)}`) : null,
         ),
         el(
           "div",
@@ -5480,27 +6268,25 @@ function sdReview(s, holder) {
             { class: "minw780" },
             el(
               "div",
-              { class: "dec-grid head" },
+              { class: "dec-grid head", inert: busy || null },
               checkbox(shown.length && shown.every((d) => sel.has(d.path)) ? true : shown.some((d) => sel.has(d.path)) ? "mixed" : false, (on) => (shown.forEach((d) => (on ? sel.add(d.path) : sel.delete(d.path))), repaint()), "Select all shown"),
               el("span", { text: `FILE · ${n(shown.length)} shown · highest risk first` }),
               el("span", { text: "RISK IF INDEXED" }),
               el("span", { text: "DECISION" }),
             ),
-            sel.size
+            sel.size && !busy
               ? el(
                   "div",
                   { class: "selbar" },
                   el("span", { class: "what", text: `${plural(sel.size, "file")} selected` }),
                   lnk("Clear", () => (sel.clear(), repaint())),
                   el("span", { class: "spacer" }),
-                  btn({ class: "btn sm", onclick: () => decide([...sel.values()], "out").then(() => sel.clear()) }, "Keep out"),
-                  btn({ class: "btn sm amber", onclick: () => decide([...sel.values()], "redact").then(() => sel.clear()) }, "Redact & index"),
-                  btn({ class: "btn sm dark", onclick: () => decide([...sel.values()], "in").then(() => sel.clear()) }, "Index"),
+                  ["out", "redact", "in"].map((v) => btn({ class: `btn sm${v === "redact" ? " amber" : v === "in" ? " dark" : ""}`, onclick: () => runBulk(WORD[v], [[v, [...sel.values()]]]) }, WORD[v])),
                 )
-              : null,
+              : bulkBar,
             el(
               "div",
-              { class: "dec-list", "data-scroll-keep": `sd-dec-${s.name}` },
+              { class: "dec-list", "data-scroll-keep": `sd-dec-${s.name}`, inert: busy || null },
               !shown.length ? empty("No file at this risk.", "lg") : null,
               shown.map((d) => {
                 const b = band(d.risk);
@@ -5516,7 +6302,7 @@ function sdReview(s, holder) {
                     el("span", { class: "why" }, el("b", { text: d.kind || classWord(d.class) }), ` · ${d.why || d.rule}`),
                     d.evidence || (d.matches || [])[0] ? el("span", { class: "evidence", text: d.evidence || maskedOf(d.matches[0]) }) : null,
                   ),
-                  el("div", { class: "col gap4 risk" }, el("div", { class: "row base nowrap gap6" }, el("span", { class: `risk-pct ${b}`, text: `${d.risk}%` }), el("span", { class: "t-mono-sm", text: b })), bar(Math.max(3, d.risk), `h4 ${b === "high" ? "red" : b === "medium" ? "amber" : "green"}`)),
+                  el("div", { class: "col gap4 risk" }, el("div", { class: "row base nowrap gap6" }, el("span", { class: `risk-pct ${b}`, text: `${d.risk}%` }), el("span", { class: "t-mono-sm", text: b })), bar(Math.max(3, d.risk), `h4 ${b === "high" ? "red" : b === "medium" ? "amber" : "green"}`, `Risk if indexed · ${d.risk} % (${b})`)),
                   el(
                     "div",
                     { class: "col gap4 acts" },
@@ -5535,7 +6321,7 @@ function sdReview(s, holder) {
           ),
         ),
       )
-    : el("div", { class: "notice green" }, icon(I.check, 14, { w: 2.6 }), "Nothing waits for you. New files that look sensitive will show up here before they are indexed.");
+    : el("div", { class: "stack" }, bulkBar, el("div", { class: "notice green" }, icon(I.check, 14, { w: 2.6 }), "Nothing waits for you. New files that look sensitive will show up here before they are indexed."));
 
   const decisions = (entry.decisions || rowsAll.filter((r) => !(r.reviewable && !r.accepted && !r.kept_out)).map(decisionFromRow)).map((d, i) => ({ ...d, i, id: `${i}:${d.path}` }));
   const q = sdUi.decQ.toLowerCase();
@@ -5602,12 +6388,169 @@ function sdReview(s, holder) {
 }
 sdReview.sel = {};
 sdReview.risk = {};
+sdReview.bulk = {};
+sdReview.asked = {};
 
 /** A refusal row as a Decisions-table row, for a daemon that sends no table. */
 function decisionFromRow(r) {
   const outcome = r.accepted ? (r.accepted === "redacted" ? "redacted · indexed" : r.accepted === "refused" || r.accepted === "kept" ? "kept out" : "accepted") : r.class === "credential" ? "never indexed" : r.class === "dummy" ? "accepted" : r.class === "unindexable" && /image/.test(r.rule) ? "read as image" : "skipped";
   const mine = !!r.accepted;
   return { path: r.path, outcome, why: r.rule, by: mine ? "you" : "rules", at: r.last_seen, can_undo: mine };
+}
+
+// ---------------------------------------------------------------- run logs
+
+/* One renderer for a run's log, live or read from its file: each event under
+ * the pipeline stage it belongs to, and a selector — All | Read | Chunk |
+ * Embed | Write — that this viewer keeps and every log on screen follows. */
+const LOG_STAGES = [
+  ["all", "All"],
+  ["read", "Read"],
+  ["chunk", "Chunk"],
+  ["embed", "Embed"],
+  ["write", "Write"],
+];
+let LOG_STAGE = "all";
+try {
+  const kept = localStorage.getItem("semlith-log-stage");
+  if (LOG_STAGES.some(([k]) => k === kept)) LOG_STAGE = kept;
+} catch (_) {
+  /* storage refused: All */
+}
+function setLogStage(stage) {
+  LOG_STAGE = stage;
+  try {
+    localStorage.setItem("semlith-log-stage", stage);
+  } catch (_) {
+    /* kept for this page only */
+  }
+  for (const view of document.querySelectorAll(".log-view")) if (view.__redraw) view.__redraw();
+}
+
+const PHASE_STAGE = { walk: "read", read: "read", embed: "embed", images: "embed", lane: "embed", drain: "embed", save: "write", finalize: "write" };
+
+function ordinal(k) {
+  const v = k % 100;
+  return `${k}${["th", "st", "nd", "rd"][(v - 20) % 10] || ["th", "st", "nd", "rd"][v] || "th"}`;
+}
+
+/** One log event as the lines it draws, each [stage, counter or time, word,
+ * words, tone]; a stage of null shows under All only. A text file read is
+ * two lines, its read and its chunks. Embed and Write lines carry the time. */
+function logLines(ev, home) {
+  if (typeof ev === "string") return [[null, "", "", ev, ""]];
+  if (!ev.event) return [[null, ev.at ? clock(ev.at) : "", ev.level || "", ev.text || "", ev.level === "error" ? "bad" : ev.level === "warn" ? "warn" : "info"]];
+  const when = ev.at ? clock(msOf(ev.at) / 1000) : "";
+  const path = ev.path ? (home ? relTo(home, ev.path) : tilde(ev.path)) : "";
+  const count = ev.total ? `${n(ev.scanned)}/${n(ev.total)}` : when;
+  if (ev.event === "file") {
+    const o = ev.outcome || "read";
+    if (o === "indexing") return [["read", count, "read", path, "ok"]].concat(ev.why ? [["chunk", count, "chunk", `${path} → ${ev.why}`, "ok"]] : []);
+    if (o === "image") return [["embed", when, "image", path, "ok"]];
+    return [["read", count, o, ev.why ? `${path} — ${ev.why}` : path, /refus|skip|fail/.test(o) ? "bad" : /unchanged|queued/.test(o) ? "" : "info"]];
+  }
+  if (ev.event === "phase") return [[PHASE_STAGE[ev.phase] || null, when, "phase", [phaseLabel(ev.phase, ev.detail, ev.lane), ev.detail].filter(Boolean).join(" — "), "info"]];
+  if (ev.event === "embed") {
+    const lanes = Object.entries(ev.lanes || {})
+      .filter(([, v]) => v > 0)
+      .map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`)
+      .join(" · ");
+    const images = ev.images_total ? ` · images ${n(ev.images || 0)} / ${n(ev.images_total)}` : "";
+    return [["embed", when, "embed", `+${plural(ev.delta || 0, "chunk")} · ${n(ev.embedded || 0)} / ${n(ev.expected || 0)}${images}${lanes ? ` · ${lanes}` : ""}`, "ok"]];
+  }
+  if (ev.event === "write") return [["write", when, "write", `index saved (${ordinal(ev.saves || 1)}) in ${((ev.ms || 0) / 1000).toFixed(1)} s · ${n(ev.embedded || 0)} searchable`, "ok"]];
+  const [a, b, c, tone] = logParts(ev);
+  return [[null, a, b, c, tone]];
+}
+
+/** Under a stage filter, a phase line that says what the last phase line
+ * shown said, with no other phase between, is folded into it (the first is
+ * kept): a save files under Write, so Embed showed "Embedding" again after
+ * every checkpoint. Under All nothing is folded. As the cloud's. */
+function foldPhases() {
+  let last = null;
+  return (e) => {
+    if (LOG_STAGE === "all" || e[2] !== "phase") return true;
+    if (e[3] === last) return false;
+    last = e[3];
+    return true;
+  };
+}
+
+/** A log view: the stage selector over the lines. `view.__lines()` hands it
+ * the events; `limit` keeps a live view to its newest lines. */
+function logView(key, home, opts) {
+  const o = opts || {};
+  const box = el("div", { class: "log", "data-scroll-keep": `log-${key}` });
+  const foot = el("div", { class: "log-foot" });
+  const stages = seg(LOG_STAGES, LOG_STAGE, setLogStage, { cls: "sm", label: "Log stage" });
+  const view = el("div", { class: "log-view", "data-morph-keep": `logv-${key}` }, el("div", { class: "log-bar" }, stages), box, foot);
+  view.__lines = () => [];
+  view.__redraw = () => {
+    for (const b of stages.querySelectorAll("button")) b.setAttribute("aria-pressed", String(LOG_STAGES[[...stages.children].indexOf(b)][0] === LOG_STAGE));
+    const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+    const entries = view.__lines()
+      .flatMap((ev) => logLines(ev, home))
+      .filter((e) => LOG_STAGE === "all" || e[0] === LOG_STAGE)
+      .filter(foldPhases());
+    const shown = o.limit ? entries.slice(-o.limit) : entries;
+    fill(
+      box,
+      shown.length ? shown.map(([, a, b, c, tone]) => el("div", { class: "ln" }, el("span", { class: "a", text: a }), el("span", { class: `b ${tone}`, text: b }), el("span", { class: "c", text: c }))) : el("div", { class: "ln" }, el("span", { class: "a" }), el("span", { class: "b" }), el("span", { class: "c", text: LOG_STAGE === "all" ? "Nothing logged yet." : "Nothing in this stage yet." })),
+    );
+    if (o.live !== false && atEnd) box.scrollTop = box.scrollHeight;
+    if (o.foot) o.foot(foot);
+  };
+  return view;
+}
+
+/* A finished run's whole log from its file, a page at a time: the next page
+ * comes as the reader nears the end, or from "Load more". Pages are kept per
+ * log, so a repaint never reads them again. */
+const HIST_LOGS = new Map();
+function historyLog(s, logFile) {
+  const page = 5000;
+  const st = HIST_LOGS.get(logFile) || { lines: [], more: true, loading: false, error: "" };
+  HIST_LOGS.set(logFile, st);
+  const load = async () => {
+    if (st.loading || !st.more) return;
+    st.loading = true;
+    view.__redraw();
+    try {
+      const out = await api(`/api/index/history/log?${new URLSearchParams({ store: s.name, log: logFile, from: String(st.lines.length), limit: String(page) })}`);
+      st.lines.push(...(out.lines || []));
+      st.more = !!out.more && (out.lines || []).length > 0;
+    } catch (e) {
+      st.error = e.message;
+      st.more = false;
+    }
+    st.loading = false;
+    if (view.isConnected) view.__redraw();
+  };
+  const view = logView(`h-${logFile}`, s, {
+    live: false,
+    foot: (foot) =>
+      fill(
+        foot,
+        st.error ? el("span", { class: "muted t-xs", text: st.error }) : null,
+        st.loading ? el("span", { class: "muted t-xs", text: `Reading the log… ${n(st.lines.length)} lines so far` }) : st.more ? lnk(`Load more · ${n(st.lines.length)} lines read`, load) : el("span", { class: "muted t-xs", text: `${plural(st.lines.length, "line")} · the whole log` }),
+      ),
+  });
+  view.classList.add("tall");
+  view.__lines = () => st.lines;
+  const box = view.querySelector(".log");
+  listen(box, "scroll", () => box.scrollHeight - box.scrollTop - box.clientHeight < 200 && load());
+  view.__redraw();
+  if (!st.lines.length && st.more) setTimeout(load, 0);
+  return view;
+}
+
+/** An older run's stored log lines, in the same renderer. */
+function storedLog(s, key, lines) {
+  const view = logView(`s-${key}`, s, { live: false });
+  view.__lines = () => lines;
+  view.__redraw();
+  return view;
 }
 
 function sdRuns(s, holder) {
@@ -5625,39 +6568,7 @@ function sdRuns(s, holder) {
     ...doneHere.filter((r) => !(data.runs?.history || []).some((h) => h.store === s.name && same(h, r))),
   ].sort((a, b) => (b.finished || b.finished_at || 0) - (a.finished || a.finished_at || 0));
   const host = el("div", { class: "stack" });
-  for (const r of live) {
-    const paused = r.status === "paused" || r.status === "pausing";
-    const p = runPct(r);
-    const b = bar(p, "h8 accent grow");
-    b.setAttribute("data-tip", `Indexing · ${Math.floor(p)}%`);
-    b.setAttribute("data-tip-rows", runRows(r));
-    const log = el("div", { class: "log rounded", "data-scroll-keep": `log-${r.id}`, "data-morph-keep": `log-${r.id}` });
-    followLog(r, log);
-    host.append(
-      el(
-        "div",
-        { class: "card blue-edge pad" },
-        el(
-          "div",
-          { class: "row" },
-          el("span", { class: "card-t", text: r.status === "queued" ? "Waiting to start" : r.status === "review" ? "Held for review" : "Running now" }),
-          pill(r.status === "pausing" ? "pausing" : paused ? "paused" : r.status === "review" ? "waiting for review" : r.status === "queued" ? `queued${r.position ? ` · ${r.position} in line` : ""}` : r.kind === "compact" ? "compacting" : r.kind === "catch-up" ? "catching up" : "indexing", paused || r.status === "review" || r.status === "queued" ? "amber" : "green", { pulse: r.status === "running" }),
-          el("span", { class: "spacer" }),
-          // Every control is drawn and hidden when it does not apply, so the
-          // card keeps its shape across states and a live patch never moves
-          // the button someone just pressed.
-          btn({ class: "btn sm primary", hidden: r.status === "review" ? null : true, onclick: () => go("store", s.name, "review") }, "Review and start"),
-          btn({ class: "btn sm", hidden: r.status === "review" ? null : true, onclick: () => runControl(r, "start") }, "Start indexing"),
-          btn({ class: "btn sm", hidden: ["running", "paused", "pausing"].includes(r.status) ? null : true, "data-keep": `run-ctl-${r.id}`, onclick: () => runControl(r, paused ? "resume" : "pause") }, paused ? "Resume" : "Pause"),
-          btn({ class: "btn sm danger-soft", "data-keep": `run-stop-${r.id}`, onclick: () => stopRun(r) }, r.status === "queued" ? "Take out of the queue" : "Stop…"),
-        ),
-        el("div", { class: "row nowrap gap12" }, b, el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
-        el("div", { class: "t-mono-sm", text: [r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "", `${n(r.chunks || 0)} chunks`, r.rate != null ? `${perSecond(r.rate)} chunks/s` : "", Object.entries(r.lane_rates || {}).filter(([, v]) => v > 0).map(([k, v]) => `${laneName(k)} ${perSecond(v)}/s`).join(" · "), r.status === "running" ? spellLeft(runLeftMs(r)) : ""].filter(Boolean).join(" · ") }),
-        el("div", { class: "muted t-sm", text: r.phase || "", hidden: r.phase ? null : true }),
-        log,
-      ),
-    );
-  }
+  for (const r of live) host.append(runCard(r));
   host.append(
     el(
       "div",
@@ -5692,10 +6603,7 @@ function sdRuns(s, holder) {
                         "div",
                         { class: "hist-open" },
                         h.stages ? el("span", { class: "t-mono-sm", text: stagesText(h.stages) }) : null,
-                        (h.log || []).length ? el("div", { class: "log rounded" }, h.log.slice(-40).map((ev) => {
-                          const [a, b, c, tone] = typeof ev === "string" ? ["", "", ev, ""] : ev.event ? logParts(ev) : [ev.at ? clock(ev.at) : "", ev.level || "", ev.text || "", ev.level === "error" ? "bad" : ev.level === "warn" ? "warn" : "info"];
-                          return el("div", { class: "ln" }, el("span", { class: "a", text: a }), el("span", { class: `b ${tone}`, text: b }), el("span", { class: "c", text: c }));
-                        })) : el("span", { class: "muted t-xs", text: "No log was kept for this run." }),
+                        h.log_file ? historyLog(s, h.log_file) : (h.log || []).length ? storedLog(s, key, h.log) : el("span", { class: "muted t-xs", text: "No log was kept for this run." }),
                       )
                     : null,
                 );
@@ -5883,6 +6791,8 @@ try {
   /* private window */
 }
 
+keepState("search", sr, ["result", "error", "busy", "sel", "whole", "detail", "scopeOpen", "recentSeed"]);
+
 const BUDGETS = [500, 1000, 1500, 3000, 6000];
 
 VIEWS.search = {
@@ -5893,6 +6803,11 @@ VIEWS.search = {
     if (state.pending.searchStore !== undefined) {
       sr.store = state.pending.searchStore;
       delete state.pending.searchStore;
+    }
+    // A query restored after a reload is asked again, so the page shows its answer.
+    if (!state.pending.searchQuery && sr.query && !sr.result && !sr.busy && !sr.error && !searchView.rerun) {
+      searchView.rerun = true;
+      setTimeout(() => runSearch(), 0);
     }
     if (state.pending.searchQuery) {
       sr.query = state.pending.searchQuery;
@@ -6028,6 +6943,17 @@ VIEWS.search = {
         sr.result && !sr.result.error ? el("span", { class: "row gap6 nowrap t-mono-sm" }, el("span", { class: "dot blue" }), resultMeta()) : null,
       ),
     );
+    // Every store as a chip, the scope dropdown's choices at a glance.
+    const names = (data.stores?.stores || []).filter((s) => s.files).map((s) => s.name);
+    if (names.length > 1)
+      bar.append(
+        el(
+          "div",
+          { class: "store-strip" },
+          el("span", { class: "eyebrow", text: "STORES" }),
+          [["", "all stores"], ...names.map((s) => [s, s])].map(([v, label]) => btn({ class: "chip sm mono", "aria-pressed": String((sr.store || "") === v), onclick: () => ((sr.store = v), repaint(), sr.query && runSearch()) }, label)),
+        ),
+      );
     function paintBody() {
       fill(body, searchBody());
     }
@@ -6055,9 +6981,20 @@ function weightWord(w) {
   return w.keyword > w.vector ? "keyword weighted ×2" : "vector and keyword weighted equally";
 }
 
+const STALE_SEARCH = new Error("a newer search was asked");
+
 async function runSearch() {
   const q = sr.query.trim();
   if (!q) return;
+  // Only the newest request's answer is drawn: a restored query asked again
+  // as the page opens, or a filter changed while one was in flight, would
+  // otherwise land last with an older answer.
+  const mine = (runSearch.seq = (runSearch.seq || 0) + 1);
+  const askMine = async (url) => {
+    const out = await api(url);
+    if (mine !== runSearch.seq) throw STALE_SEARCH;
+    return out;
+  };
   sr.busy = true;
   sr.error = "";
   sr.sel = null;
@@ -6079,16 +7016,16 @@ async function runSearch() {
       p.set("question", q);
       p.set("budget", String(sr.budget));
       if (sr.prefer !== "either") p.set("prefer", sr.prefer);
-      sr.result = await api(`/api/brief?${p}`);
+      sr.result = await askMine(`/api/brief?${p}`);
     } else if (sr.mode === "exact") {
       p.set("query", q);
       p.set("exact", "1");
-      sr.result = await api(`/api/search?${p}`);
+      sr.result = await askMine(`/api/search?${p}`);
     } else if (sr.mode === "pattern") {
       if (!sr.patternLang) throw new Error("Pick the language the pattern is written for.");
       p.set("query", q);
       p.set("lang", sr.patternLang);
-      sr.result = await api(`/api/pattern?${p}`);
+      sr.result = await askMine(`/api/pattern?${p}`);
       if (sr.result.error) throw new Error(sr.result.error);
     } else {
       p.set("query", q);
@@ -6096,7 +7033,7 @@ async function runSearch() {
       p.set("format", "locate");
       p.set("max_tokens", String(sr.budget));
       if (sr.prefer !== "either") p.set("prefer", sr.prefer);
-      sr.result = await api(`/api/search?${p}`);
+      sr.result = await askMine(`/api/search?${p}`);
       // An identifier is answered by its definition first; every line that
       // names it is one press away, in Exact.
       if (sr.result.shape_label === "identifier" && !(sr.result.hits || []).length) {
@@ -6107,6 +7044,7 @@ async function runSearch() {
       if (first) openHit(first);
     }
   } catch (e) {
+    if (e === STALE_SEARCH || mine !== runSearch.seq) return;
     sr.result = { error: e.message };
   }
   sr.busy = false;
@@ -6185,7 +7123,7 @@ function rankedView(r) {
   }
   const tokens = r.tokens || 0;
   const pctUsed = Math.min(100, (tokens / sr.budget) * 100);
-  const used = bar(pctUsed, `h5 grow ${pctUsed > 90 ? "accent" : "green"}`);
+  const used = bar(pctUsed, `h5 grow ${pctUsed > 90 ? "accent" : "green"}`, "Token budget", `sent::${n(tokens)} tokens||budget::${n(sr.budget)}||used::${Math.round(pctUsed)}%`);
   used.classList.add("minw60");
   used.setAttribute("data-tip", "Token budget");
   used.setAttribute("data-tip-rows", rows([["sent", `${n(tokens)} tokens`], ["budget", n(sr.budget)], ["headroom", n(Math.max(0, sr.budget - tokens))], ["shown", r.truncated ? `${r.truncated.shown} of ${r.truncated.total}` : `${hits.length} of ${hits.length}`]]));
@@ -6208,8 +7146,8 @@ function rankedView(r) {
             el(
               "div",
               { class: "hit-head" },
-              pathSpan(hitPath(g), "p", g.path),
-              el("span", { class: "t-mono-sm grow", text: g.store || "" }),
+              g.store ? el("span", { class: "t-mono-sm nowrap", text: `${g.store} ›` }) : null,
+              pathSpan(hitPath(g), "p grow", g.path),
               g.remote ? pill(g.remote.badge, "blue", { dot: false, sm: true, tip: `${g.remote.revision ? `indexed at ${g.remote.revision}` : "revision not stated"} · ${lagWord(g.remote.behind_seconds)}` }) : null,
               el("span", { class: "t-mono-sm nowrap", text: g.spans.length > 1 ? `${g.spans.length} spans` : `${g.spans[0].start_line}-${g.spans[0].end_line}` }),
             ),
@@ -6325,7 +7263,7 @@ function detailPanel() {
       el(
         "div",
         { class: "card-b line-row gap8" },
-        el("div", { class: "row nowrap" }, pathSpan(hitPath(h), "mono t-b t-sm", h.path), el("span", { class: "t-mono-sm grow", text: span ? `${span.start_line}-${span.end_line}` : `${h.start_line}-${h.end_line}` }), pill(fresh ? (span && span.from_disk ? "read from disk" : "fresh") : "stale", fresh ? "green" : "amber")),
+        el("div", { class: "row nowrap" }, h.store ? el("span", { class: "t-mono-sm nowrap", text: `${h.store} ›` }) : null, pathSpan(hitPath(h), "mono t-b t-sm", h.path), el("span", { class: "t-mono-sm grow", text: span ? `${span.start_line}-${span.end_line}` : `${h.start_line}-${h.end_line}` }), pill(fresh ? (span && span.from_disk ? "read from disk" : "fresh") : "stale", fresh ? "green" : "amber")),
         el("div", { class: "title-strip", text: h.symbol ? `${h.symbol_kind || ""} ${h.symbol}`.trim() : h.line || h.path }),
       ),
       d.error ? errorBox(d.error) : lines ? el("div", { class: "lines scroll" }, lines) : el("div", { class: "empty" }, "Reading…"),
@@ -6389,7 +7327,7 @@ function briefView(out) {
         ? el(
             "div",
             { class: "card" },
-            el("div", { class: "card-h tight" }, pathSpan(hitPath(top), "mono t-b t-sm min0", top.path), el("span", { class: "t-mono-sm", text: `${top.start_line}-${top.end_line}` }), el("span", { class: "t-mono-sm grow", text: top.store || "" }), listBadges(top.lists), el("span", { class: `dot ${top.fresh === false ? "amber" : "green"}` })),
+            el("div", { class: "card-h tight" }, top.store ? el("span", { class: "t-mono-sm nowrap", text: `${top.store} ›` }) : null, pathSpan(hitPath(top), "mono t-b t-sm min0", top.path), el("span", { class: "t-mono-sm grow", text: `${top.start_line}-${top.end_line}` }), listBadges(top.lists), el("span", { class: `dot ${top.fresh === false ? "amber" : "green"}` })),
             top.text ? el("div", { class: "lines wrap" }, top.text.split("\n").map((t, i) => el("div", { class: "l" }, el("span", { class: "n", text: String(top.start_line + i) }), el("span", { text: t })))) : empty("The budget left no room for the text; the locator is still sent."),
           )
         : null,
@@ -6459,7 +7397,7 @@ function linesView(r) {
           el(
             "div",
             { class: "card hit-group" },
-            el("div", { class: "hit-head" }, pathSpan(hitPath(g), "p", g.path), el("span", { class: "t-mono-sm grow", text: g.store || "" }), el("span", { class: "t-mono-sm", text: plural(g.spans.length, "line") })),
+            el("div", { class: "hit-head" }, g.store ? el("span", { class: "t-mono-sm nowrap", text: `${g.store} ›` }) : null, pathSpan(hitPath(g), "p grow", g.path), el("span", { class: "t-mono-sm", text: plural(g.spans.length, "line") })),
             g.spans.map((m) =>
               btn(
                 { class: `hit${sr.sel === m.i ? " on" : ""}`, onclick: () => openHit({ ...m, path: m.path, start_line: m.start_line, end_line: m.end_line || m.start_line, store: m.store, symbol: null, line: m.text }) },
@@ -6481,7 +7419,7 @@ function linesView(r) {
 
 /* One store at a time, picked in the toolbar: the graph of every store at once
  * is a hairball on a small corpus and wedged the daemon on the 879k one. */
-const gr = { store: "", sel: "", find: "", off: {}, dir: "in", unres: false, mapOpen: true, data: null, sym: null, map: null, br: { sym: "", hops: 3, verified: true, q: "", hop: "all", edge: "all", out: null }, pt: { from: "", to: "", verified: true, strict: false, out: null, showInferred: false } };
+const gr = keepState("graph", { store: "", sel: "", find: "", off: {}, dir: "in", unres: false, mapOpen: true, data: null, sym: null, map: null, br: { sym: "", hops: 3, verified: true, q: "", hop: "all", edge: "all", out: null }, pt: { from: "", to: "", verified: true, strict: false, out: null, showInferred: false } }, ["data", "sym", "map"]);
 
 let graphDragging = false;
 
@@ -6967,13 +7905,16 @@ function exploreTab(picker) {
       ),
       el(
         "div",
-        { class: "seg panel" },
+        { class: "seg panel toggles", role: "group", "aria-label": "Edges shown" },
         [
           ["calls", "calls"],
           ["imports", "imports"],
           ["inferred", "inferred"],
           ["ambiguous", "ambiguous"],
-        ].map(([k, label]) => btn({ "aria-pressed": String(!gr.off[k]), onclick: () => ((gr.off[k] = !gr.off[k]), paint()) }, label)),
+        ].map(([k, label]) =>
+          // paint() redraws the canvas only, so the chip shows its own state.
+          btn({ "aria-pressed": String(!gr.off[k]), "data-tip": `${label} edges · click to ${gr.off[k] ? "show" : "hide"}`, onclick: (e) => ((gr.off[k] = !gr.off[k]), e.currentTarget.setAttribute("aria-pressed", String(!gr.off[k])), e.currentTarget.setAttribute("data-tip", `${label} edges · click to ${gr.off[k] ? "show" : "hide"}`), paint()) }, label),
+        ),
       ),
       el("span", { class: "spacer" }),
       picker,
@@ -7397,7 +8338,7 @@ function blastResult(imp, headline) {
         { class: "card" },
         el("div", { class: "card-h tight" }, el("span", { class: "card-t sm grow", text: "Files to look at" }), lnk("Copy list", () => copy(files.map((f) => f.path).join("\n"), `Copied ${plural(files.length, "path")}`))),
         files.slice(0, 12).map((f) => {
-          const b2 = bar((f.symbols / top) * 100, "h5 accent");
+          const b2 = bar((f.symbols / top) * 100, "h5 accent", `${f.path} · ${n(f.symbols)} definitions reached, of ${n(top)} at most`);
           return el("div", { class: "file-bar-row", "data-tip": f.path, "data-tip-rows": rows([["definitions reached", String(f.symbols)], ["nearest hop", String(f.nearest)]]) }, pathSpan(tilde(f.path), "", f.path), b2, el("span", { class: "right muted", text: String(f.symbols) }));
         }),
       ),
@@ -7559,7 +8500,7 @@ function pathTab(picker) {
 
 // -------------------------------------------------------------------- agents
 
-const ag = { client: "", method: "json", reveal: null };
+const ag = keepState("agents", { client: "", method: "json", reveal: null }, ["reveal"]);
 
 VIEWS.agents = {
   needs: () => ["agents", "ledger"],
@@ -7867,13 +8808,15 @@ function agHealth(a) {
 
 // -------------------------------------------------------------------- ledger
 
-const lg = { tab: "sessions", filter: null, q: "", store: "all", tier: "all", zero: false, replay: null };
+const lg = keepState("ledger", { tab: "sessions", filter: null, q: "", store: "all", tier: "all", zero: false, replay: null }, ["replay"]);
 
 VIEWS.ledger = {
   needs: (route) => ["ledger", "stores", "cloud"].concat((route.parts[0] || "sessions") === "replay" ? ["replay"] : []),
   live: ["ledger"],
   render(route) {
     lg.tab = route.parts[0] || "sessions";
+    // A store kept from an earlier visit that has since gone filters nothing.
+    if (lg.store !== "all" && !store(lg.store)) lg.store = "all";
     const L = data.ledger || {};
     const rec = recordingWord();
     const recState = L.recording && typeof L.recording === "object" ? L.recording : { on: rec === "on", reason: rec === "on" ? null : "flag" };
@@ -7927,13 +8870,17 @@ VIEWS.ledger = {
         "div",
         { class: "q4" },
         kpi("Queries recorded", n(L.queries), `${plural(L.clients || byClient.length, "client")}${lastRow ? ` · last ${ago(lastRow.at)}` : ""}`),
-        kpi("Fewer tokens", L.ratio ? `${L.ratio.toFixed(1)}×` : "—", L.ratio ? `than reading those files whole · coverage ${L.coverage}% · ${L.tier}` : "counted once an agent asks", { warn: false }),
+        kpi("Fewer tokens", L.ratio ? `${L.ratio.toFixed(1)}×` : "—", L.ratio ? `than reading those files whole · coverage ${L.coverage}% · ${L.tier}` : "counted once an agent asks", { accent: !!L.ratio }),
         kpi("Net tokens not read", n(L.net_tokens), "whole-file less excerpt, rows with a hit"),
         kpi("Zero-hit", `${zeroShare.toFixed(0)}%`, `${n(L.zero_hit)} queries the corpus could not answer`),
       ),
     );
     const whole = L.whole_file_tokens || 0;
     const sent = L.excerpt_tokens || 0;
+    // Both bars on one scale, the larger full: agents can be sent more than
+    // the whole files (each answer counted per call), and then the orange
+    // bar is the long one, not one that runs off its track.
+    const readMax = Math.max(whole, sent);
     parts.push(
       el(
         "div",
@@ -7943,13 +8890,14 @@ VIEWS.ledger = {
           { class: "card pad" },
           el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "What agents read, against reading whole files" }), el("span", { class: "t-mono-sm", text: "store tokenizer · modelled" })),
           [
-            ["Reading every file a retrieval answered from", whole, 100, "line"],
-            ["What agents were actually sent", sent, whole ? Math.max(0.6, (sent / whole) * 100) : 0, "accent"],
-          ].map(([k, v, p, tone]) => {
+            ["Reading every file a retrieval answered from", whole, "line"],
+            ["What agents were actually sent", sent, "accent"],
+          ].map(([k, v, tone]) => {
+            const p = readMax ? Math.max(v ? 0.6 : 0, (v / readMax) * 100) : 0;
             const b = bar(p, `h10 ${tone === "accent" ? "accent" : ""}`);
             if (tone === "line") b.firstChild.style.background = "var(--line)";
             b.setAttribute("data-tip", k);
-            b.setAttribute("data-tip-rows", rows([["tokens", n(v)], ["relative", `${p.toFixed(1)}%`], ["that is", p < 100 && L.ratio ? `${L.ratio.toFixed(1)}× fewer` : "the baseline"]]));
+            b.setAttribute("data-tip-rows", rows([["tokens", n(v)], tone === "accent" ? ["against whole files", whole ? `${Math.round((sent / whole) * 100)}%` : "—"] : ["that is", "the baseline"], tone === "accent" && L.ratio ? ["that is", `${L.ratio.toFixed(1)}× fewer`] : null].filter(Boolean)));
             return el("div", { class: "col gap4" }, el("div", { class: "row base t-sm" }, el("span", { class: "grow ink2", text: k }), el("span", { class: "mono t-b", text: n(v) })), b);
           }),
           el("div", { class: "row gap6 tb-line" }, [`coverage ${L.coverage || 0}%`, `refunds ${n(L.refunds)} · ${L.refunds_measured ? "measured" : "a floor"}`, `tier ${L.tier || "modelled"}`].map((f) => el("span", { class: "factchip", text: f }))),
@@ -7960,7 +8908,7 @@ VIEWS.ledger = {
           el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "By client" }), el("span", { class: "t-mono-sm", text: "MCP, HTTP and CLI" })),
           byClient.length
             ? byClient.slice(0, 7).map(([k, v]) => {
-                const b = bar((v / maxClient) * 100, lg.filter === k ? "accent" : "");
+                const b = bar((v / maxClient) * 100, lg.filter === k ? "accent" : "", `${k} · ${n(v)} queries · ${pct(v, L.queries)} of all`);
                 return btn(
                   { class: `bar-row${lg.filter === k ? " on" : ""}`, "data-tip": k, "data-tip-rows": rows([["queries", n(v)], ["share", pct(v, L.queries)], ["click", lg.filter === k ? "clear the filter" : "filter the tables"]]), onclick: () => ((lg.filter = lg.filter === k ? null : k), repaint()) },
                   el("span", { class: "k ell", text: k }),
@@ -7972,6 +8920,40 @@ VIEWS.ledger = {
         ),
       ),
     );
+    // Savings by agent and by store, summed from the sessions the daemon
+    // sends (its newest, capped), so the tables say how many they cover.
+    const savings = (title, key, col) => {
+      const groups = new Map();
+      for (const s of sessionsAll) {
+        const k = s[key] || "—";
+        const g = groups.get(k) || { name: k, sessions: 0, retrievals: 0, net: 0, saved: 0, priced: false, measured: true };
+        g.sessions += 1;
+        g.retrievals += s.retrievals || 0;
+        g.net += s.net_tokens || 0;
+        if (s.saved_usd != null) (g.saved += s.saved_usd), (g.priced = true);
+        g.measured = g.measured && s.tier === "measured";
+        groups.set(k, g);
+      }
+      const list = [...groups.values()];
+      const g = grid({
+        key: `lg:by-${key}`,
+        caption: title,
+        rows: list,
+        sort: "net",
+        dir: "desc",
+        empty: "Nothing recorded yet.",
+        columns: [
+          { key: "name", label: col, cls: "m t-b", sort: (r) => r.name, render: (r) => r.name },
+          { key: "sessions", label: "Sessions", cls: "m r", firstDir: "desc", sort: (r) => r.sessions, render: (r) => n(r.sessions) },
+          { key: "reads", label: "Retrievals", cls: "m r", firstDir: "desc", sort: (r) => r.retrievals, render: (r) => n(r.retrievals) },
+          { key: "net", label: "Net tokens", cls: "m r", firstDir: "desc", sort: (r) => r.net, render: (r) => n(r.net) },
+          { key: "saved", label: "Saved", cls: "m r", firstDir: "desc", sort: (r) => r.saved, render: (r) => (r.priced ? el("span", { "data-tip": "at each session's own model input price; sessions with no known model are not priced" }, dollars(r.saved)) : "—") },
+          { key: "tier", label: "Tier", sort: (r) => (r.measured ? 1 : 0), render: (r) => pill(r.measured ? "measured" : "modelled", r.measured ? "blue" : "grey", { dot: false, tip: r.measured ? "Every session measured from the agent's own session log" : "Modelled with the store tokenizer, not observed" }) },
+        ],
+      });
+      return el("div", { class: "card" }, el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: title }), meta(sessionsAll.length ? `newest ${plural(sessionsAll.length, "session")}` : "no sessions yet")), g.node);
+    };
+    parts.push(el("div", { class: "split s-1-1" }, savings("Savings by agent", "client", "Agent"), savings("Savings by store", "store", "Store")));
     // Usage from the clients' own logs: their tokens and cost beside ours.
     const usage = L.usage || {};
     const tabsNode = tabs(
@@ -8013,6 +8995,18 @@ VIEWS.ledger = {
         ].map(([c, tipText]) => btn({ class: "cmdchip", "data-tip": tipText, onclick: () => copy(c) }, c, icon(I.copy, 11, { w: 2 }))),
         el("span", { class: "spacer" }),
         el("span", { class: "t-mono-sm", text: "~/.semlith/stores/<name>/store.db · table retrievals" }),
+      ),
+    );
+    // The chain and retention foot, as the cloud's.
+    const broken = L.intact === false;
+    parts.push(
+      el(
+        "div",
+        { class: "row gap8 t-mono-sm ledger-foot" },
+        dot(broken ? "red" : "green"),
+        el("span", { text: "rows kept on this machine until their store is deleted" }),
+        el("span", { text: "·" }),
+        el("span", { text: !L.queries ? "hash chain · nothing written yet" : broken ? `hash chain breaks${L.break ? ` at row ${n(L.break.row)} in ${L.break.store}` : ""}` : `hash chain verified · ${plural(L.queries, "query", "queries")}` }),
       ),
     );
     return el("div", { class: "page" }, parts);
@@ -8257,10 +9251,11 @@ const CADENCES = [
   ["month", 2592000],
 ];
 
-const rp = { kind: "savings", window: "month", format: "markdown", stores: [], hash: false, excerpts: false, model: "", out: null, busy: false, picking: false };
+const rp = keepState("reports", { kind: "savings", window: "month", format: "markdown", stores: [], hash: false, excerpts: false, model: "", out: null, busy: false, picking: false }, ["out", "busy", "picking"]);
 
 VIEWS.reports = {
-  needs: () => ["stores", "prices", "schedules"],
+  // The ledger for the chain chip on the savings net line.
+  needs: () => ["stores", "prices", "schedules", "ledger"],
   live: [],
   render(route, holder) {
     const prices = data.prices || {};
@@ -8351,7 +9346,7 @@ VIEWS.reports = {
           el(
             "div",
             { class: "save-line net" },
-            el("span", { class: "row gap6" }, el("span", { class: "t-b big14", text: "Net" }), facts.filter((f) => !/^Net/.test(f[0])).map((f) => el("span", { class: "factchip sm", text: `${f[0].toLowerCase()} ${f[1]}` }))),
+            el("span", { class: "row gap6" }, el("span", { class: "t-b big14", text: "Net" }), facts.filter((f) => !/^Net/.test(f[0])).map((f) => el("span", { class: "factchip sm", text: `${f[0].toLowerCase()} ${f[1]}` })), data.ledger ? el("span", { class: `factchip sm${data.ledger.intact === false ? " red" : ""}`, "data-tip": data.ledger.intact === false ? "A ledger row does not match its parent; see the Ledger page" : "Every ledger row matches its parent in the hash chain", text: data.ledger.intact === false ? "chain broken" : "chain verified" }) : null),
             el("span", { class: "tok", text: net[1] || "—" }),
             el("span", { class: "cost", text: netCost[1] || "—" }),
           ),

@@ -53,13 +53,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     tokenize='unicode61'
 );
 
--- External-content FTS5 does not track its source table by itself. These keep
--- the two in step; a delete has to hand back the original text so FTS5 can
--- find the terms it needs to remove. Foreign-key cascades fire them too, which
--- is what keeps `delete_file` correct.
-CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
-    INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
-END;
+-- External-content FTS5 does not track its source table by itself. A delete
+-- has to hand back the original text so FTS5 can find the terms it needs to
+-- remove; this trigger does, and foreign-key cascades fire it too, which is
+-- what keeps `delete_file` correct. An insert is indexed by `insert_chunk`
+-- itself: the trigger that did it cost twice the row's own insert (#198), and
+-- one an older binary recreated is dropped again before every write (see
+-- `drop_insert_trigger`).
+DROP TRIGGER IF EXISTS chunks_fts_insert;
 
 CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
     INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.id, old.text);
@@ -311,8 +312,13 @@ fn open_once(path: &Path) -> Result<Connection> {
     // and a file refused after it was indexed -- a secret appeared in it -- is
     // exactly the one whose old text must not linger (#148).
     db.pragma_update(None, "secure_delete", "ON")?;
+    // The writer's inserts run once per chunk, symbol and edge, each through
+    // the statement cache (#198); the default of 16 is shared with every
+    // other cached read.
+    db.set_prepared_statement_cache_capacity(64);
     defensive(&db)?;
     db.execute_batch(SCHEMA)?;
+    db.execute_batch(GLOB_INDEX)?;
     add_columns(&db)?;
     check_format(&db)?;
     backfill_fts(&db)?;
@@ -619,13 +625,26 @@ fn glob_predicate(groups: &[Vec<String>]) -> (String, Vec<String>) {
         let (excluded, included): (Vec<&String>, Vec<&String>) =
             group.iter().partition(|p| p.starts_with('!'));
         let placeholder = format!("{GLOB_PATH} GLOB ?");
-        let ors = vec![placeholder.clone(); included.len()].join(" OR ");
-        let nots = vec![placeholder; excluded.len()].join(" OR ");
-
         // Binds are positional, so they are pushed in the order the clause
         // below writes their placeholders — inclusions first — rather than in
         // the order the user typed them.
-        binds.extend(included.into_iter().cloned());
+        let ors = included
+            .into_iter()
+            .map(|p| match literal_dir(p) {
+                // The range is what the index answers; the GLOB stays, so the
+                // rows are exactly the pattern's.
+                Some((from, to)) => {
+                    binds.extend([from, to, p.clone()]);
+                    format!("({GLOB_PATH} >= ? AND {GLOB_PATH} < ? AND {placeholder})")
+                }
+                None => {
+                    binds.push(p.clone());
+                    placeholder.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let nots = vec![placeholder; excluded.len()].join(" OR ");
         binds.extend(excluded.into_iter().map(|p| p[1..].to_string()));
 
         clauses.push(match (ors.is_empty(), nots.is_empty()) {
@@ -872,7 +891,7 @@ pub fn delete_file(db: &Connection, path: &str, now: i64) -> Result<Vec<u64>> {
 /// stopped run's undo, whose files were never the store's to remember.
 pub fn delete_file_unretired(db: &Connection, path: &str) -> Result<Vec<u64>> {
     let ids: Vec<u64> = {
-        let mut stmt = db.prepare(
+        let mut stmt = db.prepare_cached(
             "SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.path = ?1",
         )?;
         let rows = stmt.query_map(params![path], |r| r.get::<_, i64>(0))?;
@@ -881,7 +900,8 @@ pub fn delete_file_unretired(db: &Connection, path: &str) -> Result<Vec<u64>> {
             .map(|i| i as u64)
             .collect()
     };
-    db.execute("DELETE FROM files WHERE path = ?1", params![path])?;
+    db.prepare_cached("DELETE FROM files WHERE path = ?1")?
+        .execute(params![path])?;
     Ok(ids)
 }
 
@@ -895,14 +915,14 @@ pub fn delete_file_unretired(db: &Connection, path: &str) -> Result<Vec<u64>> {
 /// A file with no symbols copies nothing, and a store opened by a binary that
 /// never wrote this table simply has none to copy.
 fn retire_symbols(db: &Connection, path: &str, now: i64) -> Result<()> {
-    db.execute(
+    db.prepare_cached(
         "INSERT INTO symbols_past
              (path, kind, name, qualified, start_line, end_line, content_hash, retired_at)
          SELECT f.path, s.kind, s.name, s.qualified, s.start_line, s.end_line, f.hash, ?2
          FROM symbols s JOIN files f ON f.id = s.file_id
          WHERE f.path = ?1",
-        params![path, now],
-    )?;
+    )?
+    .execute(params![path, now])?;
     Ok(())
 }
 
@@ -1018,10 +1038,8 @@ pub struct PastSymbol {
 }
 
 pub fn insert_file(db: &Connection, path: &str, hash: &str, bytes: u64, now: i64) -> Result<i64> {
-    db.execute(
-        "INSERT INTO files (path, hash, bytes, indexed_at) VALUES (?1, ?2, ?3, ?4)",
-        params![path, hash, bytes as i64, now],
-    )?;
+    db.prepare_cached("INSERT INTO files (path, hash, bytes, indexed_at) VALUES (?1, ?2, ?3, ?4)")?
+        .execute(params![path, hash, bytes as i64, now])?;
     Ok(db.last_insert_rowid())
 }
 
@@ -1033,20 +1051,16 @@ pub fn insert_file(db: &Connection, path: &str, hash: &str, bytes: u64, now: i64
 /// and a file whose language has no grammar both arrive at the store with no
 /// symbols at all.
 pub fn set_file_graph(db: &Connection, file_id: i64, state: &str) -> Result<()> {
-    db.execute(
-        "UPDATE files SET graph = ?1 WHERE id = ?2",
-        params![state, file_id],
-    )?;
+    db.prepare_cached("UPDATE files SET graph = ?1 WHERE id = ?2")?
+        .execute(params![state, file_id])?;
     Ok(())
 }
 
 /// Record a file's units (see `chunk::COUNTED`), by row id or, for a file
 /// whose row is already there, by path.
 pub fn set_file_units(db: &Connection, file_id: i64, units: i64) -> Result<()> {
-    db.execute(
-        "UPDATE files SET units = ?1 WHERE id = ?2",
-        params![units, file_id],
-    )?;
+    db.prepare_cached("UPDATE files SET units = ?1 WHERE id = ?2")?
+        .execute(params![units, file_id])?;
     Ok(())
 }
 
@@ -1223,12 +1237,31 @@ pub fn insert_chunk(
     end_line: u32,
     text: &str,
 ) -> Result<i64> {
-    db.execute(
+    db.prepare_cached(
         "INSERT INTO chunks (file_id, ord, start_line, end_line, text)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![file_id, ord as i64, start_line, end_line, text],
-    )?;
-    Ok(db.last_insert_rowid())
+    )?
+    .execute(params![file_id, ord as i64, start_line, end_line, text])?;
+    let id = db.last_insert_rowid();
+    db.prepare_cached("INSERT INTO chunks_fts(rowid, text) VALUES (?1, ?2)")?
+        .execute(params![id, text])?;
+    Ok(id)
+}
+
+/// Drop the insert trigger an older semlith's schema puts back when it opens
+/// this store, inside the writer's transaction so it cannot come back before
+/// the commit. With it in place every chunk would be indexed twice.
+pub fn drop_insert_trigger(db: &Connection) -> Result<()> {
+    let present: bool = db
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'chunks_fts_insert')",
+        )?
+        .query_row([], |r| r.get(0))?;
+    if present {
+        db.execute_batch("DROP TRIGGER chunks_fts_insert")?;
+    }
+    Ok(())
 }
 
 /// Indexed files whose path ends with `suffix`, most specific first.
@@ -1270,6 +1303,28 @@ const PATH_AS_TYPED: &str = "path";
 const GLOB_PATH: &str = r#"replace(lower(f.path), '\', '/')"#;
 #[cfg(not(windows))]
 const GLOB_PATH: &str = "lower(f.path)";
+
+/// An index on exactly [`GLOB_PATH`]'s expression, so a pattern with a literal
+/// directory in front -- `<root>/**`, how a scope to one repository is written
+/// -- is a range scan of it rather than a GLOB over every path (#183). Additive:
+/// a binary that predates it never names it and SQLite keeps it current.
+#[cfg(windows)]
+const GLOB_INDEX: &str =
+    r#"CREATE INDEX IF NOT EXISTS files_glob_path ON files(replace(lower(path), '\', '/'));"#;
+#[cfg(not(windows))]
+const GLOB_INDEX: &str = "CREATE INDEX IF NOT EXISTS files_glob_path ON files(lower(path));";
+
+/// The literal directory an absolute pattern starts with, `/` included, and the
+/// bound just past every path under it: `/` is followed by `0` in byte order.
+/// `None` for a pattern that starts with a wildcard or names no directory.
+fn literal_dir(pattern: &str) -> Option<(String, String)> {
+    let wild = pattern.find(['*', '?', '['])?;
+    let dir = &pattern[..pattern[..wild].rfind('/')? + 1];
+    if dir.len() < 2 || !(dir.starts_with('/') || dir.as_bytes().get(1) == Some(&b':')) {
+        return None;
+    }
+    Some((dir.to_string(), format!("{}0", &dir[..dir.len() - 1])))
+}
 
 /// Every chunk of one file whose lines overlap `start..=end`, in file order.
 ///
@@ -1785,19 +1840,19 @@ pub fn insert_symbol(
     chunk_id: Option<i64>,
     symbol: &crate::graph::Symbol,
 ) -> Result<i64> {
-    db.execute(
+    db.prepare_cached(
         "INSERT INTO symbols (file_id, chunk_id, kind, name, qualified, start_line, end_line)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            file_id,
-            chunk_id,
-            symbol.kind,
-            symbol.name,
-            symbol.qualified,
-            symbol.start_line,
-            symbol.end_line
-        ],
-    )?;
+    )?
+    .execute(params![
+        file_id,
+        chunk_id,
+        symbol.kind,
+        symbol.name,
+        symbol.qualified,
+        symbol.start_line,
+        symbol.end_line
+    ])?;
     Ok(db.last_insert_rowid())
 }
 
@@ -1810,11 +1865,11 @@ pub fn insert_edge(
     hint: Option<&str>,
     line: Option<u32>,
 ) -> Result<()> {
-    db.execute(
+    db.prepare_cached(
         "INSERT INTO edges (src, dst, kind, confidence, hint, line)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![src, dst, kind, confidence, hint, line],
-    )?;
+    )?
+    .execute(params![src, dst, kind, confidence, hint, line])?;
     Ok(())
 }
 
@@ -5120,6 +5175,7 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "foreign_keys", "ON").unwrap();
         db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(GLOB_INDEX).unwrap();
         for path in [
             "/proj/src/lib.rs",
             "/proj/src/notes.md",
@@ -5165,6 +5221,54 @@ mod tests {
         assert_eq!(
             paths_of(&db, &ids),
             [native("/proj/src/lib.rs"), native("/proj/src/notes.md")]
+        );
+    }
+
+    /// A scope to one root is a range of the path index, not a GLOB over every
+    /// path (#183): the plan searches `files_glob_path` and scans no table.
+    #[test]
+    fn a_root_scope_is_a_range_of_the_path_index() {
+        let db = mixed();
+        let groups = filter(&["/proj/src/**"], &[], &[]);
+        let (predicate, binds) = glob_predicate(&groups);
+        let sql = format!("EXPLAIN QUERY PLAN SELECT f.id FROM files f WHERE {predicate}");
+        let plan: Vec<String> = db
+            .prepare(&sql)
+            .unwrap()
+            .query_map(rusqlite::params_from_iter(binds.iter()), |r| r.get(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            plan.iter()
+                .any(|p| p.contains("INDEX files_glob_path (<expr>>? AND <expr><?)")),
+            "the scope did not use the path index: {plan:?}"
+        );
+        assert!(!plan.iter().any(|p| p.starts_with("SCAN")), "{plan:?}");
+        // And the range changes no answer.
+        let ids = filtered_chunk_ids(&db, &groups).unwrap();
+        assert_eq!(
+            paths_of(&db, &ids),
+            [native("/proj/src/lib.rs"), native("/proj/src/notes.md")]
+        );
+    }
+
+    #[test]
+    fn only_a_literal_directory_in_front_is_a_range() {
+        assert_eq!(
+            literal_dir("/proj/src/**"),
+            Some(("/proj/src/".into(), "/proj/src0".into()))
+        );
+        assert_eq!(
+            literal_dir("/proj/src/*.rs"),
+            Some(("/proj/src/".into(), "/proj/src0".into()))
+        );
+        assert_eq!(literal_dir("*/src/**"), None, "a leading wildcard");
+        assert_eq!(literal_dir("/*"), None, "the whole disk is no range");
+        assert_eq!(
+            literal_dir("/proj/readme.md"),
+            None,
+            "no wildcard, no GLOB to narrow"
         );
     }
 
@@ -5406,6 +5510,37 @@ mod tests {
         let into = edges_in(&db, "callee", &[]).unwrap();
         assert_eq!(into.len(), 1, "{into:?}");
         assert_eq!(into[0].line, None);
+    }
+
+    /// An older binary opening the store puts the insert trigger back; the
+    /// writer drops it before inserting, so a chunk is indexed once (#198).
+    #[test]
+    fn an_insert_trigger_an_older_binary_restored_does_not_index_twice() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        add_columns(&db).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+                 INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
+             END;",
+        )
+        .unwrap();
+        db.execute_batch("BEGIN").unwrap();
+        drop_insert_trigger(&db).unwrap();
+        let f = insert_file(&db, "/a/lib.rs", "h", 10, 0).unwrap();
+        let id = insert_chunk(&db, f, 0, 1, 5, "retry backoff and jitter").unwrap();
+        db.execute_batch("COMMIT").unwrap();
+        assert_eq!(
+            keyword_search(&db, "jitter", 10, &[]).unwrap(),
+            vec![id as u64]
+        );
+        // Indexed once: an integrity check of external content fails on a
+        // doubled row.
+        db.execute_batch("INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1);")
+            .unwrap();
+        // And a delete still takes it out of the index.
+        db.execute("DELETE FROM files WHERE id = ?1", [f]).unwrap();
+        assert!(keyword_search(&db, "jitter", 10, &[]).unwrap().is_empty());
     }
 
     #[test]
