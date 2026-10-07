@@ -247,7 +247,8 @@ def main():
             # would otherwise be the next one's starting point.
             try:
                 drive.eval("(() => { try { for (const k of Object.keys(localStorage)) if (k.startsWith('semlith-ui:')) localStorage.removeItem(k);"
-                           " sessionStorage.removeItem('semlith-wz'); if (typeof KEPT !== 'undefined') KEPT.length = 0; } catch (e) {} return true; })()")
+                           " sessionStorage.removeItem('semlith-wz'); if (typeof KEPT !== 'undefined') KEPT.length = 0;"
+                           " if (typeof state !== 'undefined') state.wz = null; } catch (e) {} return true; })()")
             except Exception:
                 pass
             try:

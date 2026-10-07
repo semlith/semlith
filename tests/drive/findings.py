@@ -6859,6 +6859,37 @@ def _(d):
     if any(r["name"] == name for r in stores(d)):
         fail("leaving the restored wizard did not delete its empty store %s" % name)
     want("the kept wizard once left", d.eval("sessionStorage.getItem('semlith-wz')"), None)
+    # A wizard opened from Welcome starts blank and keeps the store it just
+    # made, even when the store list it asked for as it opened answers after
+    # the create (CI under load: the late, older list read as "the store is
+    # gone" and wiped the wizard mid-step).
+    d.eval("sessionStorage.setItem('semlith-wz', JSON.stringify({step: 3, name: 'wz-stale', created: 'wz-stale', sources: [], at: Date.now()})); true")
+    d.open_view("welcome", fresh=True)
+    # On a loaded runner the store list read as the wizard opens can answer
+    # after Create, older than it. Here every store list for a few seconds
+    # is the one from before the store was made, and the agents answer late
+    # so the wizard's opening reads finish after Create.
+    d.eval("(() => { if (!window.__fetch) window.__fetch = window.fetch; const old = JSON.stringify(data.stores); const until = Date.now() + 6000;"
+           " window.fetch = async (u, o) => { const get = !(o && /post/i.test(o.method || ''));"
+           " if (get && /\\/api\\/agents(\\?|$)/.test(String(u))) await new Promise(r => setTimeout(r, 3000));"
+           " if (get && /\\/api\\/stores(\\?|$)/.test(String(u)) && Date.now() < until) {"
+           "   return new Response(old, {status: 200, headers: {'content-type': 'application/json'}}); }"
+           " return window.__fetch(u, o); };"
+           " return true; })()")
+    try:
+        d.eval("delete data.agents; true")
+        press_text(d, ".welcome-card button", "Create your first store", "Create your first store")
+        wz_step(d, 1)
+        name = "wz-%d" % random.randint(10000, 99999)
+        d.type('.wz-body input[aria-label="Store name"]', name)
+        d.eval("(() => { const b = [...document.querySelectorAll('.wz-foot button')].find(b => /Create store/.test(b.textContent)); b.disabled = false; b.click(); return true; })()")
+        wz_step(d, 2)
+        pause(d, 6500)
+        want("the wizard's store once every list has answered", d.eval("state.wz && state.wz.created"), name)
+        wz_step(d, 2)
+    finally:
+        fast_posts(d)
+        leave_wizard(d)
 
 
 @finding("par.4", "the wizard's primary button spins with aria-busy while it works, Back is locked meanwhile, and a long name says the 40-character limit")
