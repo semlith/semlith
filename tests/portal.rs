@@ -1729,6 +1729,10 @@ fn nothing_the_portal_builds_carries_an_inline_style_attribute() {
         // `el(…, { style: … })` and `"style":` set the attribute through the
         // element builder, `setAttribute("style", …)` sets it directly, and a
         // `style=` inside a string is markup somebody is about to parse.
+        // A line that only leaves the attribute out (`name !== "style"`, the
+        // morph's) writes none.
+        let leaves_out = trimmed.replace("name !== \"style\"", "");
+        let trimmed = leaves_out.as_str();
         if trimmed.contains("style:")
             || trimmed.contains("\"style\"")
             || trimmed.contains("setAttribute(\"style\"")

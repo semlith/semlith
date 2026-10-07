@@ -90,6 +90,42 @@ fn index_search_update_forget() {
     assert!(!hits.iter().any(|h| h.path.ends_with("bread.md")));
 }
 
+/// A file emptied on disk keeps nothing of what it held. The pass skips an
+/// empty file, and before 0.38.0 it skipped it without evicting it, so the old
+/// chunks went on answering searches for text no longer on disk -- found by the
+/// scorecard's SWE-bench walk, where a commit emptied astropy's `__init__.py`.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn an_emptied_file_is_evicted() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "bread.md",
+        "Sourdough starter needs flour and water fed daily.",
+    );
+    write(
+        corpus.path(),
+        "cells.md",
+        "Mitochondria are the powerhouse of the cell.",
+    );
+    let roots = vec![corpus.path().to_path_buf()];
+    let mut s = Semlith::open(store.path(), None).unwrap();
+    s.quiet = true;
+    s.index_paths(&roots, |_, _| {}).unwrap();
+    assert_eq!(top(&mut s, "what organelle produces energy"), "cells.md");
+
+    write(corpus.path(), "cells.md", "");
+    let report = s.index_paths(&roots, |_, _| {}).unwrap();
+    assert_eq!(report.removed, 1, "the emptied file was not evicted");
+    let hits = s.search("mitochondria powerhouse", 5).unwrap();
+    assert!(
+        !hits.iter().any(|h| h.path.ends_with("cells.md")),
+        "an emptied file still answers: {hits:#?}"
+    );
+    assert_eq!(top(&mut s, "how do I bake bread"), "bread.md");
+}
+
 /// A filter must narrow both halves of the search *before* either picks its
 /// top-k. Post-filtering a global ranking is the failure this guards: with the
 /// subsystem a small minority of the corpus, it returns nothing.

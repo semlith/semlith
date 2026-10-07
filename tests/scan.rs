@@ -183,7 +183,8 @@ fn a_credential_in_an_ordinary_file_is_refused_at_index_time() {
         report.refused
     );
     assert_eq!(report.indexed, 0);
-    for (path, outcome, why) in &events {
+    // A phase is the run saying what it is doing, not a file.
+    for (path, outcome, why) in events.iter().filter(|e| e.1 != FileOutcome::Phase) {
         assert_eq!(
             *outcome,
             FileOutcome::Refused,

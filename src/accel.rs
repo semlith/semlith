@@ -70,6 +70,29 @@ const START_CAP: Duration = Duration::from_secs(60 * 60);
 /// it.
 const WORKER_IDLE: Duration = Duration::from_secs(60);
 
+/// Unix seconds until which an idle worker is kept anyway: a run between two
+/// of its slices. Its last slice drains and writes the index for about a
+/// minute with nothing for the lanes, and on the owner's walk the Neural
+/// Engine's worker went in that minute, so every slice after waited two
+/// minutes for it to load again with the card saying nothing.
+static WARM_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Keep idle workers for `for_` more: a run has more slices to come.
+pub fn keep_warm(for_: Duration) {
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        + for_.as_secs();
+    WARM_UNTIL.fetch_max(until, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn kept_warm() -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    WARM_UNTIL.load(std::sync::atomic::Ordering::Relaxed) > now
+}
+
 /// Batches a worker holds at once: one it is computing and the next already
 /// in its pipe, so it never waits on the round trip for its next batch.
 const WORKER_DEPTH: usize = 2;
@@ -325,7 +348,18 @@ pub struct Lane {
     /// left before the compile has moved: the Neural Engine's first bucket
     /// is a single step of half a minute.
     expected: Mutex<Option<Duration>>,
+    /// When the lane last went from working to failed: a failure is tried
+    /// again after [`LANE_RETRY`] rather than kept for the life of the daemon.
+    failed_at: Mutex<Option<Instant>>,
 }
+
+/// How long a failed lane waits before it is tried again. A Neural Engine
+/// worker that failed once at a daemon's start left that daemon embedding on
+/// the CPU, ten times slower, for the rest of its life, and switching the lane
+/// off and on from the terminal never reached it.
+/// ponytail: one fixed interval; back off if a lane that keeps failing costs
+/// more than the retries are worth.
+const LANE_RETRY: Duration = Duration::from_secs(600);
 
 impl Lane {
     fn new(spec: &Spec) -> Self {
@@ -340,6 +374,7 @@ impl Lane {
             jobs: Mutex::new(None),
             began: Mutex::new(None),
             expected: Mutex::new(None),
+            failed_at: Mutex::new(None),
         }
     }
 
@@ -425,6 +460,8 @@ impl Lane {
         let phase = |s: &Status| match s {
             Status::Compiling { .. } => 1,
             Status::Downloading { .. } => 2,
+            // Timed too, so a run waiting on a start says for how long.
+            Status::Starting => 3,
             _ => 0,
         };
         let (was, now) = (phase(&current), phase(&status));
@@ -441,6 +478,22 @@ impl Lane {
             *began = Some((start, Instant::now(), percent));
         }
         drop(began);
+        let mut failed_at = self.failed_at.lock().unwrap_or_else(|e| e.into_inner());
+        match &status {
+            Status::Failed { reason } if !matches!(*current, Status::Failed { .. }) => {
+                *failed_at = Some(Instant::now());
+                // The daemon's log is its stderr: without this line a lane that
+                // failed was visible only to someone who ran `semlith accel`.
+                eprintln!(
+                    "semlith: the {} lane failed: {reason}; it is tried again in {} minutes",
+                    self.id,
+                    LANE_RETRY.as_secs() / 60
+                );
+            }
+            Status::Failed { .. } => {}
+            _ => *failed_at = None,
+        }
+        drop(failed_at);
         *current = status;
     }
 
@@ -454,8 +507,18 @@ impl Lane {
         )
     }
 
-    /// Whether the lane can be used at all: not failed, not unavailable.
+    /// Whether the lane can be used at all: not failed, not unavailable. A
+    /// failure older than [`LANE_RETRY`] is cleared here, so the next run
+    /// tries the lane afresh.
     pub fn usable(&self) -> bool {
+        let due = self
+            .failed_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some_and(|at| at.elapsed() >= LANE_RETRY);
+        if due {
+            self.reset();
+        }
         !matches!(
             self.status(),
             Status::Unavailable { .. } | Status::Failed { .. }
@@ -728,7 +791,15 @@ pub fn waiting_for() -> Option<String> {
             "waiting for the {label} lane to download: {percent} %{}",
             left(eta_ms)
         ),
-        _ => format!("waiting for the {label} lane to start"),
+        // Seconds so far, so a long first start after an update (Core ML
+        // compiling the model again, two minutes on replay 11) still moves.
+        _ => match *lane.began.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some((start, _, _)) if start.elapsed() >= Duration::from_secs(5) => format!(
+                "waiting for the {label} lane to start: {} s so far",
+                start.elapsed().as_secs()
+            ),
+            _ => format!("waiting for the {label} lane to start"),
+        },
     })
 }
 
@@ -833,11 +904,175 @@ pub fn snapshot() -> serde_json::Value {
         // Said, not implied: the CPU carries the run whatever its switch says
         // while no worker lane can and none is on its way.
         "cpu_fallback": !on.cpu && !accel_ready && !accel_coming,
+        // What each lane has managed here, measured or from its check: what
+        // a page estimates a run from before it starts.
+        "rates": rates(),
     })
 }
 
 fn round(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
+}
+
+// ----------------------------------------------------------------- lane rates
+
+/// The CPU lane's known-answer check, its speed remembered.
+fn check_cpu() -> Result<Check> {
+    let cache = crate::model_cache_dir()?;
+    let mut model = crate::embed::Model::Granite.load(cache, crate::chunk::MAX_CHARS / 2, true)?;
+    let check = known_answer("cpu", &crate::system::cpu_name(), "int8-cpu", |texts| {
+        let mut got = model
+            .embed(texts, Some(1))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        for vector in &mut got {
+            crate::normalize(vector);
+        }
+        Ok(got)
+    })?;
+    if check.passed {
+        // In batches, as a run embeds: see the worker's figure.
+        let (texts, _) = fixture();
+        let started = Instant::now();
+        model
+            .embed(&texts, Some(8))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        note_known_answer(
+            "cpu",
+            texts.len() as f64 / started.elapsed().as_secs_f64().max(1e-6),
+        );
+    }
+    Ok(check)
+}
+
+/// Give the CPU lane a figure if it has none, so the first estimate on a
+/// fresh machine says something rather than nothing: thirty-two chunks, a
+/// second or two, once.
+pub fn seed_cpu_rate() {
+    // Never a download for it: only a model already on this machine.
+    let cached = crate::model_cache_dir().is_ok_and(|cache| crate::embed::is_cached(&cache));
+    if cached && !rates().contains_key("cpu") {
+        let _ = check_cpu();
+    }
+}
+
+/// What one lane has managed on this machine.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, serde::Deserialize)]
+pub struct Rate {
+    /// Chunks per second, or images per second for `clip`.
+    pub per_s: f64,
+    /// `measured` from runs, or `known-answer` from the lane's check, which
+    /// embeds one chunk at a time and so undersells a batched lane.
+    pub source: RateSource,
+    /// Runs the measured figure is an average of.
+    #[serde(default)]
+    pub runs: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RateSource {
+    Measured,
+    KnownAnswer,
+}
+
+/// Every lane's remembered rate, by lane id (`clip` for images).
+pub fn rates() -> std::collections::BTreeMap<String, Rate> {
+    crate::home::lane_rates_path()
+        .ok()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_rates(rates: &std::collections::BTreeMap<String, Rate>) {
+    if let (Ok(path), Ok(bytes)) = (
+        crate::home::lane_rates_path(),
+        serde_json::to_vec_pretty(rates),
+    ) {
+        let _ = crate::home::write_private(&path, &bytes);
+    }
+}
+
+/// A run measured `per_s` on `lane`: folded into the remembered figure, half
+/// old and half new, so one odd run moves it but does not own it.
+pub fn note_rate(lane: &str, per_s: f64) {
+    if !per_s.is_finite() || per_s <= 0.0 {
+        return;
+    }
+    let mut all = rates();
+    let next = match all.get(lane) {
+        Some(old) if old.source == RateSource::Measured => Rate {
+            per_s: (old.per_s + per_s) / 2.0,
+            source: RateSource::Measured,
+            runs: old.runs.saturating_add(1),
+        },
+        _ => Rate {
+            per_s,
+            source: RateSource::Measured,
+            runs: 1,
+        },
+    };
+    all.insert(lane.to_string(), next);
+    save_rates(&all);
+}
+
+/// A lane's speed on the known-answer fixture in batches, kept only until a
+/// run measures the lane.
+pub fn note_known_answer(lane: &str, per_s: f64) {
+    if !per_s.is_finite() || per_s <= 0.0 {
+        return;
+    }
+    let mut all = rates();
+    if all
+        .get(lane)
+        .is_some_and(|r| r.source == RateSource::Measured)
+    {
+        return;
+    }
+    all.insert(
+        lane.to_string(),
+        Rate {
+            per_s,
+            source: RateSource::KnownAnswer,
+            runs: 0,
+        },
+    );
+    save_rates(&all);
+}
+
+/// Chunks per second the lanes switched on here are expected to manage
+/// together, or `None` when none of them has a figure yet. The prior a run's
+/// time left starts from.
+pub fn expected_rate() -> Option<f64> {
+    let known = rates();
+    let sum: f64 = run_lanes()
+        .iter()
+        .filter_map(|lane| known.get(*lane).map(|r| r.per_s))
+        .sum();
+    (sum > 0.0).then_some(sum)
+}
+
+/// Whether a run's text embeds off the CPU, so the image model, which runs on
+/// the CPU on a thread of its own, works beside it rather than taking turns.
+pub fn images_beside_text() -> bool {
+    run_lanes().iter().any(|lane| *lane != "cpu")
+}
+
+/// The lanes a run would embed text on, as `for_run` chooses them, among
+/// those with a known rate or usable here.
+fn run_lanes() -> Vec<&'static str> {
+    let on = enabled();
+    let known = rates();
+    let usable = |lane: &&str| on.lane(lane) && unavailable_here(lane).is_none();
+    // The lanes a run would use, as `for_run` chooses them: with the Neural
+    // Engine on, the CPU steps aside and the GPU joins only when asked to.
+    let ane = usable(&"ane") && known.contains_key("ane");
+    let lanes: Vec<&str> = ["cpu", "ane", "gpu", "cuda", "trt", "openvino", "llama"]
+        .into_iter()
+        .filter(|lane| usable(lane))
+        .filter(|lane| !ane || (*lane != "cpu" && (*lane != "gpu" || on.gpu_beside_ane)))
+        .collect();
+    lanes
 }
 
 /// The names `semlith accel on|off` takes.
@@ -1120,6 +1355,10 @@ fn dispatch(lane: Arc<Lane>, jobs: mpsc::Receiver<Job>) {
                     if worker.is_some() && matches!(lane.id, "ane" | "gpu") && coreml_compiling() {
                         continue;
                     }
+                    // Nor between a run's slices.
+                    if worker.is_some() && kept_warm() {
+                        continue;
+                    }
                     // Idle: the worker goes, and its device memory with it.
                     if worker.take().is_some() && lane.status() == Status::Active {
                         lane.set(Status::Idle);
@@ -1237,20 +1476,7 @@ fn reason_of(status: &Status) -> String {
 pub fn check_all(say: impl Fn(&str)) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     say("checking the CPU lane");
-    let cpu = (|| -> Result<Check> {
-        let cache = crate::model_cache_dir()?;
-        let mut model =
-            crate::embed::Model::Granite.load(cache, crate::chunk::MAX_CHARS / 2, true)?;
-        known_answer("cpu", &crate::system::cpu_name(), "int8-cpu", |texts| {
-            let mut got = model
-                .embed(texts, Some(1))
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            for vector in &mut got {
-                crate::normalize(vector);
-            }
-            Ok(got)
-        })
-    })();
+    let cpu = check_cpu();
     out.push(match cpu {
         Ok(check) => serde_json::to_value(check).unwrap_or_default(),
         Err(e) => serde_json::json!({ "lane": "cpu", "passed": false, "reason": format!("{e:#}") }),
@@ -1403,7 +1629,7 @@ fn worker_args(lane: &Arc<Lane>) -> Result<Vec<String>> {
 /// The Core ML worker's protocol: bump it whenever the `__embed-worker ane`
 /// or `gpu-coreml` code, its arguments or its frames change, and a fresh copy
 /// of the binary becomes the worker (see [`coreml_worker`]).
-pub const COREML_WORKER: u32 = 2;
+pub const COREML_WORKER: u32 = 3;
 
 /// Run the Core ML lanes' worker from the binary that is running now rather
 /// than the stable copy: for developing the worker itself.
@@ -1621,6 +1847,9 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
         }
         bail!("{reason}");
     }
+    if let Some(per_s) = hello["batch_per_s"].as_f64() {
+        note_known_answer(lane.id, per_s);
+    }
     if let Some(device) = hello["device"].as_str() {
         *lane.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(device.to_string());
     }
@@ -1629,6 +1858,12 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
     }
     Ok((worker, hello))
 }
+
+/// The slowest batched rate a worker lane may show on the fixture and still be
+/// used. Every hardware lane measured is far above it, even on a loaded
+/// machine (an M1's GPU 17.8 and Neural Engine 21 while another run embedded;
+/// an A30's CUDA 863); llvmpipe standing in for an A30 managed 0.7.
+const MIN_LANE_PER_S: f64 = 2.0;
 
 /// A worker's variant as the `'static` name a store's counts use.
 fn static_variant(name: &str) -> Option<&'static str> {
@@ -1786,8 +2021,28 @@ pub struct Check {
     pub variant: String,
     /// The lowest cosine against the fp32 fixture over all 32 chunks.
     pub cosine: f32,
+    /// Every chunk under the floor, by its place in the fixture: whether a
+    /// failure is one long chunk or spread over all of them (#197).
+    pub low: Vec<(usize, f32)>,
     pub chunks_per_s: f64,
     pub passed: bool,
+}
+
+impl Check {
+    /// `3 of 32 chunks below the floor: #4 0.9989, #17 0.9991, #30 0.9989`.
+    pub fn low_line(&self) -> String {
+        let each: Vec<String> = self
+            .low
+            .iter()
+            .map(|(at, cosine)| format!("#{at} {cosine:.4}"))
+            .collect();
+        format!(
+            "{} of {} chunks below the floor: {}",
+            self.low.len(),
+            fixture().0.len(),
+            each.join(", ")
+        )
+    }
 }
 
 /// Embed the fixture with `embed` and score it against the committed vectors.
@@ -1800,14 +2055,6 @@ pub fn known_answer(
     let (texts, expected) = fixture();
     // Each chunk alone, as the fixture was made: padding would change the
     // answer and it is the device being checked, not the batching.
-    let started = Instant::now();
-    let mut worst = 1.0f32;
-    for (text, want) in texts.iter().zip(&expected) {
-        let got = embed(std::slice::from_ref(text))?;
-        let got = got.first().context("no vector came back")?;
-        worst = worst.min(crate::index::cosine(got, want));
-    }
-    let elapsed = started.elapsed().as_secs_f64().max(1e-6);
     // Every variant but the CPU's int8 is full or half precision, and held to
     // the fp16 floor: llama.cpp's GGUF and OpenVINO's are too.
     let floor = if variant == "int8-cpu" {
@@ -1815,11 +2062,25 @@ pub fn known_answer(
     } else {
         MIN_COSINE_FP16
     };
+    let started = Instant::now();
+    let mut worst = 1.0f32;
+    let mut low = Vec::new();
+    for (at, (text, want)) in texts.iter().zip(&expected).enumerate() {
+        let got = embed(std::slice::from_ref(text))?;
+        let got = got.first().context("no vector came back")?;
+        let cosine = crate::index::cosine(got, want);
+        worst = worst.min(cosine);
+        if cosine < floor {
+            low.push((at, cosine));
+        }
+    }
+    let elapsed = started.elapsed().as_secs_f64().max(1e-6);
     Ok(Check {
         lane: lane.to_string(),
         device: device.to_string(),
         variant: variant.to_string(),
         cosine: worst,
+        low,
         chunks_per_s: (texts.len() as f64 / elapsed * 10.0).round() / 10.0,
         passed: worst >= floor,
     })
@@ -1892,16 +2153,56 @@ pub fn worker_main(lane: &str, dir: Option<&Path>, adapter: Option<&str>) -> i32
     // The worker tokenises only here, for the fixture; a run's batches arrive
     // as ids.
     let tokenizer = crate::model_cache_dir().and_then(|cache| crate::session::tokenizer(&cache));
+    let mut batched = None;
     let check = tokenizer.and_then(|tokenizer| {
-        known_answer(lane, &session.device(), session.variant(), |texts| {
+        let check = known_answer(lane, &session.device(), session.variant(), |texts| {
             let batch = texts
                 .iter()
                 .map(|text| crate::session::encode(&tokenizer, text))
                 .collect::<Result<Vec<_>>>()?;
             let rows: Vec<&[u32]> = batch.iter().map(Vec::as_slice).collect();
             session.embed(&rows)
-        })
+        })?;
+        // The check embeds one chunk at a time, which is latency, not what a
+        // run's batches manage: the fixture again in batches of eight, timed,
+        // is this lane's first figure for an estimate.
+        if check.passed {
+            let (texts, _) = fixture();
+            let ids = texts
+                .iter()
+                .map(|text| crate::session::encode(&tokenizer, text))
+                .collect::<Result<Vec<_>>>()?;
+            let started = Instant::now();
+            for group in ids.chunks(8) {
+                let rows: Vec<&[u32]> = group.iter().map(Vec::as_slice).collect();
+                session.embed(&rows)?;
+            }
+            batched = Some(ids.len() as f64 / started.elapsed().as_secs_f64().max(1e-6));
+        }
+        Ok(check)
     });
+    // A lane slower than any GPU is not on one. On a Linux box whose
+    // container lacks the graphics capability, or with no vendor Vulkan
+    // driver, Dawn runs on llvmpipe while the device it reports is still the
+    // card's PCI id, and the "NVIDIA" lane embedded on the CPU at under one
+    // chunk a second (#197, measured on an A30). Refused, saying so.
+    if let (Ok(check), Some(per_s)) = (&check, batched)
+        && check.passed
+        && per_s < MIN_LANE_PER_S
+    {
+        say(
+            &mut out,
+            serde_json::json!({
+                "ok": false,
+                "unavailable": true,
+                "reason": format!(
+                    "{} embedded at {per_s:.1} chunks/s, slower than any GPU, so it is most likely a software renderer standing in for the card (on Linux: the GPU maker's Vulkan driver is missing, or the container has no graphics capability)",
+                    check.device
+                ),
+            }),
+        );
+        return 1;
+    }
     match check {
         Ok(check) if check.passed => say(
             &mut out,
@@ -1911,6 +2212,7 @@ pub fn worker_main(lane: &str, dir: Option<&Path>, adapter: Option<&str>) -> i32
                 "variant": check.variant,
                 "cosine": check.cosine,
                 "chunks_per_s": check.chunks_per_s,
+                "batch_per_s": batched,
             }),
         ),
         Ok(check) => {
@@ -1919,8 +2221,8 @@ pub fn worker_main(lane: &str, dir: Option<&Path>, adapter: Option<&str>) -> i32
                 serde_json::json!({
                     "ok": false,
                     "reason": format!(
-                        "{} failed the known-answer check: cosine {:.4} against the fp32 fixture",
-                        check.device, check.cosine
+                        "{} failed the known-answer check: cosine {:.4} against the fp32 fixture ({})",
+                        check.device, check.cosine, check.low_line()
                     ),
                 }),
             );
@@ -2015,6 +2317,35 @@ pub fn component_dir(cache: &Path, lane: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// A failed check names every chunk under the floor, not only the worst
+    /// (#197: the NVIDIA report gave the minimum and nothing else).
+    #[test]
+    fn a_failed_check_names_every_chunk_under_the_floor() {
+        let (texts, expected) = fixture();
+        let mut at = 0;
+        let check = known_answer("gpu", "test", "fp16-webgpu", |_| {
+            let mut v = expected[at].clone();
+            // Two chunks bent off their fixture vector, the rest exact.
+            if at == 3 || at == 17 {
+                v[0] += 0.3;
+                v[1] -= 0.3;
+            }
+            at += 1;
+            Ok(vec![v])
+        })
+        .unwrap();
+        assert!(!check.passed);
+        assert_eq!(
+            check.low.iter().map(|l| l.0).collect::<Vec<_>>(),
+            vec![3, 17]
+        );
+        let line = check.low_line();
+        assert!(
+            line.starts_with(&format!("2 of {} chunks below the floor: #3 ", texts.len())),
+            "{line}"
+        );
+    }
+
     /// The Core ML worker is a copy made once and reused, whatever binary asks
     /// for it next, and an earlier protocol's copy goes.
     #[test]
@@ -2096,6 +2427,23 @@ mod tests {
         assert!(!lane.coming());
         lane.set(Status::Active);
         assert!(lane.ready() && !lane.coming());
+    }
+
+    /// A failed lane stays failed for a while and is then tried again, rather
+    /// than for the life of the process.
+    #[test]
+    fn a_failed_lane_is_tried_again_after_its_cool_down() {
+        let lane = Lane::new(spec("ane").unwrap());
+        lane.set(Status::Failed { reason: "x".into() });
+        assert!(!lane.usable());
+        // Failing again does not restart the wait.
+        let first = *lane.failed_at.lock().unwrap();
+        lane.set(Status::Failed { reason: "y".into() });
+        assert_eq!(*lane.failed_at.lock().unwrap(), first);
+        *lane.failed_at.lock().unwrap() = Instant::now().checked_sub(LANE_RETRY);
+        assert!(lane.usable());
+        assert_eq!(lane.status(), Status::Idle);
+        assert!(lane.failed_at.lock().unwrap().is_none());
     }
 
     /// A compile left by a killed worker is deleted; one still being written

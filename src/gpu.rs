@@ -46,6 +46,39 @@ pub fn is_software(vendor: u32, name: &str) -> bool {
     SOFTWARE_VENDORS.contains(&vendor) || SOFTWARE_NAMES.iter().any(|n| name.contains(n))
 }
 
+/// One physical device as Vulkan lists it.
+#[derive(Debug, Clone)]
+pub struct VulkanDevice {
+    pub vendor: u32,
+    /// `VkPhysicalDeviceType`: 1 integrated, 2 discrete, 3 virtual, 4 CPU.
+    pub kind: u32,
+    pub name: String,
+}
+
+/// The Vulkan device the WebGPU lane can run on: a discrete GPU first, then
+/// any other that is not the CPU or a software renderer by vendor or name.
+/// Only software devices, or none, is the reason the lane is unavailable.
+pub fn hardware_vulkan(devices: &[VulkanDevice]) -> std::result::Result<&VulkanDevice, String> {
+    let hardware = |d: &&VulkanDevice| d.kind != 4 && !is_software(d.vendor, &d.name);
+    devices
+        .iter()
+        .filter(hardware)
+        .find(|d| d.kind == 2)
+        .or_else(|| devices.iter().find(hardware))
+        .ok_or_else(|| {
+            if devices.is_empty() {
+                "Vulkan lists no device: the GPU maker's Vulkan driver is missing".to_string()
+            } else {
+                let names: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+                format!(
+                    "Vulkan has only a software device ({}), e.g. the GPU maker's Vulkan driver \
+                     is missing or the container lacks the graphics capability",
+                    names.join(", ")
+                )
+            }
+        })
+}
+
 /// The hardware GPU this machine has, by name, or why it has none.
 pub fn detect() -> std::result::Result<String, String> {
     platform::detect()
@@ -94,24 +127,111 @@ mod platform {
         let Some(first) = found.first() else {
             return Err("no hardware GPU found".to_string());
         };
-        // SAFETY: a NUL-terminated name; the handle is closed straight away
-        // and nothing is looked up through it.
-        let loader = unsafe {
+        // The DRM card says a GPU is plugged in, not that the plugin can
+        // reach it: in a container without the graphics capability, or with
+        // no driver from the GPU's maker, Vulkan offers only Mesa's llvmpipe,
+        // which the plugin then runs on while reporting the card's PCI id
+        // (#197). Ask Vulkan itself.
+        let devices = vulkan_devices().map_err(|why| format!("{first} found, but {why}"))?;
+        super::hardware_vulkan(&devices).map(|device| device.name.clone())
+    }
+
+    /// Every physical device Vulkan lists, through the loader directly: no
+    /// crate, and the instance is destroyed before returning.
+    fn vulkan_devices() -> std::result::Result<Vec<super::VulkanDevice>, String> {
+        use std::ffi::{c_char, c_void};
+        #[repr(C)]
+        struct InstanceCreateInfo {
+            s_type: u32,
+            next: *const c_void,
+            flags: u32,
+            application: *const c_void,
+            layer_count: u32,
+            layers: *const *const c_char,
+            extension_count: u32,
+            extensions: *const *const c_char,
+        }
+        type Create =
+            unsafe extern "C" fn(*const InstanceCreateInfo, *const c_void, *mut *mut c_void) -> i32;
+        type Destroy = unsafe extern "C" fn(*mut c_void, *const c_void);
+        type Enumerate = unsafe extern "C" fn(*mut c_void, *mut u32, *mut *mut c_void) -> i32;
+        type Properties = unsafe extern "C" fn(*mut c_void, *mut u8);
+
+        // SAFETY: the loader's own exported Vulkan 1.0 entry points, called
+        // with the signatures the Vulkan headers give them. The properties
+        // buffer is 4 KiB, aligned for any field, and VkPhysicalDeviceProperties
+        // is 824 bytes; the name is read only up to its 256-byte bound.
+        unsafe {
             let handle = libc::dlopen(
                 c"libvulkan.so.1".as_ptr(),
                 libc::RTLD_NOW | libc::RTLD_LOCAL,
             );
-            if !handle.is_null() {
-                libc::dlclose(handle);
+            if handle.is_null() {
+                return Err("no Vulkan loader (libvulkan.so.1) is installed".to_string());
             }
-            !handle.is_null()
-        };
-        if !loader {
-            return Err(format!(
-                "{first} found, but no Vulkan loader (libvulkan.so.1) is installed"
-            ));
+            let symbol = |name: &std::ffi::CStr| libc::dlsym(handle, name.as_ptr());
+            let (create, destroy, enumerate, properties) = (
+                symbol(c"vkCreateInstance"),
+                symbol(c"vkDestroyInstance"),
+                symbol(c"vkEnumeratePhysicalDevices"),
+                symbol(c"vkGetPhysicalDeviceProperties"),
+            );
+            if [create, destroy, enumerate, properties]
+                .iter()
+                .any(|f| f.is_null())
+            {
+                libc::dlclose(handle);
+                return Err("the Vulkan loader lacks its core entry points".to_string());
+            }
+            let create = std::mem::transmute::<*mut c_void, Create>(create);
+            let destroy = std::mem::transmute::<*mut c_void, Destroy>(destroy);
+            let enumerate = std::mem::transmute::<*mut c_void, Enumerate>(enumerate);
+            let properties = std::mem::transmute::<*mut c_void, Properties>(properties);
+            let info = InstanceCreateInfo {
+                s_type: 1, // VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+                next: std::ptr::null(),
+                flags: 0,
+                application: std::ptr::null(),
+                layer_count: 0,
+                layers: std::ptr::null(),
+                extension_count: 0,
+                extensions: std::ptr::null(),
+            };
+            let mut instance = std::ptr::null_mut();
+            let result = create(&info, std::ptr::null(), &mut instance);
+            if result != 0 || instance.is_null() {
+                libc::dlclose(handle);
+                return Err(format!(
+                    "Vulkan would not start (vkCreateInstance returned {result}): no Vulkan \
+                     driver works here"
+                ));
+            }
+            let mut count = 0u32;
+            let mut devices = Vec::new();
+            if enumerate(instance, &mut count, std::ptr::null_mut()) == 0 && count > 0 {
+                let mut handles = vec![std::ptr::null_mut(); count as usize];
+                if enumerate(instance, &mut count, handles.as_mut_ptr()) >= 0 {
+                    handles.truncate(count as usize);
+                    for device in handles {
+                        let mut buffer = [0u64; 512];
+                        let bytes = buffer.as_mut_ptr().cast::<u8>();
+                        properties(device, bytes);
+                        let field =
+                            |at: usize| u32::from_ne_bytes(*bytes.add(at).cast::<[u8; 4]>());
+                        let name = std::slice::from_raw_parts(bytes.add(20), 256);
+                        let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+                        devices.push(super::VulkanDevice {
+                            vendor: field(8),
+                            kind: field(16),
+                            name: String::from_utf8_lossy(&name[..end]).into_owned(),
+                        });
+                    }
+                }
+            }
+            destroy(instance, std::ptr::null());
+            libc::dlclose(handle);
+            Ok(devices)
         }
-        Ok(first.clone())
     }
 
     fn vendor_name(vendor: u32) -> String {
@@ -627,6 +747,18 @@ impl GpuSession {
                 refused.join(", ")
             );
         };
+        // On Linux the plugin's own device names no model (an NVIDIA card
+        // comes back as ""), and the refusal of a software-only Vulkan has to
+        // hold in the worker too: `doctor --gpu` and a run both start here.
+        // ponytail: names the Vulkan device chosen by the same rule, which on a
+        // machine with two hardware GPUs may not be the one the plugin picked.
+        #[cfg(target_os = "linux")]
+        let label = {
+            let vulkan =
+                platform::detect().map_err(|why| anyhow::anyhow!("unavailable — {why}"))?;
+            format!("{vulkan} (WebGPU; {why})")
+        };
+        #[cfg(not(target_os = "linux"))]
         let label = format!("{} GPU (WebGPU; {why})", candidates[at].name);
         let devices = vec![devices.swap_remove(at)];
         let session = ort::session::Session::builder()
@@ -723,5 +855,45 @@ mod tests {
         assert!(!is_software(0x10de, "NVIDIA GeForce RTX 3060"));
         assert!(!is_software(0x106b, "Apple"));
         assert!(!is_software(0x1002, "AMD Radeon RX 7800 XT"));
+    }
+
+    fn device(kind: u32, vendor: u32, name: &str) -> VulkanDevice {
+        VulkanDevice {
+            vendor,
+            kind,
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn a_vulkan_with_only_a_software_device_is_refused_by_name() {
+        let llvmpipe = device(4, 0x10005, "llvmpipe (LLVM 15.0.7, 256 bits)");
+        let why = hardware_vulkan(std::slice::from_ref(&llvmpipe)).unwrap_err();
+        assert!(
+            why.starts_with("Vulkan has only a software device (llvmpipe"),
+            "{why}"
+        );
+        assert!(why.contains("graphics capability"));
+        assert!(
+            hardware_vulkan(&[])
+                .unwrap_err()
+                .contains("lists no device")
+        );
+        // A software renderer that calls itself something else is still refused.
+        let disguised = device(1, 0x1af4, "Virtio-GPU Venus");
+        assert!(hardware_vulkan(&[disguised]).is_err());
+
+        let card = device(2, 0x10de, "NVIDIA RTX PRO 6000 Blackwell Server Edition");
+        let igpu = device(1, 0x8086, "Intel(R) UHD Graphics 770");
+        let both = [llvmpipe.clone(), igpu.clone(), card.clone()];
+        assert_eq!(
+            hardware_vulkan(&both).unwrap().name,
+            card.name,
+            "discrete first"
+        );
+        assert_eq!(
+            hardware_vulkan(&[llvmpipe, igpu.clone()]).unwrap().name,
+            igpu.name
+        );
     }
 }
