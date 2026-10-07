@@ -1587,9 +1587,15 @@ const loadedAt = {};
 
 function load(key, force) {
   if (!force && data[key] !== undefined) return Promise.resolve(data[key]);
-  if (loading[key]) return loading[key];
+  if (loading[key] && !force) return loading[key];
+  // A forced load is a read from now: a request already in flight left
+  // before it, so its answer may predate whatever made the caller force
+  // (a store just created). It waits that request out, so answers still land
+  // in order, then asks again. A plain load shares the one in flight.
+  const before = force && loading[key] ? loading[key].catch(() => {}) : Promise.resolve();
   // A source may depend on the page (the graph's store): then it is a function.
-  const p = api(typeof SOURCES[key] === "function" ? SOURCES[key]() : SOURCES[key])
+  const p = before
+    .then(() => api(typeof SOURCES[key] === "function" ? SOURCES[key]() : SOURCES[key]))
     .then((value) => {
       data[key] = value;
       loadedAt[key] = Date.now();
@@ -1599,7 +1605,7 @@ function load(key, force) {
       return value;
     })
     .finally(() => {
-      delete loading[key];
+      if (loading[key] === p) delete loading[key];
     });
   loading[key] = p;
   return p;
@@ -4329,8 +4335,14 @@ function wizardScreen() {
     let on = true;
     let hint = "";
     let sec = null;
+    // The spinner belongs to the action at work (Create, Start). Once the run
+    // exists the button is the next step's, even while Start winds down, and a
+    // busy button ignores presses: "Next: connect agents" drawn busy was
+    // pressed and nothing happened.
+    let spin = false;
     nextFn = null;
     if (step === 1) {
+      spin = w.busy;
       label = w.busy ? (w.created ? "Saving…" : "Creating…") : w.created ? (w.created === ns.nm ? "Continue" : "Rename and continue") : "Create store";
       on = ns.ok && !w.busy;
       hint = ns.ok ? `Creates an empty store at ~/.semlith/stores/${ns.nm}` : "Pick a name to continue";
@@ -4356,6 +4368,7 @@ function wizardScreen() {
     } else if (step === 4) {
       if (!R.length) {
         const P = plan();
+        spin = w.busy;
         label = w.busy ? "Starting…" : "Start indexing";
         on = !w.busy;
         const e = estimateText(estimate(P));
@@ -4419,7 +4432,7 @@ function wizardScreen() {
         el("span", { class: "hint hide-sm", text: hint }),
         sec ? btn({ class: "btn md", onclick: sec[1] }, sec[0]) : null,
         // Busy says so with the spinner every pending button shows.
-        btn({ class: `btn md primary${w.busy ? " busy" : ""}`, "aria-busy": w.busy ? "true" : null, disabled: on ? null : true, onclick: next }, label, icon(I.arrow, 14, { w: 2 })),
+        btn({ class: `btn md primary${spin ? " busy" : ""}`, "aria-busy": spin ? "true" : null, disabled: on ? null : true, onclick: next }, label, icon(I.arrow, 14, { w: 2 })),
       ),
     );
     paintRail();
