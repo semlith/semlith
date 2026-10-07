@@ -18,6 +18,7 @@
 pub mod accel;
 pub mod add;
 pub mod agentfiles;
+pub mod attest;
 pub mod brief;
 pub mod cache;
 pub mod chunk;
@@ -62,6 +63,7 @@ pub mod prices;
 pub mod priority;
 pub mod progress;
 pub mod proxy;
+pub mod remote;
 pub mod replay;
 pub mod report;
 pub mod rerank;

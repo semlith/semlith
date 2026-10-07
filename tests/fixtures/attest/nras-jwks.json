@@ -1,0 +1,11 @@
+{
+ "keys": [
+  {
+   "kty": "EC",
+   "crv": "P-384",
+   "kid": "nv-eat-kid-prod-20261007111800368-0075a17b-fe02-42d5-9e83-76e25ea623ce",
+   "x": "iOqzxh6Nd1K3SoSOzFbeTNWg9ckLrYsG-6YpZXqlSwfpYJTfslfdVR3J6FmMlP3a",
+   "y": "EJv_TrITnOb4wgaRownYDRjkpoB4knhdsGXtKpac8nbKv5Xstpc23SuROL60DTl9"
+  }
+ ]
+}

@@ -97,6 +97,12 @@ fn kept_warm() -> bool {
 /// in its pipe, so it never waits on the round trip for its next batch.
 const WORKER_DEPTH: usize = 2;
 
+/// Batches in flight on a lane. The remote lane's round trip crosses a
+/// network, so it keeps more in flight to keep the far GPU fed.
+fn depth(lane: &Lane) -> usize {
+    if lane.id == "remote" { 8 } else { WORKER_DEPTH }
+}
+
 /// The lowest cosine against the fp32 fixture an fp16 lane may show, on every
 /// one of the 32 chunks.
 pub const MIN_COSINE_FP16: f32 = 0.999;
@@ -135,6 +141,8 @@ pub struct Switches {
     pub llama: Option<bool>,
     /// The GPU lane beside the Neural Engine, which is off by default.
     pub gpu_beside_ane: Option<bool>,
+    /// The remote lane: another machine's GPU through `semlith worker`.
+    pub remote: Option<bool>,
 }
 
 /// Which lanes are on, and where that came from.
@@ -148,6 +156,7 @@ pub struct Enabled {
     pub openvino: bool,
     pub llama: bool,
     pub gpu_beside_ane: bool,
+    pub remote: bool,
     /// The CPU-backed worker, for verification. Only the environment turns
     /// it on.
     pub worker: bool,
@@ -183,6 +192,7 @@ impl Enabled {
             "trt" => self.trt,
             "openvino" => self.openvino,
             "llama" => self.llama,
+            "remote" => self.remote,
             "worker" => self.worker,
             _ => false,
         }
@@ -205,6 +215,7 @@ pub fn enabled() -> Enabled {
             openvino: has("openvino"),
             llama: has("llama"),
             gpu_beside_ane: has("gpu-beside-ane"),
+            remote: has("remote"),
             worker: has("worker"),
             source: "set by the environment",
         };
@@ -219,6 +230,7 @@ pub fn enabled() -> Enabled {
         openvino: saved.openvino.unwrap_or(false),
         llama: saved.llama.unwrap_or(false),
         gpu_beside_ane: saved.gpu_beside_ane.unwrap_or(false),
+        remote: saved.remote.unwrap_or(false),
         worker: false,
         source: if saved == Switches::default() {
             "default"
@@ -275,6 +287,13 @@ pub const SPECS: &[Spec] = &[
         id: "llama",
         label: "llama.cpp",
         variant: "gguf-f16",
+        experimental: true,
+    },
+    Spec {
+        id: "remote",
+        label: "Remote GPU",
+        // Set from the worker's hello: whatever its own lane makes.
+        variant: "fp16-cuda",
         experimental: true,
     },
     Spec {
@@ -384,7 +403,7 @@ impl Lane {
     pub fn token_budget(&self) -> (usize, usize, usize) {
         match self.id {
             // A discrete card is starved by less.
-            "cuda" | "trt" => (2_048, 16_384, 65_536),
+            "cuda" | "trt" | "remote" => (2_048, 16_384, 65_536),
             // Four rows a call, so several calls a batch keep it busy.
             "ane" => (1_024, 4_096, 12_288),
             _ => (512, 4_096, 16_384),
@@ -707,6 +726,7 @@ pub fn unavailable_here(id: &str) -> Option<String> {
             "the {} lane is built for Windows and Linux on x86_64",
             spec(id).map_or(id, |s| s.label)
         )),
+        "remote" => crate::remote::missing(),
         "llama" if !(apple || x86_windows_or_linux) => {
             Some("no llama.cpp build is pinned for this platform".into())
         }
@@ -878,6 +898,12 @@ pub fn snapshot() -> serde_json::Value {
             "installed": installed.map(|dir| dir.is_some()),
             "download_bytes": pack_for(lane.id).map(|pack| pack.bytes()),
         }));
+        if lane.id == "remote"
+            && let Some(row) = rows.last_mut()
+        {
+            row["endpoint"] = crate::remote::config().map(|c| c.endpoint).into();
+            row["attestation"] = crate::remote::attestation().into();
+        }
     }
     let total: f64 = rows.iter().filter_map(|row| row["rate"].as_f64()).sum();
     for row in &mut rows {
@@ -1067,16 +1093,18 @@ fn run_lanes() -> Vec<&'static str> {
     // The lanes a run would use, as `for_run` chooses them: with the Neural
     // Engine on, the CPU steps aside and the GPU joins only when asked to.
     let ane = usable(&"ane") && known.contains_key("ane");
-    let lanes: Vec<&str> = ["cpu", "ane", "gpu", "cuda", "trt", "openvino", "llama"]
-        .into_iter()
-        .filter(|lane| usable(lane))
-        .filter(|lane| !ane || (*lane != "cpu" && (*lane != "gpu" || on.gpu_beside_ane)))
-        .collect();
+    let lanes: Vec<&str> = [
+        "cpu", "ane", "gpu", "cuda", "trt", "openvino", "llama", "remote",
+    ]
+    .into_iter()
+    .filter(|lane| usable(lane))
+    .filter(|lane| !ane || (*lane != "cpu" && (*lane != "gpu" || on.gpu_beside_ane)))
+    .collect();
     lanes
 }
 
 /// The names `semlith accel on|off` takes.
-pub const SWITCH_NAMES: &str = "cpu, gpu, ane, cuda, trt, openvino, llama, gpu-beside-ane";
+pub const SWITCH_NAMES: &str = "cpu, gpu, ane, cuda, trt, openvino, llama, remote, gpu-beside-ane";
 
 /// Turn a lane on or off, as the page's switch and `semlith accel` do.
 ///
@@ -1115,6 +1143,12 @@ pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) 
         ("cpu", true) => settings.accelerators.cpu = Some(true),
         ("gpu", _) => settings.accelerators.gpu = Some(on),
         ("gpu-beside-ane", _) => settings.accelerators.gpu_beside_ane = Some(on),
+        ("remote", _) => {
+            if on && let Some(why) = unavailable_here("remote") {
+                bail!("{why}");
+            }
+            settings.accelerators.remote = Some(on);
+        }
         (id @ ("ane" | "cuda" | "trt" | "openvino" | "llama"), _) => {
             if on && let Some(why) = unavailable_here(id) {
                 bail!("{why}");
@@ -1295,9 +1329,11 @@ fn deadline() -> Duration {
 
 /// A running worker and the channel its answers arrive on.
 struct Worker {
-    child: std::process::Child,
+    /// A local lane's process; none for the remote lane, whose worker is on
+    /// another machine at the end of [`crate::remote`]'s channel.
+    child: Option<std::process::Child>,
     /// `None` only while the worker is being let go.
-    stdin: Option<std::process::ChildStdin>,
+    stdin: Option<Box<dyn Write + Send>>,
     answers: mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
 }
 
@@ -1307,15 +1343,18 @@ impl Drop for Worker {
     /// not gone within two seconds.
     fn drop(&mut self) {
         drop(self.stdin.take());
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            if let Ok(Some(_)) = self.child.try_wait() {
+            if let Ok(Some(_)) = child.try_wait() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -1367,7 +1406,7 @@ fn dispatch(lane: Arc<Lane>, jobs: mpsc::Receiver<Job>) {
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
-        } else if sent.len() < WORKER_DEPTH {
+        } else if sent.len() < depth(&lane) {
             jobs.try_recv().ok()
         } else {
             None
@@ -1431,7 +1470,7 @@ fn dispatch(lane: Arc<Lane>, jobs: mpsc::Receiver<Job>) {
             });
             // Another batch may be waiting: send it before reading, so the
             // worker's next batch is already in its pipe.
-            if sent.len() < WORKER_DEPTH {
+            if sent.len() < depth(&lane) {
                 continue;
             }
         }
@@ -1748,6 +1787,23 @@ fn coreml_compiling() -> bool {
 /// which carries the known-answer check. A worker loading models for the
 /// first time says how far it has got before it says hello.
 fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
+    let worker = if lane.id == "remote" {
+        lane.set(Status::Starting);
+        let (channel, far) = crate::remote::open()?;
+        *lane.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("remote {far}"));
+        Worker {
+            child: None,
+            stdin: Some(Box::new(channel.send)),
+            answers: channel.frames,
+        }
+    } else {
+        spawn(lane)?
+    };
+    hello(lane, worker)
+}
+
+/// A local lane's worker process, its frames on a channel.
+fn spawn(lane: &Arc<Lane>) -> Result<Worker> {
     let mut args = vec!["__embed-worker".to_string()];
     args.extend(worker_args(lane)?);
     lane.set(Status::Starting);
@@ -1778,11 +1834,15 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
             }
         }
     });
-    let worker = Worker {
-        child,
-        stdin: Some(stdin),
+    Ok(Worker {
+        child: Some(child),
+        stdin: Some(Box::new(stdin)),
         answers,
-    };
+    })
+}
+
+/// Wait for a started worker's hello, and with it the known-answer check.
+fn hello(lane: &Arc<Lane>, worker: Worker) -> Result<(Worker, serde_json::Value)> {
     // The hello, and with it the known-answer check. Bounded like a batch
     // once the models are loaded; a first load says how far it has got.
     // The deadline is for silence, not for the whole start: every progress
