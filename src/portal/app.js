@@ -2655,8 +2655,12 @@ function openWizard(opts) {
 }
 
 function wizardScreen() {
-  if (!state.wz) state.wz = restoreWizard() || blankWizard({});
+  // Restored only when this document has no wizard of its own, which is a
+  // reload mid-wizard: Welcome and New store open a blank one first.
+  const restored = state.wz ? null : restoreWizard();
+  if (!state.wz) state.wz = restored || blankWizard({});
   const w = state.wz;
+  const restoredStore = restored ? w.created : null;
   const host = el("div", { id: "app" });
   const top = el("header", { class: "top wide-pad" });
   const body = el("div", { class: "wz-scroll", "data-scroll-keep": "wz" });
@@ -2665,9 +2669,13 @@ function wizardScreen() {
   let paintGen = 0;
 
   // Data the steps read, fetched once. A restored wizard whose store is gone
-  // (deleted elsewhere, or the daemon's home changed) starts over.
+  // (deleted elsewhere, or the daemon's home changed) starts over. Only a
+  // restored one, and only while its store is still the one it came back
+  // with: this list may have left before a store the wizard just created
+  // (load() hands a forced reload the request already in flight), and
+  // reading it as "gone" wiped the wizard mid-step.
   loadMany(["stores", "runs", "accel", "privacy", "agents"]).then(() => {
-    if (w.created && !w.existing && !store(w.created)) Object.assign(w, blankWizard({ onboarding: w.onboarding }));
+    if (restoredStore && state.wz === w && w.created === restoredStore && !w.existing && !store(w.created)) Object.assign(w, blankWizard({ onboarding: w.onboarding }));
     paint();
   });
 
@@ -2877,11 +2885,28 @@ function wizardScreen() {
     // list's, are put back once the new body is in.
     const at = body.scrollTop;
     const inner = [...body.querySelectorAll("[data-scroll-keep]")].map((nd) => [nd.getAttribute("data-scroll-keep"), nd.scrollTop]);
+    // A field being typed into keeps its focus and caret across the redraw,
+    // as repaint() keeps them: the runs poll redraws this body, and the
+    // try-it box lost what was typed into it when a redraw landed mid-word.
+    const focus = document.activeElement;
+    const keep = focus && body.contains(focus) && focus.getAttribute ? focus.getAttribute("data-keep") : null;
+    const sel = keep && "selectionStart" in focus ? [focus.selectionStart, focus.selectionEnd] : null;
     fill(body, el("div", { class: "wz-body" }, left, summaryRail()));
     body.scrollTop = at;
     for (const [k, t] of inner) {
       const nd = body.querySelector(`[data-scroll-keep="${k}"]`);
       if (nd) nd.scrollTop = t;
+    }
+    if (keep) {
+      const again = body.querySelector(`[data-keep="${keep}"]`);
+      if (again) {
+        again.focus();
+        try {
+          if (sel && again.setSelectionRange) again.setSelectionRange(sel[0], sel[1]);
+        } catch (_) {
+          /* not a text field */
+        }
+      }
     }
     if (state.wz === w) saveWizard(w);
     paintFoot();
