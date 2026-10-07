@@ -57,7 +57,7 @@ fn exactly_the_experimental_lanes_say_so() {
     let rows = status(home.path());
     for row in rows["lanes"].as_array().unwrap() {
         let id = row["lane"].as_str().unwrap();
-        let want = matches!(id, "cuda" | "trt" | "openvino" | "llama");
+        let want = matches!(id, "cuda" | "trt" | "openvino" | "llama" | "remote");
         assert_eq!(row["experimental"], want, "{id}");
     }
     let text = Command::new(env!("CARGO_BIN_EXE_semlith"))

@@ -614,11 +614,46 @@ enum Command {
         /// status, on, off or remove.
         #[arg(default_value = "status")]
         action: String,
-        /// cpu, gpu, cuda, ane, trt, openvino or llama.
+        /// cpu, gpu, cuda, ane, trt, openvino, llama or remote.
         lane: Option<String>,
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
+        /// With `on remote`: the worker, as host:port.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// With `on remote`: a file holding the worker's token.
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+        /// With `on remote`: the attestation policy file.
+        #[arg(long)]
+        policy: Option<PathBuf>,
+    },
+
+    /// Serve one of this machine's lanes to other machines' `remote` lane.
+    ///
+    /// Run on a confidential GPU machine. Each connection is TLS under a key
+    /// made at start and never written down; a client presents the token in
+    /// SEMLITH_WORKER_TOKEN and a nonce, and gets the attestation evidence the
+    /// two commands print for `{binding}` (sha256 of its nonce and this
+    /// worker's certificate) before it sends anything. Texts and vectors stay
+    /// in memory; the log carries counts and timings only.
+    Worker {
+        /// Address to listen on, as host:port.
+        #[arg(long, default_value = "127.0.0.1:7400")]
+        listen: String,
+        /// The lane that embeds: cuda, trt, or worker (the CPU) for a test.
+        #[arg(long, default_value = "cuda")]
+        lane: String,
+        /// Command printing the CPU TEE's evidence; `{binding}` is replaced.
+        #[arg(long)]
+        attest_cpu: Option<String>,
+        /// Command printing the GPU's evidence; `{binding}` is replaced.
+        #[arg(long)]
+        attest_gpu: Option<String>,
+        /// Connections served at once.
+        #[arg(long, default_value_t = 4)]
+        max_connections: usize,
     },
 
     /// An accelerator lane's worker: embeds batches on stdin for the daemon.
@@ -1334,7 +1369,14 @@ fn run() -> Result<()> {
             )?;
         }
 
-        Command::Accel { action, lane, json } => match (action.as_str(), lane.as_deref()) {
+        Command::Accel {
+            action,
+            lane,
+            json,
+            endpoint,
+            token_file,
+            policy,
+        } => match (action.as_str(), lane.as_deref()) {
             ("status", _) => {
                 // The running daemon's lanes when there is one: a lane it is
                 // compiling or downloading is idle in this process.
@@ -1360,6 +1402,17 @@ fn run() -> Result<()> {
                         if row["experimental"].as_bool() == Some(true) {
                             detail.push_str(" (experimental)");
                         }
+                        if let Some(att) = row["attestation"].as_object() {
+                            let what = att
+                                .get("summary")
+                                .or(att.get("reason"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            detail.push_str(&format!(
+                                "; attestation {}: {what}",
+                                att.get("state").and_then(|v| v.as_str()).unwrap_or("?")
+                            ));
+                        }
                         println!(
                             "{:<9} {:<4} {:<34} {detail}",
                             row["lane"].as_str().unwrap_or("?"),
@@ -1384,6 +1437,11 @@ fn run() -> Result<()> {
                 }
             }
             ("on" | "off", Some(lane)) => {
+                if lane == "remote"
+                    && (endpoint.is_some() || token_file.is_some() || policy.is_some())
+                {
+                    semlith::remote::save(endpoint, token_file.as_deref(), policy)?;
+                }
                 let mut said = 101u8;
                 let line =
                     semlith::accel::set_with_progress(lane, action == "on", &mut |percent| {
@@ -1408,6 +1466,20 @@ fn run() -> Result<()> {
                 semlith::accel::SWITCH_NAMES
             ),
         },
+
+        Command::Worker {
+            listen,
+            lane,
+            attest_cpu,
+            attest_gpu,
+            max_connections,
+        } => semlith::remote::serve(semlith::remote::Serve {
+            listen,
+            lane,
+            attest_cpu,
+            attest_gpu,
+            max_connections,
+        })?,
 
         Command::EmbedWorker { lane, dir, adapter } => {
             std::process::exit(semlith::accel::worker_main(
@@ -4592,6 +4664,16 @@ fn print_gpu_checks(checks: &[serde_json::Value]) {
                 check["cosine"].as_f64().unwrap_or(0.0),
                 check["chunks_per_s"].as_f64().unwrap_or(0.0),
             ),
+        }
+        if let Some(att) = check["attestation"].as_object() {
+            println!(
+                "       attestation {}: {}",
+                att.get("state").and_then(|v| v.as_str()).unwrap_or("?"),
+                att.get("summary")
+                    .or(att.get("reason"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+            );
         }
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "semlith"
-version = "0.37.0-rc.4"
+version = "0.37.0-rc.5"
 edition = "2024"
 rust-version = "1.90"
 description = "A fast local vector store for AI agents — index files once, keep it current as you save, and answer questions across all of it in milliseconds without leaving the machine."
@@ -123,6 +123,10 @@ flate2 = { version = "1.1", default-features = false, features = ["rust_backend"
 # laying anything out, which is why `report::pdf` typesets in a fixed-width
 # base-14 face — the layout is arithmetic, not a font metrics table.
 pdf-writer = "0.15.0"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
+ring = "0.17"
+base64 = "0.23"
 
 # The Neural Engine lane: Core ML called from Rust, macOS only. Bindings, not
 # a framework of their own — the models are Apple's format and the runtime is

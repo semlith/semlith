@@ -51,7 +51,13 @@ const PORTAL_MD: &str = include_str!("../docs/portal.md");
 /// `pattern` is Search's fourth mode, and `read` is the "Read whole symbol"
 /// button in Search's detail panel. Each is in `VIEWS` with the route its view
 /// calls, so the route is probed rather than excused.
-const NO_VIEW: [&str; 3] = ["start", "mcp", "models"];
+///
+/// `worker` (0.37.0-rc.5) is a server for another machine's `remote` lane, like
+/// `start` and `mcp` are servers: it runs on a GPU machine that has no store
+/// and no portal of its own. What a user does with it is seen from the machine
+/// that uses it, on the remote lane's row (`/api/accel`: endpoint and what the
+/// attestation proved), which `accel` already covers.
+const NO_VIEW: [&str; 4] = ["start", "mcp", "models", "worker"];
 
 /// Which route is a command's portal view. Adding a command means adding a
 /// line here, which is the whole point: the compiler cannot notice a missing
