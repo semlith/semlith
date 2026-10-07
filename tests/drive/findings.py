@@ -6920,10 +6920,18 @@ def _(d):
         foot = d.eval("(() => { const bs = [...document.querySelectorAll('.wz-foot button')]; const back = bs.find(b => /Back/.test(b.textContent)), p = document.querySelector('.wz-foot .btn.primary');"
                       " return {back: !!back && back.disabled, aria: p && p.getAttribute('aria-busy')}; })()")
         want("Back and the primary button while Start works", foot, {"back": True, "aria": "true"})
+        # Once the run exists the button is the next step's, even while Start
+        # is still at work, and it answers a press (CI: v6.6 pressed a
+        # "Next: connect agents" drawn busy and stayed on step 4).
+        d.wait_for("[...document.querySelectorAll('.wz-foot button')].some(b => /Next: connect agents/.test(b.textContent))",
+                   timeout=60, what="the run to start")
+        nxt = d.eval("(() => { const b = [...document.querySelectorAll('.wz-foot button')].find(b => /Next: connect agents/.test(b.textContent));"
+                     " return {busy: b.classList.contains('busy'), aria: b.getAttribute('aria-busy')}; })()")
+        want("Next: connect agents as soon as it is drawn", nxt, {"busy": False, "aria": None})
+        press_text(d, ".wz-foot button", "Next: connect agents", "Next: connect agents")
+        wz_step(d, 5)
     finally:
         fast_posts(d)
-        d.wait_for("[...document.querySelectorAll('.wz-foot button')].some(b => /Run in background|Next: connect agents|Open store/.test(b.textContent))",
-                   timeout=60, what="the run to start")
         stop_quietly(d, name)
 
 
@@ -7100,6 +7108,47 @@ def _(d):
         fast_posts(d)
         d.eval("try { localStorage.removeItem('semlith-run-tab'); } catch (e) {}")
         stop_quietly(d, store)
+
+
+@finding("par.11", "a forced load answers from after it was asked, never from a request that left before; a plain load shares the one in flight")
+def _(d):
+    a_store(d)
+    d.open_view("home", fresh=True)
+    name = "par-forced-%d" % random.randint(10000, 99999)
+    out = d.eval("""(async () => {
+      const real = window.fetch; let gets = 0;
+      window.fetch = (u, o) => {
+        const get = !(o && /post/i.test(o.method || ''));
+        // Answered by the daemon at once, handed to the page late: a reply
+        // from before the create that arrives after it.
+        if (get && /\\/api\\/stores(\\?|$)/.test(String(u))) { gets++; return real(u, o).then(r => new Promise(done => setTimeout(() => done(r), 1500))); }
+        return real(u, o);
+      };
+      try {
+        // Nothing of the page's own in flight first (the poll), so the
+        // request counted is this check's. (The poll may load the list again
+        // once it sees the create, so later requests are not counted.)
+        while (loading.stores) await loading.stores.catch(() => {});
+        gets = 0;
+        delete data.stores;
+        const early = load('stores', true);          // leaves before the create
+        const shared = load('stores');               // shares it: no request of its own
+        const same = shared === early;
+        await new Promise(r => setTimeout(r, 50));
+        const sharedGets = gets;
+        await new Promise(r => setTimeout(r, 300));
+        await post('/api/store/create', {name: %s, kind: 'both'});
+        const fresh = await load('stores', true);    // must see the store
+        const before = await early, joined = await shared;
+        return {same, sharedGets, fresh: fresh.stores.some(s => s.name === %s),
+                early: before.stores.some(s => s.name === %s), joined: joined === before,
+                cache: data.stores.stores.some(s => s.name === %s)};
+      } finally { window.fetch = real; }
+    })()""" % ((json.dumps(name),) * 4))
+    try:
+        want("the forced load after the create", out, {"same": True, "sharedGets": 1, "fresh": True, "early": False, "joined": True, "cache": True})
+    finally:
+        d.api_result("/api/store/delete", method="POST", body={"store": name})
 
 
 @finding("par.shots", "each view the parity pass changed, in light and dark, at 1440px and 390px")
