@@ -1445,6 +1445,7 @@ runs `semlith worker`.
 | `GET /api/accel` | The `remote` row gains `endpoint` and `attestation` (`state` `attested`, `off` or `refused`, with `summary` or `reason`, and `at`). |
 | The wire | TLS 1.3, then a JSON hello `{v: 1, token, nonce}` and the worker's `{ok, version, lane, cpu, gpu}`, then the `__embed-worker` frames unchanged. `v` moves if any of it changes. |
 | Library | `accel::worker_command`, `accel::check_lane`, the `attest` and `remote` modules. |
+| Portal parity | `worker` has no portal view, like `start` and `mcp`: it runs on a GPU machine with no store and no portal. The machine using it shows it on the remote lane's row (endpoint, attestation). |
 
 ## What a break would look like
 
