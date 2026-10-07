@@ -204,7 +204,7 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 | `semlith languages` | List the language names `--lang` accepts. |
 | `semlith setup [--yes] [--register-all] [--no-hooks] [--hook-mode M] [--no-agents]` | Put `~/.semlith/bin` on `PATH`, pre-fetch the model, register semlith in every agent client on the machine that has a registration command — at the scope that means every project, launching `semlith mcp`, so no configuration file carries the key — install the semlith Agent Skill and link it into every user-level skill directory a client reads, write the steering hook into the clients that document one, set Claude Code's `alwaysLoad` so the tools are there from the first turn, and write a read-only `semlith-explorer` research agent. Idempotent, so it is also the repair command. `--register-all` also writes the configuration file of the clients that have no command, and the rules file of the clients that document one, listing every path first and backing each file up beside itself. `--no-hooks` removes the hook; `--hook-mode gate\|hard` writes a refusing form; `--no-agents` removes the research agent; `--airgap` skips the model. |
 | `semlith doctor [--fix] [--gpu]` | Per client: installed, registered, at what scope, and what to run otherwise. Plus the Privacy rules that are readings of this machine. `--fix` applies the repairs that narrow access to a path semlith owns, and clears a per-project disable of semlith for the current directory. `--gpu` embeds 32 fixed chunks on every lane and prints each lane's cosine against committed vectors, its rate and its device. |
-| `semlith accel [status\|on\|off\|remove] [lane]` | Which devices embed: `cpu`, `ane` (the Neural Engine on Apple silicon), `gpu`, and the experimental `cuda`, `trt`, `openvino` and `llama`. The CPU, the GPU and the Neural Engine are on by default; an experimental lane is off until you turn it on. A switch reaches every running run at its next batch; `remove` deletes a lane's downloads. |
+| `semlith accel [status\|on\|off\|remove] [lane]` | Which devices embed: `cpu`, `ane` (the Neural Engine on Apple silicon), `gpu`, and the experimental `cuda`, `trt`, `openvino`, `llama` and `remote`: another machine's GPU, served there by `semlith worker --listen ADDR --lane L` and attested before anything is sent (`on remote --endpoint --token-file --policy`; [docs/remote-lane.md](docs/remote-lane.md)). The CPU, the GPU and the Neural Engine are on by default; an experimental lane is off until you turn it on. A switch reaches every running run at its next batch; `remove` deletes a lane's downloads. |
 | `semlith cloud login\|status\|connect\|push\|sync\|report\|replay` | Semlith Cloud, only once you sign in: `login <org>` (a code to approve in the browser, or `--token`), `status`, `connect <org>` to read its stores beside the local ones, `push <org>/<store> <dir>` to send a tree, `sync <store> on` to send a store's ledger rows (never the text), `report` and `replay`. Until `login`, nothing here reaches the network. |
 | `semlith upgrade` | Replace this binary with the newest release, checksum-verified. `--check` only says whether one exists (exit 10 when it does). `--version <TAG>` pins one. Never runs on its own. |
 
@@ -515,7 +515,7 @@ of these drifts from its source:
 | document formats with a reader | **13** |
 | image types | **5** |
 | MCP tools | **16** |
-| CLI commands | **36** |
+| CLI commands | **37** |
 | agent clients, each launched and answered in `tests/clients.rs` | **12** |
 | prebuilt targets | **4** |
 

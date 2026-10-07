@@ -1431,6 +1431,22 @@ Semlith Cloud's client. Nothing below is reached by a machine that never ran
 | `semlith doctor` | A cloud line, and `cloud: {signed_in, orgs}` in `--json`. |
 | Library | `Semlith::index_paths_under`, `index_rest_under` and `undo_run`; `mcp::Session` gains `host`. |
 
+### 0.37.0-rc.5: the remote lane
+
+Nothing below is reached by a machine that never turns the `remote` lane on or
+runs `semlith worker`.
+
+| Surface | Change |
+|---|---|
+| CLI commands added | `worker [--listen ADDR] [--lane L] [--attest-cpu CMD] [--attest-gpu CMD] [--max-connections N]`, needing `SEMLITH_WORKER_TOKEN`. `accel on remote` takes `--endpoint`, `--token-file` and `--policy`. |
+| Lanes | `remote` joins the switches, experimental and off by default. `doctor --gpu` checks it and prints what its attestation proved. |
+| `settings.json` | `accelerators.remote`, and a `remote` object with `endpoint`, `token` and `policy` (a path). An older binary ignores both. |
+| Environment | `SEMLITH_REMOTE_ENDPOINT`, `SEMLITH_REMOTE_TOKEN`, `SEMLITH_REMOTE_POLICY` ahead of the saved settings; `SEMLITH_WORKER_TOKEN` for the worker. |
+| `GET /api/accel` | The `remote` row gains `endpoint` and `attestation` (`state` `attested`, `off` or `refused`, with `summary` or `reason`, and `at`). |
+| The wire | TLS 1.3, then a JSON hello `{v: 1, token, nonce}` and the worker's `{ok, version, lane, cpu, gpu}`, then the `__embed-worker` frames unchanged. `v` moves if any of it changes. |
+| Library | `accel::worker_command`, `accel::check_lane`, the `attest` and `remote` modules. |
+| Portal parity | `worker` has no portal view, like `start` and `mcp`: it runs on a GPU machine with no store and no portal. The machine using it shows it on the remote lane's row (endpoint, attestation). |
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:

@@ -2466,6 +2466,14 @@ function browsable(entries) {
   return (entries || []).filter((e) => !home || e.path !== home);
 }
 
+/** The remote lane's line: where its worker is and what its attestation said. */
+function remoteWord(l) {
+  if (!l.endpoint) return "Not set up: semlith accel on remote --endpoint host:port --token-file FILE --policy FILE";
+  const a = l.attestation;
+  const att = !a ? "not attested yet" : a.state === "refused" ? `attestation refused: ${a.reason}` : a.state === "off" ? "attestation off in its policy" : `attested · ${a.summary}`;
+  return `${l.endpoint} · ${laneState(l.status)} · ${att}`;
+}
+
 function laneWord(status) {
   const s = (status && status.state) || "idle";
   if (s === "compiling") return `compiling ${status.percent || 0}%`;
@@ -4830,7 +4838,7 @@ function runCard(r, o) {
   );
 }
 
-const LANE_NAMES = { cpu: "CPU", ane: "Neural Engine", gpu: "GPU", cuda: "CUDA", trt: "TensorRT for RTX", openvino: "OpenVINO", llama: "llama.cpp", worker: "Worker" };
+const LANE_NAMES = { cpu: "CPU", ane: "Neural Engine", gpu: "GPU", cuda: "CUDA", trt: "TensorRT for RTX", openvino: "OpenVINO", llama: "llama.cpp", remote: "Remote GPU", worker: "Worker" };
 const laneName = (k) => LANE_NAMES[k] || k;
 
 async function runControl(r, action) {
@@ -9797,7 +9805,9 @@ function sePerf() {
             el("span", { class: "row gap8 t-m t13" }, `${l.label || laneName(l.lane)}${l.variant ? ` · ${l.variant}` : ""}`, l.experimental ? el("span", { class: "exp", text: "experimental" }) : null),
             na
               ? el("span", { class: "muted t-xs", text: `Not available on this ${osWord()}: ${String(l.status?.reason || "").replace(/^the .*? lane (is )?/i, "").replace(/^unavailable — /, "")}` })
-              : el("span", { class: "muted t-xs", text: `${l.device || "named when it starts"} · ${laneState(l.status)}${(data.accel.bytes || {})[l.lane] ? ` · ${bytes(data.accel.bytes[l.lane])} on disk` : ""}` }),
+              : l.lane === "remote"
+                ? el("span", { class: "muted t-xs", text: remoteWord(l) })
+                : el("span", { class: "muted t-xs", text: `${l.device || "named when it starts"} · ${laneState(l.status)}${(data.accel.bytes || {})[l.lane] ? ` · ${bytes(data.accel.bytes[l.lane])} on disk` : ""}` }),
           ),
           na ? el("span", { class: "t-mono-sm muted right nowrap", text: "off" }) : check ? laneCheck(check) : el("span", { class: "t-mono-sm ink2 right nowrap", text: `${Math.round(l.share || 0)}% of the work` }),
           // Its own column at the far right, kept on every row, so the share

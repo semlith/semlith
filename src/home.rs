@@ -284,6 +284,9 @@ pub struct Settings {
     /// the experimental lanes off.
     #[serde(default)]
     pub accelerators: crate::accel::Switches,
+    /// The remote embedding lane: where its worker is and how it is trusted.
+    #[serde(default)]
+    pub remote: crate::remote::Settings,
     /// The WebGPU adapter to prefer, by a substring of its name. Absent means
     /// semlith's own choice: a discrete GPU over an integrated one.
     #[serde(default)]
