@@ -1889,7 +1889,10 @@ function dwell(key, steps, now) {
     show(0);
   }
   s.i = Math.min(s.i, last);
-  if (s.i < last && (at - s.since >= DWELL_MS || at - steps[s.i + 1].at > LAG_MS)) show(s.i + 1);
+  // A step put up always stays its full dwell; catching up is done by what
+  // comes next skipping the steps that no longer fit (show), never by cutting
+  // the one on screen short (575 ms on a loaded runner, drive rc4.2).
+  if (s.i < last && at - s.since >= DWELL_MS) show(s.i + 1);
   s.behind = s.i < last;
   return { steps: steps.slice(0, s.i + 1), behind: s.behind };
 }
