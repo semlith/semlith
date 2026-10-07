@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0-rc.5] - 2026-10-07
+
+### Added
+
+- **A `remote` embedding lane, attested before anything is sent.** `semlith
+  worker` serves a machine's CUDA or TensorRT lane over TLS 1.3 under a key it
+  makes at start; the `remote` lane on another machine checks the worker's CPU
+  and GPU attestation tokens against a policy (signature, issuer, claims, and a
+  nonce bound to the worker's key, so a replay is refused) and only then sends
+  token ids. Texts and vectors stay in the worker's memory. A worker that is
+  refused, cannot prove what the policy asks, or goes away mid-run hands its
+  batches back, and the run finishes on the local lanes with the store a run
+  without it would have left. Proven on a Google Cloud Confidential G4 (RTX PRO
+  6000, CC on, AMD SEV): CUDA at cosine 1.0000 through the lane, the semlith
+  repository in 35 s against 553 s on an M1's CPU, and a VM stopped mid-run
+  leaving a complete store. See [docs/remote-lane.md](docs/remote-lane.md).
+- `scripts/remote-worker.sh`: stand up, reach over IAP and delete a G4 worker.
+- The portal's lane row and `doctor --gpu` say where the remote lane points and
+  what its attestation proved.
+- People with their own NVIDIA GPU: the CUDA and TensorRT lanes documented and
+  measured on an RTX PRO 6000 (both cosine 1.0000).
+
 ## [0.37.0-rc.4] - 2026-10-06
 
 ### Fixed
