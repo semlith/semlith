@@ -3553,7 +3553,7 @@ impl State {
         // Before the files go: a reader holding this store open would keep its
         // SQLite handles alive, and on Windows an open handle refuses the
         // delete outright.
-        self.reopen_readers();
+        self.release_readers();
         Discovery::remove(&store.dir);
 
         // The registry entry goes before the bump: a client that re-reads
@@ -3617,7 +3617,7 @@ impl State {
             .write()
             .expect("the stores lock")
             .retain(|s| s.name != old);
-        self.reopen_readers();
+        self.release_readers();
         Discovery::remove(&store.dir);
         let dir = match crate::home::rename_store(old, new) {
             Ok(dir) => dir,
@@ -3947,6 +3947,17 @@ impl State {
     /// Dropped rather than rebuilt here: rebuilding loads the embedding model,
     /// and doing that while holding the lock would stall whichever request
     /// happened to be next. The reader is opened on demand anyway.
+    /// Close the readers now, waiting for any search that holds them: a store
+    /// leaving or moving has to let go of its files first, and Windows will
+    /// neither delete nor move a folder with an open handle in it (drive v6.14:
+    /// "Access is denied" renaming a store while the portal searched).
+    fn release_readers(&self) {
+        *self.fleet.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.readers_stale.store(false, Ordering::SeqCst);
+        self.mcp_stale.store(false, Ordering::SeqCst);
+    }
+
     fn reopen_readers(&self) {
         self.readers_stale.store(true, Ordering::SeqCst);
         self.mcp_stale.store(true, Ordering::SeqCst);
