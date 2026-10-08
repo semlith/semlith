@@ -37,6 +37,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can be switched off but never on, and the refusal says why; switching a failed
   lane off clears the failure.
 
+### Fixed
+
+- **A first index through a remote GPU is 1.39x faster (#207).** When a file
+  ran past the writer's 256-chunk window, its hand-over committed the window and
+  nothing reopened the transaction, so every remaining row and the file's whole
+  graph went to disk one autocommit at a time. The writer now keeps them in a
+  transaction. microsoft/vscode (353,398 chunks) from a 4-vCPU EPYC box through
+  a Confidential G4: median of three 437 s against 606 s for rc.5 (808 against
+  583 chunks a second), the write stage from about 400 s to 215 s (graph 185 to
+  50 s, rows 97 to 15 s). The store is the same: files, chunks, keyword rows,
+  symbols, edges and images match rc.5's counts. The writer's commit (about
+  90 s) is now its largest part; #207 stays open for the rest of the way to 2x.
+- `images` in `index -v`'s write parts now counts only the writer's work, not
+  the image model's own thread.
+
 ## [0.37.0-rc.5] - 2026-10-07
 
 ### Added
