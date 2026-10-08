@@ -116,9 +116,12 @@ fn capped_cores() -> Option<usize> {
     (cap < 100).then(|| ((cores() * f64::from(cap) / 100.0).floor() as usize).max(1))
 }
 
-/// Files prepared at once under the cap: half the cap's cores, rounded up.
+/// Files prepared at once under the cap: half the cap's cores, rounded down,
+/// at least one. Embedding gets the larger half: on the Semlith Cloud box a
+/// 75 % cap is three of four cores, and giving prepare two of them left
+/// embedding one.
 fn prepare_slots() -> usize {
-    capped_cores().map_or(usize::MAX, |n| n.div_ceil(2))
+    capped_cores().map_or(usize::MAX, |n| (n / 2).max(1))
 }
 
 /// The most embedding threads a CPU batch may use under the cap: what the
