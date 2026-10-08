@@ -20,6 +20,9 @@ clap = { version = "4.6.4", features = ["derive"] }
 cliclack = "0.5.6"
 hf-hub = { version = "0.5.0", default-features = false, features = ["ureq"] }
 libc = "0.2.189"
+# Already in the tree under turbovec, whose encoding runs on rayon's pool;
+# named here so the CPU cap can run that encoding on a pool of its size.
+rayon = "1.12.0"
 fastembed = { version = "7.1.0", default-features = false, features = ["hf-hub", "image-models"] }
 # ONNX Runtime, named here so it can be linked two ways. `ort` is fastembed's
 # dependency and is pinned to the exact version fastembed pins.
@@ -140,7 +143,7 @@ objc2-core-ml = "0.3.2"
 # `GlobalMemoryStatusEx` how much memory this machine has, which Windows
 # exposes nowhere else.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [features]
 # How ONNX Runtime is linked, and the one thing that differs between the binary

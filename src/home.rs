@@ -260,6 +260,10 @@ pub struct Settings {
     pub runs_at_once: Option<usize>,
     pub embed_threads: Option<usize>,
     pub index_memory_mb: Option<usize>,
+    /// The most of this machine's CPU semlith's own process may use while it
+    /// indexes, 0-100 %. Absent means 100, no cap. See [`crate::cpucap`].
+    #[serde(default)]
+    pub cpu_cap_percent: Option<u8>,
     /// Whether the ledger's Session replay tab may read this machine's agent
     /// transcripts. Absent means on from 0.35.0 (the owner's decision: the
     /// panel is the ledger's answer to "was it enough", and off by default

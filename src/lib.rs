@@ -29,6 +29,7 @@ pub mod clock;
 pub mod cloud;
 pub mod compact;
 pub mod coreml;
+pub mod cpucap;
 pub mod cuda;
 pub mod daemon;
 pub mod doctor;
@@ -3735,6 +3736,7 @@ impl Semlith {
                             let back = image_back.clone();
                             image_lane = Some(scope.spawn(move || {
                                 for job in jobs {
+                                    crate::cpucap::pace();
                                     let started = std::time::Instant::now();
                                     let vector = model
                                         .embed_image(&job.path, &job.bytes, quiet)
@@ -4976,10 +4978,15 @@ impl Semlith {
             flat.len(),
             done.ids.len()
         );
+        // The writer is CPU too, and under a cap it waits its turn.
+        crate::cpucap::pace();
         self.follow_budget();
         let timed = std::time::Instant::now();
-        self.index.add(&flat, &done.ids)?;
-        self.exact.append(&flat, &done.ids)?;
+        let (index, exact) = (&mut self.index, &mut self.exact);
+        crate::cpucap::within(|| -> Result<()> {
+            index.add(&flat, &done.ids)?;
+            exact.append(&flat, &done.ids)
+        })?;
         self.write_parts.add("vectors", timed);
         for id in &done.ids {
             if let Some(file) = self.file_of.remove(id)
