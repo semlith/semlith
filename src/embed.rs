@@ -919,11 +919,16 @@ pub fn writer() -> Writer {
 /// four. The first 0.28.0 build then split the derived count by `runs at
 /// once` whether or not the other runs existed, and a lone run in the daemon
 /// indexed at 54 % of the same run in a terminal on a four-core runner.
+///
+/// Never more than the CPU cap's share of the cores ([`crate::cpucap`]): one
+/// batch on every core runs past the cap before pacing between batches can
+/// answer it, measured on the M1 at a 25 % cap with eight threads.
 pub fn threads_in_force() -> usize {
-    match THREADS_IN_FORCE.load(std::sync::atomic::Ordering::Relaxed) {
+    let threads = match THREADS_IN_FORCE.load(std::sync::atomic::Ordering::Relaxed) {
         0 => split_threads(WRITERS.load(std::sync::atomic::Ordering::Relaxed)),
         n => n,
-    }
+    };
+    threads.min(crate::cpucap::thread_ceiling())
 }
 
 /// The derived count for `writers` passes at once: all of it for one, and for

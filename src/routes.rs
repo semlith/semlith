@@ -4398,6 +4398,23 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
         }
         saved.index_memory_mb = Some(n);
     }
+    // 0 is a cap (CPU work paused), so this one is clamped to 0-100 and an
+    // out-of-range value is refused rather than quietly clamped.
+    if let Some(raw) = body.get("cpu_cap_percent") {
+        let Some(n) = raw.as_u64().filter(|n| *n <= 100) else {
+            return Response::error(400, "cpu_cap_percent must be a whole number from 0 to 100");
+        };
+        if limits.cpu_cap_percent.source == daemon::Source::Environment {
+            return Response::error(
+                409,
+                &format!(
+                    "{} is set in this daemon's environment, so the page cannot change it",
+                    crate::cpucap::ENV
+                ),
+            );
+        }
+        saved.cpu_cap_percent = Some(n as u8);
+    }
     // The two compaction settings take 0 -- off, and keep everything -- so
     // they are clamped to their range rather than to at least one.
     if let Some(n) = body
@@ -4442,8 +4459,11 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
     }
     state.admission.set_limit(limits.runs_at_once.value);
     let applied = format!(
-        "now running with {} run(s) at once, {} thread(s) each, and {} MiB of vectors per store",
-        limits.runs_at_once.value, limits.embed_threads.value, limits.index_memory_mb.value
+        "now running with {} run(s) at once, {} thread(s) each, {} MiB of vectors per store, and a {} % CPU cap",
+        limits.runs_at_once.value,
+        limits.embed_threads.value,
+        limits.index_memory_mb.value,
+        limits.cpu_cap_percent.value
     );
     Response::json(&json!({
         "limits": limits,

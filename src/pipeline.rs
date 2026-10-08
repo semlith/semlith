@@ -196,7 +196,8 @@ pub struct WriteParts {
 /// The parts, in the order `index -v` names them: rows and their keyword
 /// index, a replaced file's eviction, symbols and edges, vectors into the
 /// index and its sidecar, row commits, shard saves, indexed-file hashes, the
-/// vector cache, and images, which the image model embeds on the writer.
+/// vector cache, and images: recording what the image lane embedded on its own
+/// thread, never the embedding itself.
 pub const WRITE_PARTS: [&str; 9] = [
     "rows", "evict", "graph", "vectors", "commit", "save", "hashes", "cache", "images",
 ];
@@ -207,14 +208,6 @@ impl WriteParts {
         if let Some(at) = WRITE_PARTS.iter().position(|p| *p == part) {
             let cell = &self.micros[at];
             cell.set(cell.get() + since.elapsed().as_micros() as u64);
-        }
-    }
-
-    /// Charge `ms` milliseconds to `part`: work timed on another thread.
-    pub fn add_ms(&self, part: &str, ms: u64) {
-        if let Some(at) = WRITE_PARTS.iter().position(|p| *p == part) {
-            let cell = &self.micros[at];
-            cell.set(cell.get() + ms * 1000);
         }
     }
 
@@ -480,6 +473,7 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
     {
         return Prepared::Refused(refusal);
     }
+    let _cap = crate::cpucap::slot();
     let started = Instant::now();
     let key = path.to_string_lossy();
     let opened = std::fs::File::open(path);
@@ -992,6 +986,7 @@ fn cpu_lane(mut work: CpuWork, jobs: mpsc::Receiver<CpuJob>) -> CpuWork {
     let mut batches = 0u64;
     while let Ok(job) = jobs.recv() {
         batches += 1;
+        crate::cpucap::pace();
         let answer = match &mut work {
             CpuWork::Ids { main, alt } => {
                 main.follow_threads();
