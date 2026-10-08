@@ -780,6 +780,8 @@ fn missing_hardware(id: &str) -> Option<String> {
     };
     match id {
         "gpu" => gpu().map(|why| format!("no GPU this lane can use: {why}")),
+        // Its CPU backend, asked for by name, is a test device: it needs none.
+        "llama" if std::env::var(crate::llama::DEVICE_ENV).is_ok_and(|d| d == "cpu") => None,
         "llama" => {
             gpu().map(|why| format!("llama.cpp runs on a GPU, and there is none it can use: {why}"))
         }
@@ -787,7 +789,7 @@ fn missing_hardware(id: &str) -> Option<String> {
         "openvino" => {
             let cpu = crate::system::cpu_name();
             (!cpu.to_ascii_lowercase().contains("intel"))
-                .then(|| format!("OpenVINO runs on Intel CPUs and GPUs, and this CPU is {cpu}"))
+                .then(|| format!("OpenVINO offers Intel devices only, and this CPU is {cpu}"))
         }
         _ => None,
     }
