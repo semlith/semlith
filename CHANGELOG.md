@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0-rc.6] - 2026-10-08
+
+### Added
+
+- **A CPU cap.** `SEMLITH_CPU_CAP`, the Limits card's CPU cap row or
+  `cpu_cap_percent` in `settings.json` sets the most of this machine's CPU
+  semlith's own process may use while it indexes, from 0 to 100 % of every core.
+  semlith reads its own CPU time and holds a rolling two-second window under the
+  cap by pacing file preparation, the CPU lane, the image lane and the writer;
+  while capped, it also keeps files prepared at once, CPU embedding threads and
+  vector encoding inside the cap's share of the cores, so one batch cannot burst
+  past it. 0 % pauses CPU work and the run card says so. Measured on an M1 with
+  eight threads: 25 % and 50 % caps held 30 of 30 one-second samples under the
+  cap plus five points. The Limits card and `semlith accel status` show what
+  semlith is using now beside the cap.
+
+### Changed
+
+- **The CPU lane is always on.** `semlith accel off cpu` refuses, the switch is
+  locked, and a saved "off" from an older release reads as on. The cap is the
+  control instead. Its row says `active` only while it embeds.
+- **The switches tell the truth.** Each lane reports what was saved and where
+  its state came from beside what runs use, so a page draws the choice that was
+  made and names an environment override. Which lanes can run is read from the
+  machine's hardware: no usable GPU makes the GPU and llama.cpp lanes
+  unavailable, no NVIDIA card and driver makes CUDA and TensorRT unavailable,
+  and a non-Intel CPU makes OpenVINO unavailable. An unavailable or failed lane
+  can be switched off but never on, and the refusal says why; switching a failed
+  lane off clears the failure.
+
 ## [0.37.0-rc.5] - 2026-10-07
 
 ### Added
