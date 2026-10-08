@@ -199,10 +199,39 @@ impl Enabled {
     }
 }
 
+/// What the CPU lane's switch says, wherever it is drawn or refused: the
+/// owner's decision of 2026-10-08. The CPU cap is the control instead.
+pub const CPU_ALWAYS_ON: &str = "the CPU lane is always on; use the CPU cap to limit it";
+
+/// Whether a lane is on when nothing has been saved for it.
+fn on_by_default(id: &str) -> bool {
+    matches!(id, "cpu" | "gpu" | "ane")
+}
+
+impl Switches {
+    /// The saved choice for one lane, if one was saved.
+    fn get(&self, id: &str) -> Option<bool> {
+        match id {
+            "cpu" => self.cpu,
+            "gpu" => self.gpu,
+            "cuda" => self.cuda,
+            "ane" => self.ane,
+            "trt" => self.trt,
+            "openvino" => self.openvino,
+            "llama" => self.llama,
+            "gpu-beside-ane" => self.gpu_beside_ane,
+            "remote" => self.remote,
+            _ => None,
+        }
+    }
+}
+
 /// The switches in force: the environment, then the saved setting, then the
 /// defaults. CPU, GPU and the Neural Engine are on; CUDA, TensorRT for RTX,
 /// OpenVINO and llama.cpp are experimental and off, and each is fetched only
-/// when somebody turns it on.
+/// when somebody turns it on. The CPU is on whatever was saved: a
+/// `settings.json` from before 0.37.0-rc.6 that turned it off reads as on.
+/// Only `SEMLITH_ACCEL`, an override for measurements, can leave it out.
 pub fn enabled() -> Enabled {
     if let Ok(list) = std::env::var(ACCEL_ENV) {
         let has = |name: &str| list.split(',').any(|item| item.trim() == name);
@@ -222,7 +251,7 @@ pub fn enabled() -> Enabled {
     }
     let saved = crate::home::Settings::load().accelerators;
     Enabled {
-        cpu: saved.cpu.unwrap_or(true),
+        cpu: true,
         gpu: saved.gpu.unwrap_or(true),
         cuda: saved.cuda.unwrap_or(false),
         ane: saved.ane.unwrap_or(true),
@@ -731,6 +760,37 @@ pub fn unavailable_here(id: &str) -> Option<String> {
         }
         _ => None,
     }
+    .or_else(|| missing_hardware(id))
+}
+
+/// Why this machine's hardware cannot run a lane its platform could: no GPU
+/// for the GPU or llama.cpp (Vulkan) lanes, no NVIDIA card and driver for
+/// CUDA and TensorRT, no Intel CPU for OpenVINO. Asked once per process and
+/// kept, so a server's Machine page offers only the lanes that can run on it
+/// (owner, 2026-10-08) without probing Vulkan or NVML on every poll.
+fn missing_hardware(id: &str) -> Option<String> {
+    static GPU: OnceLock<std::result::Result<String, String>> = OnceLock::new();
+    static NVIDIA: OnceLock<std::result::Result<String, String>> = OnceLock::new();
+    let gpu = || GPU.get_or_init(detect_gpu).as_ref().err();
+    let nvidia = || {
+        NVIDIA
+            .get_or_init(|| crate::cuda::detect().map(|d| d.name))
+            .as_ref()
+            .err()
+    };
+    match id {
+        "gpu" => gpu().map(|why| format!("no GPU this lane can use: {why}")),
+        "llama" => {
+            gpu().map(|why| format!("llama.cpp runs on a GPU, and there is none it can use: {why}"))
+        }
+        "cuda" | "trt" => nvidia().map(|why| format!("needs an NVIDIA GPU and driver: {why}")),
+        "openvino" => {
+            let cpu = crate::system::cpu_name();
+            (!cpu.to_ascii_lowercase().contains("intel"))
+                .then(|| format!("OpenVINO runs on Intel CPUs and GPUs, and this CPU is {cpu}"))
+        }
+        _ => None,
+    }
 }
 
 /// The worker lanes a run may use now, and whether its own CPU lane may take
@@ -788,6 +848,9 @@ pub fn spell_left(ms: u64) -> String {
 /// is on its way, and the CPU is not switched on beside them. The run card and
 /// the terminal say this instead of a rate.
 pub fn waiting_for() -> Option<String> {
+    if let Some(line) = crate::cpucap::paused_line() {
+        return Some(line);
+    }
     if !MANAGED.load(Ordering::Relaxed) {
         return None;
     }
@@ -859,22 +922,42 @@ pub fn cache_in_use() -> bool {
 }
 
 /// Every lane as the Machine limits card and `semlith accel status` show it.
+///
+/// Each row carries `enabled` (what runs use now), `saved` (what
+/// `settings.json` says, or the default) and `source` (`environment`, `saved`
+/// or `default`), so a page draws the choice somebody made and names an
+/// environment override rather than a switch that snaps back.
 pub fn snapshot() -> serde_json::Value {
     let on = enabled();
+    let from_env = std::env::var(ACCEL_ENV).is_ok();
+    let saved = crate::home::Settings::load().accelerators;
+    let choice = |id: &str| match saved.get(id) {
+        _ if from_env => (on.lane(id), "environment"),
+        Some(value) => (value, "saved"),
+        None => (on_by_default(id), "default"),
+    };
     let cpu = cpu_lane();
     let cache = crate::model_cache_dir().ok();
+    let cpu_rate = cpu.rate();
     let mut rows = vec![serde_json::json!({
         "lane": "cpu",
         "label": "CPU",
         "enabled": on.cpu,
+        "saved": true,
+        "source": if from_env { "environment" } else { "default" },
+        "locked": true,
+        "locked_reason": CPU_ALWAYS_ON,
         "experimental": false,
-        "status": Status::Active,
+        // Active while it embeds, idle otherwise: no longer said Active
+        // whatever it was doing.
+        "status": if cpu_rate > 0.0 { Status::Active } else { Status::Idle },
         "device": crate::system::cpu_name(),
         "variant": cpu.variant(),
-        "rate": round(cpu.rate()),
+        "rate": round(cpu_rate),
     })];
     for lane in lanes() {
         let enabled = on.lane(lane.id);
+        let (saved_on, source) = choice(lane.id);
         if lane.id == "worker" && !enabled {
             continue;
         }
@@ -889,6 +972,8 @@ pub fn snapshot() -> serde_json::Value {
             "lane": lane.id,
             "label": spec(lane.id).map_or(lane.id, |s| s.label),
             "enabled": enabled,
+            "saved": saved_on,
+            "source": source,
             "experimental": lane.experimental,
             "status": status,
             "device": lane.device.lock().unwrap_or_else(|e| e.into_inner()).clone(),
@@ -922,9 +1007,16 @@ pub fn snapshot() -> serde_json::Value {
             && unavailable_here(lane.id).is_none()
             && lane.coming()
     });
+    let (cap, cap_source) = crate::cpucap::in_force();
     serde_json::json!({
         "lanes": rows,
         "source": on.source,
+        "cpu_cap": {
+            "percent": cap,
+            "source": cap_source,
+            "measured_percent": crate::cpucap::measured_percent(),
+            "paused": crate::cpucap::paused(),
+        },
         "gpu_beside_ane": on.gpu_beside_ane,
         // Said, not implied: the CPU carries the run whatever its switch says
         // while no worker lane can and none is on its way.
@@ -1108,10 +1200,12 @@ pub const SWITCH_NAMES: &str = "cpu, gpu, ane, cuda, trt, openvino, llama, remot
 /// Turn a lane on or off, as the page's switch and `semlith accel` do.
 ///
 /// Saved to `settings.json` and read by every run before every batch, which
-/// is the "next batch" the switch promises. Turning a failed lane on again
-/// clears its failure so it is tried afresh. The CPU may be turned off only
-/// while an accelerator lane can carry the work; with none, the refusal says
-/// why. Turning on a lane whose pack is not here fetches it first, with
+/// is the "next batch" the switch promises. Each lane is decided on its own,
+/// so one change of several lanes lands the same in any order. The CPU is
+/// never turned off ([`CPU_ALWAYS_ON`]). A lane that is unavailable here, or
+/// failed, can be turned off but not on, and the refusal says why; turning a
+/// failed lane off clears the failure, so it may be turned on again later.
+/// Turning on a lane whose pack is not here fetches it first, with
 /// `progress` told how far the download has got.
 pub fn set(lane_id: &str, on: bool) -> Result<String> {
     set_with_progress(lane_id, on, &mut |_| {})
@@ -1121,25 +1215,14 @@ pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) 
     if std::env::var(ACCEL_ENV).is_ok() {
         bail!("{ACCEL_ENV} is set in this process's environment, so the switches cannot change it");
     }
+    if on {
+        refuse_on(lane_id)?;
+    }
     let mut settings = crate::home::Settings::load();
     match (lane_id, on) {
-        ("cpu", false) => {
-            let now = enabled();
-            let can = lanes().iter().any(|l| {
-                l.id != "worker" && now.lane(l.id) && l.usable() && unavailable_here(l.id).is_none()
-            }) && (now.ane || detect_gpu().is_ok());
-            if !can {
-                bail!(
-                    "the CPU cannot be turned off: no accelerator lane is on and usable here ({}), \
-                     so the CPU is what indexes",
-                    detect_gpu()
-                        .err()
-                        .unwrap_or_else(|| "the GPU lane is off".to_string())
-                );
-            }
-            settings.accelerators.cpu = Some(false);
-        }
-        ("cpu", true) => settings.accelerators.cpu = Some(true),
+        ("cpu", false) => bail!("{CPU_ALWAYS_ON}"),
+        // Always on: a saved `false` from an older release is cleared.
+        ("cpu", true) => settings.accelerators.cpu = None,
         ("gpu", _) => settings.accelerators.gpu = Some(on),
         ("gpu-beside-ane", _) => settings.accelerators.gpu_beside_ane = Some(on),
         ("remote", _) => {
@@ -1170,8 +1253,11 @@ pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) 
         (other, _) => bail!("there is no lane called {other}; the switches are {SWITCH_NAMES}"),
     }
     settings.save()?;
-    if on && let Some(found) = lane(lane_id) {
-        found.reset();
+    if !on
+        && let Some(found) = lane(lane_id)
+        && matches!(found.status(), Status::Failed { .. })
+    {
+        found.set(Status::Idle);
     }
     let note = spec(lane_id)
         .filter(|s| s.experimental && on)
@@ -1186,6 +1272,36 @@ pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) 
         "{lane_id} {} — runs pick it up at their next batch{note}",
         if on { "on" } else { "off" }
     ))
+}
+
+/// Why a lane may not be turned on now: it cannot run on this machine, its
+/// worker found nothing to run on, or it failed and has not been turned off
+/// since. `Ok` for everything else, including lanes that do not exist (the
+/// switch itself says so).
+fn refuse_on(id: &str) -> Result<()> {
+    if let Some(why) = unavailable_here(id) {
+        bail!("{why}");
+    }
+    let Some(found) = lane(id) else {
+        return Ok(());
+    };
+    // A failure past its cool-down is cleared here, as a run would clear it.
+    found.usable();
+    match found.status() {
+        Status::Unavailable { reason } => {
+            bail!("the {} lane is unavailable here: {reason}", label_of(id))
+        }
+        Status::Failed { reason } => bail!(
+            "the {} lane failed: {reason}; turn it off to clear the failure, or wait {} minutes and it is tried again",
+            label_of(id),
+            LANE_RETRY.as_secs() / 60
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn label_of(id: &str) -> &str {
+    spec(id).map_or(id, |s| s.label)
 }
 
 /// [`set`] for the page: a lane whose pack is not here is switched on once
@@ -1203,9 +1319,7 @@ pub fn set_in_background(lane_id: &str) -> Result<String> {
     if std::env::var(ACCEL_ENV).is_ok() {
         bail!("{ACCEL_ENV} is set in this process's environment, so the switches cannot change it");
     }
-    if let Some(why) = unavailable_here(lane_id) {
-        bail!("{why}");
-    }
+    refuse_on(lane_id)?;
     let Some(found) = lane(lane_id) else {
         bail!("there is no lane called {lane_id}; the switches are {SWITCH_NAMES}");
     };
