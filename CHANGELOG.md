@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0-rc.6] - 2026-10-08
+
+### Added
+
+- **A CPU cap.** `SEMLITH_CPU_CAP`, the Limits card's CPU cap row or
+  `cpu_cap_percent` in `settings.json` sets the most of this machine's CPU
+  semlith's own process may use while it indexes, from 0 to 100 % of every core.
+  semlith reads its own CPU time and holds a rolling two-second window under the
+  cap by pacing file preparation, the CPU lane, the image lane and the writer;
+  while capped, it also keeps files prepared at once, CPU embedding threads and
+  vector encoding inside the cap's share of the cores, so one batch cannot burst
+  past it. 0 % pauses CPU work and the run card says so. Measured on an M1 with
+  eight threads: 25 % and 50 % caps held 30 of 30 one-second samples under the
+  cap plus five points. The Limits card and `semlith accel status` show what
+  semlith is using now beside the cap.
+
+### Changed
+
+- **The CPU lane is always on.** `semlith accel off cpu` refuses, the switch is
+  locked, and a saved "off" from an older release reads as on. The cap is the
+  control instead. Its row says `active` only while it embeds.
+- **The switches tell the truth.** Each lane reports what was saved and where
+  its state came from beside what runs use, so a page draws the choice that was
+  made and names an environment override. Which lanes can run is read from the
+  machine's hardware: no usable GPU makes the GPU and llama.cpp lanes
+  unavailable, no NVIDIA card and driver makes CUDA and TensorRT unavailable,
+  and a non-Intel CPU makes OpenVINO unavailable. An unavailable or failed lane
+  can be switched off but never on, and the refusal says why; switching a failed
+  lane off clears the failure.
+
+### Fixed
+
+- **A first index through a remote GPU is 1.39x faster (#207).** When a file
+  ran past the writer's 256-chunk window, its hand-over committed the window and
+  nothing reopened the transaction, so every remaining row and the file's whole
+  graph went to disk one autocommit at a time. The writer now keeps them in a
+  transaction. microsoft/vscode (353,398 chunks) from a 4-vCPU EPYC box through
+  a Confidential G4: median of three 437 s against 606 s for rc.5 (808 against
+  583 chunks a second), the write stage from about 400 s to 215 s (graph 185 to
+  50 s, rows 97 to 15 s). The store is the same: files, chunks, keyword rows,
+  symbols, edges and images match rc.5's counts. The writer's commit (about
+  90 s) is now its largest part; #207 stays open for the rest of the way to 2x.
+- `images` in `index -v`'s write parts now counts only the writer's work, not
+  the image model's own thread.
+
 ## [0.37.0-rc.5] - 2026-10-07
 
 ### Added

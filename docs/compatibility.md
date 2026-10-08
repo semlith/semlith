@@ -1447,6 +1447,18 @@ runs `semlith worker`.
 | Library | `accel::worker_command`, `accel::check_lane`, the `attest` and `remote` modules. |
 | Portal parity | `worker` has no portal view, like `start` and `mcp`: it runs on a GPU machine with no store and no portal. The machine using it shows it on the remote lane's row (endpoint, attestation). |
 
+### 0.37.0-rc.6: the CPU cap and lane truth
+
+| Surface | Change |
+|---|---|
+| CLI | `accel off cpu` now always refuses: the CPU lane is always on. `accel on <lane>` refuses a lane this machine's hardware cannot run (no usable GPU for `gpu` and `llama`, no NVIDIA card and driver for `cuda` and `trt`, a non-Intel CPU for `openvino`) and a lane that failed. `accel status` and `doctor --gpu` print the CPU cap. |
+| `settings.json` | `cpu_cap_percent` (0-100, absent = 100). A saved `accelerators.cpu: false` is read as on and cleared by the next save. An older binary ignores `cpu_cap_percent`. |
+| Environment | `SEMLITH_CPU_CAP` (0-100) ahead of the saved setting. |
+| `GET /api/accel` | Each lane row gains `saved` and `source` (`environment`, `saved`, `default`); the CPU row gains `locked` and `locked_reason` and its `status` is `active` only while it embeds. The body gains `cpu_cap` (`percent`, `source`, `measured_percent`, `paused`). |
+| `POST /api/index/settings` | Takes `cpu_cap_percent`; outside 0-100 is a 400, and a value `SEMLITH_CPU_CAP` sets is a 409. The `limits` it and the runs route answer with gain `cpu_cap_percent` and `cpu_measured_percent`. |
+| Library | `cpucap` module; `accel::CPU_ALWAYS_ON`; `embed::threads_in_force` never exceeds the cap's share of the cores. |
+| Portal parity | The cap is a row on Settings › Performance › Limits; the CPU switch is locked there. |
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:

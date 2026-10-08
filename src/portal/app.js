@@ -9766,9 +9766,9 @@ function sePerf() {
       "div",
       { class: "model-line t-mono ink2" },
       el("span", { class: "eyebrow sm", text: "THIS MACHINE" }),
-      m.logical_cores ? `${cpuName() ? `${cpuName()} · ` : ""}${m.logical_cores} logical cores · ${n(m.total_memory_mb)} MiB · ${n(m.available_memory_mb)} MiB free now` : "reading…",
+      m.logical_cores ? `${cpuName() ? `${cpuName()} · ` : ""}${m.logical_cores} logical cores · ${n(m.total_memory_mb)} MiB · ${n(m.available_memory_mb)} MiB free now${L.cpu_cap_percent ? ` · semlith CPU ${Math.round(L.cpu_measured_percent || 0)}% of ${L.cpu_cap_percent.value >= 100 ? "no cap" : `a ${L.cpu_cap_percent.value}% cap`}` : ""}` : "reading…",
       el("span", { class: "spacer" }),
-      lnk("Reset to what it suggests", () => saveLimits({ runs_at_once: L.runs_at_once?.derived, embed_threads: L.embed_threads?.derived, index_memory_mb: L.index_memory_mb?.derived, compact_threshold_percent: comp.default_threshold_percent, history_retention_days: comp.default_retention_days, vector_cache_mb: vc.default_cap_mb }, "Limits reset to what this machine suggests")),
+      lnk("Reset to what it suggests", () => saveLimits({ runs_at_once: L.runs_at_once?.derived, embed_threads: L.embed_threads?.derived, index_memory_mb: L.index_memory_mb?.derived, ...(L.cpu_cap_percent && L.cpu_cap_percent.source !== "set by the environment" ? { cpu_cap_percent: 100 } : {}), compact_threshold_percent: comp.default_threshold_percent, history_retention_days: comp.default_retention_days, vector_cache_mb: vc.default_cap_mb }, "Limits reset to what this machine suggests")),
     ),
     el(
       "div",
@@ -9777,6 +9777,7 @@ function sePerf() {
       limit("runs_at_once", "Runs at once", L.runs_at_once, "How many stores may index at the same time.", 1),
       limit("embed_threads", "Threads per run", L.embed_threads, "Embedding threads, with one core kept free for you.", 1),
       limit("index_memory_mb", "Memory per store", L.index_memory_mb, "Vectors held in memory per open store. Lower it if other apps feel slow.", 64, " MiB"),
+      capRow(L.cpu_cap_percent, L.cpu_measured_percent),
       plain("compact_threshold_percent", "Compact past", comp.threshold_percent ?? 25, "An idle store more reclaimable than this is compacted on its own. 0 turns it off.", 5, 0, 90, "%"),
       plain("history_retention_days", "Keep retired definitions", comp.retention_days ?? 90, "How long a compaction keeps the history of a symbol that was renamed or deleted. 0 keeps everything.", 15, 0, 3650, " days"),
       vc.from_environment
@@ -9795,15 +9796,26 @@ function sePerf() {
         const na = ["unavailable"].includes(l.status?.state);
         const firstNa = na && (i === 0 || all[i - 1].status?.state !== "unavailable");
         const check = seUi.gpu && (seUi.gpu.checks || []).find((x) => x.lane === l.lane);
+        // The switch draws what was chosen (saved), not only what runs use;
+        // the environment's list is drawn as it is and cannot be switched.
+        const env = l.source === "environment";
+        const on = env ? !!l.enabled : !!(l.saved ?? l.enabled);
+        // An unavailable or failed lane can be turned off, never on; the CPU
+        // is always on.
+        const failed = l.status?.state === "failed";
+        const locked = l.locked || env || ((na || failed) && !on);
+        const tip = l.locked ? cap(l.locked_reason || "") : env ? "Set by SEMLITH_ACCEL, so the switch cannot change it" : (na || failed) && !on ? cap(l.status?.reason || "") : null;
         const row = el(
           "div",
-          { class: `lane-row${na ? " off na" : ""}`, "aria-disabled": na ? "true" : null },
-          btn({ class: `switch${l.enabled ? " on" : ""}`, role: "switch", "aria-checked": String(!!l.enabled), "aria-label": `${l.label || l.lane} lane`, disabled: na ? true : null, onclick: () => laneSwitch(l) }, el("span", { class: "tg" })),
+          { class: `lane-row${na ? " off na" : ""}`, "aria-disabled": na && !on ? "true" : null },
+          btn({ class: `switch${on ? " on" : ""}`, role: "switch", "aria-checked": String(on), "aria-label": `${l.label || l.lane} lane`, "data-tip": tip, disabled: locked ? true : null, onclick: () => laneSwitch(l) }, el("span", { class: "tg" })),
           el(
             "span",
             { class: "col" },
             el("span", { class: "row gap8 t-m t13" }, `${l.label || laneName(l.lane)}${l.variant ? ` · ${l.variant}` : ""}`, l.experimental ? el("span", { class: "exp", text: "experimental" }) : null),
-            na
+            l.locked
+              ? el("span", { class: "muted t-xs", text: `${l.device || "named when it starts"} · ${laneState(l.status)} · always on — the CPU cap limits it` })
+              : na
               ? el("span", { class: "muted t-xs", text: `Not available on this ${osWord()}: ${String(l.status?.reason || "").replace(/^the .*? lane (is )?/i, "").replace(/^unavailable — /, "")}` })
               : l.lane === "remote"
                 ? el("span", { class: "muted t-xs", text: remoteWord(l) })
@@ -9818,6 +9830,28 @@ function sePerf() {
       }),
     ),
   ];
+}
+
+// The CPU cap: semlith's own share of every core while it indexes, 0-100 %.
+// 0 pauses CPU work; 100 is no cap. Its own row because 0 is a value here,
+// where the three limits above start at one.
+function capRow(cap, measured) {
+  if (!cap) return null;
+  const env = cap.source === "set by the environment";
+  const v = cap.value;
+  const word = v >= 100 ? "no cap" : v === 0 ? "paused" : `${v}%`;
+  return el(
+    "div",
+    { class: "limit-row" },
+    el("span", { class: "col gap2" }, el("span", { class: "k", text: "CPU cap" }), el("span", { class: "n", text: `The most of this machine's CPU semlith may use while it indexes; 0 pauses CPU work. Using ${Math.round(measured || 0)}% now.${env ? " Set by SEMLITH_CPU_CAP, so the page cannot change it." : ""}` })),
+    el(
+      "div",
+      { class: "stepper", "data-tip": "Accelerator lanes are not slowed, except by the file preparation they share with the CPU." },
+      stepBtn(env || v <= 0, "Lower CPU cap", () => saveLimits({ cpu_cap_percent: Math.max(0, v - 10) }), "−"),
+      el("span", { class: "v", text: word }),
+      stepBtn(env || v >= 100, "Raise CPU cap", () => saveLimits({ cpu_cap_percent: Math.min(100, v + 10) }), "+"),
+    ),
+  );
 }
 
 const seUi = { gpu: null, reveal: null, update: null };
@@ -9839,7 +9873,7 @@ function laneState(status) {
 }
 
 async function laneSwitch(l) {
-  const on = !l.enabled;
+  const on = !(l.source === "environment" ? l.enabled : (l.saved ?? l.enabled));
   if (on && l.download_bytes && !l.installed) {
     const ok = await ask({ title: `Turn ${l.label || l.lane} on?`, body: `It downloads the ${l.label || l.lane} pack first, ${bytes(l.download_bytes)}, once, into this machine's model cache.${l.experimental ? " It is experimental: built and checked without its hardware." : ""}`, ok: "Download and turn on" });
     if (!ok) return;

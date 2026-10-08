@@ -1269,6 +1269,7 @@ request, and **Reset to what it suggests** puts every limit back.
 | Runs at once | How many stores may index at the same time. Derived from memory free less a 2 GiB reserve over what one run peaks at, capped by the cores with one kept free. |
 | Threads per run | Embedding threads, with one core kept free for you. |
 | Memory per store | Vectors held in memory per open store. Lower it if other apps feel slow. |
+| CPU cap | The most of this machine's CPU semlith's own process may use while it indexes, 0-100 % of every core, with what it is using now beside it. 100 is no cap; 0 pauses CPU work and the run card says "paused by the CPU cap". From 0.37.0-rc.6. |
 | Compact past | An idle store more reclaimable than this percentage is compacted on its own; 0 turns it off. |
 | Keep retired definitions | How long a compaction keeps the history of a symbol that was renamed or deleted; 0 keeps everything. |
 | Vector cache | Vectors kept so a chunk met again is not re-embedded, with how much of it is used and the hit rate. 0 turns it off. |
@@ -1277,7 +1278,7 @@ Each has a ceiling the route enforces as well as the page: the core count for th
 two parallelism settings, memory free less the reserve for the memory budget. A
 saved value applies at once to runs already going. A value an environment variable
 sets — `SEMLITH_INDEX_PARALLEL`, `SEMLITH_EMBED_THREADS`, `SEMLITH_INDEX_MEMORY`,
-`SEMLITH_VECTOR_CACHE_MB` — is shown and cannot be changed here. What is not from
+`SEMLITH_VECTOR_CACHE_MB`, `SEMLITH_CPU_CAP` — is shown and cannot be changed here. What is not from
 the environment is saved in `~/.semlith/settings.json`.
 
 **Where embedding runs** has one switch per lane — the CPU, the Neural Engine, the
@@ -1286,9 +1287,17 @@ variant, its state (`active`, `idle`, `starting`, `compiling` or `downloading`
 with a percentage and the time left, `unavailable` or `failed` with the reason)
 and its live share of the work. CUDA, TensorRT for RTX, OpenVINO and llama.cpp are
 marked experimental: built and checked without their hardware. Turning on a lane
-whose pack is not installed asks first, naming the size. When no other lane can
-run, the CPU carries the work whatever its switch says, and the card says so. It
-is the same control as `semlith accel`.
+whose pack is not installed asks first, naming the size. It is the same control as
+`semlith accel`.
+
+From 0.37.0-rc.6 the CPU lane is always on: its switch is locked, and the CPU cap
+above is how to hold it back. Every other switch draws the choice that was saved;
+a lane set by `SEMLITH_ACCEL` says so and cannot be switched. Which lanes can run
+is read from this machine's hardware once per daemon: no GPU the lane can use
+(Metal, or a Vulkan driver from the GPU's maker) makes the GPU and llama.cpp lanes
+unavailable, no NVIDIA card and driver makes CUDA and TensorRT unavailable, and a
+CPU that is not Intel's makes OpenVINO unavailable. An unavailable or failed lane
+can be switched off but not on, and a refusal says why.
 
 **Check each lane against the CPU** is `semlith doctor --gpu`: each lane embeds
 32 fixed chunks and compares them with CPU vectors committed to the repository,

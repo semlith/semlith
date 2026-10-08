@@ -2850,6 +2850,12 @@ pub struct Limits {
     pub runs_at_once: Limit,
     pub embed_threads: Limit,
     pub index_memory_mb: Limit,
+    /// The CPU cap in percent: the most of all cores semlith's own process
+    /// may use while it indexes. `derived` and `ceiling` are both 100, and 0
+    /// is a value (paused), unlike the three above.
+    pub cpu_cap_percent: Limit,
+    /// What semlith's process is using now, in percent of all cores.
+    pub cpu_measured_percent: f64,
     /// The reading the three were derived from, as the page shows it.
     ///
     /// Carried as JSON rather than by deriving `Serialize` on the reading
@@ -2904,6 +2910,17 @@ impl Limits {
                 crate::index::INDEX_MEMORY_ENV,
                 memory_ceiling,
             ),
+            cpu_cap_percent: {
+                let (value, source) = crate::cpucap::in_force();
+                Limit {
+                    value: usize::from(value),
+                    source,
+                    derived: 100,
+                    reason: "100 % is no cap: indexing may use every core".to_string(),
+                    ceiling: 100,
+                }
+            },
+            cpu_measured_percent: crate::cpucap::measured_percent(),
             machine: serde_json::json!({
                 "logical_cores": machine.logical_cores,
                 "physical_cores": machine.physical_cores,
@@ -2939,16 +2956,18 @@ impl Limits {
         self
     }
 
-    /// The line `semlith start` prints: all three values with their source.
+    /// The line `semlith start` prints: every value with its source.
     pub fn line(&self) -> String {
         format!(
-            "indexing: {} run(s) at once ({}), {} embedder thread(s) each ({}), {} MiB of vectors per store ({})",
+            "indexing: {} run(s) at once ({}), {} embedder thread(s) each ({}), {} MiB of vectors per store ({}), CPU cap {} % ({})",
             self.runs_at_once.value,
             self.runs_at_once.source.as_str(),
             self.embed_threads.value,
             self.embed_threads.source.as_str(),
             self.index_memory_mb.value,
             self.index_memory_mb.source.as_str(),
+            self.cpu_cap_percent.value,
+            self.cpu_cap_percent.source.as_str(),
         )
     }
 }

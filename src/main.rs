@@ -1172,6 +1172,26 @@ fn main() -> Result<()> {
     }
 }
 
+/// The CPU cap as `accel status` and `doctor --gpu` print it, from a lane
+/// snapshot's `cpu_cap`.
+fn cpu_cap_line(cap: &serde_json::Value) -> String {
+    let percent = cap["percent"].as_u64().unwrap_or(100);
+    let source = match cap["source"].as_str() {
+        Some("environment") => format!(" (set by {})", semlith::cpucap::ENV),
+        Some("saved") => " (saved)".to_string(),
+        _ => String::new(),
+    };
+    let measured = cap["measured_percent"].as_f64().unwrap_or(0.0);
+    let state = if percent >= 100 {
+        "off".to_string()
+    } else if percent == 0 {
+        "0 %, CPU work paused".to_string()
+    } else {
+        format!("{percent} % of all cores")
+    };
+    format!("CPU cap: {state}{source}; semlith is using {measured:.0} % now")
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -1185,6 +1205,7 @@ fn run() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&checks)?);
             } else {
                 print_gpu_checks(&checks);
+                println!("{}", cpu_cap_line(&semlith::accel::snapshot()["cpu_cap"]));
             }
             if checks
                 .iter()
@@ -1433,6 +1454,7 @@ fn run() -> Result<()> {
                             "off"
                         }
                     );
+                    println!("{}", cpu_cap_line(&status["cpu_cap"]));
                     println!("vector cache: {}", semlith::cache::stats().line());
                 }
             }

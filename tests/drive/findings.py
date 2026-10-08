@@ -4400,11 +4400,13 @@ def _(d):
         stop_quietly(d, store)
 
 
-@finding("8.7", "Settings › Performance lists the accelerator lanes, with the CPU active")
+@finding("8.7", "Settings › Performance lists the accelerator lanes, with the CPU always on")
 def _(d):
     """One row per lane `/api/accel` reports, each a switch with its device, its
-    state and its share of the work. The CPU is always a lane and always
-    active; CI runners have no GPU, so nothing here depends on one.
+    state and its share of the work. The CPU is always a lane and always on,
+    its switch locked (0.37.0-rc.6; it reads idle until it embeds); every
+    other switch draws what was saved. CI runners have no GPU, so nothing here
+    depends on one.
 
     Turning a lane on that needs a download says what it downloads before
     anything is posted: the dialog is opened and cancelled, and the lane is
@@ -4426,8 +4428,11 @@ def _(d):
         if wanted not in names:
             fail("the lanes card has no %s row; it lists %r" % (wanted, names))
     cpu = rows[names.index("CPU")]
-    if "active" not in cpu["state"]:
-        fail("the CPU row reads %r; the CPU lane is always active" % cpu["state"])
+    if "always on" not in cpu["state"] or cpu["on"] != "true":
+        fail("the CPU row reads %r (switch %s); the CPU lane is always on" % (cpu["state"], cpu["on"]))
+    locked = d.eval("(document.querySelector('#main .lane-row button[aria-label=\"CPU lane\"]') || {}).disabled")
+    if locked is not True:
+        fail("the CPU lane's switch can be pressed; it is locked on")
     # Matched by name: from 0.35.0 the lanes this machine cannot run are
     # listed after the others, under their own line, and read "off".
     by_label = {(l.get("label") or l["lane"]): l for l in lanes}
@@ -4435,9 +4440,12 @@ def _(d):
         lane = by_label.get(name)
         if lane is None:
             fail("the lanes card lists %r, which /api/accel does not report" % name)
-        if row["on"] != ("true" if lane.get("enabled") else "false"):
-            fail("the %s switch reads %s and the daemon has it %s"
-                 % (row["title"], row["on"], "on" if lane.get("enabled") else "off"))
+        # The switch draws the saved choice (0.37.0-rc.6), or what the
+        # environment set when it set the lanes.
+        want = lane.get("enabled") if lane.get("source") == "environment" else lane.get("saved", lane.get("enabled"))
+        if row["on"] != ("true" if want else "false"):
+            fail("the %s switch reads %s and the daemon has it saved %s"
+                 % (row["title"], row["on"], "on" if want else "off"))
         unavailable = (lane.get("status") or {}).get("state") == "unavailable"
         if unavailable:
             if row["share"] != "off":
