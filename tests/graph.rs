@@ -108,6 +108,107 @@ fn indexing_fills_the_graph_for_every_advertised_language() {
     assert_eq!(bad, 0, "an edge carries a confidence outside the two");
 }
 
+/// What the writer stores for a fixed corpus, pinned (#207). The writer's
+/// transactions, pragmas and keyword-index merges are tuned for speed; none of
+/// that may change a row. Counted, and every row folded into a digest without
+/// its ids, so a change that drops, adds or alters one fails here. Recorded on
+/// rc.5's writer; a graph-rules change moves these on purpose, and its
+/// commit says so.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn the_writer_stores_the_same_rows_for_the_same_corpus() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    polyglot(corpus.path());
+    index(store.path(), corpus.path());
+
+    let s = Semlith::open(store.path(), None).unwrap();
+    let db = s.db();
+    let count = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
+    let digest = |sql: &str| -> String {
+        let mut stmt = db.prepare(sql).unwrap();
+        let columns = stmt.column_count();
+        let mut hasher = blake3::Hasher::new();
+        let mut rows = stmt.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            for at in 0..columns {
+                let value: rusqlite::types::Value = row.get(at).unwrap();
+                hasher.update(format!("{value:?}\u{1f}").as_bytes());
+            }
+            hasher.update(b"\x1e");
+        }
+        hasher.finalize().to_hex()[..16].to_string()
+    };
+    // Paths, and the module symbols named by them, without the temporary
+    // directory they were written under.
+    let root = format!(
+        "{}/",
+        fs::canonicalize(corpus.path()).unwrap().to_string_lossy()
+    );
+    let found = [
+        ("chunks", count("SELECT COUNT(*) FROM chunks")),
+        ("fts", count("SELECT COUNT(*) FROM chunks_fts_docsize")),
+        ("symbols", count("SELECT COUNT(*) FROM symbols")),
+        ("edges", count("SELECT COUNT(*) FROM edges")),
+    ];
+    let digests = [
+        (
+            "chunks",
+            digest(&format!(
+                "SELECT replace(f.path, '{root}', ''), c.ord, c.start_line, c.end_line, c.text
+                 FROM chunks c JOIN files f ON f.id = c.file_id ORDER BY 1, 2"
+            )),
+        ),
+        (
+            "symbols",
+            digest(&format!(
+                "SELECT replace(f.path, '{root}', ''), s.kind, s.name, replace(s.qualified, '{root}', ''), s.start_line,
+                        s.end_line, (SELECT ord FROM chunks WHERE id = s.chunk_id)
+                 FROM symbols s JOIN files f ON f.id = s.file_id ORDER BY 1, 5, 2, 3, 4, 6, 7"
+            )),
+        ),
+        (
+            "edges",
+            digest(&format!(
+                "SELECT replace(f.path, '{root}', ''), s.name, s.start_line, e.dst, e.kind,
+                        e.confidence, e.hint, e.line
+                 FROM edges e JOIN symbols s ON s.id = e.src JOIN files f ON f.id = s.file_id
+                 ORDER BY 1, 3, 2, 4, 5, 6, 7, 8"
+            )),
+        ),
+    ];
+    // The keyword index holds exactly the rows it indexes.
+    Connection::open(store.path().join("store.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)",
+            [],
+        )
+        .expect("the keyword index disagrees with the rows it indexes");
+    eprintln!("{found:?} {digests:?}");
+    assert_eq!(
+        found, PINNED_COUNTS,
+        "the writer stored a different number of rows"
+    );
+    assert_eq!(
+        digests,
+        PINNED_DIGESTS.map(|(k, v)| (k, v.to_string())),
+        "the writer stored different rows"
+    );
+}
+
+const PINNED_COUNTS: [(&str, i64); 4] = [
+    ("chunks", 48),
+    ("fts", 48),
+    ("symbols", 188),
+    ("edges", 207),
+];
+const PINNED_DIGESTS: [(&str, &str); 3] = [
+    ("chunks", "64ee910ab7c594a3"),
+    ("symbols", "9b0915f8fcbf455d"),
+    ("edges", "e3214b8591ad4e4b"),
+];
+
 /// A graph list that fails leaves the search standing on the two lists that
 /// already answered. 0.32.0 let it fail the whole search, and on the
 /// 70-repository benchmark corpus it failed for every query.
