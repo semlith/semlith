@@ -385,7 +385,10 @@ fn the_same_tree_with_a_valid_image_indexes_it() {
         report.failed
     );
     assert_eq!(report.images, 1);
-    assert_eq!(find(&events, "broken.png").outcome, FileOutcome::Indexing);
+    // An image is announced as one (`FileOutcome::Image`, since the run's
+    // single account of phases and work units); `Indexing` is a text file's
+    // verdict. This test is `#[ignore]`d, so CI never caught the change.
+    assert_eq!(find(&events, "broken.png").outcome, FileOutcome::Image);
 }
 
 /// A reader that panics on one file is that file's failure, named with the
