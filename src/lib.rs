@@ -1415,7 +1415,6 @@ struct ImageJob {
 struct ImageDone {
     job: ImageJob,
     vector: std::result::Result<Vec<f32>, String>,
-    ms: u64,
 }
 
 /// Image bytes the writer may have waiting for the image lane before it waits
@@ -3737,12 +3736,10 @@ impl Semlith {
                             image_lane = Some(scope.spawn(move || {
                                 for job in jobs {
                                     crate::cpucap::pace();
-                                    let started = std::time::Instant::now();
                                     let vector = model
                                         .embed_image(&job.path, &job.bytes, quiet)
                                         .map_err(|e| format!("{e:#}"));
-                                    let ms = started.elapsed().as_millis() as u64;
-                                    if back.send(ImageDone { job, vector, ms }).is_err() {
+                                    if back.send(ImageDone { job, vector }).is_err() {
                                         break;
                                     }
                                 }
@@ -4075,6 +4072,13 @@ impl Semlith {
                             halted = true;
                             break;
                         }
+                        // The hand-over committed, and the rest of this file —
+                        // its remaining rows and its whole graph — went on
+                        // without a transaction: a commit, a WAL write and
+                        // often a checkpoint per row (#207). The larger the
+                        // file, the likelier it crosses a window, and the more
+                        // symbols and edges it carries.
+                        self.tx_begin()?;
                     }
                 }
                 report.threads = self.index_threads();
@@ -4935,8 +4939,11 @@ impl Semlith {
         written: &mut Vec<String>,
         completed: &mut Vec<(i64, String)>,
     ) -> Result<Option<(PathBuf, String)>> {
-        let ImageDone { job, vector, ms } = done;
-        self.write_parts.add_ms("images", ms);
+        let ImageDone { job, vector } = done;
+        // The writer's own part only (#207): the image model runs on its own
+        // thread since #203, and charging its time here made the parts add up
+        // to more than the write stage they split.
+        let _charged = pipeline::Charge(&self.write_parts, "images", std::time::Instant::now());
         let vector = match vector {
             Ok(vector) => vector,
             Err(why) => {

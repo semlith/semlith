@@ -196,7 +196,8 @@ pub struct WriteParts {
 /// The parts, in the order `index -v` names them: rows and their keyword
 /// index, a replaced file's eviction, symbols and edges, vectors into the
 /// index and its sidecar, row commits, shard saves, indexed-file hashes, the
-/// vector cache, and images, which the image model embeds on the writer.
+/// vector cache, and images: recording what the image lane embedded on its own
+/// thread, never the embedding itself.
 pub const WRITE_PARTS: [&str; 9] = [
     "rows", "evict", "graph", "vectors", "commit", "save", "hashes", "cache", "images",
 ];
@@ -207,14 +208,6 @@ impl WriteParts {
         if let Some(at) = WRITE_PARTS.iter().position(|p| *p == part) {
             let cell = &self.micros[at];
             cell.set(cell.get() + since.elapsed().as_micros() as u64);
-        }
-    }
-
-    /// Charge `ms` milliseconds to `part`: work timed on another thread.
-    pub fn add_ms(&self, part: &str, ms: u64) {
-        if let Some(at) = WRITE_PARTS.iter().position(|p| *p == part) {
-            let cell = &self.micros[at];
-            cell.set(cell.get() + ms * 1000);
         }
     }
 
