@@ -7,13 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-09
+
+The Semlith Cloud client leaves release candidate. Everything rc.1 to rc.7
+carried ships here; the sections below them say what each added. Nothing changes
+for anybody who never signs in: with no `~/.semlith/cloud.json` the binary makes
+no connection to Semlith Cloud at all.
+
+### In this release, from rc.1 to rc.7
+
+- **Semlith Cloud, from this machine** (rc.1): `semlith cloud login`, `connect`,
+  `status`, `push`, `sync`, `report` and `replay`; an organisation's stores
+  listed beside the local ones with a `remote` badge and answered in one ranked
+  list with them; ledger sync per store, off by default and never the query
+  text; the portal's Cloud page.
+- Images indexed by their bytes, not their extension (rc.2).
+- A vector cache a library caller can give a store of its own (rc.3).
+- An index run that tells the truth about itself everywhere it is shown; the
+  image lane on a thread of its own; checkpoints that no longer drain the
+  lanes; WebGPU on NVIDIA checked against its Vulkan driver (rc.4).
+- A CPU cap, 0-100 % of semlith's own process (`SEMLITH_CPU_CAP`, the Limits
+  card, in steps of 5); the CPU lane always on; lanes this machine's hardware
+  cannot run refused at the switch (rc.6, rc.7).
+
+### Removed
+
+- **The `remote` lane and `semlith worker`** (added in rc.5) are no longer in
+  the binary. `semlith accel on remote` is refused as an unknown lane, the
+  `--endpoint`, `--token-file` and `--policy` options are gone, and
+  `settings.json`'s `remote` object is ignored. A program that embeds the
+  library and runs a worker of its own registers it with `accel::set_remote`
+  (an `accel::Remote` opens the channel the lane frames batches over); without
+  one the lane is not listed, checked, switched or used.
+- `ledger::measure`, which had no caller in the binary.
+- The direct `rustls`, `rcgen`, `ring` and `base64` dependencies, which only the
+  remote lane used.
+
+### Changed
+
+- The published crate carries the source, the tree-sitter queries, the files
+  the binary compiles in and the notices; tests, harnesses, docs and CI stay in
+  the repository.
+
 ## [0.37.0-rc.7] - 2026-10-09
 
 ### Changed
 
 - **The CPU cap steps by 5.** The Limits card's CPU cap stepper on
   Settings › Performance moves in steps of 5 % instead of 10, so 75 % can be
-  reached, the same steps as the Semlith Cloud operator panel. A value set off
+  reached. A value set off
   that grid (`SEMLITH_CPU_CAP=73`) snaps onto it at the first press.
   `SEMLITH_CPU_CAP` and `settings.json` still take any whole number 0-100.
 
@@ -53,8 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ran past the writer's 256-chunk window, its hand-over committed the window and
   nothing reopened the transaction, so every remaining row and the file's whole
   graph went to disk one autocommit at a time. The writer now keeps them in a
-  transaction. microsoft/vscode (353,398 chunks) from a 4-vCPU EPYC box through
-  a Confidential G4: median of three 437 s against 606 s for rc.5 (808 against
+  transaction. microsoft/vscode (353,398 chunks) embedded through the remote
+  lane: median of three 437 s against 606 s for rc.5 (808 against
   583 chunks a second), the write stage from about 400 s to 215 s (graph 185 to
   50 s, rows 97 to 15 s). The store is the same: files, chunks, keyword rows,
   symbols, edges and images match rc.5's counts. The writer's commit (about
@@ -74,22 +116,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token ids. Texts and vectors stay in the worker's memory. A worker that is
   refused, cannot prove what the policy asks, or goes away mid-run hands its
   batches back, and the run finishes on the local lanes with the store a run
-  without it would have left. Proven on a Google Cloud Confidential G4 (RTX PRO
-  6000, CC on, AMD SEV): CUDA at cosine 1.0000 through the lane, the semlith
-  repository in 35 s against 553 s on an M1's CPU, and a VM stopped mid-run
-  leaving a complete store. See [docs/remote-lane.md](docs/remote-lane.md).
-- `scripts/remote-worker.sh`: stand up, reach over IAP and delete a G4 worker.
+  without it would have left. CUDA matched the local lane at cosine 1.0000
+  through it, and a worker stopped mid-run left a complete store.
 - The portal's lane row and `doctor --gpu` say where the remote lane points and
   what its attestation proved.
 - People with their own NVIDIA GPU: the CUDA and TensorRT lanes documented and
-  measured on an RTX PRO 6000 (both cosine 1.0000).
+  measured (both cosine 1.0000).
 
 ## [0.37.0-rc.4] - 2026-10-06
 
 ### Fixed
 
-- **An index run tells the truth about itself, everywhere it is shown.** The
-  owner's walk of this release found the run view guessed at almost
+- **An index run tells the truth about itself, everywhere it is shown.** A manual
+  walk of this release found the run view guessed at almost
   everything: Start sat on "Starting…" with nothing behind it, the stage pills
   were thresholds on the file count, the log only ever said "indexing", and
   time left swung from 22 h to 1 h 34 within six percent. Now:
@@ -133,7 +172,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A run no longer stops to drain at each checkpoint (#203). A checkpoint saves
   what has been embedded and records as indexed only the files whose every
   chunk has landed, and a long run gives the writer back to the watcher only
-  when the watcher has changes or another job is queued. On the owner's walk
+  when the watcher has changes or another job is queued. On a manual walk
   each 45-second slice had been followed by 10 to 12 minutes of "finishing
   embeddings in flight" on the CPU.
 - Images are embedded on a thread of their own, so the text lanes keep
@@ -166,7 +205,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   device, and names the hardware device it uses. The known-answer failure on
   NVIDIA (#197) was never NVIDIA: the rented containers it was measured on lack
   the graphics capability, so Dawn ran on llvmpipe on the CPU while the device
-  still reported the card. On a real NVIDIA Vulkan driver (an RTX PRO 6000) the
+  still reported the card. On a real NVIDIA Vulkan driver the
   lane passes at a minimum cosine of 0.99997 and embeds 1,408 chunks/s, against
   CUDA's 2,784 on the same card. A worker lane that embeds the fixture at under
   2 chunks/s is also refused, as a backstop.
@@ -232,19 +271,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Semlith::vector_cache` takes a `cache::Location` (a file and a cap), and
   that store's index runs read and write that cache and never the machine's.
   A cap of 0 turns the cache off for that store only. `cache::stats_at` reports
-  one cache's rows, size and hit rate, and `cache::clear` deletes one. Semlith
-  Cloud gives each organisation its own, so no customer's run reads another's
-  vectors. The binary never sets one: its machine-wide cache, the
+  one cache's rows, size and hit rate, and `cache::clear` deletes one. The
+  binary never sets one: its machine-wide cache, the
   `SEMLITH_VECTOR_CACHE_MB` cap and the portal's cache settings are unchanged.
 
 ### Changed
 
 - `semlith cloud status` reports how many chunks the organisation indexed this
-  month against its cap (`212,400 of 2,650,000 chunks indexed`), as Semlith
-  Cloud 0.4.0 meters indexing in chunks; `semlith cloud push` states the host's
-  estimate (`about 1,400 chunks to index`) and its `--json` report carries
-  `estimate_chunks`. Against a host before Cloud 0.4.0 both read the minutes it
-  sends, as before.
+  month against its cap (`12,400 of 100,000 chunks indexed`) when the host
+  counts chunks; `semlith cloud push` states the host's estimate
+  (`about 1,400 chunks to index`) and its `--json` report carries
+  `estimate_chunks`. Against a host that counts minutes both read the minutes
+  it sends, as before.
 
 ## [0.37.0-rc.2] - 2026-10-04
 
@@ -528,7 +566,7 @@ Chrome and Firefox write no path into a field and go straight to the lookup.
 Every drop ends in the paste box when nothing finds it. On Windows a Windows
 Search answer on any drive counts, not only under the profile.
 
-### From the owner's walk
+### From a manual walk
 
 **Read and decided the way people use it.** Every dropdown is the portal's
 own, drawn like the Graph's store picker. Long paths lose their start, never
@@ -568,8 +606,7 @@ it follows file changes (`watch`), whether its retrievals are recorded
 (`record`) and whether its walks honour `.gitignore`. The keys are additive in
 `registry.json`, and their defaults are what every store did before.
 
-**Review decides several files at once.** Owner decision of 2026-10-01: a
-person may now decide about many refused files in one request
+**Review decides several files at once.** A person may now decide about many refused files in one request
 (`POST /api/refused/decide`: in, redact, out, reset); each file is still its
 own decision and its own ledger row, a credential file is still never let in,
 and no agent can reach the route. Keep out is a recorded decision that leaves
@@ -990,8 +1027,8 @@ live, reclaimable and the reclaimable share — `semlith_stats` carries the same
 figures, and the Stores page has a Disk column, a Compact action that asks with
 the bytes it will give back, and an On disk tile that now sums the stores
 themselves rather than the source they indexed. The crate exposes
-`Semlith::compact` and `Semlith::footprint` so Semlith Cloud can do the same for
-org stores.
+`Semlith::compact` and `Semlith::footprint` so an embedder can do the same for
+the stores it hosts.
 
 **A reader sees a writer's new shards.** A long-lived reader — an MCP server, the
 portal — re-read the shard directory only when it opened a store, so a shard a
@@ -2523,7 +2560,7 @@ that replays every one of their reproductions as a standing gate.
 - A store holds only what its roots cover. The index boundary treated the whole
   home directory as inside every store's boundary, so any store on the machine
   could swallow any other's corpus and be allowed — the `semlith` store held 262
-  files belonging to `ultraship`, every search across all stores returned them
+  files belonging to another store, every search across all stores returned them
   twice, and the store label on the duplicate was wrong. The home directory is
   now the fallback only for a store with no registered roots. A store reconciles
   what it should not hold when the daemon opens it, logging the count and showing
