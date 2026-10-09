@@ -1459,6 +1459,12 @@ runs `semlith worker`.
 | Library | `cpucap` module; `accel::CPU_ALWAYS_ON`; `embed::threads_in_force` never exceeds the cap's share of the cores. |
 | Portal parity | The cap is a row on Settings › Performance › Limits; the CPU switch is locked there. |
 
+### 0.37.0-rc.7: the CPU cap steps by 5
+
+| Surface | Change |
+|---|---|
+| Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:

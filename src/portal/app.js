@@ -9834,7 +9834,8 @@ function sePerf() {
 
 // The CPU cap: semlith's own share of every core while it indexes, 0-100 %.
 // 0 pauses CPU work; 100 is no cap. Its own row because 0 is a value here,
-// where the three limits above start at one.
+// where the three limits above start at one. Steps of 5, as the cloud
+// operator panel: a value set off the grid (SEMLITH_CPU_CAP=73) snaps to it.
 function capRow(cap, measured) {
   if (!cap) return null;
   const env = cap.source === "set by the environment";
@@ -9847,9 +9848,9 @@ function capRow(cap, measured) {
     el(
       "div",
       { class: "stepper", "data-tip": "Accelerator lanes are not slowed, except by the file preparation they share with the CPU." },
-      stepBtn(env || v <= 0, "Lower CPU cap", () => saveLimits({ cpu_cap_percent: Math.max(0, v - 10) }), "−"),
+      stepBtn(env || v <= 0, "Lower CPU cap", () => saveLimits({ cpu_cap_percent: Math.max(0, Math.ceil(v / 5) * 5 - 5) }), "−"),
       el("span", { class: "v", text: word }),
-      stepBtn(env || v >= 100, "Raise CPU cap", () => saveLimits({ cpu_cap_percent: Math.min(100, v + 10) }), "+"),
+      stepBtn(env || v >= 100, "Raise CPU cap", () => saveLimits({ cpu_cap_percent: Math.min(100, Math.floor(v / 5) * 5 + 5) }), "+"),
     ),
   );
 }

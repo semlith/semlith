@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0-rc.7] - 2026-10-09
+
+### Changed
+
+- **The CPU cap steps by 5.** The Limits card's CPU cap stepper on
+  Settings › Performance moves in steps of 5 % instead of 10, so 75 % can be
+  reached, the same steps as the Semlith Cloud operator panel. A value set off
+  that grid (`SEMLITH_CPU_CAP=73`) snaps onto it at the first press.
+  `SEMLITH_CPU_CAP` and `settings.json` still take any whole number 0-100.
+
 ## [0.37.0-rc.6] - 2026-10-08
 
 ### Added
