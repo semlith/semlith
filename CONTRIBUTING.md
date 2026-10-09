@@ -1,18 +1,17 @@
 # Contributing to semlith
 
-Thanks for taking the time. semlith is a small, focused tool, and the bar for
-a change is simply that it makes the tool better at its job: finding the right
-excerpt, fast, locally.
+How to build semlith, which checks a change must pass, and how to send it. The
+bar for a change is that it makes the tool better at its job: finding the right
+excerpt, fast, locally. [AGENTS.md](AGENTS.md) holds the full build, test and
+architecture notes; this page is the short version.
 
-By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md).
+By participating you agree to abide by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-## Getting set up
+## Build
 
-You need a 64-bit machine and Rust 1.90 or newer. turbovec refuses to compile
-on 32-bit targets by design.
-
-Nothing else has to be installed first. turbovec 1.0.0 dropped its BLAS
-dependency, so the OpenBLAS step Linux used to need is gone.
+You need a 64-bit machine and Rust 1.90 or newer (turbovec refuses 32-bit
+targets). Nothing else has to be installed first: there is no BLAS or OpenSSL
+dependency.
 
 ```sh
 git clone https://github.com/semlith/semlith
@@ -21,13 +20,13 @@ cargo build
 cargo test
 ```
 
-The first build compiles SQLite and downloads ONNX Runtime binaries, so give it
-a few minutes. Later builds are fast.
+The first build compiles SQLite and downloads ONNX Runtime, so it takes a few
+minutes.
 
-## The checks that must pass
+## Checks
 
-CI runs exactly these on Linux, macOS and Windows. Run them before opening a
-pull request and there will be no surprises:
+CI runs these on Linux, macOS and Windows. Run them before opening a pull
+request:
 
 ```sh
 cargo fmt --all -- --check
@@ -35,54 +34,50 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Two more jobs run beside them and need nothing from you until they fail. `msrv`
-builds the crate on the Rust version `Cargo.toml` declares, so a newer
-language feature that compiles on your toolchain and not on the declared floor
-fails there rather than on a user's machine. `scripts` shellchecks `install.sh`
-and lints `install.ps1`, because the install scripts are the front door and
-nothing else compiles them.
+CI also runs `msrv`, which builds on the Rust version `Cargo.toml` declares, and
+`scripts`, which shellchecks `install.sh` and lints `install.ps1`.
 
-There is one more test that CI does not run, because it downloads a ~52 MB
-embedding model:
+Most integration tests are `#[ignore]`d because they download the ~52 MB
+embedding model. Run them when your change touches what they cover:
 
 ```sh
-cargo test -- --ignored
+cargo test -- --ignored                                        # everything, incl. the round trip
+cargo test --test mcp -- --ignored                             # one file
+cargo test --release --test measure -- --ignored --nocapture   # performance claims
+cargo test --release --test shards -- --ignored --nocapture
+cargo test --release --test retrieval -- --ignored --nocapture # retrieval quality
 ```
 
-This is the end-to-end round trip — index, search, edit, prune, reopen, forget.
-**Run it if you touch anything in `lib.rs`, `store.rs`, or `chunk.rs`.** It is
-the test that catches chunk ids in the vector index drifting out of sync with
-their rows in SQLite, which is the failure mode that matters most here.
+**Run `cargo test -- --ignored` if you touch `lib.rs`, `store.rs` or
+`chunk.rs`.** Its round trip (index, search, edit, prune, reopen, forget) is the
+test that catches chunk ids in the vector index drifting out of sync with their
+rows in SQLite. `measure` and `shards` assert real thresholds and need
+`--release`; a debug build fails them.
 
-## How the code is laid out
+## Code layout
 
 | File | Responsibility |
 |---|---|
 | `src/lib.rs` | The `Semlith` type: opening a store, indexing, searching, persistence |
-| `src/store.rs` | Every SQL statement. Nothing else touches the database |
+| `src/store.rs` | Every SQL statement; nothing else touches the database |
 | `src/chunk.rs` | Reading a file into text and splitting it into chunks |
-| `src/mcp.rs` | The stdio MCP server |
+| `src/mcp.rs` | The MCP server |
 | `src/main.rs` | CLI argument parsing and output formatting |
 
-See [docs/architecture.md](docs/architecture.md) for how the pieces fit
-together and why the store is split across two files.
+[docs/architecture.md](docs/architecture.md) explains how the pieces fit
+together.
 
 ## House style
 
-The codebase follows a few conventions. They are not arbitrary, and matching
-them makes review quick:
-
-- **`cargo fmt` decides formatting.** Do not fight it.
+- **`cargo fmt` decides formatting.**
 - **Comments explain why, not what.** If a line needs a comment to say what it
-  does, rename something instead. The comments worth writing are the ones that
-  save the next person an hour: why a batch size is 32, why a hash is written
-  after the index and not before.
-- **Prefer deleting to adding.** A smaller diff that solves the problem beats a
-  larger one that also solves problems nobody has.
-- **Errors that a user can act on.** `bail!("store was built with X, not Y")`
-  beats `bail!("model mismatch")`.
+  does, rename something. Worth writing: why a batch size is 32, why a hash is
+  written after the index and not before.
+- **Prefer deleting to adding.** The smaller diff that solves the problem wins.
+- **Errors a user can act on.** `bail!("store was built with X, not Y")`, not
+  `bail!("model mismatch")`.
 - **Deliberate shortcuts get a `ponytail:` comment** naming the ceiling and the
-  upgrade path, so the next person knows it was a choice and not an oversight.
+  upgrade path.
 
 ## Commits and pull requests
 
@@ -95,22 +90,22 @@ docs: record measured indexing throughput
 perf: cap embed batch size to keep attention memory bounded
 ```
 
-The subject line says what changed. The body, when there is one, says why —
-what was wrong before, what tradeoff you took, what you deliberately left out.
+The subject says what changed; the body, when there is one, says why.
 
-For pull requests:
+Open pull requests against `develop`; `main` receives releases.
 
-- One logical change per PR. Two unrelated fixes are two PRs.
-- Include the check that proves it works. A bug fix without a test that would
-  have failed before is a bug fix that comes back.
-- If you changed indexing or search behaviour, say so in the PR body along with
-  whatever you measured. Numbers beat adjectives.
+- One logical change per PR.
+- Include the test that proves it: a bug fix without a test that would have
+  failed before tends to come back.
+- If you changed indexing or search behaviour, put what you measured in the PR
+  body. Numbers, not adjectives.
 - Update `CHANGELOG.md` under `## [Unreleased]`.
+- A change to a public surface (command, flag, environment variable, MCP tool,
+  store format) also lands in [docs/compatibility.md](docs/compatibility.md).
 
 ## Performance work
 
-If you are optimizing, measure first and put the numbers in the PR. The two
-that matter:
+Measure first and put the numbers in the PR:
 
 ```sh
 # Indexing throughput and peak memory
@@ -120,17 +115,16 @@ that matter:
 ./target/release/semlith --store /tmp/bench mcp < requests.jsonl > /dev/null
 ```
 
-Peak memory is a first-class concern. This tool is meant to run on a laptop
-while other things are open, and an embedding batch that is too large will
-quietly push a machine into swap and look like a hang.
+Peak memory matters as much as speed: semlith runs on a laptop beside other
+work, and an embedding batch that is too large pushes the machine into swap and
+looks like a hang. Published figures and their commands are in
+[docs/performance.md](docs/performance.md).
 
-### The benchmark corpus is a fixture, not a per-release cost
+### The 100k-chunk benchmark store
 
-Building a hundred-thousand-chunk store takes over an hour of embedding, which
-is the whole point of the numbers in the README. **Index it once and keep it.**
-The store the published figures come from lives at
-`~/.cache/semlith/bench/100k-store`, built from crates already in the local
-cargo registry:
+Building a hundred-thousand-chunk store takes over an hour of embedding, so
+build it once and keep it at `~/.cache/semlith/bench/100k-store`. It is made
+from crates already in the local cargo registry:
 
 ```sh
 R=~/.cargo/registry/src/index.crates.io-*/
@@ -141,33 +135,27 @@ semlith -s ~/.cache/semlith/bench/100k-store index \
   $R/linux-raw-sys-0.4.15 $R/chrono-tz-0.10.4 $R/winapi-0.3.9 --quiet
 ```
 
-Rebuild it only when the corpus or the default model changes — a new model
-invalidates the vectors, nothing else does. Re-running `index` against an
-unchanged corpus costs seconds, so keeping it current is nearly free.
+Rebuild it only when the corpus or the default model changes; re-running
+`index` on an unchanged corpus takes seconds. Use it when a change is about
+indexing or scan performance, not for every release.
 
-Reach for it when a release is *about* performance. A release that does not
-touch the indexing or scan path does not need a fresh hour of embedding to
-prove it left them alone.
+## Discuss first
 
-## Things we are deliberately not doing
+Open an issue before building any of these, because each changes what the tool
+is:
 
-Please open an issue to discuss before building any of these — not because they
-are bad ideas, but because they change what the tool is:
+- another bind address than `127.0.0.1`, or any new outbound connection;
+- sending text to a hosted embedding API;
+- a user-editable configuration file. Files such as `~/.semlith/registry.json`
+  and `settings.json` are tool-written state, not configuration.
 
-- A server mode, or anything that listens on a network port. Local means local.
-- Sending text to a hosted embedding API. The whole point is that nothing
-  leaves the machine.
-- Configuration files. Flags and environment variables have been enough.
+## Bugs and feature requests
 
-## Reporting bugs and asking for features
-
-Use the issue templates. For a bug, the single most useful thing you can
-include is the exact command and the output of `semlith stats`.
-
-Security issues do **not** go in the issue tracker — see
-[SECURITY.md](SECURITY.md).
+Use the issue templates. For a bug, include the exact command and the output of
+`semlith stats`. Security issues go through [SECURITY.md](SECURITY.md), not the
+issue tracker.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the
-[Apache License 2.0](LICENSE), the same license that covers the project.
+Contributions are licensed under the [Apache License 2.0](LICENSE), the same
+license as the project.

@@ -604,8 +604,8 @@ enum Command {
         gpu: bool,
     },
 
-    /// Which devices embed: the CPU, a GPU, and the experimental accelerator
-    /// lanes (the Neural Engine, TensorRT, OpenVINO, llama.cpp).
+    /// Which devices embed: the CPU, the Neural Engine on Apple silicon, a GPU,
+    /// and the experimental lanes (CUDA, TensorRT, OpenVINO, llama.cpp).
     ///
     /// `status` names each lane, its device and whether it is on. `on` and
     /// `off` take effect at the next batch of every run. `remove` deletes a
