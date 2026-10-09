@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-10-10
+
 ### The public scorecard
 
 **`bench/scorecard/` reproduces every published number.** One entry point per
@@ -18,6 +20,21 @@ tools on a seeded 20 of SWE-bench Lite, an agent round with Opus and Haiku, and 
 the ledger's real sessions. Data, clones and stores live under
 `~/semlith-bench/scorecard`, never in the repository, and nothing under
 `bench/` is in the crate.
+
+### Documentation
+
+**The README and the documentation are rewritten to the point.** The README is
+a front page — what semlith is, install, quick start, agents, the portal, the
+benchmarks and the numbers — at 518 lines, down from 740, with the reference
+material it carried moved to `docs/`. `docs/portal.md`, `docs/architecture.md`,
+`docs/compatibility.md`, `docs/performance.md`, `docs/models.md`,
+`docs/security.md`, `CONTRIBUTING.md` and `SECURITY.md` keep every fact and lose
+the release-by-release narration; sections that no longer matched the code were
+corrected (search has no graph list, the current embedding batches, session
+replay on by default, the full list of downloads, commands and tools).
+**Screenshots of every portal page**, light and dark, taken from a clean install
+indexing BurntSushi/ripgrep with real Claude Code sessions in the ledger, live
+in `docs/images/` (outside the crate).
 
 ### Fixed
 
@@ -54,6 +71,24 @@ the ledger's real sessions. Data, clones and stores live under
   randomized test failed on it about one run in 700. The marker now counts
   only when the rest of the segment is a word, one case, or digits:
   `FAKEtokenvalue` and `1234-fake-token` are still dummies.
+
+- **A search hit is named for the definition it is mostly about.** A chunk
+  that was most of one function and the first lines of the next was labelled
+  with the next one: on ripgrep, `examples/walk.rs` 25-53, the body of `main`,
+  read `class DirEntry`, and a brief expanded around the wrong symbol. The
+  label is set after ranking, so no result moves.
+- **The run card's drain line counts down.** "Finishing embeddings in flight —
+  N chunks still embedding" kept the count from the moment the phase began; it
+  now reads the run's live backlog, matching the chunks figure beside it.
+- **Home tells agents apart from the portal.** The Agents connected tile named
+  the portal or the terminal as the last agent to ask, and Needs attention said
+  no agent was connected while one was, whenever no client was registered.
+- **A report saved after midnight is named for the right day.** The file name
+  took the UTC date while the report's own Generated line gave the local one.
+- **`semlith accel --help`** no longer calls the Neural Engine experimental.
+- **A test no longer deletes the login service.** The service-removal test
+  treated a booted-out service as not installed and removed the real plist from
+  `~/Library/LaunchAgents`; a definition on disk now counts as installed.
 
 ## [0.37.0] - 2026-10-09
 
@@ -4802,7 +4837,9 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.36.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.38.0...HEAD
+[0.38.0]: https://github.com/semlith/semlith/compare/v0.37.0...v0.38.0
+[0.37.0]: https://github.com/semlith/semlith/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/semlith/semlith/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/semlith/semlith/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/semlith/semlith/compare/v0.33.1...v0.34.0
