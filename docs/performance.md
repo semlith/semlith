@@ -1,10 +1,10 @@
 # Performance
 
 Every number semlith publishes, with the command that reproduces it and the
-release it was taken for. A figure here is allowed to name a version, because a
-measurement without a date is a claim rather than a measurement.
+release it was measured for. Use it to size a machine or to check a claim.
 
-Measured on a 4P+4E Apple Silicon laptop with 8 GB of RAM:
+Unless a section says otherwise, the reference machine is an M1 Air: 4
+performance and 4 efficiency cores, 8 GB of RAM, fanless. The harnesses:
 
 ```sh
 cargo test --release --test measure -- --ignored --nocapture
@@ -12,28 +12,22 @@ cargo test --release --test shards -- --ignored --nocapture
 cargo test --release --test retrieval -- --ignored --nocapture
 ```
 
-The `--release` is not optional. `tests/measure.rs` and `tests/shards.rs` assert
-real thresholds, and a debug build fails them honestly rather than usefully.
+`--release` is required: `tests/measure.rs` and `tests/shards.rs` assert real
+thresholds, and a debug build fails them.
 
-The query, watcher and image tables were taken for 0.17.0. The larger-corpus
-table is a fixture — building a hundred-thousand-chunk store takes over an hour
-of embedding — and is re-taken when the indexing or scan path changes rather
-than every release; the recipe is in [CONTRIBUTING.md](../CONTRIBUTING.md).
+The query, watcher and image tables were measured for 0.17.0. The larger-corpus
+table uses a fixture store that takes over an hour to build and is re-measured
+only when the indexing or scan path changes; the recipe is in
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
-**Every indexing figure on this page before the section on the service was
-taken in a terminal**, by the test binary or by `semlith index`, running at the
-priority the terminal gave it. None of them measured the login service, which is
-how most users index, and until 0.28.0 the service ran slower. The macOS plist
-asked for `ProcessType Background`, which keeps a process on the efficiency
-cores. On the reference machine it indexed at 3.3 chunks/s against 28 in a
-terminal, measured on 2026-09-23. [The service, and the CPU and GPU
-together](#the-service-and-the-cpu-and-gpu-together) has the figures for the
-path most users are on.
+Indexing figures before [the service section](#the-service-and-the-cpu-and-gpu-together)
+were taken in a terminal, at the priority the terminal gave. Most users index
+through the login service; that section has its figures.
 
 ## Query latency
 
 Warm, server-side, as the daemon reports it. A query is embedded once per vector
-space the store holds, and that embedding is most of the cost at these sizes.
+space the store holds, and at these sizes that embedding is most of the cost.
 
 | store | p50 | what is in it |
 |---|---|---|
@@ -41,10 +35,8 @@ space the store holds, and that embedding is most of the cost at these sizes.
 | images | **9.1 ms** | 120 images, no text |
 | a fleet of both kinds | **25.0 ms** | the text store above, beside one holding images |
 
-The two halves add rather than interfere, because each store embeds the query
-once for every vector space it holds. A store of source code never pays for the
-image space at all: it has no images to compare against, so that half is skipped
-before a model is loaded.
+The two halves add rather than interfere. A store with no images skips the
+image space before a model is loaded.
 
 Over three larger corpora of mixed Rust, Markdown and TypeScript:
 
@@ -54,21 +46,17 @@ Over three larger corpora of mixed Rust, Markdown and TypeScript:
 | 9.9k chunks | **5.4 ms** | 11.0 ms | 24.3 chunks/sec | 637 MB |
 | 105k chunks | **22.7 ms** | 67.4 ms | 23.5 chunks/sec | 595 MB |
 
-**Peak memory does not grow with the corpus** — 105k chunks is 85 times the work
-of 1.2k for slightly less memory, so the number to plan for is roughly 600 MB
-whatever you point it at. **Query latency does grow**, because the index scan is
-linear: budget a few milliseconds for a repository and a few tens for a very
-large corpus. The recipe for rebuilding the fixture is in
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+**Peak memory does not grow with the corpus**: plan for about 600 MB whatever
+you index. **Query latency does grow**, because the index scan is linear: a few
+milliseconds for a repository, a few tens for a very large corpus.
 
 ## A large multi-repository store
 
-Taken for 0.33.1 on 2026-09-30 on the reference machine, an M1 Air with 8 GB,
-over 70 well-known public repositories pinned to release tags: 879 439 chunks
-from 66 333 files, 521.7 MB of indexed text. Every search went through the login
-service: a stdlib Python harness called the daemon's `/mcp` endpoint, dropped
-the first three calls, and ran three sessions. Each range is the lowest and
-highest figure of the three sessions.
+Measured for 0.33.1 on 2026-09-30: 70 public repositories pinned to release
+tags, 879 439 chunks from 66 333 files, 521.7 MB of indexed text. Every search
+went through the login service: a stdlib Python harness called the daemon's
+`/mcp` endpoint, dropped the first three calls, and ran three sessions. Each
+range is the lowest and highest of the three.
 
 | search | p50 | p95 |
 |---|---|---|
@@ -77,9 +65,8 @@ highest figure of the three sessions.
 | scoped to one repository | **574–597 ms** | 803–910 ms |
 | concept, `excerpt` format | **335–372 ms** | 532–545 ms |
 
-Where a search's time goes, measured with temporary stage timers in a
-measurement-only build that did not ship: one session through the daemon, 72
-warm searches.
+Where a search's time went, from temporary stage timers in a measurement-only
+build: one session through the daemon, 72 warm searches.
 
 | stage | p50 | p95 | max |
 |---|---|---|---|
@@ -91,20 +78,19 @@ warm searches.
 | graph list | **112.3 ms** | 438.3 ms | 2 120.1 ms |
 | everything inside the store | **328.3 ms** | 748.5 ms | 2 267.4 ms |
 
-The linear scan is not where the time goes at this size, so an
-approximate-nearest-neighbour index would save a few milliseconds; the keyword
-list and the graph list are the cost. The first search after a start paid 3.4 s
-once in the image list to load CLIP, because the corpus holds two PNG images.
+The linear scan is not the cost at this size, so an approximate-nearest-neighbour
+index would save only a few milliseconds; the keyword and graph lists are the
+cost. (Search stopped building the graph list in 0.36.0; see
+[architecture.md](architecture.md#ranking).) The first search after a start paid
+3.4 s once in the image list to load CLIP, because the corpus holds two PNG
+images. The daemon's RSS was 525–727 MB.
 
-The daemon's RSS was 525–727 MB. Before 0.33.1 every search on this store ran
-for 31 to 244 s and then failed; the changelog has what changed.
+**A search scoped to one repository is about twice as slow as an unscoped one**,
+because the path filter did not reach the graph's edge lookups.
 
-**A search scoped to one repository is about twice as slow as an unscoped
-one**, because the path filter does not reach the graph's edge lookups.
-
-The first index of the corpus took 70.7 min for 879 439 chunks, a mean of 207
-chunks/s on the Neural Engine lane. It was taken with the 0.32.0 daemon on
-2026-09-29, mostly on battery, with low power mode off.
+The first index of this corpus took 70.7 min, a mean of 207 chunks/s on the
+Neural Engine lane (0.32.0 daemon, 2026-09-29, mostly on battery, low power mode
+off).
 
 ## Keeping it current
 
@@ -126,8 +112,7 @@ chunks/s on the Neural Engine lane. It was taken with the 0.32.0 daemon on
 | resident, after an image query | 191 MB |
 
 CLIP is fetched only when a store first indexes an image: 335 MB for the vision
-encoder and 244 MB for the text encoder, against 52 MB for the text model. A
-corpus with no pictures in it never downloads either.
+encoder and 244 MB for the text encoder, against 52 MB for the text model.
 
 ## What an agent pays
 
@@ -135,89 +120,71 @@ corpus with no pictures in it never downloads either.
 |---|---|
 | `tools/call` over HTTP | **23.4 ms** p50 over 20 calls |
 | the same call through the stdio proxy | **20.9 ms** p50, same daemon, same query |
-| `tools/list` | **3 995 bytes**, about 999 tokens, for twelve tools with one store open, measured for 0.17.1. `tests/retrieval.rs` asserts it stays under 1 000 tokens, which is the whole reason the figure is watched |
+| `tools/list` | **2 633 bytes** for the eight listed tools (0.36.0); `tests/retrieval.rs` asserts it stays under 675 tokens |
 | an MCP server open on one store | 131 MB; on three stores, 132 MB |
 | three same-model stores, one search | **1** query embed, +1.7 ms for the second store |
 
-The endpoint costs about what the proxy costs, and the difference is the
-client's connection setup rather than the route. Both talk to the same daemon
-and run the same search.
+The HTTP endpoint costs about what the proxy costs; the difference is the
+client's connection setup. Both reach the same daemon and run the same search.
 
 ## What sharding costs
 
-A store split into 16 shards answers with the same top ten as the same corpus in
-one shard **about 90%** of the time, measured over twelve questions about meaning
-rather than about an identifier. The shards are what keep peak memory flat, and
-that is the price.
+A store split into 16 shards returns the same top ten as one shard **about 90 %**
+of the time, over twelve questions about meaning rather than identifiers. The
+shards keep peak memory flat; that is the price.
 
-The figure moves between 0.88 and 0.98 from run to run, and the reason is worth
-knowing: ONNX Runtime reduces across its threads in whatever order they finish,
-so the same question does not embed to exactly the same vector twice, and a
-vector that lands nearer a tie changes which of two near-equal chunks comes
-back. It is the same effect that makes `SEMLITH_EMBED_THREADS` worth pinning
-when you want a reproducible index.
-
-
+The figure moves between 0.88 and 0.98 from run to run. ONNX Runtime reduces
+across its threads in whatever order they finish, so a question does not embed
+to exactly the same vector twice, and a vector near a tie changes which of two
+near-equal chunks comes back. Pin `SEMLITH_EMBED_THREADS` when you need a
+reproducible index.
 
 ## What a store costs to hold
 
-An MCP server that is sitting there waiting to be asked something holds a model
-and nothing else: a hundredfold more corpus costs an open store **0.8 MB**,
-because the vectors are read when a question is asked rather than when the store
-is opened. Searching holds the vectors it searches — 70 000 chunks is 43 MB, and
-fits inside the 512 MB default with room to spare. Past that budget the store
-keeps what it can and reads the rest back per query, which is what makes a
-corpus larger than memory searchable at all, and it is not free: the same
-70 000-chunk store squeezed into an 8 MB budget answered in 364 ms instead of
-53 ms.
+An idle MCP server holds a model and little else: a hundredfold more corpus
+costs an open store **0.8 MB**, because vectors are read when a question is
+asked. Searching holds the vectors it searches: 70 000 chunks is 43 MB, well
+inside the 512 MB default. Past that budget the store keeps what it can and reads
+the rest back per query, so a corpus larger than memory stays searchable, at a
+cost: the same 70 000-chunk store squeezed into an 8 MB budget answered in
+364 ms instead of 53 ms.
 
-Changing one file rewrites the shards it touches rather than the index. On a
+Changing one file rewrites the shards it touches, not the whole index. On a
 store of 14 shards, re-indexing one changed file wrote 176 KB of a 1 436 KB
-index — two shards, not one, because the shard losing the old vector and the
-newest shard taking the new one both change. The saving appears once a store is
-more than two shards, around 131 000 chunks at the default shard size.
+index: two shards, because the shard losing the old vector and the newest shard
+taking the new one both change. The saving appears once a store is more than
+two shards, around 131 000 chunks at the default shard size.
 
-An index run killed eight seconds into a 6 000-file corpus keeps what it had
-already embedded: **1 952** chunks, not zero. Vectors are made durable before
-the files they cover are marked indexed, so a kill is resumable and never leaves
-a file recorded as indexed that cannot be answered for.
+An index run killed eight seconds into a 6 000-file corpus kept **1 952**
+chunks, not zero. Vectors are made durable before their files are marked
+indexed, so a killed run resumes and never leaves a file marked indexed that
+cannot be answered for.
 
 ## Choosing a model
 
-Indexing is the slow half, and that cost is the embedding model, not the index
-— a transformer on CPU is simply not fast. If you have a large corpus and can
-trade some retrieval quality for throughput, `--model AllMiniLML6V2` is about
-1.8x faster (6 transformer layers instead of 12).
+Indexing is the slow half, and its cost is the embedding model, not the index.
+For a large corpus where throughput matters more than some retrieval quality,
+`--model AllMiniLML6V2` is about 1.8x faster (6 transformer layers instead
+of 12).
 
-Quantization is worth testing rather than assuming. The int8 build of the
-default model is both smaller *and* faster than its fp32 build on ARM, while
-BGE's quantized variants measured no faster than fp32 on the same machine —
-whether int8 wins depends on the model's graph, not on the architecture alone.
+Test quantization rather than assume it: the default model's int8 build is both
+smaller and faster than its fp32 build on ARM, while BGE's quantized variants
+measured no faster than fp32 on the same machine.
 
-Thread count is chosen rather than left to ONNX Runtime. Its threads
-synchronise at every operator, so on a CPU with performance and efficiency
-cores a thread on a slow core paces the whole batch. Semlith uses the
-performance-core count on Apple silicon, on Intel hybrid CPUs under Linux (from
-`/sys/devices/cpu_core/cpus`) and on Windows (the cores in the highest
-`EfficiencyClass`), and the full count everywhere else. Override
-with `SEMLITH_EMBED_THREADS` if your machine disagrees. It is also what makes
-embedding reproducible: ONNX Runtime reduces across its threads in whatever
-order they finish, so the same text embedded twice differs in the last bits, and
-under int8 quantisation that is enough to swap two near-equal chunks.
+Thread count is chosen per CPU, not left to ONNX Runtime; the measurement and
+the rule are in [architecture.md](architecture.md#choosing-the-thread-count).
+Override it with `SEMLITH_EMBED_THREADS`.
 
 ## The service, and the CPU and GPU together
 
-Taken for 0.28.0 on the reference machine: an M1 Air with 4 performance and 4
-efficiency cores and 8 GB, with nothing else measuring, after `df -h`. Each
-figure is the median of three runs over one pinned corpus whose hash is
-recorded in the release record.
+Measured for 0.28.0 with nothing else running, after `df -h`. Each figure is the
+median of three runs over one pinned corpus whose hash is in the release record.
 
-**Priority.** The daemon puts itself in background state while nothing is
-embedding and returns to normal priority when an embed pass starts. On the M1,
-each switch took under 100 µs in both directions, read from the daemon's own
-log, which records every switch with its latency. It returns to background 300
-ms after the last embed ends. Read with `ps -o pri` on the service: 4 while
-idle, 20 while embedding, and 4 again 0.35 s after the run ended.
+**Priority.** The daemon stays in background state while nothing embeds and
+returns to normal priority when an embed pass starts. Each switch took under
+100 µs, read from the daemon's log. It returns to background 300 ms after the
+last embed ends. `ps -o pri` on the service read 4 while idle, 20 while
+embedding, and 4 again 0.35 s after the run ended.
 
 | path | chunks/s |
 |---|---|
@@ -225,35 +192,31 @@ idle, 20 while embedding, and 4 again 0.35 s after the run ended.
 | a portal run through the launchd service, CPU lane alone | 15.1, against 24.7 for the CLI in the same rounds (61 %) |
 | the same service before 0.28.0 (`ProcessType Background`) | 3.3, against 28 in a terminal, 2026-09-23 |
 
-Three interleaved rounds on 2026-09-24, median, over the pinned corpus (the `src/`
-of v0.27.0, 3 746 chunks). The service is 4.6× faster than it was, but it still
-runs at 61 % of the same binary in a terminal. The gap belongs to launchd: the
-same binary started with `semlith start` from a terminal ran at 89 % of the CLI,
-and in a launchd agent its embedding threads sit at scheduler priority 20
-against 31 from a terminal. Neither a user-initiated QoS request nor
-`ProcessType Interactive` closed it. The M1 Air is fanless, and single runs
-moved between 12 and 27 chunks/s over a day of load, so only figures taken in
-interleaved pairs are quoted here.
+Three interleaved rounds on 2026-09-24, median, over the `src/` of v0.27.0
+(3 746 chunks). The service runs at 61 % of the same binary in a terminal. The
+gap belongs to launchd: `semlith start` from a terminal ran at 89 % of the CLI,
+and in a launchd agent the embedding threads sit at scheduler priority 20
+against 31 from a terminal. Neither a user-initiated QoS request nor `ProcessType
+Interactive` closed it. Single runs on the fanless Air moved between 12 and 27
+chunks/s over a day of load, so only interleaved pairs are quoted.
 
 **Length-sorted batching.** The index pass sorts a window of up to 64 chunks by
-length before embedding it, so a batch no longer pads short chunks to the
-length of a long one. A standalone script over 512 real chunks measured 19.5
-against 29.1 chunks/s before it was built. Inside the release binary the gain
-is smaller, because the unsorted path already embeds eight neighbouring chunks
-of one file at a time, and those are close in length. Against unsorted batches
-of 32, sorting gives 1.31×. Windows of 128 to 2 048 chunks measured within
-run-to-run spread of the window of 64.
+length before embedding, so short chunks are not padded to a long one's length.
+A standalone script over 512 real chunks measured 19.5 against 29.1 chunks/s.
+In the binary the gain is smaller, because the unsorted path already embedded
+eight neighbouring chunks of one file at a time; against unsorted batches of 32,
+sorting gives 1.31×. Windows of 128 to 2 048 chunks were within run-to-run
+spread of 64.
 
 | CPU lane alone, int8 | chunks/s |
 |---|---|
 | unsorted, file order | 23.5 |
 | sorted, window of 64 | 27.6 (1.17×; a second interleaved round gave 23.4 against 20.6, 1.14×) |
 
-**Lanes.** A GPU lane is a worker process running the fp16 export of the model.
-The CPU lane runs int8 in the daemon. Both take batches from one sorted queue,
-so the faster device takes the larger share. The figures below come from a
-portal run through the service with default settings, where CPU and WebGPU are
-both on. The per-lane rates are the ones the run card showed.
+**Lanes.** A GPU lane is a worker process running the fp16 export; the CPU lane
+runs int8 in the daemon. Both take batches from one sorted queue, so the faster
+device takes the larger share. A portal run through the service with default
+settings (CPU and WebGPU on); per-lane rates as the run card showed them:
 
 | lanes | chunks/s | per lane |
 |---|---|---|
@@ -262,13 +225,12 @@ both on. The per-lane rates are the ones the run card showed.
 | CPU and WebGPU (the default) | 36.8, 1.52× the unsorted CPU path (24.1) | GPU 22.4/s · CPU 11.6/s |
 
 **Agreement.** `semlith doctor --gpu` embeds 32 fixed chunks on every lane and
-compares them with CPU fp32 vectors committed under `tests/fixtures/gpu/`. On the
-M1, WebGPU on Metal scored cosine 1.0000 on all 32 chunks, and the CPU int8
-lane scored 0.9851. An fp16 lane below 0.999 on any chunk is refused before
-its first real batch. Tested on the 2026-09-23 corpus, int8 and fp16 vectors of
-the same text agree at cosine 0.987. That is why a store embedded by both lanes
-was measured against an all-int8 store before hybrid became the default. On the
-sealed split of 30 questions, CPU lane alone, median of three:
+compares them with CPU fp32 vectors in `tests/fixtures/gpu/`. WebGPU on Metal
+scored cosine 1.0000 on all 32; the CPU int8 lane scored 0.9851. An fp16 lane
+below 0.999 on any chunk is refused before its first batch. int8 and fp16
+vectors of the same text agree at cosine 0.987, so a store embedded by both
+lanes was compared with an all-int8 store before hybrid became the default. On
+the sealed split of 30 questions, CPU lane alone, median of three:
 
 | store | hit@1 | hit@3 | hit@8 |
 |---|---|---|---|
@@ -277,15 +239,14 @@ sealed split of 30 questions, CPU lane alone, median of three:
 | half and half, int8 queries | 25/30 | 27/30 | 28/30 |
 | half and half, fp16 queries | 25/30 | 26/30 | 28/30 |
 
-The mix is within one question of all-int8 at every k, so a store may hold
-both, and queries stay int8. All 11 identifier questions stay in the top
-three in every arrangement.
+The mix is within one question of all-int8 at every k, so a store may hold both
+and queries stay int8. All 11 identifier questions stay in the top three in
+every arrangement.
 
-**Memory.** ONNX Runtime's arenas never shrink, so in 0.27.0 each writer kept its
-peak until the daemon exited: 5 392 MB across seven stores on the M1, read with
-`footprint` on 2026-09-23. A writer now releases its session after 60 seconds
-without embedding, and a GPU worker exits after 60 idle seconds. All readers
-share one query session.
+**Memory.** ONNX Runtime's arenas never shrink. In 0.27.0 each writer kept its
+peak until exit: 5 392 MB across seven stores, read with `footprint` on
+2026-09-23. A writer now releases its session after 60 s without embedding, a
+GPU worker exits after 60 idle seconds, and all readers share one query session.
 
 | daemon, seven stores open, GPU lane on | footprint |
 |---|---|
@@ -294,19 +255,17 @@ share one query session.
 | 60 s after the last run ends | 465 MB, no writer session loaded |
 | 0.27.0, after indexing | 5 392 MB |
 
-From 0.32.0 `semlith index` in a terminal uses the lanes as the daemon does;
+`semlith index` in a terminal uses the lanes as the daemon does;
 `tests/retrieval.rs` runs on the CPU alone unless `SEMLITH_ACCEL` is set. A
-single lane is deterministic, but which lane embeds a given chunk depends on
-timing. Two hybrid runs over the same corpus therefore produce the same chunks
-but not bit-identical vectors.
+single lane is deterministic, but which lane embeds a chunk depends on timing,
+so two hybrid runs give the same chunks but not bit-identical vectors.
 
 ## The Neural Engine and the accelerator lanes
 
-Taken for 0.32.0 on the same M1 Air, on AC, in a scratch `SEMLITH_HOME` with
-the vector cache off, over the 0.30.1 gate corpus (nine repositories, 20 146
-files, 120 000 chunks). The rate is chunks over wall time per slice, and the
-figure is the tenth percentile over slices two to fifteen, the median of three
-runs.
+Measured for 0.32.0 on AC, in a scratch `SEMLITH_HOME` with the vector cache
+off, over the 0.30.1 gate corpus (nine repositories, 20 146 files, 120 000
+chunks). The rate is chunks over wall time per slice; the figure is the tenth
+percentile over slices two to fifteen, median of three runs.
 
 | run | p10 chunks/s | gate |
 |---|---|---|
@@ -315,10 +274,9 @@ runs.
 | the same, the GPU lane alone | 58.2, the lane at 74.4 | — |
 | `semlith index` in a terminal against the daemon, one repository, three each | 240.7 against 240.6 | within 10 %, met |
 
-The Core ML GPU model runs about 72 chunks/s on its own at batch 8 or 16, and
-the CPU lane about 30; together they contend for the four performance cores. A
-GPU model converted at six buckets instead of three measured 67.2 and is not
-shipped yet.
+The Core ML GPU model runs about 72 chunks/s alone at batch 8 or 16, and the CPU
+lane about 30; together they contend for the four performance cores. A GPU model
+converted at six buckets instead of three measured 67.2 and is not shipped.
 
 | other gate | measured | gate |
 |---|---|---|
@@ -331,7 +289,7 @@ shipped yet.
 | peak RSS, daemon and its workers, Neural Engine run | 686 MB | recorded |
 
 macOS empties the Neural Engine's compile cache when the disk runs low: with
-13 GB free all six buckets were gone within ten minutes, with 32 GB free none
+13 GB free all six buckets were gone within ten minutes; with 32 GB free none
 were.
 
 ## The binary, and what a Linux machine needs
@@ -348,32 +306,28 @@ ls -l target/release/semlith
 objdump -T semlith runtime/libonnxruntime.so | grep -o 'GLIBC_[0-9.]*' | sort -V -u | tail -1
 ```
 
-The glibc figure is taken over the pair that ships, not the binary alone: a
-Linux archive holds `libonnxruntime.so` beside `semlith`, what a user runs is
-both, and the floor is whichever of the two needs more. `release.yml` measures
-it on every tag and fails above GLIBC_2.35, which is Ubuntu 22.04 LTS — the
-oldest distribution the project promises to start on.
+The glibc floor is taken over the pair that ships: a Linux archive holds
+`libonnxruntime.so` beside `semlith`, and the floor is whichever needs more.
+`release.yml` measures it on every tag and fails above GLIBC_2.35 (Ubuntu 22.04
+LTS), the oldest distribution the project promises to start on.
 
 ## Retrieval quality
 
 Measured for 0.23.0 over the 107-question harness in
-`tests/fixtures/retrieval/questions.yaml`, against the corpus pinned beside it
-at `tests/fixtures/retrieval/corpus` — the 0.21.0 tree at commit `4e8df39`, 146
-files and 3 119 835 bytes, asserted by file count and byte total on every run:
+`tests/fixtures/retrieval/questions.yaml`, against the corpus pinned at
+`tests/fixtures/retrieval/corpus` (the 0.21.0 tree at commit `4e8df39`, 146
+files, 3 119 835 bytes, asserted by file count and byte total on every run):
 
 ```sh
 cargo test --release --test retrieval -- --ignored --nocapture
 ```
 
-The set is split 77 development / 30 sealed, redrawn for this release with a
-recorded seed. The sealed thirty are scored once, at the end. Both are here, and
-0.22.0 is measured on the same corpus, through the same instrument, on the same
-split, so the comparison is like for like.
-
-The split was redrawn because the thirty drawn for 0.22.0 stopped being held out
-on 2026-09-19, when eight questions' spans were completed after that set had been
-scored. It is weaker evidence than that one was, and `split.yaml` says so: the
-work has now seen all 107 questions.
+The set is split 77 development / 30 sealed by a recorded seed, and the sealed
+thirty are scored once, at the end. The split was redrawn for 0.23.0 because
+the 0.22.0 sealed set stopped being held out on 2026-09-19, when eight
+questions' spans were completed after it had been scored; the work has now seen
+all 107 questions, and `split.yaml` says so. 0.22.0 is measured on the same
+corpus, instrument and split.
 
 | what | 0.22.0 | 0.23.0 |
 |---|---|---|
@@ -387,48 +341,32 @@ work has now seen all 107 questions.
 | wrong yes, on `path` | 0 | **0** — asserted, not reported |
 | call-edge resolution | | **62 %** settled |
 
-**hit@8 on the sealed thirty is two questions worse than 0.22.0's, and the cause
-is full-precision rescoring.** The store now keeps an `exact.f32` sidecar and the
-query path reorders its candidates by the true vectors rather than by their
-4-bit codes — which is more accurate and costs recall at k=8, because
-reciprocal-rank fusion weighs a candidate by its rank. A chunk the codes placed
-third can fall far enough under exact cosine to lose its contribution and leave
-the top eight.
+Each figure is the median of three runs, each its own index of the corpus; the
+spread was zero on every figure (issue #88's drift is gone: the corpus is pinned
+and embedding runs on one ONNX thread).
 
-It was found by elimination, not guessed at. Four candidates were ruled out by
-measurement first: the fastembed bump this release carries (0.22.0 scores 27 with
-fastembed 6.1.0 too), the constants extraction, the candidate-pool depth, and a
-graph-seed interaction that was real and was fixed and turned out not to be the
-cause. The corpus indexes to 4 267 chunks in every one of those runs, so chunking
-was never it.
+**hit@8 on the sealed thirty fell by two, and the cause is full-precision
+rescoring.** The store keeps an `exact.f32` sidecar, and the query path reorders
+candidates by the true vectors rather than their 4-bit codes. That is more
+accurate but costs recall at k=8, because reciprocal-rank fusion weighs a
+candidate by its rank: a chunk the codes placed third can fall far enough under
+exact cosine to leave the top eight. It was found by elimination: the fastembed
+bump (0.22.0 scores 27 with fastembed 6.1.0 too), the constants extraction, the
+candidate-pool depth and a graph-seed interaction were each ruled out, and the
+corpus indexed to 4 267 chunks in every run, so chunking was never the cause.
 
-The pass ships because it is the groundwork the next release needs, and the
-number it costs is stated rather than buried. Making rescoring pay for itself —
-by fusing on score rather than rank where a list has true scores, or by rescoring
-only the head — is where the next release starts.
+**The sealed figures move less than the development ones**: +2/+1/+0 against
++7/+7/+2. That gap is what tuning against a visible set is worth on this corpus.
 
-Each figure is the median of three runs, and each run is its own index of the
-corpus. The spread was zero on every figure of every configuration this release
-measured, which is issue #88's drift gone: the corpus is pinned and the
-embedding runs on one ONNX thread.
+Of the 77 development questions, seven concept questions miss at k=8, and twenty
+more are inside the top eight but outside the top three — a ranking problem. A
+larger embedding model gained two questions at k=8 and none at hit@3; a
+cross-encoder over the fused head changed nothing at either depth in this
+release. Neither shipped as a default; the cross-encoder later shipped opt-in
+(see [models.md](models.md#rescoring-jina-reranker-v1-turbo-en)).
 
-**The sealed figures move less than the development ones, and that is the point
-of having them.** The development questions are the ones the work was tuned
-against. The gap between +7/+7/+2 and +2/+1/+0 is what tuning against a visible
-set is worth on this corpus.
-
-What stands in the way of the questions that still miss is named rather than
-guessed: seven concept questions of the development seventy-seven miss at k=8,
-and twenty more are found inside the top eight while sitting outside the top
-three. The second is a ranking problem, and the two standard levers for it were
-both built and both measured here — a larger embedding model gained two questions
-at k=8 and none at hit@3, and a cross-encoder over the fused head changed nothing
-at all at any depth on either set. Neither ships.
-
-Two earlier figures on this page and in the README are withdrawn rather than
-updated. They were taken over a corpus that moved with every commit; against a
-question set in which 47 of 92 spans no longer contained the symbol they named;
-and by a harness in which no `path` question could record a hit while still
-counting in the denominator, which capped hit@8 at 87 % by construction. A moved
-number here is a report, never an adjective — and a number from a broken
-instrument is not a report at all.
+Earlier retrieval figures are withdrawn. They were taken over a corpus that
+moved with every commit, against a question set in which 47 of 92 spans no
+longer contained the symbol they named, and by a harness in which no `path`
+question could record a hit while still counting in the denominator, which
+capped hit@8 at 87 %.

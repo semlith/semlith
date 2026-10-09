@@ -195,6 +195,12 @@ function saveKept() {
 }
 window.addEventListener("pagehide", saveKept);
 
+/** A day as this machine's clock says it, YYYY-MM-DD: a file saved just after
+ * midnight is named for the day its own "Generated" line gives, not UTC's. */
+function localDay(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 /** Move a bar made by `bar` to a new value without rebuilding it. */
 function setBar(node, pct) {
   const fillNode = node.firstElementChild;
@@ -346,7 +352,7 @@ function ago(unix) {
   if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))}m ago`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
   if (seconds < 86400 * 30) return `${Math.floor(seconds / 86400)}d ago`;
-  return new Date(unix * 1000).toISOString().slice(0, 10);
+  return localDay(new Date(unix * 1000));
 }
 
 /** A clock time with its offset, so a portal time and a ledger row agree. */
@@ -1822,12 +1828,19 @@ function phaseLabel(phase, detail, lane) {
   return `Starting ${/^the /i.test(named) ? named : `the ${named}`}`;
 }
 
+/** The current phase's sentence. The engine says the drain's count once, as
+ * the phase starts; the run's live backlog is what is still embedding now. */
+function liveDetail(run) {
+  return run.phase === "drain" && run.backlog != null ? `${n(run.backlog)} chunks still embedding` : run.phase_detail;
+}
+
 /** What a run is doing now, in one line: the phase and its sentence. An
  * older daemon sends a sentence in `phase` itself. */
 function phaseText(run) {
   if (!run.phase) return "";
   if (!PHASE_LABEL[run.phase]) return run.phase;
-  return [phaseLabel(run.phase, run.phase_detail, run.lane), run.phase_detail].filter(Boolean).join(" — ");
+  const detail = liveDetail(run);
+  return [phaseLabel(run.phase, detail, run.lane), detail].filter(Boolean).join(" — ");
 }
 
 // A daemon time in milliseconds: phases carry ms, older fields seconds.
@@ -1855,7 +1868,7 @@ function runSteps(r, skip) {
       label: phaseLabel(p.phase, p.detail, p.lane),
       at: msOf(p.at),
       until: p.until != null ? msOf(p.until) : null,
-      detail: (current && r.phase === p.phase && r.phase_detail) || p.detail || (p.count != null ? n(p.count) : ""),
+      detail: (current && r.phase === p.phase && liveDetail(r)) || p.detail || (p.count != null ? n(p.count) : ""),
     });
   });
   // An older daemon names no phases: one step, in its own words.
@@ -5149,7 +5162,8 @@ VIEWS.home = {
           )
         : null;
 
-    const lastQuery = (ledger.rows || [])[0];
+    // The portal and the terminal record their searches too; neither is an agent.
+    const lastQuery = (ledger.rows || []).find((r) => r.client !== "portal" && r.client !== "cli");
     const kpis = el(
       "div",
       { class: "q4" },
@@ -5309,7 +5323,7 @@ function attentionItems() {
   if (data.ledger && data.ledger.intact === false) out.push({ tone: "red", title: "Ledger chain does not verify", sub: "Some rows were edited or removed after they were written", label: "Inspect", onclick: () => go("ledger") });
   const reclaim = stores.filter((s) => reclaimable(s) > 1024 * 1024);
   if (reclaim.length) out.push({ tone: "blue", title: `${bytes(reclaim.reduce((a, s) => a + reclaimable(s), 0))} reclaimable in ${plural(reclaim.length, "store")}`, sub: reclaim.map((s) => s.name).join(", "), label: "Compact", onclick: () => compactStores(reclaim.map((s) => s.name)) });
-  if (data.agents && !registeredClients().length) out.push({ tone: "amber", title: "No agent is connected yet", sub: "Register the clients found on this machine in one step", label: "Connect", onclick: () => go("agents", "add") });
+  if (data.agents && !registeredClients().length && !connectedCount()) out.push({ tone: "amber", title: "No agent is connected yet", sub: "Register the clients found on this machine in one step", label: "Connect", onclick: () => go("agents", "add") });
   const broken = (data.agents?.doctor || []).filter((c) => c.registered && (c.repair || c.why || (c.disabled_in || []).length));
   if (broken.length) out.push({ tone: "grey", title: `${broken[0].name}${broken.length > 1 ? ` and ${broken.length - 1} more` : ""} cannot reach semlith`, sub: broken[0].why || broken[0].repair || "registered but switched off in some folders", label: "Details", onclick: () => go("agents", "health") });
   const finished = (data.runs?.runs || []).filter((r) => r.status === "done" && r.finished_at && Date.now() / 1000 - r.finished_at < 3600 && r.kind !== "catch-up" && !state.dismissed.has(r.id));
@@ -9207,7 +9221,7 @@ function exportLedger(format) {
   const sessions = lg.tab === "sessions";
   const list = lg.shown ? lg.shown() : sessions ? data.ledger?.sessions || [] : data.ledger?.rows || [];
   const cols = sessions ? ["when", "session", "client", "store", "retrievals", "net_tokens", "tier", "model"] : ["when", "client", "store", "query", "hits", "excerpt_tokens", "whole_file_tokens", "ms"];
-  const stamp = new Date().toISOString().slice(0, 10);
+  const stamp = localDay();
   const name = `ledger-${sessions ? "sessions" : "retrievals"}-${stamp}`;
   if (format === "JSON") return download(`${name}.json`, JSON.stringify(list, null, 2), "application/json");
   const cell = (v) => (v === null || v === undefined ? "" : String(v));
@@ -9264,7 +9278,7 @@ VIEWS.reports = {
     const def = REPORTS.find((r) => r[0] === rp.kind);
     const inert = !WINDOWED.includes(rp.kind);
     const fmt = REPORT_FORMATS.find((f) => f[0] === rp.format);
-    const fileName = `${rp.kind}-${new Date().toISOString().slice(0, 10)}.${fmt[2]}`;
+    const fileName = `${rp.kind}-${localDay()}.${fmt[2]}`;
     const preview = el("div", { class: "preview", "data-scroll-keep": "rp-preview" });
     const previewMeta = el("div", { class: "card-foot" });
     const savingsCard = el("div", {});

@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-10-10
+
+### The public scorecard
+
+**`bench/scorecard/` reproduces every published number.** One entry point per
+benchmark, each printing its table and the command that produced it, every
+figure the median of three runs with its spread: SWE-bench Lite and Verified
+retrieval (each instance indexed at its own base commit), CodeRAG-Bench on its
+canonical corpora, a seeded sample of RepoBench-R's test split, nine competitor
+tools on a seeded 20 of SWE-bench Lite, an agent round with Opus and Haiku, and the savings in
+the ledger's real sessions. Data, clones and stores live under
+`~/semlith-bench/scorecard`, never in the repository, and nothing under
+`bench/` is in the crate.
+
+### Documentation
+
+**The README and the documentation are rewritten to the point.** The README is
+a front page — what semlith is, install, quick start, agents, the portal, the
+benchmarks and the numbers — at 440 lines, down from 740, with the reference
+material it carried moved to `docs/`. **The benchmarks are charts**: the README
+shows the headline charts and a short table, and the scorecard page
+(`bench/scorecard/README.md`) carries every chart, every table and every
+command; `bench/scorecard/charts.py` draws the charts from those tables, light
+and dark, in the portal's type and colours. `docs/portal.md`, `docs/architecture.md`,
+`docs/compatibility.md`, `docs/performance.md`, `docs/models.md`,
+`docs/security.md`, `CONTRIBUTING.md` and `SECURITY.md` keep every fact and lose
+the release-by-release narration; sections that no longer matched the code were
+corrected (search has no graph list, the current embedding batches, session
+replay on by default, the full list of downloads, commands and tools).
+**Screenshots of every portal page**, light and dark, taken from a clean install
+indexing BurntSushi/ripgrep with real Claude Code sessions in the ledger, live
+in `docs/images/` (outside the crate).
+
+### Fixed
+
+- **A long query no longer puts a screenshot first.** CLIP reads 77 tokens, so
+  an issue or a pasted paragraph was compared to the store's images by its
+  opening words alone, and a screenshot of text matches the opening of almost
+  any technical prose: on the scorecard's SWE-bench walk a documentation image
+  came first for 57 of 102 Django and Astropy issues, above the code they were
+  about. A query CLIP has to cut short no longer counts as a confident image
+  match; its images still rank, as weak candidates.
+- **A file emptied on disk is evicted from the store.** The index pass skipped an
+  empty file without removing what it used to hold, so its old chunks went on
+  answering searches for text no longer on disk; the same held for a file that
+  grew past the size cap or became unreadable. Found by the scorecard's
+  base-commit check on the SWE-bench walk, where a commit emptied two astropy
+  files.
+- **A scope's first search no longer pays the whole filter resolution each time
+  the scope changes (#183).** A store kept one resolved filter, so an agent
+  moving between two repositories resolved each again on every call; it keeps
+  the eight most recent now. Allowlists are sorted once when built, so a sharded
+  index takes each shard's ids by binary search instead of testing every id
+  against every shard. A scope with a literal directory in front, `<root>/**`,
+  is a range of a new index on the lowered path rather than a GLOB over every
+  path; the index is added on open and older binaries ignore it.
+- **A failed accelerator lane is tried again (#188).** One failed start of the
+  Neural Engine worker left the daemon embedding on the CPU, about a tenth of the
+  speed, until it was restarted — switching the lane off and on from the terminal
+  never reached it, and nothing was written to its log. A failed lane is tried
+  again on the first run ten minutes later, and the failure goes to the log.
+- **A live secret that opens on `FAKE` by chance is no longer a dummy.** A
+  marker of four or five letters at the edge of a segment counted even when
+  the rest of the segment was a generator's output, so about one live Slack
+  token in 3.7 million was read as a placeholder and indexed; the scanner's
+  randomized test failed on it about one run in 700. The marker now counts
+  only when the rest of the segment is a word, one case, or digits:
+  `FAKEtokenvalue` and `1234-fake-token` are still dummies.
+
+- **A search hit is named for the definition it is mostly about.** A chunk
+  that was most of one function and the first lines of the next was labelled
+  with the next one: on ripgrep, `examples/walk.rs` 25-53, the body of `main`,
+  read `class DirEntry`, and a brief expanded around the wrong symbol. The
+  label is set after ranking, so no result moves.
+- **The run card's drain line counts down.** "Finishing embeddings in flight —
+  N chunks still embedding" kept the count from the moment the phase began; it
+  now reads the run's live backlog, matching the chunks figure beside it.
+- **Home tells agents apart from the portal.** The Agents connected tile named
+  the portal or the terminal as the last agent to ask, and Needs attention said
+  no agent was connected while one was, whenever no client was registered.
+- **A report saved after midnight is named for the right day.** The file name
+  took the UTC date while the report's own Generated line gave the local one.
+- **`semlith accel --help`** no longer calls the Neural Engine experimental.
+- **A test no longer deletes the login service.** The service-removal test
+  treated a booted-out service as not installed and removed the real plist from
+  `~/Library/LaunchAgents`; a definition on disk now counts as installed.
+
 ## [0.37.0] - 2026-10-09
 
 The Semlith Cloud client leaves release candidate. Everything rc.1 to rc.7
@@ -4754,7 +4841,9 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.36.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.38.0...HEAD
+[0.38.0]: https://github.com/semlith/semlith/compare/v0.37.0...v0.38.0
+[0.37.0]: https://github.com/semlith/semlith/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/semlith/semlith/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/semlith/semlith/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/semlith/semlith/compare/v0.33.1...v0.34.0

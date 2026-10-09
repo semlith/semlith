@@ -151,13 +151,13 @@ refs:
 
   docs-contract:
     key: >-
-      docs/compatibility.md:130-135: the `score` is a reciprocal rank fusion score; it orders results within
+      docs/compatibility.md:65-67: the `score` is a reciprocal rank fusion score; it orders results within
       one query and means nothing across queries or across versions; don't assert on it or assume a result
       keeps its position. Also AGENTS.md:97-101 (fusion scores 1/(60+rank), not cosines) and
       docs/skill/SKILL.md:96 (never compare scores across stores).
     facts:
-      - {at: docs/compatibility.md:130, has: 'The `score` on a hit is a reciprocal'}
-      - {at: docs/compatibility.md:131, has: 'means nothing across'}
+      - {at: docs/compatibility.md:65, has: 'The `score` on a hit is a reciprocal'}
+      - {at: docs/compatibility.md:66, has: 'means nothing across'}
       - {at: AGENTS.md:99, has: '1 / (60 + rank)'}
       - {at: docs/skill/SKILL.md:96, has: 'never compare scores across stores'}
 
@@ -205,7 +205,7 @@ refs:
       never a gate. Refusals persist masked in the `refusals` table (store.rs:167); a person can accept one
       file (Semlith::accept lib.rs:1907, `acceptances` table store.rs:183, salted fingerprints, redacted or
       as-is; a new match refuses it again). Semlith::plan (lib.rs:1741) runs this scan phase before
-      embedding. Documented in docs/security.md:145. A good answer finds filter.rs and keyscan.rs.
+      embedding. Documented in docs/security.md:126. A good answer finds filter.rs and keyscan.rs.
     facts:
       - {at: src/filter.rs:478, has: 'pub const DENIED_DIRS'}
       - {at: src/filter.rs:498, has: 'pub const DENIED_NAMES'}
@@ -229,7 +229,7 @@ refs:
       - {at: src/lib.rs:2790, has: 'keyscan::scan(&key, &text)'}
       - {at: src/store.rs:167, has: 'CREATE TABLE IF NOT EXISTS refusals'}
       - {at: src/store.rs:183, has: 'CREATE TABLE IF NOT EXISTS acceptances'}
-      - {at: docs/security.md:145, has: 'What is inside a file'}
+      - {at: docs/security.md:126, has: 'What is inside a file'}
 
   grep-todo:
     key: >-
