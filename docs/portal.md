@@ -1269,7 +1269,7 @@ request, and **Reset to what it suggests** puts every limit back.
 | Runs at once | How many stores may index at the same time. Derived from memory free less a 2 GiB reserve over what one run peaks at, capped by the cores with one kept free. |
 | Threads per run | Embedding threads, with one core kept free for you. |
 | Memory per store | Vectors held in memory per open store. Lower it if other apps feel slow. |
-| CPU cap | The most of this machine's CPU semlith's own process may use while it indexes, 0-100 % of every core, with what it is using now beside it. 100 is no cap; 0 pauses CPU work and the run card says "paused by the CPU cap". From 0.37.0-rc.6. |
+| CPU cap | The most of this machine's CPU semlith's own process may use while it indexes, 0-100 % of every core, with what it is using now beside it. 100 is no cap; 0 pauses CPU work and the run card says "paused by the CPU cap". Its stepper moves in steps of 5 (from 0.37.0-rc.7; 10 before), the same steps as the Semlith Cloud operator panel; a value set off that grid snaps onto it. From 0.37.0-rc.6. |
 | Compact past | An idle store more reclaimable than this percentage is compacted on its own; 0 turns it off. |
 | Keep retired definitions | How long a compaction keeps the history of a symbol that was renamed or deleted; 0 keeps everything. |
 | Vector cache | Vectors kept so a chunk met again is not re-embedded, with how much of it is used and the hit rate. 0 turns it off. |
