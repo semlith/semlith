@@ -25,8 +25,12 @@ the ledger's real sessions. Data, clones and stores live under
 
 **The README and the documentation are rewritten to the point.** The README is
 a front page — what semlith is, install, quick start, agents, the portal, the
-benchmarks and the numbers — at 518 lines, down from 740, with the reference
-material it carried moved to `docs/`. `docs/portal.md`, `docs/architecture.md`,
+benchmarks and the numbers — at 440 lines, down from 740, with the reference
+material it carried moved to `docs/`. **The benchmarks are charts**: the README
+shows the headline charts and a short table, and the scorecard page
+(`bench/scorecard/README.md`) carries every chart, every table and every
+command; `bench/scorecard/charts.py` draws the charts from those tables, light
+and dark, in the portal's type and colours. `docs/portal.md`, `docs/architecture.md`,
 `docs/compatibility.md`, `docs/performance.md`, `docs/models.md`,
 `docs/security.md`, `CONTRIBUTING.md` and `SECURITY.md` keep every fact and lose
 the release-by-release narration; sections that no longer matched the code were

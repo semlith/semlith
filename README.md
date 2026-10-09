@@ -307,111 +307,33 @@ It is an upper bound: a file named by two answers is counted twice.
 ## Benchmarks
 
 Public code-retrieval benchmarks, run by [`bench/scorecard/`](bench/scorecard/README.md)
-on one M1 MacBook Air (4P+4E, 8 GB) in October 2026, indexing on its Neural
-Engine. SWE-bench and the competitor table ran on the 0.38.0 build; CodeRAG-Bench,
-RepoBench-R and the agent round ran on 0.36.0, whose search path is the same for
-these image-free corpora. Each figure is the median of the runs named, with the
-spread when it is not zero, and each table ends with the command that
-reproduces it. Results are published as measured, including where another tool
-wins.
+on one M1 MacBook Air in October 2026 and published as measured, including where
+another tool wins. **Every table, every chart and the command that reproduces each
+number are on the [scorecard page](bench/scorecard/README.md).**
 
-The baselines are what an agent does without semlith. *BM25* ranks the files one
-ripgrep pass hits; *grep then read* reads up to twenty of them whole, in that
-order. "Tokens" are bytes returned divided by four, up to the first gold file.
+| Benchmark | semlith | baseline | instances |
+|---|---|---|---|
+| SWE-bench Verified, right file in the top 10 | **76.8 %** | 47.0 % grep then read | 500 |
+| SWE-bench Lite, right file in the top 10 | **72.3 %** | 47.3 % grep then read | 300 |
+| SWE-bench Verified, median tokens to the first right file | **224** | 15 491 grep then read | 500 |
+| CodeRAG-Bench DS-1000, NDCG@10 | **0.260** | 0.158 BM25 | 513 |
+| Agents (Opus), cost per correct answer | **$0.065** | $0.072 grep only | 50 × 3 runs |
+| Real sessions, tokens sent against whole files read | **75.2× fewer** | | 1,575 retrievals |
 
-<!-- scorecard:begin -->
-### SWE-bench, retrieval only
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/bench/swe-hit-dark.svg"><img src="docs/images/bench/swe-hit-light.svg" alt="SWE-bench: semlith puts the right file in the top 10 for 72-77 % of instances, against 47 % for grep then read" width="760"></picture>
 
-The issue is the query; the gold is every file the reference patch edits; each instance is indexed at its own base commit.
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/bench/swe-tokens-dark.svg"><img src="docs/images/bench/swe-tokens-light.svg" alt="SWE-bench: semlith returns a median 224-225 tokens before the first right file, against 8 813-15 491 for grep then read" width="760"></picture>
 
-| set | arm | instances | file hit@1 | @5 | @10 | all gold @10 | first gold within 4k tokens | median tokens to first gold |
-|---|---|---|---|---|---|---|---|---|
-| Lite | grep then read | 300 | 18.7 % | 37.3 % | 47.3 % | 47.3 % | 22.3 % | 8813 |
-| Lite | semlith | 300 | 35.7 % | 59.0 % | 72.3 % | 72.3 % | 69.3 % | 225 |
-| Verified | grep then read | 500 | 16.8 % | 37.6 % | 47.0 % | 42.2 % | 20.4 % | 15491 |
-| Verified | semlith | 500 | 36.6 % | 64.8 % | 76.8 % | 70.4 % | 77.4 % | 224 |
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/bench/competitors-dark.svg"><img src="docs/images/bench/competitors-light.svg" alt="Nine tools on SWE-bench Lite: semlith 55 % hit@5, semble 50 %, graphify and sourcebot 35 %, serena 25 %, rg and ugrep 15 %; grepai, colgrep and ck not run" width="760"></picture>
 
-`uv run --with pyarrow python bench/scorecard/swe.py walk && uv run --with pyarrow python bench/scorecard/swe.py score <run dir>...`
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/bench/agents-cost-dark.svg"><img src="docs/images/bench/agents-cost-light.svg" alt="Agents: cost per correct answer, grep only against semlith installed and semlith first, on Opus and Haiku" width="760"></picture>
 
-### CodeRAG-Bench, retrieval
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/bench/coderag-dark.svg"><img src="docs/images/bench/coderag-light.svg" alt="CodeRAG-Bench: NDCG@10 per task, semlith against BM25" width="760"></picture>
 
-Each task's canonical corpus and gold documents.
-
-| task | queries | NDCG@10 BM25 | NDCG@10 semlith | Recall@10 BM25 | Recall@10 semlith |
-|---|---|---|---|---|---|
-| ds1000 | 513 | 0.158 | 0.260 | 0.246 | 0.379 |
-| humaneval | 164 | 0.993 | 0.995 | 1.000 | 1.000 |
-| mbpp | 500 | 0.973 | 0.999 | 1.000 | 1.000 |
-| odex | 201 | 0.081 | 0.191 | 0.149 | 0.292 |
-| repoeval | 373 | 0.735 | 0.683 | 0.496 | 0.485 |
-
-`uv run --with pyarrow python bench/scorecard/coderag.py run --out ~/semlith-bench/scorecard/results/coderag/full`
-
-### RepoBench-R
-
-The query is the last `keep` lines of the in-file code; the candidates are the instance's own cross-file snippets. A seeded sample of 500 instances per configuration and level (seed 20261003) of the 48 000-instance test split.
-
-| setting | level | keep | instances | acc@1 BM25 | acc@1 semlith | acc@5 BM25 | acc@5 semlith |
-|---|---|---|---|---|---|---|---|
-| java first | easy | 3 | 500 | 16.2 % | 16.8 % | 81.6 % | 83.4 % |
-| java first | easy | 10 | 500 | 13.4 % | 12.2 % | 80.4 % | 82.8 % |
-| java first | hard | 3 | 500 | 10.2 % | 11.2 % | 43.2 % | 51.0 % |
-| java first | hard | 10 | 500 | 8.6 % | 7.6 % | 38.0 % | 44.6 % |
-| java random | easy | 3 | 500 | 26.0 % | 28.0 % | 82.8 % | 87.4 % |
-| java random | easy | 10 | 500 | 22.6 % | 23.0 % | 84.2 % | 86.4 % |
-| java random | hard | 3 | 500 | 20.0 % | 19.2 % | 57.0 % | 63.8 % |
-| java random | hard | 10 | 500 | 16.2 % | 17.2 % | 59.2 % | 58.8 % |
-| python first | easy | 3 | 500 | 21.6 % | 25.2 % | 80.2 % | 85.0 % |
-| python first | easy | 10 | 500 | 19.0 % | 25.0 % | 79.8 % | 84.0 % |
-| python first | hard | 3 | 500 | 13.0 % | 18.0 % | 49.0 % | 49.6 % |
-| python first | hard | 10 | 500 | 12.6 % | 16.4 % | 44.6 % | 51.8 % |
-| python random | easy | 3 | 500 | 26.4 % | 29.8 % | 85.8 % | 87.8 % |
-| python random | easy | 10 | 500 | 27.0 % | 26.2 % | 85.6 % | 84.8 % |
-| python random | hard | 3 | 500 | 21.2 % | 28.6 % | 57.8 % | 62.4 % |
-| python random | hard | 10 | 500 | 21.0 % | 22.8 % | 60.0 % | 60.0 % |
-
-`uv run --with pyarrow python bench/scorecard/repobench.py run --out ~/semlith-bench/scorecard/results/repobench/full`
-
-### Competitors, SWE-bench Lite
-
-The same base-commit checkouts and issue text for every tool, on a seeded random sample of SWE-bench Lite; semlith beside each tool on exactly the instances that tool completed (all runs without an error). A tool whose cumulative indexing passed 4x semlith's is stopped and its remaining instances are "not run".
-
-| tool | version | completed | file hit@1 | @5 | @10 | first gold within 4k tokens | semlith hit@5, same instances | semlith within 4k, same instances | not run |
-|---|---|---|---|---|---|---|---|---|---|
-| rg | 15.2.0 | 20/20 | 0.0 % | 15.0 % | 15.0 % | 15.0 % | 55.0 % | 60.0 % | — |
-| ugrep | 7.8.5 | 20/20 | 0.0 % | 15.0 % | 15.0 % | 15.0 % | 55.0 % | 60.0 % | — |
-| semble | 0.6.1 | 20/20 | 35.0 % | 50.0 % | 70.0 % | 70.0 % | 55.0 % | 60.0 % | — |
-| graphify | 0.9.74 | 20/20 | 20.0 % | 35.0 % | 50.0 % | 65.0 % | 55.0 % | 60.0 % | — |
-| serena | 1.7.0 | 16/20 | 18.8 % | 25.0 % | 25.0 % | 37.5 % | 56.2 % | 62.5 % | 4: search: TimeoutError |
-| sourcebot | 5.1.15 | 20/20 | 20.0 % | 35.0 % | 35.0 % | 30.0 % | 55.0 % | 60.0 % | — |
-| grepai | 0.37.0 | 0/20 | — | — | — | — | — | — | 19: not run: index budget; 1: index: TimeoutError |
-| colgrep | 1.7.0 | 0/20 | — | — | — | — | — | — | 19: not run: index budget; 1: index: TimeoutExpired |
-| ck | 0.7.11 | 0/20 | — | — | — | — | — | — | 19: not run: index budget; 1: index: TimeoutExpired |
-| semlith, every instance |  | 20 | 30.0 % | 55.0 % | 60.0 % | 60.0 % |  |  |  |
-
-`cd bench/scorecard && python3.11 competitors_swe.py walk && python3.11 competitors_swe.py score` (the slow tools in their own `--out` with `SEMLITH_VECTOR_CACHE_MB=0`, scored with `--also`; see bench/scorecard/README.md)
-
-### Agents on an unfamiliar codebase
-
-Headless Claude Code on 50 held-out questions generated from the code of a 70-repository corpus (not a public set: Opus has memorised SWE-bench Lite, `bench/scorecard/agent/contamination.md`).
-
-| model | arm | runs | questions | correct | cost / session | cost / correct answer | median input tokens | sessions calling semlith |
-|---|---|---|---|---|---|---|---|---|
-| opus | grep (Grep, Glob, Read) | 3 | 50 | 92.0 % ±2.0 % | $0.068 ±$0.007 | $0.072 ±$0.008 | 17910 ±339 | 0 |
-| opus | semlith installed, Grep built in | 3 | 50 | 92.0 % ±2.0 % | $0.061 ±$0.005 | $0.065 ±$0.005 | 22541 ±1197 | 0 ±1 |
-| opus | semlith installed, Grep gated to semlith first | 3 | 50 | 96.0 % ±2.0 % | $0.076 ±$0.006 | $0.080 ±$0.008 | 30790 ±2159 | 45 ±6 |
-| haiku | grep (Grep, Glob, Read) | 2 | 50 | 86.0 % ±4.0 % | $0.081 ±$0.003 | $0.099 ±$0.008 | 60523 ±3316 | 0 |
-| haiku | semlith installed, Grep built in | 2 | 50 | 90.0 % ±2.0 % | $0.076 ±$0.003 | $0.086 ±$0.005 | 97593 ±15590 | 47 |
-| haiku | semlith installed, Grep gated to semlith first | 2 | 50 | 88.0 % ±2.0 % | $0.082 ±$0.018 | $0.095 ±$0.022 | 94681 ±4755 | 42 ±2 |
-
-`python3 bench/scorecard/agent/corpus_round.py`
-
-### Savings in real sessions
-
-The owner's own ledger across 8 stores, benchmark stores excluded: 1,575 retrievals, 87 % credited (measured/modelled). The excerpts returned were 1,281,313 tokens; the whole files they came from, 96,399,209 — 75.2x across all stores, 50.7x for the median store. That comparison is an upper bound on what reading would have cost, not a measurement of it; the agent table is the head-to-head.
-
-`python3 bench/scorecard/ledger_savings.py`
-<!-- scorecard:end -->
+Where semlith does not win: Semble edges it at hit@1 and hit@10 on the 20-instance
+competitor sample, BM25 beats it on CodeRAG-Bench's RepoEval, and with Grep built
+in Opus rarely reaches for semlith on its own. The
+[scorecard page](bench/scorecard/README.md) has these rows and RepoBench-R.
 
 ## The numbers
 

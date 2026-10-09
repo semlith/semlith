@@ -1,11 +1,12 @@
-"""The README's Benchmarks tables, from the runs' own score files.
+"""The scorecard tables, from the runs' own score files.
 
     python bench/scorecard/report.py [--swe DIR] [--coderag DIR] [--repobench DIR] [--competitors FILE]
-                                     [--agent FILE] [--ledger DIR] [--readme README.md]
+                                     [--agent FILE] [--ledger DIR] [--readme bench/scorecard/README.md]
 
 Each option defaults to the newest run under SCORECARD_HOME/results (the competitor and agent files to
 their fixed paths). Prints Markdown -- or, with --readme, writes it between that file's scorecard markers:
-one table per benchmark, each with its instance count, runs and the command that reproduces it. A number is
+one table per benchmark, each with its instance count, runs and the command that reproduces it. The tables
+live on the scorecard page, `bench/scorecard/README.md`; `charts.py` then draws the charts from them. A number is
 the median of the runs; a spread other than zero is printed beside it.
 """
 import argparse, glob, json, os, sys
