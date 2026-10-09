@@ -13,19 +13,19 @@ categories = ["command-line-utilities", "database", "text-processing"]
 # What the crate ships: the source, what it compiles in, and the notices.
 # Tests, harnesses, docs and CI stay in the repository.
 include = [
-    "src/**",
-    "queries/**",
-    "docs/clients.md",
-    "docs/skill/**",
-    "tests/fixtures/gpu/known-answer.*",
-    "examples/**",
-    "Cargo.toml",
-    "Cargo.lock",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE",
-    "NOTICE",
-    "THIRD-PARTY-NOTICES",
+    "/src/**",
+    "/queries/**",
+    "/docs/clients.md",
+    "/docs/skill/**",
+    "/tests/fixtures/gpu/known-answer.*",
+    "/examples/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/NOTICE",
+    "/THIRD-PARTY-NOTICES",
 ]
 
 [dependencies]
