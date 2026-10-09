@@ -6258,7 +6258,9 @@ def _(d):
     # Walk 3: the slowest-step feature is gone — no highlighted lane, no line
     # naming one; the status line is the run's own phase.
     want("lanes highlighted as slowest", seen["slow"], 0)
-    want("the status line of a draining run", seen["status"], "Finishing embeddings in flight — 4,864 chunks still embedding")
+    # The engine's sentence is a count taken as the drain began; the line reads the
+    # run's live backlog instead, so it counts down (0.38.0).
+    want("the status line of a draining run", seen["status"], "Finishing embeddings in flight — 5,000 chunks still embedding")
     if re.search(r"slowest", seen["status"], re.I):
         fail("the status line still names a slowest step: %r" % seen["status"])
     want("a finished run's status line", seen["done"], "done in 14m 32s · 3 saves")
