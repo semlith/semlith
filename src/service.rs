@@ -976,9 +976,13 @@ mod tests {
         let _guard = crate::home::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if status().installed {
+        let found = status();
+        if found.installed || found.definition.is_some() {
             // The developer's own machine has one installed; removing it here
-            // would be this test deciding something it was not asked to.
+            // would be this test deciding something it was not asked to. A
+            // definition on disk counts even while the job is not loaded: a
+            // service booted out for a moment is still installed, and this
+            // test deleted its plist.
             return;
         }
         assert!(matches!(remove(), Ok(false)), "removing nothing failed");
