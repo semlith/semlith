@@ -276,13 +276,15 @@ fn the_readme_credits_the_work_the_index_is_built_on() {
 /// Moved from 625 to 760 in 0.38.0 for the Benchmarks section the contract
 /// puts on the front page and nowhere else: one table per public benchmark,
 /// each with its instance count, spread and reproducing command, rendered by
-/// `bench/scorecard/report.py`.
+/// `bench/scorecard/report.py`. Lowered to 560 in the same release, whose
+/// rewrite of the front page brought it to 518 lines with those tables kept:
+/// the reference material it shed lives in `docs/`.
 #[test]
 fn the_readme_is_short() {
     let lines = README.lines().count();
     assert!(
-        lines < 760,
-        "the README is {lines} lines; the ceiling is 760"
+        lines < 560,
+        "the README is {lines} lines; the ceiling is 560"
     );
 }
 

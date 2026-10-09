@@ -1,25 +1,25 @@
-# The models semlith loads, and the bytes it will accept
+# Models and pinned downloads
 
-semlith computes every vector in every store with one of three ONNX models. They
-are fetched from Hugging Face on first use, cached under `~/.cache/semlith/models`
-(or wherever `SEMLITH_MODEL_CACHE` names), and never fetched again.
+Every model and accelerator component semlith downloads, with the commit,
+digest and size it is pinned to. Read it to check what runs on your machine or
+to verify a download yourself.
 
-From 0.14.0 each one is pinned to a commit and each file is verified against a
-SHA-256 recorded in the source beside the repository name. A Hugging Face
-repository is a git repository somebody else can push to, and the weights are
-what decides what a corpus means: a model that changed under you would change
-every answer without changing anything you can see, and a model that was
-replaced would do it deliberately.
+semlith computes vectors with three ONNX models: granite for text, a
+cross-encoder for optional rescoring, and CLIP for images. They are fetched from
+Hugging Face on first use, cached under `~/.cache/semlith/models` (or
+`SEMLITH_MODEL_CACHE`), and never fetched again.
 
-A file whose digest does not match is refused by name, with both digests
-printed, and nothing is loaded. That is a release-level event rather than
-something to retry: if it happens twice on a clean cache, the bytes upstream
-have changed and semlith needs a new release rather than another download.
+Each model is pinned to a commit, and each file is verified against a SHA-256
+recorded in the source. A model that changed upstream would change every answer
+without changing anything you can see. A file whose digest does not match is
+refused by name with both digests printed, and nothing is loaded. If that
+happens twice on a clean cache, the upstream bytes have changed and semlith
+needs a new release, not another download.
 
 ## Text: granite-embedding-small-english-r2
 
-The default model, 384 dimensions, int8, Apache-2.0. semlith fetches these files
-itself, so each one is verified as it is read rather than after the fact.
+The default model: 384 dimensions, int8, Apache-2.0. semlith fetches these files
+itself and verifies each as it is read.
 
 - Repository: [`onnx-community/granite-embedding-small-english-r2-ONNX`](https://huggingface.co/onnx-community/granite-embedding-small-english-r2-ONNX)
 - Commit: [`1dc7835ba0cb9c76a3618d0bf0c427c97671b3c8`](https://huggingface.co/onnx-community/granite-embedding-small-english-r2-ONNX/tree/1dc7835ba0cb9c76a3618d0bf0c427c97671b3c8)
@@ -36,10 +36,10 @@ itself, so each one is verified as it is read rather than after the fact.
 
 ### The fp16 and fp32 exports
 
-From 0.28.0 two more exports of the same model are pinned, at the same commit
-and with the same tokenizer files. They are recorded in `src/embed.rs` as
-`Variant::files`, and the fp16 pair is also in `src/gpu.rs` as `FP16_FILES`,
-with the sizes the download is checked against.
+Two more exports of the same model, at the same commit and with the same
+tokenizer files. Recorded in `src/embed.rs` as `Variant::files`; the fp16 pair is
+also in `src/gpu.rs` as `FP16_FILES`, with the sizes the download is checked
+against.
 
 | Variant | File | SHA-256 | Bytes |
 | --- | --- | --- | --- |
@@ -48,36 +48,35 @@ with the sizes the download is checked against.
 | fp32 | `onnx/model.onnx` | `cddb145cd1147ec24a3908b2ca2602b98b20a3d198365cff270b7cb26c98179e` | |
 | fp32 | `onnx/model.onnx_data` | `86a3a705d4598615894d89540ea71a3d9bbdb17a315e79edcd5dfc737222834b` | |
 
-**fp16 is what the GPU lanes run.** The int8 graph does not load on WebGPU. The
-fp16 pair is downloaded with the WebGPU plugin, the first time a run starts on a
-machine that has a hardware GPU with the GPU lane on, or when CUDA is turned on.
-Both files are stored in the plugin's own directory in the model cache, not in
-the Hugging Face snapshot. Tested on the 2026-09-23 corpus, fp16 and int8
-vectors of the same text agree at cosine 0.987. A store records how many chunks
-each variant embedded, in its `variants` meta row.
-
-**fp32 is what the known-answer fixture was made with.** `tests/fixtures/gpu/`
-holds 32 chunks and their CPU fp32 vectors. `semlith doctor --gpu`, and every
-GPU lane before its first real batch, compare against them. The product never
-downloads fp32. It is fetched only when a harness asks for it with
-`SEMLITH_EMBED_VARIANT=fp32`, which is not part of the documented environment.
+- **fp16 is what the GPU lanes run.** The int8 graph does not load on WebGPU.
+  The fp16 pair is downloaded with the WebGPU plugin, the first time a run starts
+  on a machine with a hardware GPU and the GPU lane on, or when CUDA is turned
+  on. Both files are stored in the plugin's directory in the model cache, not in
+  the Hugging Face snapshot. fp16 and int8 vectors of the same text agree at
+  cosine 0.987 (2026-09-23 corpus). A store records how many chunks each variant
+  embedded in its `variants` meta row.
+- **fp32 is what the known-answer fixture was made with.** `tests/fixtures/gpu/`
+  holds 32 chunks and their CPU fp32 vectors; `semlith doctor --gpu`, and every
+  GPU lane before its first real batch, compare against them. The product never
+  downloads fp32. A harness fetches it with `SEMLITH_EMBED_VARIANT=fp32`, which
+  is not part of the documented environment.
 
 ## Accelerator components
 
-These are not models, but they are pinned and verified the same way. Each
-download is streamed through SHA-256 and deleted if its digest does not match.
-Each set is kept under `accel/` in the model cache, in a directory named by its pinned
-version. Turning a lane off leaves the directory in place, and `semlith accel
-remove <gpu | cuda>` deletes it. Under `--airgap` each download is refused
-unless its directory has been seeded beforehand.
+Not models, but pinned and verified the same way. Each download is streamed
+through SHA-256 and deleted if its digest does not match. Each set is kept under
+`accel/` in the model cache, in a directory named by its pinned version. Turning
+a lane off leaves the directory in place; `semlith accel remove <gpu | cuda>`
+deletes it. Under `--airgap` each download is refused unless its directory was
+seeded beforehand.
 
 ### The WebGPU plugin
 
-Microsoft's WebGPU plugin execution provider, `onnxruntime-ep-webgpu` 0.4.0,
-taken from the wheel Microsoft publishes on PyPI. It is MIT-licensed. semlith
-extracts the plugin library, plus the two shader compilers beside it on Windows,
-into `accel/webgpu-0.4.0/` in the model cache. Recorded in `src/gpu.rs` as
-`WEBGPU_VERSION` and `wheel()`.
+Microsoft's WebGPU plugin execution provider, `onnxruntime-ep-webgpu` 0.4.0
+(MIT), taken from the wheel Microsoft publishes on PyPI. semlith extracts the
+plugin library, plus the two shader compilers beside it on Windows, into
+`accel/webgpu-0.4.0/`. Recorded in `src/gpu.rs` as `WEBGPU_VERSION` and
+`wheel()`.
 
 | Platform | Wheel | SHA-256 | Bytes |
 | --- | --- | --- | --- |
@@ -86,22 +85,21 @@ into `accel/webgpu-0.4.0/` in the model cache. Recorded in `src/gpu.rs` as
 | Linux aarch64 | [`onnxruntime_ep_webgpu-0.4.0-py3-none-manylinux_2_28_aarch64.whl`](https://files.pythonhosted.org/packages/4e/ca/00c70322c19913c81a6bb2239aca83781b97a818b55c2ec3d25cec72dc4c/onnxruntime_ep_webgpu-0.4.0-py3-none-manylinux_2_28_aarch64.whl) | `17f660db53b1a509c63e721ac6784a2daa1c4e91a968523ee9986505ee5b0a55` | 6 096 222 |
 | Windows x86_64 | [`onnxruntime_ep_webgpu-0.4.0-py3-none-win_amd64.whl`](https://files.pythonhosted.org/packages/d7/a4/c98a9e9433b3eeb576977b26c5c1cd0364f15ba9d198bb16101e7563ab06/onnxruntime_ep_webgpu-0.4.0-py3-none-win_amd64.whl) | `7db646669d1a2390551da675115ea125e68cb3d4d2c3a2d6e463372bf8d6ea87` | 13 149 847 |
 
-It is fetched only after a hardware adapter has been found. A machine whose
-only adapter is a software renderer (Mesa lavapipe or llvmpipe, SwiftShader,
+It is fetched only after a hardware adapter is found. A machine whose only
+adapter is a software renderer (Mesa lavapipe or llvmpipe, SwiftShader,
 Microsoft WARP or the Basic Render Driver) counts as having no GPU, and nothing
 is downloaded.
 
 ### The CUDA pack
 
-x86_64 Linux only in this release. Pack `1.24.4-cu12.8`, recorded in
-`src/cuda.rs` as `PACK_VERSION` and `PARTS`, with `PACK_BYTES` asserted against
-the sum of the sizes in `tests/cuda.rs`. It is downloaded only after CUDA has
-been turned on, with `semlith accel on cuda` or the switch on the Machine
-limits card, and the size is stated before the download starts. When the
-system supplies none of the libraries, the download is 1 891 522 804 bytes
-(1.89 GB). A library the system already has, at the pinned version or a newer
-one in the same major version, is used from the system, and its wheel is not
-fetched. The parts are listed in load order.
+x86_64 Linux only. Pack `1.24.4-cu12.8`, recorded in `src/cuda.rs` as
+`PACK_VERSION` and `PARTS`, with `PACK_BYTES` asserted against the sum of the
+sizes in `tests/cuda.rs`. It is downloaded only after CUDA is turned on (`semlith
+accel on cuda` or the switch on the Machine limits card), and the size is stated
+before the download starts: 1 891 522 804 bytes (1.89 GB) when the system
+supplies none of the libraries. A library the system already has, at the pinned
+version or a newer one in the same major version, is used from the system and
+its wheel is not fetched. Parts are listed in load order.
 
 | Part | Version | Source | SHA-256 | Bytes | Supplies |
 | --- | --- | --- | --- | --- | --- |
@@ -114,23 +112,22 @@ fetched. The parts are listed in load order.
 | `nvidia-cuda-nvrtc-cu12` | 12.8.93 | [PyPI wheel](https://files.pythonhosted.org/packages/05/6b/32f747947df2da6994e999492ab306a903659555dddc0fbdeb9d71f75e52/nvidia_cuda_nvrtc_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl) | `a7756528852ef889772a84c6cd89d41dfa74667e24cca16bb31f8f061e3e9994` | 88 040 029 | `libnvrtc-builtins.so.12.8`, `libnvrtc.so.12` |
 | `nvidia-cudnn-cu12` | 9.10.2.21 | [PyPI wheel](https://files.pythonhosted.org/packages/ba/51/e123d997aa098c61d029f76663dedbfb9bc8dcf8c60cbd6adbe42f76d049/nvidia_cudnn_cu12-9.10.2.21-py3-none-manylinux_2_27_x86_64.whl) | `949452be657fa16687d0930933f032835951ef0892b37d2d53824d1a84dc97a8` | 706 758 467 | `libcudnn.so.9` and its seven sub-libraries |
 
-The NVIDIA versions are the CUDA 12.8 set that PyTorch 2.8's cu128 wheels pin.
-In practice, ONNX Runtime's `onnxruntime-gpu[cuda,cudnn]` extras resolve to the
-same set. The card must run a driver of 525.60.13 or newer, the minimum for CUDA
-12.x on Linux x86_64. A card on an older driver is reported with that minimum
-and is not used. On Windows, an NVIDIA card is used through WebGPU on D3D12.
+The NVIDIA versions are the CUDA 12.8 set that PyTorch 2.8's cu128 wheels pin;
+ONNX Runtime's `onnxruntime-gpu[cuda,cudnn]` extras resolve to the same set. The
+card needs driver 525.60.13 or newer, the minimum for CUDA 12.x on Linux x86_64;
+a card on an older driver is reported with that minimum and not used. On
+Windows, an NVIDIA card is used through WebGPU on D3D12.
 
 **Licences.** ONNX Runtime is Microsoft's MIT-licensed release, downloaded from
-its GitHub release. None of NVIDIA's libraries pass through semlith. The user's
-machine downloads each wheel from `files.pythonhosted.org`, where NVIDIA
-publishes it. These are the same bytes from the same place that `pip install
-nvidia-cudnn-cu12` would fetch, and semlith never hosts, mirrors or ships a
-copy. The user's use of the libraries is governed by the licence each wheel
-carries ("NVIDIA Proprietary Software"). These are the terms a pip install of
-the same wheel accepts. When a wheel includes that licence text, semlith keeps
-it beside the libraries in `licences/`. semlith does not redistribute the
-libraries, so the redistribution terms in the CUDA Toolkit EULA and the cuDNN
-Software License Agreement do not apply to it.
+its GitHub release. NVIDIA's libraries never pass through semlith: your machine
+downloads each wheel from `files.pythonhosted.org`, where NVIDIA publishes it —
+the same bytes from the same place `pip install nvidia-cudnn-cu12` would fetch —
+and semlith never hosts, mirrors or ships a copy. Your use of the libraries is
+governed by the licence each wheel carries ("NVIDIA Proprietary Software"), the
+terms a pip install of the same wheel accepts. When a wheel includes that
+licence text, semlith keeps it beside the libraries in `licences/`. Because
+semlith does not redistribute the libraries, the redistribution terms in the
+CUDA Toolkit EULA and the cuDNN Software License Agreement do not apply to it.
 
 ### The Core ML pack
 
@@ -139,10 +136,13 @@ builds it: `.github/workflows/packs.yml` runs `packs/coreml/convert.py` on a
 macOS runner and publishes the zip to this repository's `pack-coreml-v2`
 release, and `src/packs.rs` pins it by URL, SHA-256 and size. granite at
 `ibm-granite/granite-embedding-small-english-r2@2ab6fa8e` is converted twice:
-once in the Neural Engine's layout (batch 4; sequence buckets 128, 192, 256,
-320, 384, 512) and once in the standard layout for the GPU (batch 8; 128, 192,
-256, 320, 400 — no chunk is longer than 400 tokens). The GPU models run with
-fp16 accumulation, which leaves the fixture's cosine against fp32 at 0.999999. Each layout is one multifunction model with a function per bucket, so the
+
+- for the Neural Engine: batch 4; sequence buckets 128, 192, 256, 320, 384, 512;
+- for the GPU, in the standard layout: batch 8; buckets 128, 192, 256, 320, 400
+  (no chunk is longer than 400 tokens). These run with fp16 accumulation, which
+  leaves the fixture's cosine against fp32 at 0.999999.
+
+Each layout is one multifunction model with a function per bucket, so the
 weights are stored once per layout.
 
 | Asset | SHA-256 | Bytes |
@@ -151,20 +151,21 @@ weights are stored once per layout.
 
 On the M1 Air, every Neural Engine function places 99.85 % of its operations on
 the Neural Engine, and its vectors agree with the fp32 reference at cosine
-0.99998 or better on the 512-chunk fixture in `tests/fixtures/coreml`. The
-first load on a Mac compiles the models for that machine: the lane is ready
+0.99998 or better on the 512-chunk fixture in `tests/fixtures/coreml`.
+
+The first load on a Mac compiles the models for that machine. The lane is ready
 once the longest bucket has compiled (39 s on the M1) and compiles the other
 five behind it, about three minutes in all. macOS keeps the result for the
 program that compiled it, which is a copy of semlith kept beside the models, so
 a later start is ready in about 2 s and an upgrade does not compile again.
 macOS empties that cache when the disk runs low: with 13 GB free on the M1 it
-had within ten minutes, and the next start compiled again.
+had done so within ten minutes, and the next start compiled again.
 
 ### The llama.cpp pack
 
 Experimental. ggml-org's own `llama-server` build b11146 for the platform, and
-granite as GGUF f16, which semlith builds with llama.cpp's converter at the
-same build (`packs/llama/convert.sh`) and publishes to `pack-llama-v1`.
+granite as GGUF f16, which semlith builds with llama.cpp's converter at the same
+build (`packs/llama/convert.sh`) and publishes to `pack-llama-v1`.
 
 | Asset | SHA-256 | Bytes |
 |---|---|---|
@@ -176,8 +177,8 @@ same build (`packs/llama/convert.sh`) and publishes to `pack-llama-v1`.
 ### TensorRT for RTX and OpenVINO
 
 Experimental, x86_64 Windows and Linux. Each is the vendor's own ONNX Runtime
-plugin execution provider, downloaded from PyPI where the vendor publishes it,
-as the WebGPU plugin is; semlith never hosts a copy.
+plugin execution provider, downloaded from PyPI where the vendor publishes it;
+semlith never hosts a copy.
 
 | Plugin | Platform | Wheel | SHA-256 | Bytes |
 |---|---|---|---|---|
@@ -191,20 +192,18 @@ Intel GPU or NPU it offers no device, and the lane says so.
 
 ## Rescoring: jina-reranker-v1-turbo-en
 
-A cross-encoder, 37 M parameters, int8, Apache-2.0. It reads the query and a
-candidate together and reorders the head of the fused list; it embeds nothing
+A cross-encoder: 37 M parameters, int8, Apache-2.0. It reads the query and a
+candidate together and reorders the head of the fused list. It embeds nothing
 and adds no candidates, so a store's vectors do not depend on it.
 
-**It is off unless you turn it on**, with `SEMLITH_RERANK=on`, and the reason
-is measured: a search over one store takes 8.2 ms, and 132.2 ms with this stage
-over twelve candidates. What that buys is two questions at k=1 and one at k=3
-of seventy-seven. Worth it when an answer matters more than a tenth of a
-second; not worth making every agent's every search sixteen times slower by
-default.
+**It is off unless you set `SEMLITH_RERANK=on`.** A search over one store takes
+8.2 ms, and 132.2 ms with rescoring over twelve candidates — sixteen times
+slower — for a gain of two questions at k=1 and one at k=3 out of seventy-seven.
+Turn it on when an answer matters more than a tenth of a second.
 
-`semlith setup` fetches it beside the embedding model so that turning it on
-never pauses a query to download one, and `semlith stats` and `semlith doctor`
-both say which ranking a search used.
+`semlith setup` fetches it beside the embedding model, so turning it on never
+pauses a query for a download. `semlith stats` and `semlith doctor` both say
+which ranking a search used.
 
 - Repository: [`jinaai/jina-reranker-v1-turbo-en`](https://huggingface.co/jinaai/jina-reranker-v1-turbo-en)
 - Commit: [`b8c14f4e723d9e0aab4732a7b7b93741eeeb77c2`](https://huggingface.co/jinaai/jina-reranker-v1-turbo-en/tree/b8c14f4e723d9e0aab4732a7b7b93741eeeb77c2)
@@ -220,16 +219,16 @@ both say which ranking a search used.
 
 ## Images: CLIP ViT-B/32
 
-Two repositories, a vision encoder and a text encoder, fixed as a pair: a query
+Two repositories, a vision encoder and a text encoder, fixed as a pair. A query
 about a picture goes through CLIP's own text encoder, never through the store's
-model, because a granite vector and a CLIP vector are numbers of different
-lengths about different things.
+model, because a granite vector and a CLIP vector have different lengths and
+describe different things.
 
 These are fastembed's built-in models, so fastembed resolves and caches them
-through its own client and semlith cannot hand it a revision. What semlith does
-instead is check the cache — every snapshot in it, not only the pinned one —
-before either encoder is used and again after a fetch, and refuse to load bytes
-that are not the ones this release was built against.
+through its own client and semlith cannot hand it a revision. Instead, semlith
+checks every snapshot in the cache, not only the pinned one, before either
+encoder is used and again after a fetch, and refuses to load bytes that are not
+the ones this release was built against.
 
 - Vision: [`Qdrant/clip-ViT-B-32-vision`](https://huggingface.co/Qdrant/clip-ViT-B-32-vision) at
   [`e0c24ed0fa57fa3e4f97f30de74c51d944036ace`](https://huggingface.co/Qdrant/clip-ViT-B-32-vision/tree/e0c24ed0fa57fa3e4f97f30de74c51d944036ace)
@@ -250,18 +249,16 @@ that are not the ones this release was built against.
 | text | `vocab.json` | `5047b556ce86ccaf6aa22b3ffccfc52d391ea4accdab9c2f2407da5b742d4363` |
 | text | `merges.txt` | `9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a` |
 
-## The cache directory itself
+## The cache directory
 
-semlith refuses to load weights from a model cache that is owned by another
-account or that other users on the machine can write to, naming the `chown` or
-`chmod` that fixes it. A directory somebody else can write to is a model
-somebody else chooses, and a corpus embedded by a different model still answers —
-just differently, which is the hard kind of wrong to notice.
+semlith refuses to load weights from a model cache owned by another account or
+writable by other users, and names the `chown` or `chmod` that fixes it. A
+directory somebody else can write to is a model somebody else chooses.
 
 ## Checking a digest yourself
 
-Nothing here has to be taken on trust. Hugging Face publishes the SHA-256 of
-every LFS file in its tree API, and the small ones can be hashed directly:
+Hugging Face publishes the SHA-256 of every LFS file in its tree API, and the
+small files can be hashed directly:
 
 ```sh
 curl -sSL "https://huggingface.co/onnx-community/granite-embedding-small-english-r2-ONNX/resolve/1dc7835ba0cb9c76a3618d0bf0c427c97671b3c8/tokenizer.json" \
@@ -277,6 +274,5 @@ curl -sS "https://huggingface.co/api/models/Qdrant/clip-ViT-B-32-vision/tree/e0c
 
 Changing a model is a release, not a patch to a table. The commit and every
 digest move together, `docs/models.md` and the constants are updated in the same
-change, and `CHANGELOG.md` says which model moved and why — a store's vectors
-are only comparable with vectors from the model that built it, so a model change
-that nobody announced is a corpus that quietly stops agreeing with itself.
+change, and `CHANGELOG.md` says which model moved and why. A store's vectors are
+comparable only with vectors from the model that built it.
