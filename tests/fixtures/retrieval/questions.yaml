@@ -1,9 +1,8 @@
 # The fixed question set for the retrieval harness (`tests/retrieval.rs`).
 #
 # This file is the measuring stick, so it is committed before the work it
-# measures. Every question here was written from the two study documents in
-# `live-project-files/semlith/docs/vector-graph-retrieval/` and from reading the
-# repository, not from reading a resolver that answers them. Adding a question
+# measures. Every question here was written from two study documents on
+# vector and graph retrieval and from reading the repository, not from reading a resolver that answers them. Adding a question
 # because the resolver now gets it right, or loosening a span because the
 # resolver misses it, makes every number this file produces meaningless. If a
 # question turns out to be wrong about the code, fix the question and say so in
@@ -25,7 +24,7 @@
 # had been scored and the misses read. Each edit is defensible on its own; the
 # timing is not. From this point the sealed thirty are no longer a held-out set,
 # and a figure measured against them is a figure measured against questions the
-# work has seen. The owner made that call with the cost stated.
+# work has seen. That was a deliberate choice, made with the cost stated.
 #
 # What that means for anyone reading a number from this file: the 0.22.0 sealed
 # figures taken before this change (hit@1 17, hit@3 20, hit@8 22 of 30, and

@@ -2728,7 +2728,7 @@ pub const TYPICAL_MIN_ROWS: usize = 5;
 /// Every tool with what it answers and a typical answer's size. `seen` is the
 /// ledger's excerpt tokens per tool, by short name (`search`); a tool with
 /// [`TYPICAL_MIN_ROWS`] of them shows their median, the rest the labelled
-/// estimate. The local portal and Semlith Cloud's Agents page both draw this.
+/// estimate. The local portal draws this, and so can an embedder.
 pub fn tool_catalog(seen: &mut std::collections::BTreeMap<String, Vec<i64>>) -> Vec<Value> {
     let listed = listed_names();
     tool_list()
@@ -2817,7 +2817,7 @@ mod tests {
         );
     }
 
-    /// The walk stop of 0.30.0 found 604 bytes with three roots: the budget
+    /// A manual check in 0.30.0 found 604 bytes with three roots: the budget
     /// held room for " and 1 more" but the tail says " and 1 more folder".
     #[test]
     fn the_instructions_stay_within_their_limit_for_any_fleet() {

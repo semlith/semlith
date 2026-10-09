@@ -64,7 +64,7 @@ jobs:
           cat "$RUNNER_TEMP/coreml-pack/SHA256SUMS"
 
       # The runner is a VM that may not expose the Neural Engine, so its plan says
-      # nothing about the owner's hardware: recorded, never gating here.
+      # nothing about a real Mac's hardware: recorded, never gating here.
       # verify.py and a real placement run are local, on Apple silicon.
       - name: Placement report
         continue-on-error: true

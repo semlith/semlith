@@ -24,9 +24,9 @@ surface that now carries it (the Index page's run cards are a store's Runs tab;
 its folder pickers are the wizard's Sources step; Machine limits is Settings ›
 Performance; Impact is Graph › Blast radius; About is Settings › About). Where
 v6 deliberately reversed an old rule, the check asserts the new rule and says
-"0.35.0 owner decision" beside it: v6 as drawn wins over older rules, and the
-owner named the three biggest reversals (bulk decisions in review, session
-replay on by default, a runtime ledger recording switch). That comment is the
+"0.35.0 design decision" beside it: v6 as drawn wins over older rules, and the
+three biggest reversals are bulk decisions in review, session replay on by
+default and a runtime ledger recording switch. That comment is the
 only way a check's meaning is allowed to change.
 
 The `v6.*` checks at the end are new in 0.35.0: one or more per view and flow,
@@ -754,7 +754,7 @@ def _(d):
     # card with Pause and Stop, and a finished one is a History row with none.
     #
     # The old check also required a finished card to offer Remove.
-    # 0.35.0 owner decision (v6 as drawn): finished runs are not dismissed by hand any more —
+    # 0.35.0 design decision (v6 as drawn): finished runs are not dismissed by hand any more —
     # they leave the live area by themselves and are kept, newest first, in a
     # History that survives a restart. What the finding was about is unchanged
     # and asserted in full: nothing about a run that is over offers to pause it
@@ -1008,7 +1008,7 @@ def _(d):
     # And the portal carries that string rather than a clock of its own: the
     # browser's own time was the other half of the disagreement.
     #
-    # 0.35.0 owner decision (v6 as drawn): the Retrievals table prints a short
+    # 0.35.0 design decision (v6 as drawn): the Retrievals table prints a short
     # clock — "today 14:02" — and hangs the row's full `when`, offset and all,
     # on that cell as its tooltip. So the assertion is that the newest row's
     # cell carries `when` exactly, and that the clock it prints is that
@@ -1358,7 +1358,7 @@ def _(d):
 @finding("2.6", "finished runs leave the live area by themselves, and the active run sorts first")
 def _(d):
     # The finding: finished runs could not be dismissed and buried the live one
-    # under them. 0.35.0 owner decision (v6 as drawn): there is nothing to
+    # under them. 0.35.0 design decision (v6 as drawn): there is nothing to
     # dismiss by hand — a run that finishes leaves the live area of its store's
     # Runs tab for History on its own, and History is kept across restarts. The
     # half of the finding that is about order is asserted as before: a live run
@@ -2040,7 +2040,7 @@ def _(d):
     # that showed what it would write was secondary, so the destructive button
     # was reachable without ever seeing the preview.
     #
-    # 0.35.0 owner decision (v6 as drawn): there is no separate dry run. Each
+    # 0.35.0 design decision (v6 as drawn): there is no separate dry run. Each
     # client registers in one click, and the exact command or file that click
     # writes is printed beside the button before it can be pressed; the wizard's
     # Connect step lists what it will write per client above its Register. So
@@ -2307,7 +2307,7 @@ def _(d):
 
 @finding("3.23", "the theme control can return to following the system")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): the theme control is Light, Dark and
+    # 0.35.0 design decision (v6 as drawn): the theme control is Light, Dark and
     # System side by side rather than a cycle, and the root always carries the
     # resolved scheme in `data-theme` — "system" writes whichever one the OS
     # prefers, and follows it live. The finding's property is asserted on that:
@@ -2346,7 +2346,7 @@ def _(d):
 def _(d):
     # The finding: one destination, three names. Read in two parts from 0.26.1.
     #
-    # 0.35.0 owner decision (v6 as drawn): the header's launcher reads "Ask the
+    # 0.35.0 design decision (v6 as drawn): the header's launcher reads "Ask the
     # index a question" and the Search box it opens says how to ask — "Ask in
     # words, or paste an identifier" — so the box's placeholder is guidance, not
     # a second name for the launcher. What stays asserted is that the launcher
@@ -2564,7 +2564,7 @@ def _(d):
     # rendered at full contrast like the folders that could — what a row looked
     # like did not say what it did.
     #
-    # 0.35.0 owner decision (v6 as drawn): a single file is a source in its own
+    # 0.35.0 design decision (v6 as drawn): a single file is a source in its own
     # right, so the wizard's picker offers files for selection beside folders.
     # The property asserted is the finding's — a row reads as what it does: a
     # file row carries the same checkbox a folder row does, and ticking it
@@ -2964,7 +2964,7 @@ def _(d):
 
 @finding("5.1", "the sidebar is every page, in three groups, in order")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): nine pages in three groups. Files is
+    # 0.35.0 design decision (v6 as drawn): nine pages in three groups. Files is
     # a store's own tab, Index is the store wizard, Inside the index is a tab of
     # Stores, Impact is Graph › Blast radius, Cloud, Doctor and About are
     # sections of Settings and Agents.
@@ -3121,7 +3121,7 @@ def _(d):
     for wanted in ["Markdown", "CSV", "JSON"]:
         if wanted not in texts_of(d, "#main .tabs button"):
             fail("the sessions table cannot export %s" % wanted)
-    # 0.35.0 owner decision (v6 as drawn): three filters — client, store and
+    # 0.35.0 design decision (v6 as drawn): three filters — client, store and
     # tier — where there were two. Still no one model picked for every row: a
     # session's saving is priced at the model it ran on.
     selects = d.eval("[...document.querySelectorAll('#main .filterbar .dd')].map(s => s.getAttribute('aria-label'))")
@@ -3129,7 +3129,7 @@ def _(d):
     if d.eval("!!document.querySelector('[aria-label=\"Cost at\"]')"):
         fail("the sessions table still prices every session at one chosen model")
     # The Model column comes with the Usage-from-client-logs switch, which is
-    # where the model each session ran on is read from (0.35.0 owner decision:
+    # where the model each session ran on is read from (0.35.0 design decision:
     # usage from logs is a Ledger switch). Saved comes with a priced session.
     was = bool((d.api("/api/ledger").get("usage") or {}).get("enabled"))
     try:
@@ -3147,7 +3147,7 @@ def _(d):
 
 @finding("5.7", "session replay is on by default, and Privacy can turn it off and on")
 def _(d):
-    # 0.35.0 owner decision: session replay defaults to on (a settings file that
+    # 0.35.0 design decision: session replay defaults to on (a settings file that
     # never wrote the key reads as on; one that wrote off stays off). The old
     # check asserted the opposite default. Asserted now: replay is on in this
     # drive's pristine home, the Ledger's replay tab shows the on state, and
@@ -3278,7 +3278,7 @@ def open_welcome(d):
 
 @finding("6.1", "the first-run screen carries what the v6 design's welcome carries")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): five steps, Connect being the fifth;
+    # 0.35.0 design decision (v6 as drawn): five steps, Connect being the fifth;
     # the version as a chip beside the wordmark; the machine checks on the
     # right, the first naming the address the daemon answers on. The v4 screen's
     # `--no-ledger` sentence is not on v6's welcome — it is on the Ledger page,
@@ -3310,7 +3310,7 @@ def _(d):
 
 @finding("6.2", "Skip for now lands on Home")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): the first run's Skip for now is on
+    # 0.35.0 design decision (v6 as drawn): the first run's Skip for now is on
     # the wizard's last step, Connect, and lands on Home — the page about this
     # machine's index — rather than on the welcome's own Stores link it was in v4.
     reach_connect_step(d, "skipper")
@@ -3501,7 +3501,7 @@ def _(d):
 @finding("7.2", "every page ends with the design's floor under its last card")
 def _(d):
     """The v6 design's page is `20px 24px 28px`, and `14px 14px 24px` on a
-    phone, so the floor is 28px and 24px (0.35.0 owner decision: v6 as drawn,
+    phone, so the floor is 28px and 24px (0.35.0 design decision: v6 as drawn,
     where v4's was 44px at both). Search and Graph are the recorded exceptions:
     full-height pages whose canvas fills the frame."""
     a_store(d)
@@ -4012,7 +4012,7 @@ def _(d):
     rebuilt card put new controls in place of the focused one.
 
     The old check also removed a finished card and pressed "Remove all
-    finished". 0.35.0 owner decision (v6 as drawn): a finished run leaves the
+    finished". 0.35.0 design decision (v6 as drawn): a finished run leaves the
     live area for History by itself, which is the "run finishing" asserted
     here; there is no card to remove by hand.
     """
@@ -4165,7 +4165,7 @@ def _(d):
         d.reset_viewport()
         still_open(d, STILL_VIEWPORT, "store/%s/runs" % store)
         d.wait_for("!!%s" % CARD, what="the live run's card")
-        # 0.37.0-rc.4 owner decision (W8): the live card is the wizard's run
+        # 0.37.0-rc.4 design decision (W8): the live card is the wizard's run
         # card. Its log grows a line per file; its Pipeline is fixed in shape,
         # so nothing else on the tab may be rebuilt.
         seen = observe(d, CARD, ".log", 20000, rate=True)
@@ -4316,7 +4316,7 @@ def _(d):
     on it must not delete it by default, and the dialog says what is at stake.
     (A store the run is creating is offered, ticked: 8.1.)
 
-    0.35.0 owner decision (v6 as drawn): for a store that held files the delete
+    0.35.0 design decision (v6 as drawn): for a store that held files the delete
     option is not offered at all, which is the old "unticked" made stronger,
     and the dialog's sentence is the design's — what the run embedded is undone
     and the store is left exactly as it was before the run — where the v4
@@ -4495,7 +4495,7 @@ def _(d):
     if len(rows) < len(downloads):
         fail("the list has %d rows; /api/privacy lists %d downloads" % (len(rows), len(downloads)))
     for row, download in zip(rows, downloads):
-        # 0.35.0 owner decision (revised v6 design): the portal never names the
+        # 0.35.0 design decision (revised v6 design): the portal never names the
         # embedding model, so the row is the route's words without the bracketed
         # model detail — "the embedding model", not which one. Everything else
         # in the row is still the route's.
@@ -4517,7 +4517,7 @@ def _(d):
 
 # ---------------------------------------------------------------- 0.29.0
 #
-# The eleven portal fixes the owner found using 0.28.0, one check each.
+# The eleven portal fixes found by using 0.28.0 by hand, one check each.
 
 
 @finding("9.1", "a running card counts down from the daemon's estimate, not up from submission")
@@ -4599,7 +4599,7 @@ def _(d):
 
 @finding("9.4", "every paginated table opens at the design's page size")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): tables open at 10 rows a page, and a
+    # 0.35.0 design decision (v6 as drawn): tables open at 10 rows a page, and a
     # store's Files table at 25, where v4's opened at 5. The property is that a
     # table opens at its stated size and shows no more rows than that.
     store = a_store(d)
@@ -4625,7 +4625,7 @@ def _(d):
 
 @finding("9.5", "each store's Forget asks in a confirm that names it, and takes it")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): the Stores list has no multi-select,
+    # 0.35.0 design decision (v6 as drawn): the Stores list has no multi-select,
     # so stores are forgotten one by one from each row's menu — the bulk confirm
     # that named every store it would delete has no v6 surface. What it was for
     # is asserted per store: the confirm names the store it deletes, and when it
@@ -4671,7 +4671,7 @@ def _(d):
         if clipped:
             fail("with the side column scrolled to its %s, %s is cut off" % (scrolled, clipped))
     # 0.29.0 kept a long name to one line with an ellipsis and the full name on
-    # hover. 0.35.0 owner decision (v6 as drawn): the name breaks across lines
+    # hover. 0.35.0 design decision (v6 as drawn): the name breaks across lines
     # and is shown whole. Either way the property is that the name is never
     # cut off with nothing carrying the rest, which is asserted on both shapes.
     sym = d.eval(
@@ -4919,7 +4919,7 @@ def _(d):
         rows = decision_rows(d)
         want("the files the review step asks about", sorted(r["file"] for r in rows), ["alpha.txt", "beta.txt"])
         for r in rows:
-            # 0.35.0 owner decision: three decisions per file — Keep out, Redact
+            # 0.35.0 design decision: three decisions per file — Keep out, Redact
             # & index, Index — taken on the row, one file or a selection at a
             # time, each logged per file. Where 0.30.0 read "Accept redacted",
             # "Accept as-is" and "Keep refused" through a dialog.
@@ -5098,7 +5098,7 @@ def _(d):
     dirs = [r["name"] for r in tree["rows"] if r["dir"]]
     if names[:len(dirs)] != dirs:
         fail("the tree does not order folders before files: %r" % names)
-    # The owner's third walk: chips on an explorer were no use, so a tree offers
+    # The third manual walk: chips on an explorer were no use, so a tree offers
     # none it does not apply.
     chips = d.eval("[...document.querySelectorAll('#main .row .chip')].filter(c => c.offsetParent !== null).map(c => c.textContent.trim())")
     want("the chips offered beside the tree", chips, [])
@@ -5135,7 +5135,7 @@ def _(d):
         " rows: [...t.querySelectorAll('tbody tr')].map(tr => ({cells: [...tr.cells].map(td => (td.innerText || '').trim()),"
         " buttons: [...tr.querySelectorAll('button:not([role=checkbox])')].map(b => b.textContent.trim())}))}; })()" % table
     )
-    # 0.35.0 owner decision (v6 as drawn): the Decisions table is Path,
+    # 0.35.0 design decision (v6 as drawn): the Decisions table is Path,
     # Outcome, Why and By — yours and the rules' together, undo on any of yours —
     # where 0.30.0 listed only the person's with a "Likely real" confidence.
     for label in ("Path", "Outcome", "Why", "By"):
@@ -5157,7 +5157,7 @@ def _(d):
     if any(os.path.basename(r["path"]) == "alpha.txt" and r.get("accepted") for r in after):
         fail("Undo left alpha.txt accepted: %s" % json.dumps(after)[:400])
 
-    # 0.35.0 owner decision: decisions take a list — bulk is allowed — and each
+    # 0.35.0 design decision: decisions take a list — bulk is allowed — and each
     # file is still logged as its own decision, by the person. Where 0.30.0
     # refused a list with a 400.
     status, answer = d.api_result("/api/refused/decide", method="POST",
@@ -5173,7 +5173,7 @@ def _(d):
 
 @finding("10.7", "a finished run states what it did, and the store says what it did not index and what needs review")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): a finished run's History row states
+    # 0.35.0 design decision (v6 as drawn): a finished run's History row states
     # what it indexed, in how many chunks and how long it took; what the run
     # did not index and what waits for a decision are the store's Review tab —
     # the Waiting card and the rules' rows in Decisions — rather than a plan
@@ -5196,7 +5196,7 @@ def _(d):
 
 @finding("10.8", "the sidebar's Stores item counts the files waiting for a decision")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): the Stores item carries an amber
+    # 0.35.0 design decision (v6 as drawn): the Stores item carries an amber
     # count of files waiting for a decision, where 0.30.0's fourth walk had
     # taken it off. Asserted: the count is the daemon's, and it is not shown
     # when nothing waits.
@@ -6067,7 +6067,7 @@ def _(d):
 
 # ------------------------------------------------- 0.37.0-rc.4 run truth (rc4.x)
 #
-# The owner's 2026-10-06 walk (W1-W7 in releases/0.37.0-rc.4/run-truth-spec.md):
+# The manual walk of 2026-10-06 (items W1-W7):
 # Start sat on "Starting…", the run card's stage pills were guesses, the scan
 # card's stages were thresholds on a paced fraction, bulk decisions said
 # nothing while they ran, and the Index step's estimate read "—". Each check
@@ -6431,7 +6431,7 @@ CARD_SHAPE = r"""
 
 @finding("rc4.7", "the wizard's Index step and the store's Runs tab draw a live run with the same card")
 def _(d):
-    """W8: the owner wants one run card, the wizard's, wherever a live run is
+    """W8: one run card, the wizard's, wherever a live run is
     shown in full. The same run is read on both pages while it is live."""
     d.clear_console()
     root = d.fixtures.unique("rc4same", count=1500)
@@ -6732,9 +6732,8 @@ def _(d):
 
 # ------------------------------------------------- parity with the cloud
 #
-# 2026-10-07: the core portal brought level with Semlith Cloud 0.3.2 on what
-# the two share (live-project-files/semlith/repos/semlith-cloud/
-# parity-2026-10-07.md, "where core is behind the cloud"). One check per item.
+# 2026-10-07: the core portal brought level with Semlith Cloud's web pages on
+# what the two share. One check per item.
 
 
 def slow_posts(d, ms):
