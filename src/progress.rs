@@ -1,5 +1,5 @@
 //! How far an index run is, and how long it has left: one account, used by the
-//! CLI, the daemon and Semlith Cloud alike.
+//! CLI, the daemon and the library's embedders alike.
 //!
 //! The walk of 0.37.0-rc.4 found every figure on the run card derived from
 //! the wrong thing. Time left was bytes over a byte rate, and a PNG moves
@@ -62,7 +62,7 @@ impl Phase {
 
 /// What an image weighs against a chunk until the run has measured both: the
 /// image model's time per image over the text model's time per chunk on the
-/// owner's M1 (CLIP about 9 images/s on the CPU, granite about 70 chunks/s on
+/// an M1 (CLIP about 9 images/s on the CPU, granite about 70 chunks/s on
 /// the Neural Engine beside it).
 pub const IMAGE_UNITS: f64 = 8.0;
 
@@ -126,7 +126,7 @@ impl Work {
     /// Units done and in all for the time left: the embedding alone. Reading
     /// runs ahead of the lanes in bursts the backpressure then holds back, so
     /// counted in the rate it made the run look faster than its lanes: time
-    /// left 45 % short on cloud 0.3.2's 1,500-file drive. The bar keeps the
+    /// left 45 % short on a 1,500-file run. The bar keeps the
     /// files ([`Work::units`]), so it moves while they are read.
     pub fn eta_units(&self) -> (f64, f64) {
         Work {

@@ -10,8 +10,7 @@ questions about a real agent in this repository:
 - **Is it better or cheaper for it?** Every answer is graded blind against a
   reference key, and every session's cost and lookup output is measured.
 
-It was a research harness first (2026-09-25, 216 sessions, in
-`live-project-files/semlith/docs/agent-adoption-bench/`). That run found the
+It was a research harness first (2026-09-25, 216 sessions). That run found the
 shipped setup at 7 % share and forcing adoption costing 0.8 of quality. This is
 that harness, ported to be the 0.30.0 release gate.
 
@@ -38,8 +37,8 @@ wrote into per-run flags:
 | `~/.claude/skills/semlith` | `--plugin-dir`, as `skills/semlith` |
 | `~/.claude/agents/semlith-explorer.md` | `--plugin-dir`, as `agents/` |
 
-The key is `semlith_bench` because a per-project disable of `semlith` in the
-owner's `~/.claude.json` beats `--mcp-config`. The tools are therefore
+The key is `semlith_bench` because a per-project disable of `semlith` in your
+own `~/.claude.json` beats `--mcp-config`. The tools are therefore
 `mcp__semlith_bench__*`; a hook matcher written for `mcp__semlith__` is
 rewritten to the bench key and the rewrite is printed, and one that still
 cannot match stops the run. A hook *command* that checks the tool name itself
@@ -50,37 +49,21 @@ as a warning before any session starts.
 
 Every arm runs with `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`,
 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `--setting-sources project,local`: no
-CLAUDE.md, no memory, no user-level settings, plugins or hooks. The owner's
+CLAUDE.md, no memory, no user-level settings, plugins or hooks. Your own
 `~/.claude*` files are never read or written. Redirecting `HOME` for the
 sessions themselves is the wrong isolation: it loses the login.
 
 ## Prompts
 
-Sixteen, in `bench.py`:
+Thirteen, in `bench.py`:
 
 - the twelve from the original benchmark (impact, locate, concept, trace,
   cross-language, literal sweep, a bug hunt, docs, a plan);
-- `overview-src`, the orientation question a directory listing answers;
-- three cross-store prompts, whose answers are outside the directory the
-  agent runs in: which `semlith-cloud` code depends on the core's MCP reply
-  format, what in `infra` deploys the cloud service, and what breaks across
-  both repositories if `Hit` gains a field.
-
-The cross-store prompts need the sibling repositories indexed into stores
-named `semlith-cloud` and `infra`. The bench never creates them unless asked:
-
-```sh
-semlith index ../semlith-cloud --name semlith-cloud
-semlith index ../infra --name infra
-# or let bench.py do exactly that with the binary under test:
-python3 tests/adoption/bench.py --index-cross-stores ...
-```
-
-If a daemon is running, restart it afterwards so it serves the new stores.
+- `overview-src`, the orientation question a directory listing answers.
 
 ## The gate
 
-Setup against off, pooled over two repeats of all sixteen prompts. It holds
+Setup against off, pooled over two repeats of all thirteen prompts. It holds
 open if any line fails.
 
 | Criterion | Measured by |
@@ -91,7 +74,6 @@ open if any line fails.
 | median lookup output per session (semlith plus raw result characters) <= off's | `analyze.py` |
 | sessions with a recursive listing (`ls -R`, `tree`, `find -name/-type`) <= 10 % | `analyze.py` |
 | the orientation prompt calls `semlith_files` with `tree: true`, both repeats | `analyze.py` |
-| cross-store quality beats off | `judge.py` |
 
 `analyze.py` also prints every figure for the twelve original prompts alone,
 so the result can be set against the 2026-09-25 baseline.
@@ -112,7 +94,7 @@ python3 tests/adoption/judge.py --runs tests/adoption/runs/0.30.0
 `--dry-run` runs the sandboxed `semlith setup`, builds the arms, and prints
 the flags and any warnings without starting a session. Start there, then with
 `--prompts overview-src --repeats 1` to check the plumbing before spending the
-quota. Other knobs: `--arms`, `--prompts` (ids, or `original`, `cross`,
+quota. Other knobs: `--arms`, `--prompts` (ids, or `original`,
 `all`), `--repeats` (default 2), `--parallel` (default 4), `--model`,
 `--timeout`. Finished sessions in `--out` are skipped, so an interrupted run
 resumes; use a fresh `--out` per binary.
@@ -121,8 +103,8 @@ It needs `claude` on `PATH`, a logged-in Claude Code, and `pyyaml`.
 
 ## What it costs
 
-Sixteen prompts, two repeats, two arms: 64 headless Opus sessions, plus one
-grading call per (prompt, repeat), about 40 minutes at four at a time. Under a
+Thirteen prompts, two repeats, two arms: 52 headless Opus sessions, plus one
+grading call per (prompt, repeat), about 35 minutes at four at a time. Under a
 claude.ai subscription that spends usage quota, not money. The dollar figures
 every script prints are `total_cost_usd` from `claude -p`: what the same
 sessions would cost at API prices, an equivalent and not a charge.

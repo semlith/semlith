@@ -2466,14 +2466,6 @@ function browsable(entries) {
   return (entries || []).filter((e) => !home || e.path !== home);
 }
 
-/** The remote lane's line: where its worker is and what its attestation said. */
-function remoteWord(l) {
-  if (!l.endpoint) return "Not set up: semlith accel on remote --endpoint host:port --token-file FILE --policy FILE";
-  const a = l.attestation;
-  const att = !a ? "not attested yet" : a.state === "refused" ? `attestation refused: ${a.reason}` : a.state === "off" ? "attestation off in its policy" : `attested · ${a.summary}`;
-  return `${l.endpoint} · ${laneState(l.status)} · ${att}`;
-}
-
 function laneWord(status) {
   const s = (status && status.state) || "idle";
   if (s === "compiling") return `compiling ${status.percent || 0}%`;
@@ -4838,7 +4830,7 @@ function runCard(r, o) {
   );
 }
 
-const LANE_NAMES = { cpu: "CPU", ane: "Neural Engine", gpu: "GPU", cuda: "CUDA", trt: "TensorRT for RTX", openvino: "OpenVINO", llama: "llama.cpp", remote: "Remote GPU", worker: "Worker" };
+const LANE_NAMES = { cpu: "CPU", ane: "Neural Engine", gpu: "GPU", cuda: "CUDA", trt: "TensorRT for RTX", openvino: "OpenVINO", llama: "llama.cpp", remote: "Remote", worker: "Worker" };
 const laneName = (k) => LANE_NAMES[k] || k;
 
 async function runControl(r, action) {
@@ -6474,7 +6466,7 @@ function logLines(ev, home) {
 /** Under a stage filter, a phase line that says what the last phase line
  * shown said, with no other phase between, is folded into it (the first is
  * kept): a save files under Write, so Embed showed "Embedding" again after
- * every checkpoint. Under All nothing is folded. As the cloud's. */
+ * every checkpoint. Under All nothing is folded. */
 function foldPhases() {
   let last = null;
   return (e) => {
@@ -9005,7 +8997,7 @@ VIEWS.ledger = {
         el("span", { class: "t-mono-sm", text: "~/.semlith/stores/<name>/store.db · table retrievals" }),
       ),
     );
-    // The chain and retention foot, as the cloud's.
+    // The chain and retention foot.
     const broken = L.intact === false;
     parts.push(
       el(
@@ -9817,9 +9809,7 @@ function sePerf() {
               ? el("span", { class: "muted t-xs", text: `${l.device || "named when it starts"} · ${laneState(l.status)} · always on — the CPU cap limits it` })
               : na
               ? el("span", { class: "muted t-xs", text: `Not available on this ${osWord()}: ${String(l.status?.reason || "").replace(/^the .*? lane (is )?/i, "").replace(/^unavailable — /, "")}` })
-              : l.lane === "remote"
-                ? el("span", { class: "muted t-xs", text: remoteWord(l) })
-                : el("span", { class: "muted t-xs", text: `${l.device || "named when it starts"} · ${laneState(l.status)}${(data.accel.bytes || {})[l.lane] ? ` · ${bytes(data.accel.bytes[l.lane])} on disk` : ""}` }),
+              : el("span", { class: "muted t-xs", text: `${l.device || "named when it starts"} · ${laneState(l.status)}${(data.accel.bytes || {})[l.lane] ? ` · ${bytes(data.accel.bytes[l.lane])} on disk` : ""}` }),
           ),
           na ? el("span", { class: "t-mono-sm muted right nowrap", text: "off" }) : check ? laneCheck(check) : el("span", { class: "t-mono-sm ink2 right nowrap", text: `${Math.round(l.share || 0)}% of the work` }),
           // Its own column at the far right, kept on every row, so the share
@@ -9834,8 +9824,8 @@ function sePerf() {
 
 // The CPU cap: semlith's own share of every core while it indexes, 0-100 %.
 // 0 pauses CPU work; 100 is no cap. Its own row because 0 is a value here,
-// where the three limits above start at one. Steps of 5, as the cloud
-// operator panel: a value set off the grid (SEMLITH_CPU_CAP=73) snaps to it.
+// where the three limits above start at one. Steps of 5: a value set off the
+// grid (SEMLITH_CPU_CAP=73) snaps to it.
 function capRow(cap, measured) {
   if (!cap) return null;
   const env = cap.source === "set by the environment";

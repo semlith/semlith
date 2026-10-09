@@ -1,17 +1,16 @@
 //! The CPU cap: the most of this machine's CPU semlith's own process may use
 //! while it indexes, from 0 to 100 % of every logical core.
 //!
-//! The owner's choice (2026-10-08) is semlith's own CPU, not the whole
-//! machine's and not a load average: on the Semlith Cloud box the service, its
-//! database and its identity provider share four vCPUs with indexing, and the
-//! cap is what keeps an index from taking all four. The CPU lane can never be
-//! switched off, so this is the control instead.
+//! The cap is on semlith's own CPU, not the whole machine's and not a load
+//! average: on a small server where indexing shares a few cores with other
+//! services, the cap is what keeps an index from taking all of them. The CPU
+//! lane can never be switched off, so this is the control instead.
 //!
 //! Enforced by pacing, not by fewer threads: before each CPU batch and each
 //! prepared file, [`pace`] reads how much CPU the process has used over the
 //! last two seconds and sleeps until that share is back under the cap. The
-//! GPU, Neural Engine and remote lanes run in other processes or other
-//! machines and are slowed only by the prepare stage they share. 0 % pauses
+//! GPU and Neural Engine lanes run in other processes and are slowed only by
+//! the prepare stage they share. 0 % pauses
 //! CPU work until the cap is raised.
 
 use std::collections::VecDeque;
@@ -117,9 +116,8 @@ fn capped_cores() -> Option<usize> {
 }
 
 /// Files prepared at once under the cap: half the cap's cores, rounded down,
-/// at least one. Embedding gets the larger half: on the Semlith Cloud box a
-/// 75 % cap is three of four cores, and giving prepare two of them left
-/// embedding one.
+/// at least one. Embedding gets the larger half: on four cores a 75 % cap is
+/// three, and giving prepare two of them left embedding one.
 fn prepare_slots() -> usize {
     capped_cores().map_or(usize::MAX, |n| (n / 2).max(1))
 }

@@ -19,7 +19,7 @@ Claude Code is lifted into per-run flags:
 
     python3 tests/adoption/bench.py --binary target/release/semlith
 
-The owner's own ~/.claude* files are never read or written. The server key is
+Your own ~/.claude* files are never read or written. The server key is
 not `semlith` because a per-project disable of `semlith` in ~/.claude.json
 beats --mcp-config.
 """
@@ -40,9 +40,6 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-# The folder holding this repository and its siblings.
-LIVE = REPO.parent
-CROSS_REPOS = {"semlith-cloud": LIVE / "semlith-cloud", "infra": LIVE / "infra"}
 
 PROMPTS = {
     # The twelve from the 2026-09-25 benchmark, unchanged.
@@ -60,14 +57,9 @@ PROMPTS = {
     "grep-todo": "Find every TODO or FIXME comment in src/.",
     # Orientation: the question a listing answers, and the tree view exists for.
     "overview-src": "Give me an overview of how `src/` is organised and which files hold what",
-    # Cross-store: the answer is outside the directory the agent runs in.
-    "x-cloud-mcp": "Which code in the semlith-cloud repository depends on the format of the core crate's MCP replies? Name the files and functions with file:line.",
-    "x-infra-deploy": "What in the infra repository deploys the Semlith Cloud service, and how does a change reach production?",
-    "x-hit-field": "If the core `Hit` struct gains a new field, what breaks across both the semlith core repository and the semlith-cloud repository? Give file:line for each.",
 }
 ORIGINAL = list(PROMPTS)[:12]
 ORIENTATION = "overview-src"
-CROSS = ["x-cloud-mcp", "x-infra-deploy", "x-hit-field"]
 
 SERVER_KEY = "semlith_bench"
 # A tool name as the setup arm's session sees it. Every hook matcher that means
@@ -222,20 +214,6 @@ def build_arms(names: list[str], binary: Path, where: Path) -> dict[str, dict]:
     return arms
 
 
-def registered_stores() -> set[str]:
-    home = Path(os.environ.get("SEMLITH_HOME") or Path.home() / ".semlith")
-    try:
-        return set(json.loads((home / "registry.json").read_text())["stores"])
-    except (OSError, ValueError, KeyError):
-        return set()
-
-
-def index_cross_stores(binary: Path) -> None:
-    for name, path in CROSS_REPOS.items():
-        print(f"indexing {path} into store {name}", flush=True)
-        subprocess.run([str(binary), "index", str(path), "--name", name, "--quiet"], check=True)
-
-
 def run(arm: str, flags: list[str], pid: str, rep: int, out: Path, args) -> str:
     """One headless session, its stream-json kept whole."""
     f = out / f"{arm}__{pid}__r{rep}.jsonl"
@@ -258,7 +236,7 @@ def run(arm: str, flags: list[str], pid: str, rep: int, out: Path, args) -> str:
 
 
 def pick_prompts(spec: str) -> list[str]:
-    groups = {"all": list(PROMPTS), "original": ORIGINAL, "cross": CROSS}
+    groups = {"all": list(PROMPTS), "original": ORIGINAL}
     picked: list[str] = []
     for word in filter(None, spec.split(",")):
         for pid in groups.get(word, [word]):
@@ -276,7 +254,7 @@ def main() -> int:
     parser.add_argument("--arms", default=",".join(DEFAULT_ARMS),
                         help=f"comma list from {', '.join(ARMS)} (default: %(default)s)")
     parser.add_argument("--prompts", default="all",
-                        help="comma list of prompt ids, or the groups all, original, cross (default: all)")
+                        help="comma list of prompt ids, or the groups all, original (default: all)")
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--parallel", type=int, default=4, help="sessions at once")
     parser.add_argument("--out", default=str(HERE / "runs/latest"),
@@ -284,8 +262,6 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=1200, help="seconds per session")
     parser.add_argument("--model", help="passed to claude --model; the account default when omitted")
     parser.add_argument("--cwd", default=str(REPO), help="where the agent runs (default: this repository)")
-    parser.add_argument("--index-cross-stores", action="store_true",
-                        help="index semlith-cloud and infra into stores of those names first (writes to your store home)")
     parser.add_argument("--dry-run", action="store_true", help="build the arms and print them; run no session")
     args = parser.parse_args()
 
@@ -299,14 +275,6 @@ def main() -> int:
         print(f"unknown arm(s) {', '.join(unknown)}; known: {', '.join(ARMS)}", file=sys.stderr)
         return 2
     prompts = pick_prompts(args.prompts)
-
-    if args.index_cross_stores:
-        index_cross_stores(binary)
-    missing = sorted(set(CROSS_REPOS) - registered_stores())
-    if any(p in CROSS for p in prompts) and missing:
-        print(f"no store named {', '.join(missing)}: pass --index-cross-stores, or leave the cross "
-              f"prompts out with --prompts original,{ORIENTATION}", file=sys.stderr)
-        return 2
 
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)

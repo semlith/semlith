@@ -367,19 +367,6 @@ it is already cached:
 lane runs in its own worker process, so a driver crash ends that worker and its
 lane, not the daemon.
 
-## Embedding on another machine
-
-The `remote` lane (off by default) sends token ids to `semlith worker` on
-another machine and takes vectors back. Nothing is sent before that machine has
-proved, in signed tokens bound to this connection's nonce and the worker's own
-TLS key, what the attestation policy asks: on Google Cloud, a Confidential VM
-with Secure Boot in the named project, and an NVIDIA GPU that passed NVIDIA's
-attestation in confidential-computing mode. A token for another nonce or key is
-refused as a replay. The worker keeps everything in memory and logs counts
-only. On a G4 the CPU side is AMD SEV, so it rests on Google's vTPM and does not
-name the software the VM booted; [remote-lane.md](remote-lane.md) has the whole
-chain and what it does not prove.
-
 ## What is still true, and what is not covered
 
 **The store is not encrypted.** It holds the plain text of everything you

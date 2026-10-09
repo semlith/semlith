@@ -159,21 +159,21 @@ fn two_stores_with_caches_of_their_own_never_share_a_vector() {
     let repo = tempfile::tempdir().unwrap();
     repository(repo.path(), 4);
     let caches = tempfile::tempdir().unwrap();
-    let org_a = semlith::cache::Location::at(caches.path().join("org-a.db"), 64);
-    let org_b = semlith::cache::Location::at(caches.path().join("org-b.db"), 64);
+    let own_a = semlith::cache::Location::at(caches.path().join("a.db"), 64);
+    let own_b = semlith::cache::Location::at(caches.path().join("b.db"), 64);
     let machine = semlith::cache::stats().rows;
 
     let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let first = index_into(a.path(), repo.path(), Some(org_a.clone()));
-    let second = index_into(b.path(), repo.path(), Some(org_b.clone()));
+    let first = index_into(a.path(), repo.path(), Some(own_a.clone()));
+    let second = index_into(b.path(), repo.path(), Some(own_b.clone()));
     assert!(second.cache_lookups > 0);
     assert_eq!(second.cache_hits, 0, "org b's run read org a's cache");
     assert_eq!(
-        semlith::cache::stats_at(&org_a).rows as usize,
+        semlith::cache::stats_at(&own_a).rows as usize,
         first.cache_lookups
     );
     assert_eq!(
-        semlith::cache::stats_at(&org_b).rows as usize,
+        semlith::cache::stats_at(&own_b).rows as usize,
         second.cache_lookups
     );
     assert_eq!(
@@ -184,7 +184,7 @@ fn two_stores_with_caches_of_their_own_never_share_a_vector() {
 
     // The same text again under org a's cache is all hits.
     let c = tempfile::tempdir().unwrap();
-    let again = index_into(c.path(), repo.path(), Some(org_a));
+    let again = index_into(c.path(), repo.path(), Some(own_a));
     assert_eq!(again.cache_hits, again.cache_lookups);
 
     // A cap of 0 turns the cache off for that store only.

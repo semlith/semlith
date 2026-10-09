@@ -4900,7 +4900,7 @@ fn perform(
                     // something wants it: file changes for the watcher, or a job
                     // on this store's queue. With nothing waiting it carries on,
                     // because every slice end drains the lanes and saves, and on
-                    // the owner's walk that cost a minute per 45 s slice.
+                    // a manual walk that cost a minute per 45 s slice.
                     //
                     // File changes wait longer than a job: a person saving in
                     // the folder being indexed (replay 11: screenshots landing

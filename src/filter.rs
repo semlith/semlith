@@ -683,7 +683,7 @@ pub fn resolve_boundary(roots: &[PathBuf]) -> Vec<String> {
         // boundary no boundary: every store on the machine shares a home, so
         // an agent pointed at one repository could index another one into it
         // and be allowed. That is how the `semlith` store came to hold 262
-        // files belonging to `ultraship`, under a Privacy page that says the
+        // files belonging to another project, under a Privacy page that says the
         // roots are enforced.
         //
         // An unknown home makes this stricter rather than looser: nothing is

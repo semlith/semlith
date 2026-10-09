@@ -51,13 +51,7 @@ const PORTAL_MD: &str = include_str!("../docs/portal.md");
 /// `pattern` is Search's fourth mode, and `read` is the "Read whole symbol"
 /// button in Search's detail panel. Each is in `VIEWS` with the route its view
 /// calls, so the route is probed rather than excused.
-///
-/// `worker` (0.37.0-rc.5) is a server for another machine's `remote` lane, like
-/// `start` and `mcp` are servers: it runs on a GPU machine that has no store
-/// and no portal of its own. What a user does with it is seen from the machine
-/// that uses it, on the remote lane's row (`/api/accel`: endpoint and what the
-/// attestation proved), which `accel` already covers.
-const NO_VIEW: [&str; 4] = ["start", "mcp", "models", "worker"];
+const NO_VIEW: [&str; 3] = ["start", "mcp", "models"];
 
 /// Which route is a command's portal view. Adding a command means adding a
 /// line here, which is the whole point: the compiler cannot notice a missing
@@ -103,7 +97,7 @@ const VIEWS: &[(&str, &str)] = &[
     // both of which post here. The other steps have their own surfaces: Start
     // at login (Settings › Agent access, `/api/login-item`), the model download
     // (Welcome and the wizard). The file-manager helpers are the CLI's only
-    // (`semlith setup --file-managers`): the owner dropped the portal card in
+    // (`semlith setup --file-managers`): the portal card was dropped in
     // 0.35.0, since a drop onto the page already does what they offered.
     ("setup", "/api/agents/register"),
     // Settings › About: Check for updates, then Install. Both reach the
@@ -611,7 +605,7 @@ const NOT_PROBED: &[(&str, &str, &str)] = &[
         "POST",
         "/api/login-item",
         "installs or removes the login service; launchd, systemd and schtasks are not \
-         redirected by HOME, so a probe could reach the owner's real service",
+         redirected by HOME, so a probe could reach the developer's real service",
     ),
 ];
 
@@ -1514,7 +1508,7 @@ fn every_surface_of_a_removed_page_has_a_place_in_v6() {
 /// Bulk acceptance by a person (0.35.0, item 19).
 ///
 /// Until 0.35.0 a refused file was accepted one at a time, by a person, never
-/// by an agent. The owner reversed the first half: the store Review tab and
+/// by an agent. 0.35.0 reversed the first half: the store Review tab and
 /// the wizard's Review step decide on a selection, and the route takes a list.
 /// The second half stands — it is enforced by the route, not the page, and is
 /// tested where the route is. What this checks is that every decision the page
@@ -1545,7 +1539,7 @@ fn the_review_surfaces_decide_on_a_list_of_files() {
 
 /// Session replay is on by default (0.35.0, item 19).
 ///
-/// It was off by default until 0.35.0; the owner reversed that. A fresh
+/// It was off by default until 0.35.0, which reversed that. A fresh
 /// settings file reads as on, and the Privacy page's switch shows what this
 /// route says. A user who turned it off explicitly stays off — that half is a
 /// settings-file property, tested beside `home::Settings`.

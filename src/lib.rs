@@ -18,7 +18,6 @@
 pub mod accel;
 pub mod add;
 pub mod agentfiles;
-pub mod attest;
 pub mod brief;
 pub mod cache;
 pub mod chunk;
@@ -64,7 +63,6 @@ pub mod prices;
 pub mod priority;
 pub mod progress;
 pub mod proxy;
-pub mod remote;
 pub mod replay;
 pub mod report;
 pub mod rerank;
@@ -2744,9 +2742,9 @@ impl Semlith {
     /// undo is the caller's: [`Semlith::undo_run`] with every slice's
     /// `written`, which leaves the store as it was before the run.
     ///
-    /// Public for an embedder that schedules runs of its own — Semlith Cloud
-    /// pauses, stops and slices them — and takes the store's lock exactly as
-    /// `index_paths` does.
+    /// Public for a program that embeds the library and schedules runs of
+    /// its own, pausing, stopping and slicing them; it takes the store's lock
+    /// exactly as `index_paths` does.
     pub fn index_paths_under(
         &mut self,
         roots: &[PathBuf],
@@ -3230,9 +3228,8 @@ impl Semlith {
             let prefetch = pipeline::Prefetch::start(scope, first, sealed, &ctx, prepare_threads);
             // The image lane (#203): the image model on a thread of its own,
             // started at the first image, so the text lanes keep embedding
-            // while it works. It was the writer's own call, and on the owner's
-            // walk a stretch of screenshots left the Neural Engine idle for
-            // minutes. The writer records each image when its vector returns.
+            // while it works. It was the writer's own call, and a stretch of
+            // screenshots left the Neural Engine idle for minutes. The writer records each image when its vector returns.
             let (image_send, image_jobs) = std::sync::mpsc::channel::<ImageJob>();
             let (image_back, image_done) = std::sync::mpsc::channel::<ImageDone>();
             let mut image_send = Some(image_send);
@@ -4144,7 +4141,7 @@ impl Semlith {
                     // files whose every chunk has landed are recorded as indexed.
                     // A file still embedding stays pending, which is what a
                     // crash here must leave it as. Waiting for every window cost
-                    // the owner's walk a minute per checkpoint. The window being
+                    // a minute per checkpoint. The window being
                     // filled is handed over now, not waited for, so the chunks
                     // of a small corpus reach a lane before the run ends.
                     if !window.ids.is_empty()

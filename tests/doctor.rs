@@ -306,7 +306,7 @@ fn json_carries_the_fields_a_script_would_read() {
 /// Registered at user scope, switched off for one directory, and silent about
 /// it.
 ///
-/// The defect of 2026-09-17 and 2026-09-18 on the owner's machine: the entry
+/// The defect of 2026-09-17 and 2026-09-18 on a developer's machine: the entry
 /// was in `mcpServers` at user scope, the binary answered `initialize` in under
 /// a second, `claude mcp list` from any other directory reported the server
 /// connected — and a session opened in that one directory had no semlith and no

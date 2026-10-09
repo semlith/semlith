@@ -15,9 +15,9 @@
 //! off. Deleting the file is safe: it is a cache.
 //!
 //! A caller of the library may give a store a cache of its own instead (a
-//! [`Location`] on [`crate::Semlith::vector_cache`]): Semlith Cloud gives each
-//! organisation one, so no customer's run reads another's vectors. The binary
-//! never sets one and keeps the machine's.
+//! [`Location`] on [`crate::Semlith::vector_cache`]), so stores that must not
+//! share vectors never read each other's. The binary never sets one and keeps
+//! the machine's.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};

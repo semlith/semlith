@@ -3082,9 +3082,9 @@ fn answer_with(
 /// brief, exact, read), patterns, and the Graph page's symbol, neighbours,
 /// path, impact, trace, map and drawing. `None` for any other path.
 ///
-/// Public for an embedder that keeps its own stores — Semlith Cloud draws the
-/// same Search and Graph pages over an organisation's stores and answers them
-/// with the very routes the local portal uses.
+/// Public for an embedder that keeps its own stores, so it can draw the same
+/// Search and Graph pages over them and answer them with the very routes the
+/// local portal uses.
 pub fn portal_read(fleet: &mut crate::fleet::Fleet, request: &Request) -> Option<Response> {
     Some(match request.path.as_str() {
         "/api/search" => search_on(fleet, request),
@@ -4965,7 +4965,7 @@ fn refused_decide(state: &Arc<State>, request: &Request, accept: bool) -> Respon
         .map_err(|e| e.to_string())?;
         answer_of(progress)
     };
-    // A list from 0.35.0 (the owner's bulk decision); each file is its own
+    // A list from 0.35.0 (bulk decisions); each file is its own
     // decision and its own ledger row, and one refusal does not stop the rest.
     if let Some(files) = body.get("files").and_then(Value::as_array) {
         let results: Vec<Value> = files
