@@ -1,10 +1,10 @@
 //! The Semlith Cloud client, end to end against a stub host.
 //!
 //! The real cloud is not here and is not needed: `common/stub.rs` answers the
-//! routes of `infra/docs/cloud-api.md` with canned JSON and records every
+//! routes of the Semlith Cloud API with canned JSON and records every
 //! request, so these tests assert what left the binary as well as what it did
 //! with the answer. Every run has its own HOME and store home; none touches
-//! the owner's `~/.semlith`, and none needs a model.
+//! the developer's `~/.semlith`, and none needs a model.
 
 #[path = "common/stub.rs"]
 mod stub;
@@ -362,7 +362,7 @@ fn org_host(mcp_host: Option<String>) -> Stub {
                           "sources": [{ "label": "acme/api", "kind": "github", "revision": "a41c9e2", "behind_seconds": 38, "state": "fresh" }] },
                         { "name": "docs", "state": "fresh", "files": 3, "chunks": 9, "sources": [] }
                     ],
-                    "usage": { "month": "2026-10", "store_bytes": 1000, "cap_bytes": 8000, "index_chunks": 212400, "cap_chunks": 2650000, "queue": { "running": 0, "waiting": 0 } }
+                    "usage": { "month": "2026-10", "store_bytes": 1000, "cap_bytes": 8000, "index_chunks": 12400, "cap_chunks": 100000, "queue": { "running": 0, "waiting": 0 } }
                 }),
             ),
             _ => stub::error(404, "not_found", "No such route."),
@@ -429,10 +429,7 @@ fn connect_then_disconnect_leaves_the_registry_byte_for_byte() {
     let o = semlith(home.path(), &["cloud", "status", "acme"]);
     assert!(o.status.success(), "{}", out(&o));
     let text = String::from_utf8_lossy(&o.stdout);
-    assert!(
-        text.contains("212,400 of 2,650,000 chunks indexed"),
-        "{text}"
-    );
+    assert!(text.contains("12,400 of 100,000 chunks indexed"), "{text}");
 
     let o = semlith(home.path(), &["cloud", "disconnect", "acme"]);
     assert!(o.status.success(), "{}", out(&o));
@@ -882,7 +879,7 @@ fn signed_in_but_not_connected_reaches_nothing() {
     assert_eq!(host.seen().len(), before);
 }
 
-/// The model the owner's machine already has, read where it is, so the
+/// The model the developer's machine already has, read where it is, so the
 /// ignored test below does not download 52 MB into a temporary home.
 fn model_cache() -> std::path::PathBuf {
     std::env::var_os("SEMLITH_MODEL_CACHE")
@@ -968,7 +965,7 @@ fn a_local_and_a_remote_store_answer_as_one_list() {
 
 // --------------------------------------------------------- command line
 
-/// `semlith` with the owner's model cache, for a run that loads the model.
+/// `semlith` with the developer's model cache, for a run that loads the model.
 fn semlith_model(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_semlith"))
         .args(args)

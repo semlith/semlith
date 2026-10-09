@@ -1,7 +1,7 @@
 //! A store is about its roots.
 //!
 //! The 2026-09-17 drive found the `semlith` store holding 262 files that belong
-//! to `ultraship`: every search across all stores returned them twice, once
+//! to another project: every search across all stores returned them twice, once
 //! under each label, and the label on the duplicate was simply wrong. The cause
 //! was the boundary rule, which treated the whole home directory as inside
 //! every store's boundary — so any store on the machine could swallow any

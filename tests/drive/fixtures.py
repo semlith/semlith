@@ -2,7 +2,7 @@
 
 The manual drive that produced the findings document ran against one
 developer's machine: a `semlith-drive-corpus` directory, six stores that
-happened to be open, an `ultraship` checkout next door. None of that is a
+happened to be open, another project's checkout next door. None of that is a
 gate. This module builds the same shapes from scratch so the drive asserts
 against a corpus it created and can reason about.
 

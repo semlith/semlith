@@ -32,11 +32,10 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from bench import CLEAN_ENV, CROSS, ORIGINAL, PARENT_ENV, PROMPTS  # noqa: E402
+from bench import CLEAN_ENV, ORIGINAL, PARENT_ENV, PROMPTS  # noqa: E402
 
-GRADE = """You are grading answers to a question about a codebase (the semlith Rust repository, and for some
-questions its sibling repositories semlith-cloud and infra). Grade each answer 0-10 against the reference
-key, written by someone who verified the code. 10 = everything important in the key, correct file:line
+GRADE = """You are grading answers to a question about a codebase (the semlith Rust repository).
+Grade each answer 0-10 against the reference key, written by someone who verified the code. 10 = everything important in the key, correct file:line
 (within ~15 lines), no wrong claims. Deduct for missing key items, wrong locations or wrong claims. Do not
 reward length. Extra correct detail beyond the key is fine but earns little.
 
@@ -99,10 +98,10 @@ def report(rows: list[dict], judged: dict, rounds: int) -> None:
         return (st.mean(qs), len(qs)) if qs else (None, 0)
 
     print(f"quality, 0-10, blind ({len(judged)} gradings; judge cost {cost:.2f} $ API-price equivalent)")
-    print(f"  {'arm':16} {'all':>10} {'original':>10} {'cross':>10}")
+    print(f"  {'arm':16} {'all':>10} {'original':>10}")
     for arm in arms:
         cells = []
-        for pids in (list(PROMPTS), ORIGINAL, CROSS):
+        for pids in (list(PROMPTS), ORIGINAL):
             m, n = mean(arm, pids)
             cells.append(f"{m:.2f} ({n})" if n else "-")
         print(f"  {arm:16} " + " ".join(f"{c:>10}" for c in cells))
@@ -131,11 +130,6 @@ def report(rows: list[dict], judged: dict, rounds: int) -> None:
         d = st.mean(diffs)
         print("\ngate (setup against off; the rest is analyze.py's)")
         print(f"  {'PASS' if d >= -0.3 else 'FAIL'}  quality >= off - 0.3: {d:+.2f} (95 % {lo:+.2f} .. {hi:+.2f})")
-        s, o = mean("setup", CROSS)[0], mean("off", CROSS)[0]
-        if s is not None and o is not None:
-            print(f"  {'PASS' if s > o else 'FAIL'}  cross-store quality beats off: {s:.2f} against {o:.2f}")
-        else:
-            print("  -     cross-store quality: no cross-store prompts graded")
 
 
 def main() -> int:

@@ -9,9 +9,8 @@ The manual drive found 47 defects across 62 numbered findings and took most of
 a day. This is the standing gate that would have caught all of them, and it
 takes minutes.
 
-The findings document it encodes lives outside this repository, at
-`live-project-files/semlith/repos/semlith/full-regression-drive/17-09-2026/findings.md`. Read
-it before touching `findings.py`: it describes the *buggy* behaviour, and every
+The findings document it encodes (the full regression drive of 2026-09-17)
+is not part of this repository. It described the *buggy* behaviour; every
 check here asserts the *fixed* behaviour instead.
 
 ## Running it
@@ -106,8 +105,8 @@ correctly fail if the implementation takes a different reading:
 ### Fixtures
 
 `fixtures.py` builds every corpus from scratch under a temp directory, so the
-drive does not depend on one developer's machine having an `ultraship`
-checkout next door. Each is built on first use and removed at the end:
+drive does not depend on one developer's machine having another
+project's checkout next door. Each is built on first use and removed at the end:
 
 | | |
 |---|---|
@@ -189,7 +188,7 @@ surfaces went:
 | `dialog.modal[open]` | `.modal-scrim > .modal[role=dialog]` (`Drive.MODAL`) |
 
 Where v6 deliberately reversed an old rule, the check asserts the new rule and
-carries a comment saying `0.35.0 owner decision`: v6 as drawn wins over older
+carries a comment saying `0.35.0 design decision`: v6 as drawn wins over older
 rules (bulk decisions in review, session replay on by default, a runtime ledger
 recording switch, three nav groups, 10 rows a page, and so on). That comment is
 the only way a check's meaning may change; grep for it to see every one.

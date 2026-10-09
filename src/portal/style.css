@@ -3524,8 +3524,8 @@ button.gl-row:hover,
 .run-stats.five {
   grid-template-columns: repeat(5, minmax(0, 1fr));
 }
-/* A run card's Pipeline panel: four lanes of fixed shape (spec W2, the
- * owner's second walk) — name, bar, figures — and one status line. */
+/* A run card's Pipeline panel: four lanes of fixed shape — name, bar,
+ * figures — and one status line. */
 .pipe {
   display: flex;
   flex-direction: column;
@@ -5698,7 +5698,6 @@ button,
   min-width: 0;
 }
 
-/* Parity with the cloud (2026-10-07). */
 /* Drawn, not written: the mark stays out of the header's text, so a screen
    reader and a check read "Path", not "Path↕". */
 .sortable .ar.off::after,

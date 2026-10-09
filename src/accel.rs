@@ -72,9 +72,9 @@ const WORKER_IDLE: Duration = Duration::from_secs(60);
 
 /// Unix seconds until which an idle worker is kept anyway: a run between two
 /// of its slices. Its last slice drains and writes the index for about a
-/// minute with nothing for the lanes, and on the owner's walk the Neural
-/// Engine's worker went in that minute, so every slice after waited two
-/// minutes for it to load again with the card saying nothing.
+/// minute with nothing for the lanes, and the Neural Engine's worker used to
+/// go in that minute, so every slice after waited two minutes for it to load
+/// again with the card saying nothing.
 static WARM_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Keep idle workers for `for_` more: a run has more slices to come.
@@ -98,7 +98,7 @@ fn kept_warm() -> bool {
 const WORKER_DEPTH: usize = 2;
 
 /// Batches in flight on a lane. The remote lane's round trip crosses a
-/// network, so it keeps more in flight to keep the far GPU fed.
+/// network, so it keeps more in flight to keep the far worker fed.
 fn depth(lane: &Lane) -> usize {
     if lane.id == "remote" { 8 } else { WORKER_DEPTH }
 }
@@ -141,7 +141,7 @@ pub struct Switches {
     pub llama: Option<bool>,
     /// The GPU lane beside the Neural Engine, which is off by default.
     pub gpu_beside_ane: Option<bool>,
-    /// The remote lane: another machine's GPU through `semlith worker`.
+    /// The remote lane, when an embedder registers one ([`Remote`]).
     pub remote: Option<bool>,
 }
 
@@ -199,8 +199,8 @@ impl Enabled {
     }
 }
 
-/// What the CPU lane's switch says, wherever it is drawn or refused: the
-/// owner's decision of 2026-10-08. The CPU cap is the control instead.
+/// What the CPU lane's switch says, wherever it is drawn or refused. The CPU
+/// cap is the control instead.
 pub const CPU_ALWAYS_ON: &str = "the CPU lane is always on; use the CPU cap to limit it";
 
 /// Whether a lane is on when nothing has been saved for it.
@@ -269,6 +269,54 @@ pub fn enabled() -> Enabled {
     }
 }
 
+// --------------------------------------------------------------- remote lane
+
+/// A worker on another machine, for a program that embeds this crate and
+/// runs one. It registers a `Remote` with [`set_remote`], and the `remote`
+/// lane frames batches over the channel [`Remote::open`] returns, exactly as
+/// a local worker reads them on its stdin and writes them on its stdout
+/// ([`write_frame`], [`read_frame`]), starting with the worker's hello. The
+/// binary registers none, so it has no remote lane: without one the lane is
+/// not listed, checked, switched or used.
+pub trait Remote: Send + Sync {
+    /// Connect to a worker and hand back the channel. Called on every start,
+    /// so a reconnect is opened afresh.
+    fn open(&self) -> Result<RemoteChannel>;
+    /// Why the lane cannot be turned on now, if it cannot.
+    fn missing(&self) -> Option<String>;
+    /// Fields added to the lane's status and check rows: where its worker is,
+    /// what it last proved.
+    fn describe(&self) -> serde_json::Value;
+}
+
+/// An open channel to a remote worker.
+pub struct RemoteChannel {
+    /// Frames to the worker.
+    pub send: Box<dyn Write + Send>,
+    /// Frames from the worker, or why the channel closed.
+    pub frames: mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
+    /// Where the worker is, for the lane's device line.
+    pub device: String,
+}
+
+static REMOTE: Mutex<Option<Arc<dyn Remote>>> = Mutex::new(None);
+
+/// Register the remote lane's worker, or take it away with `None`.
+pub fn set_remote(remote: Option<Arc<dyn Remote>>) {
+    *REMOTE.lock().unwrap_or_else(|e| e.into_inner()) = remote;
+}
+
+fn remote() -> Option<Arc<dyn Remote>> {
+    REMOTE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Add `extra`'s fields to `row`, both objects.
+fn extend(row: &mut serde_json::Value, extra: serde_json::Value) {
+    if let (Some(row), serde_json::Value::Object(extra)) = (row.as_object_mut(), extra) {
+        row.extend(extra);
+    }
+}
+
 // --------------------------------------------------------------------- lanes
 
 /// What each lane is, in the order they are shown.
@@ -320,7 +368,7 @@ pub const SPECS: &[Spec] = &[
     },
     Spec {
         id: "remote",
-        label: "Remote GPU",
+        label: "Remote",
         // Set from the worker's hello: whatever its own lane makes.
         variant: "fp16-cuda",
         experimental: true,
@@ -758,6 +806,7 @@ pub fn unavailable_here(id: &str) -> Option<String> {
         "llama" if !(apple || x86_windows_or_linux) => {
             Some("no llama.cpp build is pinned for this platform".into())
         }
+        "remote" if remote().is_none() => Some("no remote worker is registered".into()),
         _ => None,
     }
     .or_else(|| missing_hardware(id))
@@ -766,8 +815,8 @@ pub fn unavailable_here(id: &str) -> Option<String> {
 /// Why this machine's hardware cannot run a lane its platform could: no GPU
 /// for the GPU or llama.cpp (Vulkan) lanes, no NVIDIA card and driver for
 /// CUDA and TensorRT, no Intel CPU for OpenVINO. Asked once per process and
-/// kept, so a server's Machine page offers only the lanes that can run on it
-/// (owner, 2026-10-08) without probing Vulkan or NVML on every poll.
+/// kept, so the lanes offered are only those that can run here, without
+/// probing Vulkan or NVML on every poll.
 fn missing_hardware(id: &str) -> Option<String> {
     static GPU: OnceLock<std::result::Result<String, String>> = OnceLock::new();
     static NVIDIA: OnceLock<std::result::Result<String, String>> = OnceLock::new();
@@ -960,7 +1009,7 @@ pub fn snapshot() -> serde_json::Value {
     for lane in lanes() {
         let enabled = on.lane(lane.id);
         let (saved_on, source) = choice(lane.id);
-        if lane.id == "worker" && !enabled {
+        if (lane.id == "worker" && !enabled) || (lane.id == "remote" && remote().is_none()) {
             continue;
         }
         let status = match unavailable_here(lane.id) {
@@ -985,10 +1034,9 @@ pub fn snapshot() -> serde_json::Value {
             "download_bytes": pack_for(lane.id).map(|pack| pack.bytes()),
         }));
         if lane.id == "remote"
-            && let Some(row) = rows.last_mut()
+            && let (Some(remote), Some(row)) = (remote(), rows.last_mut())
         {
-            row["endpoint"] = crate::remote::config().map(|c| c.endpoint).into();
-            row["attestation"] = crate::remote::attestation().into();
+            extend(row, remote.describe());
         }
     }
     let total: f64 = rows.iter().filter_map(|row| row["rate"].as_f64()).sum();
@@ -1197,7 +1245,7 @@ fn run_lanes() -> Vec<&'static str> {
 }
 
 /// The names `semlith accel on|off` takes.
-pub const SWITCH_NAMES: &str = "cpu, gpu, ane, cuda, trt, openvino, llama, remote, gpu-beside-ane";
+pub const SWITCH_NAMES: &str = "cpu, gpu, ane, cuda, trt, openvino, llama, gpu-beside-ane";
 
 /// Turn a lane on or off, as the page's switch and `semlith accel` do.
 ///
@@ -1217,6 +1265,9 @@ pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) 
     if std::env::var(ACCEL_ENV).is_ok() {
         bail!("{ACCEL_ENV} is set in this process's environment, so the switches cannot change it");
     }
+    if lane_id == "remote" && remote().is_none() {
+        bail!("there is no lane called remote; the switches are {SWITCH_NAMES}");
+    }
     if on {
         refuse_on(lane_id)?;
     }
@@ -1228,8 +1279,9 @@ pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) 
         ("gpu", _) => settings.accelerators.gpu = Some(on),
         ("gpu-beside-ane", _) => settings.accelerators.gpu_beside_ane = Some(on),
         ("remote", _) => {
-            // Not this machine's hardware but its settings: said at the switch.
-            if on && let Some(why) = crate::remote::missing() {
+            // Not this machine's hardware but the embedder's setup: said at
+            // the switch.
+            if on && let Some(why) = remote().and_then(|r| r.missing()) {
                 bail!("{why}");
             }
             settings.accelerators.remote = Some(on);
@@ -1446,7 +1498,7 @@ fn deadline() -> Duration {
 /// A running worker and the channel its answers arrive on.
 struct Worker {
     /// A local lane's process; none for the remote lane, whose worker is on
-    /// another machine at the end of [`crate::remote`]'s channel.
+    /// another machine at the end of a [`Remote`]'s channel.
     child: Option<std::process::Child>,
     /// `None` only while the worker is being let go.
     stdin: Option<Box<dyn Write + Send>>,
@@ -1651,6 +1703,9 @@ pub fn check_all(say: impl Fn(&str)) -> Vec<serde_json::Value> {
             }
             row
         };
+        if id == "remote" && remote().is_none() {
+            continue;
+        }
         if let Some(why) = unavailable_here(id) {
             if id != "worker" {
                 out.push(row(serde_json::json!({
@@ -1674,15 +1729,22 @@ pub fn check_all(say: impl Fn(&str)) -> Vec<serde_json::Value> {
         say(&format!("checking the {} lane", spec.label));
         let lane = Arc::new(Lane::new(spec));
         out.push(match start(&lane) {
-            Ok((_, hello)) => row(serde_json::json!({
-                "device": hello["device"],
-                "variant": hello["variant"],
-                "cosine": hello["cosine"],
-                "chunks_per_s": hello["chunks_per_s"],
-                "passed": true,
+            Ok((_, hello)) => {
+                let mut passed = row(serde_json::json!({
+                    "device": hello["device"],
+                    "variant": hello["variant"],
+                    "cosine": hello["cosine"],
+                    "chunks_per_s": hello["chunks_per_s"],
+                    "passed": true,
+                }));
                 // What the remote lane's worker proved before the check ran.
-                "attestation": (id == "remote").then(crate::remote::attestation).flatten(),
-            })),
+                if id == "remote"
+                    && let Some(remote) = remote()
+                {
+                    extend(&mut passed, remote.describe());
+                }
+                passed
+            }
             Err(e) => {
                 let text = format!("{e:#}");
                 match text.strip_prefix("unavailable — ") {
@@ -1711,10 +1773,10 @@ fn adapter_choice() -> Option<String> {
         .filter(|name| !name.trim().is_empty())
 }
 
-/// What a lane's worker is started with: its lane name and a directory.
-/// Start lane `id` once and run its known-answer check: what `semlith worker`
-/// does before it serves anyone, so a lane that cannot run here is said at
-/// start rather than to the first client. The hello on success.
+/// Start lane `id` once and run its known-answer check: what a worker that
+/// serves another machine does before it serves anyone, so a lane that
+/// cannot run here is said at start rather than to the first client. The
+/// hello on success.
 pub fn check_lane(id: &str) -> Result<serde_json::Value> {
     let spec = spec(id).with_context(|| format!("there is no lane called {id}"))?;
     let lane = Arc::new(Lane::new(spec));
@@ -1722,8 +1784,9 @@ pub fn check_lane(id: &str) -> Result<serde_json::Value> {
     Ok(hello)
 }
 
-/// The `__embed-worker` arguments for lane `id`, fetching what it needs:
-/// what `semlith worker` starts for each connection, as a local run would.
+/// The `__embed-worker` arguments for lane `id`, fetching what it needs: what
+/// a worker serving another machine starts for each connection, as a local
+/// run would. The process it names runs [`worker_main`].
 pub fn worker_command(id: &str) -> Result<Vec<String>> {
     let spec = spec(id).with_context(|| format!("there is no lane called {id}"))?;
     if id == "remote" {
@@ -1929,11 +1992,11 @@ fn coreml_compiling() -> bool {
 fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
     let worker = if lane.id == "remote" {
         lane.set(Status::Starting);
-        let (channel, far) = crate::remote::open()?;
-        *lane.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("remote {far}"));
+        let channel = remote().context("no remote worker is registered")?.open()?;
+        *lane.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(channel.device);
         Worker {
             child: None,
-            stdin: Some(Box::new(channel.send)),
+            stdin: Some(channel.send),
             answers: channel.frames,
         }
     } else {
@@ -2047,10 +2110,9 @@ fn hello(lane: &Arc<Lane>, mut worker: Worker) -> Result<(Worker, serde_json::Va
         }
         bail!("{reason}");
     }
-    // The remote worker's own figure was timed beside its GPU, with no
-    // network in it: 1,851 chunks/s on the G4 against about 220 reaching a
-    // laptop over a tunnel, and a time left of "1 s" for a whole run. The
-    // lane times the fixture over its own channel instead.
+    // The remote worker's own figure was timed beside its accelerator, with
+    // no network in it, and promised several times the rate that reaches
+    // this machine. The lane times the fixture over its own channel instead.
     let measured = if lane.id == "remote" {
         time_fixture(&mut worker)?
     } else {

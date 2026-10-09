@@ -238,7 +238,7 @@ fn the_mcp_tool_and_the_cli_answer_the_same_question_the_same_way() {
 }
 
 /// Across two stores a path means nothing without its store, and a name both
-/// repositories define must bring only its own store's edges. The walk stop of
+/// repositories define must bring only its own store's edges. A manual check in
 /// 0.30.0 found both: unlabelled spans, and edges looked up across the fleet.
 #[test]
 #[ignore = "downloads an embedding model on first run"]

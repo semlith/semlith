@@ -687,7 +687,7 @@ fn the_ledger_page_can_filter_sort_page_and_export_its_sessions() {
 /// file that said off before keeps saying it.
 #[test]
 fn session_replay_is_on_unless_the_privacy_page_turned_it_off() {
-    // The setting's absence is on: the owner's 0.35.0 decision. What was
+    // The setting's absence is on, as decided in 0.35.0. What was
     // written stays what it was, so nobody who switched it off is switched
     // back on by an upgrade.
     let fresh = semlith::home::Settings::default();
