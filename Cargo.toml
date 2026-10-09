@@ -1,6 +1,6 @@
 [package]
 name = "semlith"
-version = "0.37.0-rc.3"
+version = "0.37.0"
 edition = "2024"
 rust-version = "1.90"
 description = "A fast local vector store for AI agents — index files once, keep it current as you save, and answer questions across all of it in milliseconds without leaving the machine."
@@ -10,8 +10,23 @@ license = "Apache-2.0"
 readme = "README.md"
 keywords = ["vector-search", "embeddings", "rag", "mcp", "semantic-search"]
 categories = ["command-line-utilities", "database", "text-processing"]
-# CI config, local credentials and the benchmark harness are not part of the crate.
-exclude = [".env", ".github", "assets/portal", "bench", "packs", "tests/fixtures/coreml"]
+# What the crate ships: the source, what it compiles in, and the notices.
+# Tests, harnesses, docs and CI stay in the repository.
+include = [
+    "/src/**",
+    "/queries/**",
+    "/docs/clients.md",
+    "/docs/skill/**",
+    "/tests/fixtures/gpu/known-answer.*",
+    "/examples/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/NOTICE",
+    "/THIRD-PARTY-NOTICES",
+]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -20,6 +35,9 @@ clap = { version = "4.6.4", features = ["derive"] }
 cliclack = "0.5.6"
 hf-hub = { version = "0.5.0", default-features = false, features = ["ureq"] }
 libc = "0.2.189"
+# Already in the tree under turbovec, whose encoding runs on rayon's pool;
+# named here so the CPU cap can run that encoding on a pool of its size.
+rayon = "1.12.0"
 fastembed = { version = "7.1.0", default-features = false, features = ["hf-hub", "image-models"] }
 # ONNX Runtime, named here so it can be linked two ways. `ort` is fastembed's
 # dependency and is pinned to the exact version fastembed pins.
@@ -136,7 +154,7 @@ objc2-core-ml = "0.3.2"
 # `GlobalMemoryStatusEx` how much memory this machine has, which Windows
 # exposes nowhere else.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [features]
 # How ONNX Runtime is linked, and the one thing that differs between the binary

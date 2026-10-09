@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, mpsc};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Written beside the store's lock while a daemon holds it, so `semlith mcp`
 /// can find the daemon and forward to it instead of fighting for the lock.
@@ -49,6 +49,15 @@ const EVENT_HISTORY: usize = 20;
 /// to the watcher. The same budget `semlith_index` has always had.
 const SLICE: Duration = Duration::from_secs(45);
 
+/// How long a run keeps the writer while only file changes wait for it. A
+/// yield drains the lanes, so this bounds that cost to a small share of the
+/// run; an edit made during a long run is searchable within it.
+const EVENTS_SLICE: Duration = Duration::from_secs(300);
+
+/// The budget a slice is handed: long, because the slice ends at `SLICE` only
+/// when the control finds something waiting (see `perform`).
+const RUN_BUDGET: Duration = Duration::from_secs(24 * 3600);
+
 /// How many of a run's log lines the daemon keeps for a page to catch up on.
 ///
 /// A ring rather than a log, for the same reason [`EVENT_HISTORY`] is one: the
@@ -64,6 +73,14 @@ const LOG_HISTORY: usize = 500;
 /// for a week does not accumulate them without limit. Only finished runs are
 /// ever dropped.
 const RUN_HISTORY: usize = 24;
+
+/// Lines one run's log file keeps before it says it stopped keeping them. A
+/// line is about 200 bytes, so this is about 40 MB for a run of more files
+/// than any measured here.
+const FULL_LOG_LINES: u64 = 200_000;
+
+/// The folder beside `store.db` that holds each run's log in full.
+pub const LOGS_DIR: &str = "logs";
 
 /// The run id a job that is not an index run carries.
 ///
@@ -273,10 +290,15 @@ struct Tally {
     cache_hits: u64,
     /// Chunk rows the run wrote, embedded or not yet.
     rows: u64,
+    /// What the last slice left to embed: the next slice's starting estimate.
+    expected_left: u64,
+    images_left: u64,
 }
 
 impl Tally {
     fn add(&mut self, report: &crate::IndexReport) {
+        self.expected_left = report.expected_left;
+        self.images_left = report.images_left as u64;
         self.stages.add(&report.stages);
         self.cache_lookups += report.cache_lookups as u64;
         self.cache_hits += report.cache_hits as u64;
@@ -329,6 +351,14 @@ enum Job {
         source: String,
     },
     Revoke(PathBuf),
+    /// A person's decision on many files at once, recorded in one job and
+    /// without indexing any: a run that follows indexes the accepted ones,
+    /// with a card of its own. `mode` is `None` for a reset.
+    Decide {
+        files: Vec<PathBuf>,
+        mode: Option<String>,
+        source: String,
+    },
     Compact(crate::compact::CompactOptions),
 }
 
@@ -363,6 +393,8 @@ pub struct Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
+    /// The scan before a review: walking, reading and checking every file.
+    Scanning,
     Queued,
     /// Scanned, and waiting for a person to review what the scan refused
     /// before it is queued at all (2.7). Holds nothing: not a slot, not the
@@ -413,6 +445,8 @@ pub enum RunKind {
     Rebuild,
     /// Exactly the files a person picked, re-embedded whatever their hash.
     Files,
+    /// The files a person has just accepted or reset, indexed in one run.
+    Decisions,
 }
 
 impl RunKind {
@@ -429,15 +463,13 @@ impl RunKind {
             Self::Files => format!("Re-index {paths} files"),
             Self::CatchUp | Self::Batch => "Watcher catch-up".to_string(),
             Self::Compact => "Compact".to_string(),
+            Self::Decisions => format!("Apply {paths} decisions"),
         }
     }
 }
 
 /// How far back the rate a run card shows looks.
 const RATE_WINDOW_MS: u64 = 10_000;
-
-/// Active embedding time before a remaining-time estimate is offered.
-const ETA_SETTLE_MS: u64 = 5_000;
 
 /// Watcher event batches up to this many files run straight away; a larger
 /// one is admitted like a run. A saved file must reach search in seconds, and
@@ -524,9 +556,6 @@ pub struct RunState {
     /// The plan's own estimate, which stands until the measured rate settles:
     /// the first remaining time appears when embedding starts (2.7).
     plan_eta_ms: Option<u64>,
-    /// The last estimate a poll was given, and when (ms of the run's clock).
-    /// What a stall holds on to, and what a jump is measured against (#143).
-    shown_eta: std::cell::Cell<Option<(u64, u64)>>,
     /// The `done` event as it was sent, with its refused, failed and
     /// skipped-by-reason lists.
     pub summary: Option<serde_json::Value>,
@@ -538,7 +567,60 @@ pub struct RunState {
     /// client reads after.
     log: VecDeque<serde_json::Value>,
     next_seq: u64,
+    /// Every line of the run, in full, on disk beside the store (see
+    /// [`RunState::push_log`]): what the run history shows, where the ring
+    /// above keeps only the last [`LOG_HISTORY`].
+    log_file: Option<PathBuf>,
+    /// The file's name without `.jsonl`, which the page asks for it by.
+    log_key: Option<String>,
+    /// The embedded count and images at the last `embed` line, and when.
+    logged: (u64, u64, Option<Instant>),
+    /// Index saves already said on the log.
+    logged_saves: u64,
+    /// The run's expected chunks and its images, embedded and expected (see
+    /// `crate::IndexProgress`), as the run's, not the slice's.
+    pub expected_chunks: u64,
+    pub images: u64,
+    pub images_total: u64,
+    /// What the run is doing in a sentence, and since when (unix ms).
+    pub phase_detail: Option<String>,
+    phase_since: Option<u64>,
+    /// Every phase the run has been through, in order, for the run card's
+    /// timeline: what it was, its sentence, when it began and ended.
+    phases: Vec<serde_json::Value>,
+    /// Files the scan has flagged for a decision so far.
+    flagged: u64,
+    /// The share done in work units, highest so far; time left from it.
+    high: f64,
+    eta: crate::progress::Eta,
+    shown: Option<(u64, (u64, u64))>,
+    /// The scan's chunk count per file, for the run that follows it.
+    planned: Option<Arc<std::collections::HashMap<String, u64>>>,
+    /// The plan's images, beside `planned`'s chunks.
+    planned_images: Option<usize>,
+    /// Each lane's ten-second rates through the run, for what it records.
+    lane_seen: BTreeMap<String, Vec<f64>>,
+    /// Times the run has written its index to disk, and the last one: when
+    /// it ended (unix ms) and how long it took. The Write lane of the card.
+    saves: u64,
+    saved_at: Option<u64>,
+    save_ms: Option<u64>,
+    /// What an image weighs in chunks on this machine, read at the start.
+    image_weight: f64,
+    /// See `progress::Work::parallel`; fixed per run, like the weight.
+    images_parallel: bool,
 }
+
+/// Unix milliseconds.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Phases kept on a run's timeline. A long run re-enters embed after every
+/// checkpoint; past this many the oldest are folded into one per phase.
+const PHASES_KEPT: usize = 64;
 
 impl RunState {
     fn new(id: u64, paths: Vec<PathBuf>, kind: RunKind) -> Self {
@@ -573,7 +655,6 @@ impl RunState {
             symbols: 0,
             rows: 0,
             phase: None,
-            shown_eta: std::cell::Cell::new(None),
             plan: None,
             plan_eta_ms: None,
             summary: None,
@@ -581,7 +662,145 @@ impl RunState {
             cache: (0, 0),
             log: VecDeque::new(),
             next_seq: 0,
+            log_file: None,
+            log_key: None,
+            logged: (0, 0, None),
+            logged_saves: 0,
+            expected_chunks: 0,
+            images: 0,
+            images_total: 0,
+            phase_detail: None,
+            phase_since: None,
+            phases: Vec::new(),
+            flagged: 0,
+            high: 0.0,
+            eta: crate::progress::Eta::default(),
+            shown: None,
+            planned: None,
+            planned_images: None,
+            lane_seen: BTreeMap::new(),
+            saves: 0,
+            saved_at: None,
+            save_ms: None,
+            image_weight: crate::progress::IMAGE_UNITS,
+            images_parallel: false,
         }
+    }
+
+    /// Enter `phase` with `detail`, closing the phase before it on the
+    /// timeline. A new sentence on the same phase updates it in place.
+    fn enter(&mut self, phase: &str, detail: Option<String>) {
+        let at = now_ms();
+        if self.phase.as_deref() == Some(phase) {
+            if let Some(last) = self.phases.last_mut() {
+                last["detail"] = serde_json::json!(detail);
+            }
+            self.phase_detail = detail;
+            return;
+        }
+        if let Some(last) = self.phases.last_mut()
+            && last["until"].is_null()
+        {
+            last["until"] = serde_json::json!(at);
+            if last["phase"] == "save" {
+                self.saves += 1;
+                self.saved_at = Some(at);
+                self.save_ms = last["at"].as_u64().map(|from| at.saturating_sub(from));
+            }
+        }
+        self.phases.push(serde_json::json!({
+            "phase": phase,
+            "detail": detail,
+            "at": at,
+            "until": null,
+        }));
+        if self.phases.len() > PHASES_KEPT {
+            // The oldest two of the same name become one.
+            if let Some(i) = (1..self.phases.len()).find(|&i| {
+                self.phases[..i]
+                    .iter()
+                    .any(|p| p["phase"] == self.phases[i]["phase"])
+            }) {
+                self.phases.remove(i);
+            } else {
+                self.phases.remove(0);
+            }
+        }
+        self.phase = Some(phase.to_string());
+        self.phase_detail = detail;
+        self.phase_since = Some(at);
+    }
+
+    /// Close the timeline: the run is over.
+    fn close_phases(&mut self) {
+        let at = now_ms();
+        if let Some(last) = self.phases.last_mut()
+            && last["until"].is_null()
+        {
+            last["until"] = serde_json::json!(at);
+            if last["phase"] == "save" {
+                self.saves += 1;
+                self.saved_at = Some(at);
+                self.save_ms = last["at"].as_u64().map(|from| at.saturating_sub(from));
+            }
+        }
+        self.phase = None;
+        self.phase_detail = None;
+    }
+
+    /// The run's work, in the units its share done and time left are in.
+    fn work(&self) -> crate::progress::Work {
+        crate::progress::Work {
+            files: (self.scanned, self.total),
+            chunks: (self.chunks, self.expected_chunks.max(self.rows)),
+            images: (self.images, self.images_total),
+            image_weight: self.image_weight,
+            parallel: self.images_parallel,
+        }
+    }
+
+    /// Fold the counters just read into the share done and the time left.
+    fn account(&mut self) {
+        for (lane, rate) in self.lane_rates() {
+            if rate > 0.0 {
+                let seen = self.lane_seen.entry(lane).or_default();
+                seen.push(rate);
+                if seen.len() > 4096 {
+                    seen.drain(..2048);
+                }
+            }
+        }
+        let work = self.work();
+        self.high = self.high.max(work.share()).min(0.999);
+        let at = self.elapsed().as_secs_f64();
+        let hold = matches!(
+            self.phase.as_deref(),
+            // Not a drain: that is the embedding's tail, and counts down.
+            Some("lane" | "save" | "walk" | "decisions")
+        );
+        let (done, all) = work.eta_units();
+        self.eta.observe_unless(hold, at, done);
+        // No figure before the run knows how much there is.
+        if self.total == 0 || all <= 0.0 {
+            self.shown = None;
+            return;
+        }
+        self.shown = self.eta.left(at, all - done, hold);
+    }
+
+    /// What each lane managed through this run, for the machine to remember:
+    /// the upper quartile of its ten-second rates, which is the lane busy
+    /// rather than the lane waiting on reading.
+    fn lane_measures(&self) -> BTreeMap<String, f64> {
+        self.lane_seen
+            .iter()
+            .filter(|(_, rates)| rates.len() >= 6)
+            .map(|(lane, rates)| {
+                let mut sorted = rates.clone();
+                sorted.sort_by(f64::total_cmp);
+                (lane.clone(), sorted[sorted.len() * 3 / 4])
+            })
+            .collect()
     }
 
     /// How long this run has been going, not counting time it spent held.
@@ -671,54 +890,34 @@ impl RunState {
     /// whenever the run is not moving: the first seconds of a run carry the
     /// model load and whichever file happened to come first, and a figure
     /// taken from them swings by minutes between polls.
+    /// The whole run's share done: the share read (bytes, or files when the
+    /// walk found no bytes) times the share of the rows written so far that
+    /// are embedded. Below 1 until the run says it is done, so a bar never
+    /// reads full while anything is left; `None` for a run that ended without
+    /// finishing.
+    fn progress(&self) -> Option<f64> {
+        match self.status {
+            RunStatus::Done => return Some(1.0),
+            RunStatus::Stopped | RunStatus::Failed => return None,
+            _ => {}
+        }
+        Some(((self.high * 1000.0).round() / 1000.0).min(0.999))
+    }
+
+    /// Time left in work units over the run's smoothed rate
+    /// ([`crate::progress::Eta`]); none while the run is not running.
     fn eta_ms(&self) -> Option<u64> {
-        if !matches!(self.status, RunStatus::Running) || self.bytes_total == 0 {
-            return None;
-        }
-        let now = self.elapsed().as_millis() as u64;
-        let from_plan = self.plan_eta_ms.map(|eta| eta.saturating_sub(now));
-        let Some((t0, _, b0)) = self.first_sample else {
-            return from_plan;
-        };
-        if now.saturating_sub(t0) < ETA_SETTLE_MS {
-            return from_plan;
-        }
-        let start = now.saturating_sub(RATE_WINDOW_MS);
-        let (at, _, was) = self
-            .samples
-            .iter()
-            .rev()
-            .find(|(at, _, _)| *at <= start)
-            .copied()
-            .unwrap_or((t0, 0, b0));
-        let moved = self.bytes.saturating_sub(was);
-        let span = now.saturating_sub(at);
-        let shown = self.shown_eta.get();
-        // A run writing its index moves no bytes for twenty seconds, and the
-        // rate over that window says the rest will take minutes. Issue #143:
-        // the card jumped to minutes, then back. While the run says it is in
-        // a phase, or no bytes moved in the window, the last estimate stands.
-        // Not "fewer than 1 % of the bytes": a run that takes longer than
-        // about seventeen minutes never moves 1 % in ten seconds, and kept
-        // its first estimate to the end — 9 h 19 min for the whole of the
-        // 70-repository corpus. A spike out of a stall is the doubling cap's
-        // to absorb, below.
-        let stalled = self.phase.is_some() || moved == 0;
-        if stalled && let Some((eta, _)) = shown {
-            return Some(eta);
-        }
-        if moved == 0 || span == 0 {
-            return None;
-        }
-        let left = self.bytes_total.saturating_sub(self.bytes);
-        let mut eta = (left as u128 * span as u128 / moved as u128) as u64;
-        // And never more than double between two polls: a real slowdown shows
-        // over a few polls, a spike does not show at all.
-        if let Some((last, _)) = shown {
-            eta = eta.min(last.saturating_mul(2).max(1_000));
-        }
-        self.shown_eta.set(Some((eta, now)));
-        Some(eta)
+        matches!(self.status, RunStatus::Running)
+            .then_some(self.shown)
+            .flatten()
+            .map(|(ms, _)| ms)
+    }
+
+    fn eta_range_ms(&self) -> Option<(u64, u64)> {
+        matches!(self.status, RunStatus::Running)
+            .then_some(self.shown)
+            .flatten()
+            .map(|(_, range)| range)
     }
 
     /// Chunks per second per lane over the same window as [`Self::rates`].
@@ -791,7 +990,31 @@ impl RunState {
                 self.queued_ms.get_or_insert(waited);
                 self.files_before = num("files_before").or(self.files_before);
                 self.chunks_before = num("chunks_before").or(self.chunks_before);
+                self.eta.set_prior(crate::accel::expected_rate());
+                self.image_weight = crate::progress::image_units();
+                self.images_parallel = crate::accel::images_beside_text();
+                // The scan's counters were the scan's: the run counts its own
+                // files from nothing, or the card opens on "3,973 / 3,973".
+                self.scanned = 0;
+                self.total = 0;
+                self.bytes = 0;
+                self.bytes_total = 0;
                 self.unhold();
+            }
+            Some("phase") => {
+                if let Some(phase) = event.get("phase").and_then(serde_json::Value::as_str) {
+                    let detail = event
+                        .get("detail")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    // Said again with nothing new (the engine re-enters
+                    // embedding after every save and lane check): the log
+                    // already has it, four lines of "Embedding" in a row.
+                    if self.phase.as_deref() == Some(phase) && self.phase_detail == detail {
+                        return;
+                    }
+                    self.enter(phase, detail);
+                }
             }
             Some("held") => {
                 self.status = RunStatus::Held;
@@ -808,21 +1031,17 @@ impl RunState {
                 ) {
                     self.status = RunStatus::Running;
                 }
-                // A `writing` line is the run saying it has stopped reading
-                // files for a moment; the next line of any other outcome ends
-                // the phase. Progress inside a file says nothing about it.
-                self.phase = if kind == "progress" {
-                    self.phase.take()
-                } else {
-                    match event.get("outcome").and_then(serde_json::Value::as_str) {
-                        Some("writing") => event
-                            .get("why")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string)
-                            .or_else(|| Some("writing the index to disk".to_string())),
-                        _ => None,
+                // Every line carries the phase the engine is in, so a page
+                // opened mid-phase sees it; only a change is a new entry.
+                if let Some(phase) = event.get("phase").and_then(serde_json::Value::as_str) {
+                    let detail = event
+                        .get("phase_detail")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    if self.phase.as_deref() != Some(phase) || self.phase_detail != detail {
+                        self.enter(phase, detail);
                     }
-                };
+                }
                 // Taken rather than added: every one of these is the run's
                 // own running total, so summing them would count each file
                 // once per event it appeared in.
@@ -835,6 +1054,10 @@ impl RunState {
                 self.symbols = num("symbols").unwrap_or(self.symbols);
                 self.rows = num("rows").unwrap_or(self.rows);
                 self.threads = num("threads").filter(|n| *n > 0).unwrap_or(self.threads);
+                self.expected_chunks = num("expected_chunks").unwrap_or(self.expected_chunks);
+                self.images = num("images").unwrap_or(self.images);
+                self.images_total = num("images_total").unwrap_or(self.images_total);
+
                 // From the first file embedding starts on, so the walk of
                 // unchanged files before it is not part of either rate.
                 let embedding = self.first_sample.is_some()
@@ -852,6 +1075,17 @@ impl RunState {
                             self.sample_lanes(lanes);
                         }
                     }
+                }
+                self.account();
+            }
+            Some("scan") => {
+                self.scanned = num("scanned").unwrap_or(self.scanned);
+                self.total = num("total").unwrap_or(self.total);
+                self.bytes = num("bytes").unwrap_or(self.bytes);
+                self.bytes_total = num("bytes_total").unwrap_or(self.bytes_total);
+                self.flagged = num("flagged").unwrap_or(self.flagged);
+                if let Some(phase) = event.get("phase").and_then(serde_json::Value::as_str) {
+                    self.enter(phase, None);
                 }
             }
             Some("paused") => {
@@ -892,7 +1126,7 @@ impl RunState {
                 } else {
                     RunStatus::Done
                 };
-                self.phase = None;
+                self.close_phases();
                 self.indexed = num("indexed").unwrap_or(self.indexed);
                 self.chunks = num("chunks").unwrap_or(self.chunks);
                 self.unhold();
@@ -901,6 +1135,7 @@ impl RunState {
                 self.summary = Some(event.clone());
             }
             Some("error") => {
+                self.close_phases();
                 self.status = RunStatus::Failed;
                 self.unhold();
                 self.ended = Some(self.elapsed());
@@ -909,18 +1144,99 @@ impl RunState {
             _ => {}
         }
 
+        // The embed and write stages say themselves on the log too, as their
+        // own lines: embedding every two seconds while it moves, and each
+        // index save once it is written. The run's last figures go before
+        // its `done`.
+        let finishing = matches!(
+            event.get("event").and_then(serde_json::Value::as_str),
+            Some("done" | "error")
+        );
+        self.stage_lines(finishing);
         // Per-batch progress moves the snapshot and nothing else: a log line
         // per eight chunks would push every file line off the ring.
-        if event.get("event").and_then(serde_json::Value::as_str) == Some("progress") {
+        if matches!(
+            event.get("event").and_then(serde_json::Value::as_str),
+            Some("progress" | "scan")
+        ) {
             return;
         }
-        let mut line = event.clone();
+        self.push_log(event.clone());
+    }
+
+    /// An `embed` line when embedding has moved and two seconds have passed
+    /// since the last (or `now`), and a `write` line for each index save the
+    /// log has not said yet.
+    fn stage_lines(&mut self, now: bool) {
+        let (chunks, images, at) = self.logged;
+        let moved = self.chunks > chunks || self.images > images;
+        if moved && (now || at.is_none_or(|at| at.elapsed() >= Duration::from_secs(2))) {
+            let lanes: serde_json::Map<String, serde_json::Value> = self
+                .lane_rates()
+                .into_iter()
+                .filter(|(_, rate)| *rate > 0.0)
+                .map(|(lane, rate)| (lane, serde_json::json!((rate * 10.0).round() / 10.0)))
+                .collect();
+            self.push_log(serde_json::json!({
+                "event": "embed",
+                "embedded": self.chunks,
+                "delta": self.chunks.saturating_sub(chunks),
+                "expected": self.expected_chunks.max(self.rows),
+                "images": self.images,
+                "images_total": self.images_total,
+                "lanes": lanes,
+            }));
+            self.logged = (self.chunks, self.images, Some(Instant::now()));
+        }
+        if self.saves > self.logged_saves {
+            self.logged_saves = self.saves;
+            self.push_log(serde_json::json!({
+                "event": "write",
+                "saves": self.saves,
+                "ms": self.save_ms,
+                "embedded": self.chunks,
+                "rows": self.rows,
+            }));
+        }
+    }
+
+    /// One line onto the run's log: numbered for a page catching up, kept in
+    /// the ring, and appended to the run's file in full.
+    fn push_log(&mut self, mut line: serde_json::Value) {
         if let Some(object) = line.as_object_mut() {
             object.insert("seq".into(), serde_json::json!(self.next_seq));
             // When, for the run history's log (0.35.0); additive on the line.
             object.entry("at").or_insert(serde_json::json!(now()));
         }
         self.next_seq += 1;
+        if let Some(path) = &self.log_file {
+            use std::io::Write;
+            let line = if self.next_seq <= FULL_LOG_LINES {
+                Some(line.to_string())
+            } else if self.next_seq == FULL_LOG_LINES + 1 {
+                Some(
+                    serde_json::json!({
+                        "event": "truncated",
+                        "text": format!("the log keeps a run's first {FULL_LOG_LINES} lines"),
+                        "at": now(),
+                    })
+                    .to_string(),
+                )
+            } else {
+                None
+            };
+            if let Some(line) = line {
+                // ponytail: an open and append per line, about 20 µs; a
+                // held handle if a run's lines ever cost that much. Never
+                // creating the folder here: a stop that deleted the store
+                // would see it made again by the lines that follow.
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut file| writeln!(file, "{line}"));
+            }
+        }
         if self.log.len() == LOG_HISTORY {
             self.log.pop_front();
         }
@@ -985,6 +1301,8 @@ impl RunState {
             "chunks": self.chunks,
             "stages": stages,
             "log": log,
+            // The whole log, by `/api/index/history/log`.
+            "log_file": self.log_key,
         })
     }
 }
@@ -1019,6 +1337,21 @@ fn history_line(event: &serde_json::Value) -> serde_json::Value {
             )
         }
         "error" => ("error", format!("error: {}", text("error"))),
+        "embed" => (
+            "info",
+            format!(
+                "embedded {} of {} chunks",
+                event
+                    .get("embedded")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                event
+                    .get("expected")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            ),
+        ),
+        "write" => ("info", "index saved".to_string()),
         "done" => (
             "info",
             format!(
@@ -1063,10 +1396,68 @@ fn remember_run(dir: &Path, row: &serde_json::Value) {
     if let Ok(text) = std::fs::read_to_string(&path) {
         let lines: Vec<&str> = text.lines().collect();
         if lines.len() > HISTORY_KEEP * 2 {
-            let kept = lines[lines.len() - HISTORY_KEEP..].join("\n") + "\n";
-            let _ = crate::home::write_private(&path, kept.as_bytes());
+            let kept = &lines[lines.len() - HISTORY_KEEP..];
+            let _ = crate::home::write_private(&path, (kept.join("\n") + "\n").as_bytes());
+            forget_logs(dir, kept);
         }
     }
+}
+
+/// Delete the log files of runs older than every run the history still keeps.
+/// A file is named for the millisecond its run began, so a run still going,
+/// which has no row yet, is newer than all of them and is left alone.
+fn forget_logs(dir: &Path, kept: &[&str]) {
+    let began = |key: &str| key.split('-').next().and_then(|ms| ms.parse::<u64>().ok());
+    let Some(oldest) = kept
+        .iter()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|row| row["log_file"].as_str().and_then(began))
+        .min()
+    else {
+        return;
+    };
+    for entry in std::fs::read_dir(dir.join(LOGS_DIR))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name
+            .strip_suffix(".jsonl")
+            .and_then(began)
+            .is_some_and(|ms| ms < oldest)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// One run's whole log, from line `from` (counted from 0), at most `limit`
+/// lines, and whether more follow. `key` is a history row's `log_file`;
+/// anything that is not one is refused, so the name cannot leave the folder.
+pub fn run_log(
+    dir: &Path,
+    key: &str,
+    from: usize,
+    limit: usize,
+) -> Option<(Vec<serde_json::Value>, bool)> {
+    let valid = key.split_once('-').is_some_and(|(ms, id)| {
+        !ms.is_empty()
+            && !id.is_empty()
+            && ms.bytes().all(|b| b.is_ascii_digit())
+            && id.bytes().all(|b| b.is_ascii_digit())
+    });
+    if !valid {
+        return None;
+    }
+    let text = std::fs::read_to_string(dir.join(LOGS_DIR).join(format!("{key}.jsonl"))).ok()?;
+    let mut lines = text
+        .lines()
+        .skip(from)
+        .filter_map(|line| serde_json::from_str(line).ok());
+    let page: Vec<serde_json::Value> = lines.by_ref().take(limit).collect();
+    let more = lines.next().is_some();
+    Some((page, more))
 }
 
 /// A store's finished runs, newest first, at most [`HISTORY_KEEP`].
@@ -1141,6 +1532,9 @@ pub struct Store {
     /// forwarded `semlith_index` lands on — stopping it would make the store
     /// unwritable, which is not what "stop watching" means.
     pub watch_events: AtomicBool,
+    /// Raised by the watcher while file changes wait for the writer: one of
+    /// the two things a long run gives its turn up for (see `perform`).
+    pub events_waiting: Arc<AtomicBool>,
     /// The store's `gitignore` setting, read by the writer between jobs.
     pub gitignore: AtomicBool,
 }
@@ -1203,6 +1597,7 @@ impl Store {
             expecting_run_until: AtomicUsize::new(expecting_run_until),
             stopped_because: Mutex::new(None),
             watch_events: AtomicBool::new(true),
+            events_waiting: Arc::new(AtomicBool::new(false)),
             gitignore: AtomicBool::new(true),
         }
     }
@@ -1231,7 +1626,15 @@ impl Store {
     /// not finished is never dropped.
     fn begin_run(&self, id: u64, paths: Vec<PathBuf>, kind: RunKind) {
         let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
-        runs.push(RunState::new(id, paths, kind));
+        let mut run = RunState::new(id, paths, kind);
+        let key = format!("{}-{id}", now_ms());
+        let logs = self.dir.join(LOGS_DIR);
+        if std::fs::create_dir_all(&logs).is_ok() {
+            crate::home::tighten_dir(&logs);
+            run.log_file = Some(logs.join(format!("{key}.jsonl")));
+        }
+        run.log_key = Some(key);
+        runs.push(run);
         while runs.len() > RUN_HISTORY {
             match runs.iter().position(|run| run.status.finished()) {
                 Some(at) => {
@@ -1253,9 +1656,11 @@ impl Store {
             .iter()
             .filter(|r| r.id != id)
             .filter_map(RunState::embed_rate)
-            .last();
+            .next_back();
         if let Some(run) = runs.iter_mut().find(|r| r.id == id) {
             run.plan = serde_json::to_value(plan).ok();
+            run.planned = Some(Arc::new(plan.counts.clone()));
+            run.planned_images = Some(plan.images);
             run.plan_eta_ms = plan
                 .eta_ms
                 .or_else(|| seen.map(|rate| (plan.embed_bytes as f64 / rate * 1000.0) as u64));
@@ -1279,6 +1684,16 @@ impl Store {
     }
 
     /// A run held for review, moved to the queue or ended.
+    /// Set a run's status outright: a scan becoming a review or a queued run.
+    fn set_status(&self, id: u64, to: RunStatus) {
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(run) = runs.iter_mut().find(|r| r.id == id) {
+            run.status = to;
+        }
+        drop(runs);
+        self.runs_changed();
+    }
+
     fn leave_review(&self, id: u64, to: RunStatus) -> bool {
         let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
         let Some(run) = runs
@@ -1396,6 +1811,36 @@ impl Store {
     }
 
     /// What started a run.
+    /// The scan's chunk count per file, for the run that follows it.
+    fn run_planned(&self, id: u64) -> Option<Arc<std::collections::HashMap<String, u64>>> {
+        self.runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|run| run.id == id)
+            .and_then(|run| run.planned.clone())
+    }
+
+    fn run_planned_images(&self, id: u64) -> Option<usize> {
+        self.runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|run| run.id == id)
+            .and_then(|run| run.planned_images)
+    }
+
+    /// What each lane managed through a run, for the machine to remember.
+    fn run_lane_measures(&self, id: u64) -> BTreeMap<String, f64> {
+        self.runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|run| run.id == id)
+            .map(RunState::lane_measures)
+            .unwrap_or_default()
+    }
+
     fn run_kind(&self, id: u64) -> Option<RunKind> {
         self.runs
             .lock()
@@ -1513,7 +1958,7 @@ impl Store {
 
     fn snapshot_of(&self, run: &RunState, position: Option<usize>) -> serde_json::Value {
         let (rate, average) = run.rates();
-        serde_json::json!({
+        let mut snapshot = serde_json::json!({
             "id": run.id,
             "store": self.name,
             "kind": run.kind,
@@ -1553,17 +1998,17 @@ impl Store {
             "indexed": run.indexed,
             "chunks": run.chunks,
             "symbols": run.symbols,
-            // What the run is doing when it is not reading files — or, while
-            // no lane it may use is ready and one is on its way, what it is
-            // waiting for, with that lane's progress and time left.
-            "phase": (run.status == RunStatus::Running)
-                .then(crate::accel::waiting_for)
-                .flatten()
-                .or_else(|| run.phase.clone()),
+            // What the run is doing, as the engine said it (see
+            // `crate::progress::Phase`), in a sentence, since when, and every
+            // phase so far for the card's timeline.
+            "phase": run.phase,
             "summary": run.summary,
             // Walk, read+hash, extract+scan, parse+chunk, tokenize, the wait
             // on each lane, and write, summing to the run's wall time.
             "stages": run.stages,
+            // The whole run's share done, reading and embedding both: what a
+            // run's bar shows. See `RunState::progress`.
+            "progress": run.progress(),
             // The share of the store the vector half does not cover yet: rows
             // this run wrote that it has not embedded, over what the store
             // holds with them. Null outside a running run.
@@ -1585,7 +2030,41 @@ impl Store {
                 .and_then(serde_json::Value::as_u64)
                 .map(|first| first.saturating_sub(1)),
             "log_to": run.next_seq.saturating_sub(1),
-        })
+        });
+        if let Some(object) = snapshot.as_object_mut() {
+            // Chunks expected in all (converging as files are chunked), images
+            // embedded and expected, rows still with the lanes, the phase in a
+            // sentence and since when, and every phase so far for the card's
+            // timeline. Inserted apart: the literal above is at the macro's
+            // depth limit.
+            for (key, value) in [
+                ("phase_detail", serde_json::json!(run.phase_detail)),
+                ("phase_since", serde_json::json!(run.phase_since)),
+                ("phases", serde_json::json!(run.phases)),
+                ("flagged", serde_json::json!(run.flagged)),
+                (
+                    "expected_chunks",
+                    serde_json::json!(run.expected_chunks.max(run.rows)),
+                ),
+                ("images", serde_json::json!(run.images)),
+                ("images_total", serde_json::json!(run.images_total)),
+                (
+                    "backlog",
+                    serde_json::json!(run.rows.saturating_sub(run.chunks)),
+                ),
+                ("eta_range_ms", serde_json::json!(run.eta_range_ms())),
+                // Chunks written (the Chunk lane), and the Write lane: index
+                // saves so far, the last one's end and length.
+                ("rows", serde_json::json!(run.rows)),
+                ("saves", serde_json::json!(run.saves)),
+                ("saved_at", serde_json::json!(run.saved_at)),
+                ("save_ms", serde_json::json!(run.save_ms)),
+                ("log_file", serde_json::json!(run.log_key)),
+            ] {
+                object.insert(key.to_string(), value);
+            }
+        }
+        snapshot
     }
 
     /// Every log line one run emitted after `seq`.
@@ -1675,6 +2154,41 @@ impl Store {
         progress
     }
 
+    /// Take admitted index runs that have not started off this store's writer
+    /// queue: `run` names one, `None` takes every one. The card of a run
+    /// admitted behind another job says "queued", and taking it out used to
+    /// look only in the admission line, so it answered "nothing waiting"
+    /// (walk 3). Jobs that are not runs (a forget, a fetch) are never taken.
+    pub fn dequeue_runs(&self, run: Option<u64>) -> usize {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut dropped = 0;
+        queue.retain(|pending| {
+            let ours = pending.run != NO_RUN
+                && matches!(pending.job, Job::Index(_))
+                && run.is_none_or(|run| run == pending.run);
+            if !ours {
+                return true;
+            }
+            let answer = serde_json::json!({
+                "event": "done",
+                "indexed": 0,
+                "unchanged": 0,
+                "skipped": 0,
+                "removed": 0,
+                "chunks": 0,
+                "images": 0,
+                "remaining": 0,
+                "stopped": true,
+                "dequeued": true,
+            });
+            self.record(pending.run, &answer);
+            let _ = pending.report.send(answer);
+            dropped += 1;
+            false
+        });
+        dropped
+    }
+
     /// [`Store::submit`], at the front of the queue.
     fn submit_front(&self, job: Job) -> mpsc::Receiver<serde_json::Value> {
         let (report, progress) = mpsc::channel();
@@ -1718,7 +2232,7 @@ impl Store {
                 // it is.
                 work: match kind {
                     // A picked list is indexed as the list it is, like a burst.
-                    RunKind::Batch | RunKind::Files => Work::Rest(paths),
+                    RunKind::Batch | RunKind::Files | RunKind::Decisions => Work::Rest(paths),
                     // A compaction is never admitted, so never reaches here;
                     // named rather than folded into a wildcard so a new kind
                     // has to say where it goes.
@@ -2336,6 +2850,12 @@ pub struct Limits {
     pub runs_at_once: Limit,
     pub embed_threads: Limit,
     pub index_memory_mb: Limit,
+    /// The CPU cap in percent: the most of all cores semlith's own process
+    /// may use while it indexes. `derived` and `ceiling` are both 100, and 0
+    /// is a value (paused), unlike the three above.
+    pub cpu_cap_percent: Limit,
+    /// What semlith's process is using now, in percent of all cores.
+    pub cpu_measured_percent: f64,
     /// The reading the three were derived from, as the page shows it.
     ///
     /// Carried as JSON rather than by deriving `Serialize` on the reading
@@ -2390,6 +2910,17 @@ impl Limits {
                 crate::index::INDEX_MEMORY_ENV,
                 memory_ceiling,
             ),
+            cpu_cap_percent: {
+                let (value, source) = crate::cpucap::in_force();
+                Limit {
+                    value: usize::from(value),
+                    source,
+                    derived: 100,
+                    reason: "100 % is no cap: indexing may use every core".to_string(),
+                    ceiling: 100,
+                }
+            },
+            cpu_measured_percent: crate::cpucap::measured_percent(),
             machine: serde_json::json!({
                 "logical_cores": machine.logical_cores,
                 "physical_cores": machine.physical_cores,
@@ -2425,16 +2956,18 @@ impl Limits {
         self
     }
 
-    /// The line `semlith start` prints: all three values with their source.
+    /// The line `semlith start` prints: every value with its source.
     pub fn line(&self) -> String {
         format!(
-            "indexing: {} run(s) at once ({}), {} embedder thread(s) each ({}), {} MiB of vectors per store ({})",
+            "indexing: {} run(s) at once ({}), {} embedder thread(s) each ({}), {} MiB of vectors per store ({}), CPU cap {} % ({})",
             self.runs_at_once.value,
             self.runs_at_once.source.as_str(),
             self.embed_threads.value,
             self.embed_threads.source.as_str(),
             self.index_memory_mb.value,
             self.index_memory_mb.source.as_str(),
+            self.cpu_cap_percent.value,
+            self.cpu_cap_percent.source.as_str(),
         )
     }
 }
@@ -2504,6 +3037,16 @@ pub struct State {
     /// agent's index freezing the portal for as long as the slice lasts. A
     /// reader that is never used costs a SQLite handle and no vectors.
     pub mcp_fleet: Mutex<Option<Fleet>>,
+    /// Set when a store joins or leaves: the readers are rebuilt on their next
+    /// use. A flag rather than taking their locks, which a search or a graph
+    /// holds for as long as it runs: a store created during one waited for it,
+    /// past 30 s on a busy runner (drive rc4.5, rc4.6 on Ubuntu).
+    readers_stale: AtomicBool,
+    mcp_stale: AtomicBool,
+    /// Held while a store is looked up and, if absent, opened: two requests
+    /// for the same new folder raced, and the second found the first's lock
+    /// and was refused with "being indexed by" this daemon (drive rc4.5).
+    opening: Mutex<()>,
     /// Whether retrievals are recorded into each store's `retrievals` table.
     ///
     /// On unless `--no-ledger` or `SEMLITH_LEDGER=0` says otherwise, which
@@ -2739,7 +3282,7 @@ impl State {
     /// second press is Start indexing. Nothing else waits: other runs and the
     /// watcher go on.
     pub fn index_planned(
-        &self,
+        self: &Arc<Self>,
         store: &Arc<Store>,
         paths: Vec<PathBuf>,
         review: bool,
@@ -2786,31 +3329,68 @@ impl State {
             let _ = give_run.send(run);
             return Ok(run);
         }
-        let plan = self.plan(store, &paths).ok();
-        if (review || hold)
-            && let Some(plan) = plan.as_ref().filter(|p| hold || !p.review.is_empty())
-        {
-            let run = self.admission.mint();
-            store.begin_run(run, paths.clone(), RunKind::Run);
-            store.set_plan(run, plan, true);
-            // What the store held before, as a started run reports it: a
-            // held run never starts, and Discard scan decides from this
-            // whether the scan made the store and should take it away.
-            if let Ok((files, chunks, _)) =
-                crate::Semlith::open_existing(&store.dir).and_then(|reader| reader.stats())
-            {
-                store.set_before(run, files.max(0) as u64, chunks.max(0) as u64);
-            }
-            self.awaiting
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(run, (Arc::clone(store), paths));
-            return Ok(run);
-        }
-        let (run, _progress) = self.admission.submit(store, paths, RunKind::Run);
-        if let Some(plan) = &plan {
-            store.set_plan(run, plan, false);
-        }
+        // The scan is a run from its first moment, in the Scanning status,
+        // saying how far it has got: the walk, every file read, hashed and
+        // checked, then the rules. It used to run inside the request, so the
+        // page had nothing to show but a paced guess until it was over. When
+        // it is done the same run holds for review or goes to the queue.
+        let run = self.admission.mint();
+        store.begin_run(run, paths.clone(), RunKind::Run);
+        store.set_status(run, RunStatus::Scanning);
+        let me = Arc::clone(self);
+        let scanned = Arc::clone(store);
+        let gitignore = store.gitignore.load(Ordering::Relaxed);
+        std::thread::Builder::new()
+            .name("semlith-scan".to_string())
+            .spawn(move || {
+                let store = scanned;
+                let plan = crate::Semlith::open_existing(&store.dir).and_then(|mut reader| {
+                    reader.gitignore = gitignore;
+                    reader.plan_with(&paths, &mut |p| {
+                        store.record(
+                            run,
+                            &serde_json::json!({
+                                "event": "scan",
+                                "phase": p.phase,
+                                "scanned": p.scanned,
+                                "total": p.total,
+                                "bytes": p.bytes,
+                                "bytes_total": p.bytes_total,
+                                "flagged": p.flagged,
+                            }),
+                        );
+                    })
+                });
+                match plan {
+                    Ok(plan) if review || hold => {
+                        if hold || !plan.review.is_empty() {
+                            store.set_plan(run, &plan, true);
+                            // What the store held before, as a started run
+                            // reports it: a held run never starts, and Discard
+                            // scan decides from this whether the scan made the
+                            // store and should take it away.
+                            if let Ok((files, chunks, _)) =
+                                crate::Semlith::open_existing(&store.dir)
+                                    .and_then(|reader| reader.stats())
+                            {
+                                store.set_before(run, files.max(0) as u64, chunks.max(0) as u64);
+                            }
+                            me.awaiting
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(run, (Arc::clone(&store), paths));
+                            return;
+                        }
+                        store.set_plan(run, &plan, false);
+                    }
+                    Ok(plan) => store.set_plan(run, &plan, false),
+                    // The run reads the files itself and says what it cannot.
+                    Err(_) => {}
+                }
+                store.set_status(run, RunStatus::Queued);
+                me.admission.enqueue(run, &store, paths, RunKind::Run);
+            })
+            .context("starting the scan")?;
         Ok(run)
     }
 
@@ -2883,6 +3463,57 @@ impl State {
         }))
     }
 
+    /// Record a person's decision on many files in one writer job, at the
+    /// front of the queue, without indexing any (see [`Job::Decide`]).
+    pub fn decide(
+        &self,
+        store: &Arc<Store>,
+        files: Vec<PathBuf>,
+        mode: Option<&str>,
+        source: &str,
+    ) -> Result<mpsc::Receiver<serde_json::Value>> {
+        Self::writer_alive(store)?;
+        Ok(store.submit_front(Job::Decide {
+            files,
+            mode: mode.map(str::to_string),
+            source: source.to_string(),
+        }))
+    }
+
+    /// Index the files a decision let in (or put back on the list), as one
+    /// run with a card, opening with the decisions as its first phase.
+    pub fn index_decided(&self, store: &Arc<Store>, files: Vec<PathBuf>, decided: usize) -> u64 {
+        let (run, _progress) = self.admission.submit(store, files, RunKind::Decisions);
+        store.record(
+            run,
+            &serde_json::json!({
+                "event": "phase",
+                "phase": "decisions",
+                "detail": format!("{decided} decisions recorded"),
+            }),
+        );
+        run
+    }
+
+    /// Say on a reviewed run that a person's decisions were recorded before
+    /// it was started: its first phase.
+    pub fn note_decisions(&self, run: u64, decided: usize) {
+        if let Some(store) = self
+            .stores()
+            .into_iter()
+            .find(|s| s.run_kind(run).is_some())
+        {
+            store.record(
+                run,
+                &serde_json::json!({
+                    "event": "phase",
+                    "phase": "decisions",
+                    "detail": format!("{decided} decisions recorded"),
+                }),
+            );
+        }
+    }
+
     /// Undo an acceptance: the file leaves the store and returns to the list.
     pub fn revoke(
         &self,
@@ -2945,7 +3576,7 @@ impl State {
         // Before the files go: a reader holding this store open would keep its
         // SQLite handles alive, and on Windows an open handle refuses the
         // delete outright.
-        self.reopen_readers();
+        self.release_readers();
         Discovery::remove(&store.dir);
 
         // The registry entry goes before the bump: a client that re-reads
@@ -3009,7 +3640,7 @@ impl State {
             .write()
             .expect("the stores lock")
             .retain(|s| s.name != old);
-        self.reopen_readers();
+        self.release_readers();
         Discovery::remove(&store.dir);
         let dir = match crate::home::rename_store(old, new) {
             Ok(dir) => dir,
@@ -3241,6 +3872,9 @@ impl State {
     /// The reader forwarded MCP calls answer from, opened on first use.
     pub fn open_mcp_fleet(&self) -> Result<()> {
         let mut fleet = self.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner());
+        if self.mcp_stale.swap(false, Ordering::SeqCst) {
+            *fleet = None;
+        }
         if fleet.is_some() {
             return Ok(());
         }
@@ -3272,6 +3906,7 @@ impl State {
     /// that another process might already own.
     pub fn open_store(self: &Arc<Self>, dir: &Path, expect_run: bool) -> Result<Arc<Store>> {
         let dir = crate::canonical(dir);
+        let _opening = self.opening.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(open) = self.stores().into_iter().find(|s| s.dir == dir) {
             return Ok(open);
         }
@@ -3336,15 +3971,41 @@ impl State {
     /// Dropped rather than rebuilt here: rebuilding loads the embedding model,
     /// and doing that while holding the lock would stall whichever request
     /// happened to be next. The reader is opened on demand anyway.
-    fn reopen_readers(&self) {
+    /// Close the readers now, waiting for any search that holds them: a store
+    /// leaving or moving has to let go of its files first, and Windows will
+    /// neither delete nor move a folder with an open handle in it (drive v6.14:
+    /// "Access is denied" renaming a store while the portal searched).
+    fn release_readers(&self) {
         *self.fleet.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.readers_stale.store(false, Ordering::SeqCst);
+        self.mcp_stale.store(false, Ordering::SeqCst);
+    }
+
+    fn reopen_readers(&self) {
+        self.readers_stale.store(true, Ordering::SeqCst);
+        self.mcp_stale.store(true, Ordering::SeqCst);
+        // Dropped now when nothing is reading, so the files of a store being
+        // deleted are let go of at once (Windows refuses to delete an open one).
+        if let Ok(mut fleet) = self.fleet.try_lock()
+            && self.readers_stale.swap(false, Ordering::SeqCst)
+        {
+            *fleet = None;
+        }
+        if let Ok(mut fleet) = self.mcp_fleet.try_lock()
+            && self.mcp_stale.swap(false, Ordering::SeqCst)
+        {
+            *fleet = None;
+        }
     }
 
     /// The reader every read route answers from, opened on first use and
     /// reopened after a store joins.
     pub fn open_fleet(&self) -> Result<()> {
         let mut fleet = self.fleet.lock().unwrap_or_else(|e| e.into_inner());
+        if self.readers_stale.swap(false, Ordering::SeqCst) {
+            *fleet = None;
+        }
         if fleet.is_some() {
             return Ok(());
         }
@@ -3703,6 +4364,9 @@ pub fn run(
     {
         lane.wake();
     }
+    // A first estimate needs a CPU figure; a fresh machine has none until it
+    // has run, so the CPU's known-answer check gives one, once, off to the side.
+    std::thread::spawn(crate::accel::seed_cpu_rate);
 
     // Background while idle, normal while embedding. Before the watchers
     // start, so the catch-up they run is the first thing that lifts it.
@@ -3727,6 +4391,9 @@ pub fn run(
         proxies: Mutex::new(BTreeMap::new()),
         clients: Mutex::new(BTreeMap::new()),
         mcp_fleet: Mutex::new(None),
+        readers_stale: AtomicBool::new(false),
+        mcp_stale: AtomicBool::new(false),
+        opening: Mutex::new(()),
         ledger,
         schedules: crate::schedule::Runner::new(),
         gone: Mutex::new(Vec::new()),
@@ -3994,6 +4661,7 @@ fn tend(
         watch::Held {
             catch_up: false,
             roots_now: &|| store.watched(),
+            events: Some(Arc::clone(&store.events_waiting)),
             waiting: &|| false,
             // A burst larger than a save is admitted like a run, so a `git
             // checkout` of thousands of files waits its turn and shows as a
@@ -4223,9 +4891,31 @@ fn perform(
                 let admission = Arc::clone(admission);
                 let told = std::sync::atomic::AtomicBool::new(false);
                 let held = std::sync::atomic::AtomicBool::new(false);
+                let slice_began = std::time::Instant::now();
                 move || {
                     if store.cancelled.load(Ordering::Relaxed) {
                         return crate::Flow::Stop;
+                    }
+                    // A slice gives the writer back after its budget only when
+                    // something wants it: file changes for the watcher, or a job
+                    // on this store's queue. With nothing waiting it carries on,
+                    // because every slice end drains the lanes and saves, and on
+                    // a manual walk that cost a minute per 45 s slice.
+                    //
+                    // File changes wait longer than a job: a person saving in
+                    // the folder being indexed (replay 11: screenshots landing
+                    // in it) gave up the writer every 45 s, and each yield
+                    // drains.
+                    let spent = slice_began.elapsed();
+                    if (spent >= SLICE
+                        && !store
+                            .queue
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .is_empty())
+                        || (spent >= EVENTS_SLICE && store.events_waiting.load(Ordering::Relaxed))
+                    {
+                        return crate::Flow::Yield;
                     }
                     // The daemon is shutting down: keep what is done and
                     // step aside now, as the slice budget would in 45 s,
@@ -4275,9 +4965,17 @@ fn perform(
             let rows_before = tally.rows;
             let chunks_before = tally.chunks;
             let symbols_before = tally.symbols;
+            let images_before = tally.images;
             let on_file = |path: &Path, progress: crate::IndexProgress| {
                 let scanned = scanned_before + progress.scanned as u64;
-                say(serde_json::json!({
+                if progress.outcome == crate::FileOutcome::Phase {
+                    say(serde_json::json!({
+                        "event": "phase",
+                        "phase": progress.phase.as_str(),
+                        "detail": progress.phase_detail,
+                    }));
+                }
+                let mut line = serde_json::json!({
                     // A batch inside a file is progress, not a verdict about
                     // the file: it moves the counters and stays off the log.
                     "event": if progress.outcome == crate::FileOutcome::Progress { "progress" } else { "file" },
@@ -4306,24 +5004,61 @@ fn perform(
                     "threads": progress.threads,
                     "lanes": progress.lanes,
                     "elapsed_ms": store.run_elapsed_ms(run),
-                }));
+                });
+                if let Some(object) = line.as_object_mut() {
+                    // The run's, like the counters above: rows written before
+                    // this slice were all embedded before it handed on.
+                    for (key, value) in [
+                        (
+                            "expected_chunks",
+                            serde_json::json!(rows_before + progress.expected_chunks),
+                        ),
+                        (
+                            "images",
+                            serde_json::json!(images_before + progress.images as u64),
+                        ),
+                        (
+                            "images_total",
+                            serde_json::json!(images_before + progress.images_total as u64),
+                        ),
+                        ("phase", serde_json::json!(progress.phase.as_str())),
+                        ("phase_detail", serde_json::json!(progress.phase_detail)),
+                    ] {
+                        object.insert(key.to_string(), value);
+                    }
+                }
+                // A phase change is its own line, said above; its counters
+                // ride on a progress event so they stay off the log.
+                if progress.outcome == crate::FileOutcome::Phase {
+                    line["event"] = serde_json::json!("progress");
+                }
+                say(line);
             };
             // Every slice of a forced run is forced: a slice only carries the
             // files the run has not reached yet.
             writer.force = store.run_kind(run).is_some_and(RunKind::forced);
+            writer.planned = store.run_planned(run);
+            writer.planned_images = store.run_planned_images(run);
+            writer.expect_rest = match &work {
+                Work::Rest(_) => Some((tally.expected_left, tally.images_left as usize)),
+                Work::Roots(_) => None,
+            };
             let outcome = match work {
                 Work::Roots(ref roots) => {
-                    writer.index_within_held_under(roots, SLICE, &control, on_file)
+                    writer.index_within_held_under(roots, RUN_BUDGET, &control, on_file)
                 }
                 Work::Rest(rest) => writer.index_rest_held_under(
                     rest,
-                    SLICE,
+                    RUN_BUDGET,
                     (bytes_total_before > 0).then_some(bytes_total_before),
                     &control,
                     on_file,
                 ),
             };
             writer.force = false;
+            writer.planned = None;
+            writer.planned_images = None;
+            writer.expect_rest = None;
             match outcome {
                 Ok(mut done) => {
                     store.last_write.store(now() as usize, Ordering::Relaxed);
@@ -4374,6 +5109,9 @@ fn perform(
                     let slice_stages = tally.stages.clone();
                     let slice_cache = (tally.cache_lookups, tally.cache_hits);
                     if done.remaining > 0 {
+                        // The lanes stay loaded for the next slice: this
+                        // one's drain and save gave them nothing for a minute.
+                        crate::accel::keep_warm(Duration::from_secs(300));
                         // The remainder of the walk, not the roots. Handing the
                         // roots back meant the next slice walked the tree from
                         // the top and re-opened and re-hashed every file the
@@ -4434,6 +5172,17 @@ fn perform(
                         store.note(text);
                     } else {
                         store.note(format!("{} indexed from the portal", tally.indexed));
+                    }
+                    // What the lanes managed, remembered for the next estimate;
+                    // the image model's rate from its own time on the writer.
+                    for (lane, rate) in store.run_lane_measures(run) {
+                        crate::accel::note_rate(&lane, rate);
+                    }
+                    if let Some(ms) = tally.stages.write_parts_ms.get("images")
+                        && tally.images >= 5
+                        && *ms > 0
+                    {
+                        crate::accel::note_rate("clip", tally.images as f64 * 1000.0 / *ms as f64);
                     }
                     // The daemon's log carries where the run's time went, so
                     // the next bottleneck is read rather than guessed.
@@ -4535,6 +5284,32 @@ fn perform(
                 }
                 Err(e) => say(serde_json::json!({ "event": "error", "error": format!("{e:#}") })),
             }
+            None
+        }
+        Job::Decide {
+            files,
+            mode,
+            source,
+        } => {
+            let mut results = Vec::with_capacity(files.len());
+            for path in &files {
+                let key = path.to_string_lossy().into_owned();
+                let outcome = match mode.as_deref() {
+                    Some(mode) => writer.accept(&key, mode, &source).map(|a| a.path),
+                    None => writer.revoke(&key).map(|_| key.clone()),
+                };
+                results.push(match outcome {
+                    Ok(stored) => serde_json::json!({ "path": crate::plain(&key), "stored": stored, "ok": true }),
+                    Err(e) => serde_json::json!({ "path": crate::plain(&key), "ok": false, "error": format!("{e:#}") }),
+                });
+            }
+            store.last_write.store(now() as usize, Ordering::Relaxed);
+            store.note(format!(
+                "{} decision(s) recorded ({})",
+                files.len(),
+                mode.as_deref().unwrap_or("reset")
+            ));
+            say(serde_json::json!({ "event": "done", "results": results }));
             None
         }
         Job::Revoke(path) => {
@@ -5256,6 +6031,38 @@ mod tests {
         assert_eq!(admission.dequeue("b"), 0);
     }
 
+    /// A run admitted behind another writer job still says "queued", and
+    /// taking it out finds it there: walk 3 answered "nothing waiting".
+    #[test]
+    fn a_run_waiting_on_the_writer_can_be_taken_out() {
+        let _held = counters();
+        let store = bare_store("w");
+        let forget = store.submit(Job::Forget(PathBuf::from("/nowhere/x")), None);
+        let (report, waiting) = mpsc::channel();
+        store.submit_index(
+            7,
+            Vec::new(),
+            RunKind::Run,
+            report,
+            serde_json::json!({ "event": "queued", "run": 7 }),
+        );
+        assert_eq!(waiting.recv().unwrap()["event"], "queued");
+
+        assert_eq!(
+            store.dequeue_runs(Some(8)),
+            0,
+            "took a run it was not asked for"
+        );
+        assert_eq!(store.dequeue_runs(Some(7)), 1);
+        let answer = waiting.recv().expect("the dequeued run was answered");
+        assert_eq!(answer["dequeued"], true);
+        assert_eq!(answer["removed"], 0, "a dequeued run undid something");
+        // The forget is not a run and stays queued.
+        assert_eq!(store.queue.lock().unwrap().len(), 1);
+        drop(forget);
+        assert_eq!(store.dequeue_runs(None), 0);
+    }
+
     /// Each counter moves when, and only when, its own domain is written.
     ///
     /// The bump sites themselves are held to "once, and nowhere else" by
@@ -5407,6 +6214,38 @@ mod tests {
         assert_eq!(admission.running(), 1, "then the queue moves");
     }
 
+    /// Embedding and index saves say themselves on the log, every line also
+    /// lands in the run's file, and the history route pages that file and
+    /// refuses a name that is not a run's.
+    #[test]
+    fn every_stage_is_logged_and_the_whole_log_is_kept_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = RunState::new(3, Vec::new(), RunKind::Run);
+        std::fs::create_dir_all(dir.path().join(LOGS_DIR)).unwrap();
+        run.log_file = Some(dir.path().join(LOGS_DIR).join("1700000000000-3.jsonl"));
+        run.log_key = Some("1700000000000-3".into());
+        run.absorb(&serde_json::json!({ "event": "file", "outcome": "indexing", "path": "/r/a.md", "why": "4 chunks", "rows": 4 }));
+        run.absorb(&serde_json::json!({ "event": "progress", "chunks": 4, "rows": 4 }));
+        run.absorb(&serde_json::json!({ "event": "phase", "phase": "save" }));
+        run.absorb(&serde_json::json!({ "event": "phase", "phase": "embed" }));
+        run.absorb(&serde_json::json!({ "event": "done", "indexed": 1, "chunks": 4 }));
+        let events: Vec<&str> = run.log.iter().filter_map(|l| l["event"].as_str()).collect();
+        assert!(events.contains(&"embed"), "{events:?}");
+        assert!(events.contains(&"write"), "{events:?}");
+        assert_eq!(events.last(), Some(&"done"), "{events:?}");
+
+        let (all, more) = run_log(dir.path(), "1700000000000-3", 0, 100).unwrap();
+        assert!(!more);
+        assert_eq!(all.len(), run.log.len(), "the file holds every line");
+        let (page, more) = run_log(dir.path(), "1700000000000-3", 1, 2).unwrap();
+        assert_eq!(page.len(), 2);
+        assert!(more);
+        assert_eq!(page[0]["seq"], all[1]["seq"]);
+        for bad in ["../x", "1-2/../../a", "abc-1", "17", ""] {
+            assert!(run_log(dir.path(), bad, 0, 10).is_none(), "{bad}");
+        }
+    }
+
     /// The card's rate is the chunks of the last ten active seconds over
     /// their time, blank before the first batch, and the average leaves out
     /// the time before embedding began.
@@ -5425,139 +6264,127 @@ mod tests {
         assert_eq!(average, Some(20.0));
     }
 
-    /// The time left is the bytes still to go over the bytes per second of
-    /// the last ten active seconds, and there is none until the rate settles
-    /// or while the run is not running.
-    #[test]
-    fn the_estimate_is_bytes_left_over_the_rolling_byte_rate() {
-        let mut run = RunState::new(1, Vec::new(), RunKind::Run);
-        run.status = RunStatus::Running;
-        run.bytes_total = 10_000_000;
-        run.first_sample = Some((0, 0, 0));
-        run.samples = VecDeque::from(vec![(0, 0, 0), (2_000, 40, 200_000)]);
-        run.bytes = 300_000;
-        run.ended = Some(Duration::from_secs(3));
-        assert_eq!(
-            run.eta_ms(),
-            None,
-            "three seconds in, the rate has not settled"
-        );
-
-        // 20 s in; the newest sample at or before 10 s is the base: 3 MB in
-        // 10 s is 300 KB/s, and 6 MB left is 20 s.
-        run.samples = VecDeque::from(vec![
-            (0, 0, 0),
-            (10_000, 200, 1_000_000),
-            (15_000, 300, 2_500_000),
-        ]);
-        run.bytes = 4_000_000;
-        run.ended = Some(Duration::from_secs(20));
-        assert_eq!(run.eta_ms(), Some(20_000));
-
-        run.status = RunStatus::Paused;
-        assert_eq!(
-            run.eta_ms(),
-            None,
-            "a paused run has no time left to count down"
-        );
+    /// A file line as the engine's callback sends it, at `t` seconds of the
+    /// run's clock.
+    fn line(run: &mut RunState, t: u64, fields: serde_json::Value) {
+        run.ended = Some(Duration::from_secs(t));
+        let mut event = serde_json::json!({ "event": "file", "outcome": "indexing" });
+        for (k, v) in fields.as_object().unwrap() {
+            event[k] = v.clone();
+        }
+        run.absorb(&event);
     }
 
-    /// The plan's estimate is on the card from the first batch, before the
-    /// measured rate settles, and a finished run's rate is what a store with
-    /// no rate of its own is planned on (2.7, measured failing at the 0.30.0
-    /// walk stop: the first estimate came five seconds into embedding).
+    /// The walk's run, replayed: a 4,369-file run whose embedding keeps up
+    /// with its reading, then one file that adds thirty thousand chunks.
+    /// rc.3 read 99 % from the first second; the walk's rc.4 build read 22 h,
+    /// then 5 h, then 1 h 34 as such files arrived. In work units the bar
+    /// climbs with the files and chunks, never moves backwards, stays below
+    /// 100 % until done, and the time left moves at most a quarter in ten
+    /// seconds.
     #[test]
-    fn the_first_estimate_comes_with_the_first_batch() {
+    fn progress_and_time_left_follow_the_work_not_the_bytes() {
+        let mut run = RunState::new(1, Vec::new(), RunKind::Run);
+        assert_eq!(run.progress(), Some(0.0), "queued");
+        run.status = RunStatus::Running;
+        run.eta.set_prior(Some(100.0));
+        let mut last_pct = 0.0;
+        let mut shown: Vec<(u64, u64)> = Vec::new();
+        for t in 1..=400u64 {
+            let scanned = (t * 10).min(4_369);
+            let mut expected = 60_000 + scanned * 2;
+            if t >= 120 {
+                expected += 30_000;
+            }
+            let chunks = (t * 100).min(expected);
+            line(
+                &mut run,
+                t,
+                serde_json::json!({
+                    "scanned": scanned, "total": 4_369, "chunks": chunks,
+                    "rows": chunks + 200, "expected_chunks": expected,
+                    "phase": "embed",
+                }),
+            );
+            let pct = run.progress().unwrap();
+            assert!(pct >= last_pct, "{pct} after {last_pct} at {t} s");
+            assert!(pct < 1.0);
+            last_pct = pct;
+            if let Some(ms) = run.eta_ms() {
+                shown.push((t, ms));
+            }
+        }
+        assert!(
+            run.progress().unwrap() > 0.4,
+            "40,000 of about 99,000 chunks: {}",
+            run.progress().unwrap()
+        );
+        // The work grew by thirty thousand chunks at 120 s: the figure
+        // follows the work there, and the cap holds everywhere else.
+        for pair in shown
+            .windows(10)
+            .filter(|p| !(p[0].0 < 120 && p[9].0 >= 120))
+        {
+            let ((t0, a), (t1, b)) = (pair[0], pair[9]);
+            let counted = a.saturating_sub((t1 - t0) * 1_000).max(1_000) as f64;
+            assert!(
+                (b as f64) <= a as f64 * 1.25 * 1.001 && b as f64 >= counted / 1.25 / 1.001,
+                "{a} ms -> {b} ms between {t0} s and {t1} s"
+            );
+        }
+        run.status = RunStatus::Done;
+        assert_eq!(run.progress(), Some(1.0));
+        run.status = RunStatus::Failed;
+        assert_eq!(run.progress(), None, "a failed run has no share done");
+    }
+
+    /// Every phase the engine enters is on the run's timeline, in order, with
+    /// when it began and ended, and the estimate holds while a lane loads.
+    #[test]
+    fn phases_build_a_timeline_and_a_lane_wait_holds_the_estimate() {
+        let mut run = RunState::new(1, Vec::new(), RunKind::Run);
+        run.status = RunStatus::Running;
+        run.eta.set_prior(Some(50.0));
+        for (t, phase) in [(1, "walk"), (2, "read"), (5, "embed")] {
+            line(
+                &mut run,
+                t,
+                serde_json::json!({ "phase": phase, "scanned": t, "total": 100, "expected_chunks": 1_000, "chunks": t * 10 }),
+            );
+        }
+        line(
+            &mut run,
+            8,
+            serde_json::json!({ "phase": "lane", "phase_detail": "Neural Engine loading", "scanned": 8, "total": 100, "expected_chunks": 1_000, "chunks": 50 }),
+        );
+        let held = run.eta_ms();
+        line(
+            &mut run,
+            30,
+            serde_json::json!({ "phase": "lane", "phase_detail": "Neural Engine loading", "scanned": 8, "total": 100, "expected_chunks": 1_000, "chunks": 50 }),
+        );
+        assert_eq!(run.eta_ms(), held, "a lane wait does not count down or up");
+        let names: Vec<&str> = run
+            .phases
+            .iter()
+            .filter_map(|p| p["phase"].as_str())
+            .collect();
+        assert_eq!(names, ["walk", "read", "embed", "lane"]);
+        assert!(run.phases[..3].iter().all(|p| !p["until"].is_null()));
+        assert_eq!(run.phase_detail.as_deref(), Some("Neural Engine loading"));
+        run.absorb(&serde_json::json!({ "event": "done", "stopped": false }));
+        assert!(run.phases.iter().all(|p| !p["until"].is_null()));
+        assert_eq!(run.phase, None);
+    }
+
+    /// A finished run's byte rate is what a store with no rate of its own is
+    /// planned on (2.7).
+    #[test]
+    fn a_finished_runs_byte_rate_is_its_bytes_over_its_embedding_time() {
         let mut done = RunState::new(1, Vec::new(), RunKind::Run);
         done.first_sample = Some((1_000, 0, 0));
         done.samples = VecDeque::from(vec![(1_000, 0, 0), (5_000, 90, 2_000_000)]);
         assert_eq!(done.embed_rate(), Some(500_000.0));
-
-        let mut run = RunState::new(2, Vec::new(), RunKind::Run);
-        run.status = RunStatus::Running;
-        run.bytes_total = 3_000_000;
-        run.plan_eta_ms = Some(6_000);
-        run.first_sample = Some((500, 0, 0));
-        run.samples = VecDeque::from(vec![(500, 0, 0)]);
-        run.bytes = 50_000;
-        run.ended = Some(Duration::from_millis(600));
-        assert_eq!(
-            run.eta_ms(),
-            Some(5_400),
-            "no estimate with the first batch"
-        );
-    }
-
-    /// Issue #143: a run that stalls for eight seconds in a phase — writing its
-    /// index — shows no estimate above twice the one before it.
-    #[test]
-    fn a_stalled_phase_holds_the_estimate_and_it_never_more_than_doubles() {
-        let mut run = RunState::new(1, Vec::new(), RunKind::Run);
-        run.status = RunStatus::Running;
-        run.bytes_total = 10_000_000;
-        run.first_sample = Some((0, 0, 0));
-        run.samples = VecDeque::from(vec![
-            (0, 0, 0),
-            (10_000, 200, 1_000_000),
-            (15_000, 300, 2_500_000),
-        ]);
-        run.bytes = 4_000_000;
-        run.ended = Some(Duration::from_secs(20));
-        let before = run.eta_ms().expect("settled");
-        // Eight seconds writing the index: no bytes move at all.
-        run.phase = Some("writing the index".to_string());
-        for t in 21..=28 {
-            run.samples.push_back((t * 1_000, 300, 4_000_000));
-            run.ended = Some(Duration::from_secs(t));
-            let eta = run.eta_ms().expect("held, not dropped");
-            assert!(eta <= before * 2, "{eta} ms after {before} ms at {t} s");
-        }
-        // Out of the phase, the rate over the window is far lower than
-        // before; the estimate may rise, but by at most 2x a poll.
-        run.phase = None;
-        run.samples.push_back((29_000, 310, 4_200_000));
-        run.bytes = 4_200_000;
-        run.ended = Some(Duration::from_secs(30));
-        let after = run.eta_ms().expect("moving again");
-        assert!(after <= before * 2, "{after} ms after {before} ms");
-    }
-
-    /// 0.30.1: a long run's estimate follows its rate. Before, a window that
-    /// moved under 1 % of the run's bytes counted as stalled, and a run that
-    /// never moves 1 % in ten seconds kept its first estimate for ever.
-    #[test]
-    fn a_long_runs_estimate_follows_its_rate() {
-        let mut run = RunState::new(1, Vec::new(), RunKind::Run);
-        run.status = RunStatus::Running;
-        // A gigabyte at 100 KB/s, then at 200 KB/s: 0.1 % and 0.2 % a window.
-        run.bytes_total = 1_000_000_000;
-        run.first_sample = Some((0, 0, 0));
-        run.samples = VecDeque::from(vec![(0, 0, 0)]);
-        let mut shown = Vec::new();
-        for t in 1..=40u64 {
-            run.bytes = if t <= 20 {
-                t * 100_000
-            } else {
-                2_000_000 + (t - 20) * 200_000
-            };
-            run.samples.push_back((t * 1_000, t, run.bytes));
-            run.ended = Some(Duration::from_secs(t));
-            if let Some(eta) = run.eta_ms() {
-                shown.push((t, eta));
-            }
-        }
-        let at = |t: u64| {
-            shown
-                .iter()
-                .find(|(at, _)| *at == t)
-                .expect("an estimate")
-                .1
-        };
-        // 998 MB left at 100 KB/s is 9,980 s.
-        assert_eq!(at(20) / 1_000, 9_980);
-        // Ten seconds into the faster rate the window is all 200 KB/s:
-        // 994 MB left is 4,970 s.
-        assert_eq!(at(40) / 1_000, 4_970);
     }
 
     /// 0.30.1: a saved memory figure is never clamped below the derived one,
@@ -5615,6 +6442,9 @@ mod tests {
             proxies: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
             mcp_fleet: Mutex::new(None),
+            readers_stale: AtomicBool::new(false),
+            mcp_stale: AtomicBool::new(false),
+            opening: Mutex::new(()),
             ledger: false,
             schedules: crate::schedule::Runner::new(),
             gone: Mutex::new(Vec::new()),

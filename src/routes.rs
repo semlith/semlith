@@ -151,6 +151,7 @@ fn dispatch(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/doctor") => doctor(state),
         (true, _, "/api/index/runs") => index_runs(state),
         (true, _, "/api/index/log") => index_log(state, request),
+        (true, _, "/api/index/history/log") => history_log(state, request),
         (true, _, "/api/projects") => projects(request),
         (true, _, "/api/changes") => changes(state),
         (true, _, "/api/refused") if request.query("decisions") == Some("1") => {
@@ -3081,9 +3082,9 @@ fn answer_with(
 /// brief, exact, read), patterns, and the Graph page's symbol, neighbours,
 /// path, impact, trace, map and drawing. `None` for any other path.
 ///
-/// Public for an embedder that keeps its own stores — Semlith Cloud draws the
-/// same Search and Graph pages over an organisation's stores and answers them
-/// with the very routes the local portal uses.
+/// Public for an embedder that keeps its own stores, so it can draw the same
+/// Search and Graph pages over them and answer them with the very routes the
+/// local portal uses.
 pub fn portal_read(fleet: &mut crate::fleet::Fleet, request: &Request) -> Option<Response> {
     Some(match request.path.as_str() {
         "/api/search" => search_on(fleet, request),
@@ -4182,6 +4183,40 @@ fn index_log(state: &Arc<State>, request: &Request) -> Response {
     Response::json(&json!({ "store": name, "run": run, "lines": lines, "cursor": last }))
 }
 
+/// One run's whole log, as its file beside the store keeps it: every line the
+/// live log showed, paged so a run of a hundred thousand files is not one
+/// response. `log` is the run's `log_file`; `from` and `limit` page it.
+fn history_log(state: &Arc<State>, request: &Request) -> Response {
+    let Some(name) = request.query("store") else {
+        return Response::error(400, "missing store");
+    };
+    let Some(store) = state.store(name) else {
+        return Response::error(404, &format!("no store called {name} is open"));
+    };
+    let Some(key) = request.query("log") else {
+        return Response::error(400, "missing log");
+    };
+    let from = request
+        .query("from")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let limit = request
+        .query("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(5_000)
+        .clamp(1, 20_000);
+    match crate::daemon::run_log(&store.dir, key, from, limit) {
+        Some((lines, more)) => Response::json(&json!({
+            "store": name,
+            "log": key,
+            "from": from,
+            "lines": lines,
+            "more": more,
+        })),
+        None => Response::error(404, "no log is kept for that run"),
+    }
+}
+
 /// The projects directly under a directory, for the Index page's checklist.
 ///
 /// A git repository is the unit, because it is the unit a developer means by
@@ -4363,6 +4398,23 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
         }
         saved.index_memory_mb = Some(n);
     }
+    // 0 is a cap (CPU work paused), so this one is clamped to 0-100 and an
+    // out-of-range value is refused rather than quietly clamped.
+    if let Some(raw) = body.get("cpu_cap_percent") {
+        let Some(n) = raw.as_u64().filter(|n| *n <= 100) else {
+            return Response::error(400, "cpu_cap_percent must be a whole number from 0 to 100");
+        };
+        if limits.cpu_cap_percent.source == daemon::Source::Environment {
+            return Response::error(
+                409,
+                &format!(
+                    "{} is set in this daemon's environment, so the page cannot change it",
+                    crate::cpucap::ENV
+                ),
+            );
+        }
+        saved.cpu_cap_percent = Some(n as u8);
+    }
     // The two compaction settings take 0 -- off, and keep everything -- so
     // they are clamped to their range rather than to at least one.
     if let Some(n) = body
@@ -4407,8 +4459,11 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
     }
     state.admission.set_limit(limits.runs_at_once.value);
     let applied = format!(
-        "now running with {} run(s) at once, {} thread(s) each, and {} MiB of vectors per store",
-        limits.runs_at_once.value, limits.embed_threads.value, limits.index_memory_mb.value
+        "now running with {} run(s) at once, {} thread(s) each, {} MiB of vectors per store, and a {} % CPU cap",
+        limits.runs_at_once.value,
+        limits.embed_threads.value,
+        limits.index_memory_mb.value,
+        limits.cpu_cap_percent.value
     );
     Response::json(&json!({
         "limits": limits,
@@ -4501,6 +4556,15 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
     if let Some(id) = run {
         match action {
             Some("start") => {
+                // Decisions a page recorded just before starting (`defer`)
+                // are this run's to apply: said as its first phase.
+                if let Some(n) = body
+                    .get("decisions")
+                    .and_then(Value::as_u64)
+                    .filter(|n| *n > 0)
+                {
+                    state.note_decisions(id, n as usize);
+                }
                 return match state.start_reviewed(id) {
                     Ok(()) => Response::json(&json!({ "started": id })),
                     Err(e) => Response::error(409, &e.to_string()),
@@ -4588,6 +4652,10 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
         // to unwind, only a place in a line.
         Some("dequeue") => {
             dequeued += state.admission.dequeue(&store.name);
+            // Admitted already and waiting on the writer behind another job.
+            if dequeued == 0 {
+                dequeued += store.dequeue_runs(run);
+            }
             if dequeued == 0 {
                 return Response::error(
                     409,
@@ -4897,7 +4965,7 @@ fn refused_decide(state: &Arc<State>, request: &Request, accept: bool) -> Respon
         .map_err(|e| e.to_string())?;
         answer_of(progress)
     };
-    // A list from 0.35.0 (the owner's bulk decision); each file is its own
+    // A list from 0.35.0 (bulk decisions); each file is its own
     // decision and its own ledger row, and one refusal does not stop the rest.
     if let Some(files) = body.get("files").and_then(Value::as_array) {
         let results: Vec<Value> = files
@@ -4956,26 +5024,49 @@ fn decide_files(state: &Arc<State>, request: &Request) -> Response {
         Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
-    let results: Vec<Value> = files
+    // Recorded in one writer job, however many; the files a decision lets in
+    // (or puts back on the list) are then indexed as one run with a card of
+    // its own, unless the caller defers that to a run it is about to start.
+    let defer = body.get("defer").and_then(Value::as_bool).unwrap_or(false);
+    let paths: Vec<PathBuf> = files
         .iter()
         .filter_map(Value::as_str)
-        .map(|path| {
-            let progress = match mode {
-                Some(mode) => state.accept(&store, PathBuf::from(path), mode, "portal"),
-                None => state.revoke(&store, PathBuf::from(path)),
-            };
-            match progress.map_err(|e| e.to_string()).and_then(answer_of) {
-                Ok(_) => json!({ "path": path, "ok": true, "decision": decision }),
-                Err(e) => json!({ "path": path, "ok": false, "error": e }),
-            }
+        .map(PathBuf::from)
+        .collect();
+    let answer = match state
+        .decide(&store, paths, mode, "portal")
+        .map_err(|e| e.to_string())
+        .and_then(answer_of)
+    {
+        Ok(answer) => answer,
+        Err(e) => return Response::error(500, &e),
+    };
+    let results: Vec<Value> = answer["results"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut r| {
+            r["decision"] = json!(decision);
+            r
         })
         .collect();
     let failed = results.iter().filter(|r| r["ok"] == json!(false)).count();
+    let applied = results.len() - failed;
+    let to_index: Vec<PathBuf> = results
+        .iter()
+        .filter(|r| r["ok"] == json!(true))
+        .filter_map(|r| r["stored"].as_str().map(PathBuf::from))
+        .collect();
+    let run = (!defer && decision != "out" && !to_index.is_empty())
+        .then(|| state.index_decided(&store, to_index, applied));
     Response::json(&json!({
         "store": store.name,
         "decision": decision,
         "results": results,
         "failed": failed,
+        "applied": applied,
+        "run": run,
     }))
 }
 

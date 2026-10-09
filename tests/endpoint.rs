@@ -159,7 +159,7 @@ fn the_agent_key_opens_mcp_and_nothing_else() {
     }
 
     // With the session token the accept route takes one path or, from 0.35.0
-    // (the owner's bulk decision), a `files` list — each file its own
+    // (bulk decisions), a `files` list — each file its own
     // decision. Anything else is refused before a store is even chosen.
     let (status, body) = daemon.with_token(
         "POST",

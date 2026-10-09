@@ -79,6 +79,10 @@ pub struct Stages {
     pub write_ms: u64,
     pub embed_wait_ms: BTreeMap<String, u64>,
     pub prepare_cpu_ms: BTreeMap<String, u64>,
+    /// What the writer's own time went on, by part (#198): `write_ms` is the
+    /// rest of the wall once every wait is taken out, and on a fast GPU it is
+    /// most of the run, so the part that dominates is the one worth cutting.
+    pub write_parts_ms: BTreeMap<String, u64>,
 }
 
 impl Stages {
@@ -96,6 +100,9 @@ impl Stages {
         }
         for (part, ms) in &other.prepare_cpu_ms {
             *self.prepare_cpu_ms.entry(part.clone()).or_default() += ms;
+        }
+        for (part, ms) in &other.write_parts_ms {
+            *self.write_parts_ms.entry(part.clone()).or_default() += ms;
         }
     }
 
@@ -125,7 +132,21 @@ impl Stages {
             format!("tokenize {}", secs(self.tokenize_ms)),
         ];
         parts.extend(waits);
-        parts.push(format!("write {}", secs(self.write_ms)));
+        let split: Vec<String> = self
+            .write_parts_ms
+            .iter()
+            .filter(|(_, ms)| **ms > 0)
+            .map(|(part, ms)| format!("{part} {}", secs(*ms)))
+            .collect();
+        if split.is_empty() {
+            parts.push(format!("write {}", secs(self.write_ms)));
+        } else {
+            parts.push(format!(
+                "write {} ({})",
+                secs(self.write_ms),
+                split.join(", ")
+            ));
+        }
         format!("stages over {}: {}", secs(self.wall_ms), parts.join(", "))
     }
 }
@@ -161,6 +182,51 @@ impl Clocks {
             self.parse.load(Ordering::Relaxed),
             self.tokenize.load(Ordering::Relaxed),
         ]
+    }
+}
+
+/// The writer's own work, timed by part. Cells, because the parts are timed
+/// inside methods that only borrow the store; the store is never shared
+/// between threads.
+#[derive(Debug, Default)]
+pub struct WriteParts {
+    micros: [std::cell::Cell<u64>; WRITE_PARTS.len()],
+}
+
+/// The parts, in the order `index -v` names them: rows and their keyword
+/// index, a replaced file's eviction, symbols and edges, vectors into the
+/// index and its sidecar, row commits, shard saves, indexed-file hashes, the
+/// vector cache, and images: recording what the image lane embedded on its own
+/// thread, never the embedding itself.
+pub const WRITE_PARTS: [&str; 9] = [
+    "rows", "evict", "graph", "vectors", "commit", "save", "hashes", "cache", "images",
+];
+
+impl WriteParts {
+    /// Charge the time since `since` to `part`, one of [`WRITE_PARTS`].
+    pub fn add(&self, part: &str, since: Instant) {
+        if let Some(at) = WRITE_PARTS.iter().position(|p| *p == part) {
+            let cell = &self.micros[at];
+            cell.set(cell.get() + since.elapsed().as_micros() as u64);
+        }
+    }
+
+    /// Every part's milliseconds, and the counters back to zero.
+    pub fn take(&self) -> BTreeMap<String, u64> {
+        WRITE_PARTS
+            .iter()
+            .zip(&self.micros)
+            .map(|(part, cell)| (part.to_string(), cell.replace(0) / 1000))
+            .collect()
+    }
+}
+
+/// Charges the time from its making to its drop to one part.
+pub struct Charge<'a>(pub &'a WriteParts, pub &'static str, pub Instant);
+
+impl Drop for Charge<'_> {
+    fn drop(&mut self) {
+        self.0.add(self.1, self.2);
     }
 }
 
@@ -407,6 +473,7 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
     {
         return Prepared::Refused(refusal);
     }
+    let _cap = crate::cpucap::slot();
     let started = Instant::now();
     let key = path.to_string_lossy();
     let opened = std::fs::File::open(path);
@@ -750,6 +817,51 @@ impl Prefetch {
         list.0.get(i..).map(<[PathBuf]>::to_vec).unwrap_or_default()
     }
 
+    /// [`Prefetch::take`], calling `tick` every two seconds it waits: a
+    /// large file can take the pool tens of seconds, and a run that says
+    /// nothing for that long reads as hung.
+    pub fn take_ticking(&self, i: usize, tick: &mut dyn FnMut()) -> Prepared {
+        let mut last = Instant::now();
+        loop {
+            if let Some(prepared) = self.try_take(i, Duration::from_millis(250)) {
+                return prepared;
+            }
+            if last.elapsed() >= Duration::from_secs(2) {
+                tick();
+                last = Instant::now();
+            }
+        }
+    }
+
+    /// The file at `i` if it is ready within `wait`.
+    fn try_take(&self, i: usize, wait: Duration) -> Option<Prepared> {
+        let until = Instant::now() + wait;
+        let mut done = self.shared.done.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(prepared) = done.0.remove(&i) {
+                done.1 = done.1.max(i + 1);
+                self.shared.room.notify_all();
+                return Some(prepared);
+            }
+            if Arc::strong_count(&self.shared) == 1 {
+                return Some(Prepared::Failed {
+                    error: anyhow::anyhow!("the prepare stage lost this file"),
+                    file_bytes: 0,
+                });
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            done = self
+                .shared
+                .ready
+                .wait_timeout(done, left.min(Duration::from_millis(50)))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
     /// The file at `i`, waiting for it if the pool has not got there yet.
     pub fn take(&self, i: usize) -> Prepared {
         let mut done = self.shared.done.lock().unwrap_or_else(|e| e.into_inner());
@@ -874,6 +986,7 @@ fn cpu_lane(mut work: CpuWork, jobs: mpsc::Receiver<CpuJob>) -> CpuWork {
     let mut batches = 0u64;
     while let Ok(job) = jobs.recv() {
         batches += 1;
+        crate::cpucap::pace();
         let answer = match &mut work {
             CpuWork::Ids { main, alt } => {
                 main.follow_threads();

@@ -1,6 +1,6 @@
 //! Semlith Cloud, from this side of the wire.
 //!
-//! Everything here is built against `infra/docs/cloud-api.md` and is reached
+//! Everything here is built against the Semlith Cloud API and is reached
 //! only after `semlith cloud login`: with no `~/.semlith/cloud.json` nothing
 //! in this module opens a socket, starts a thread or reads anything but the
 //! file's absence. The rules that keep that true:
@@ -819,7 +819,7 @@ pub fn render_status(entry: &Entry, status: &Value, version: Option<&str>) -> St
     out.trim_end().to_string()
 }
 
-/// 2650000 as 2,650,000.
+/// 1234567 as 1,234,567.
 fn grouped(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = String::new();
@@ -2352,12 +2352,12 @@ mod tests {
             &entry,
             &status(
                 json!({ "month": "2026-10", "store_bytes": 1000, "cap_bytes": 8000,
-                "index_chunks": 212400, "cap_chunks": 2650000, "queue": { "running": 0, "waiting": 0 } }),
+                "index_chunks": 12400, "cap_chunks": 100000, "queue": { "running": 0, "waiting": 0 } }),
             ),
             None,
         );
         assert!(
-            chunks.contains("212,400 of 2,650,000 chunks indexed"),
+            chunks.contains("12,400 of 100,000 chunks indexed"),
             "{chunks}"
         );
         assert!(!chunks.contains("minutes"), "{chunks}");

@@ -70,9 +70,38 @@ const START_CAP: Duration = Duration::from_secs(60 * 60);
 /// it.
 const WORKER_IDLE: Duration = Duration::from_secs(60);
 
+/// Unix seconds until which an idle worker is kept anyway: a run between two
+/// of its slices. Its last slice drains and writes the index for about a
+/// minute with nothing for the lanes, and the Neural Engine's worker used to
+/// go in that minute, so every slice after waited two minutes for it to load
+/// again with the card saying nothing.
+static WARM_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Keep idle workers for `for_` more: a run has more slices to come.
+pub fn keep_warm(for_: Duration) {
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        + for_.as_secs();
+    WARM_UNTIL.fetch_max(until, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn kept_warm() -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    WARM_UNTIL.load(std::sync::atomic::Ordering::Relaxed) > now
+}
+
 /// Batches a worker holds at once: one it is computing and the next already
 /// in its pipe, so it never waits on the round trip for its next batch.
 const WORKER_DEPTH: usize = 2;
+
+/// Batches in flight on a lane. The remote lane's round trip crosses a
+/// network, so it keeps more in flight to keep the far worker fed.
+fn depth(lane: &Lane) -> usize {
+    if lane.id == "remote" { 8 } else { WORKER_DEPTH }
+}
 
 /// The lowest cosine against the fp32 fixture an fp16 lane may show, on every
 /// one of the 32 chunks.
@@ -112,6 +141,8 @@ pub struct Switches {
     pub llama: Option<bool>,
     /// The GPU lane beside the Neural Engine, which is off by default.
     pub gpu_beside_ane: Option<bool>,
+    /// The remote lane, when an embedder registers one ([`Remote`]).
+    pub remote: Option<bool>,
 }
 
 /// Which lanes are on, and where that came from.
@@ -125,6 +156,7 @@ pub struct Enabled {
     pub openvino: bool,
     pub llama: bool,
     pub gpu_beside_ane: bool,
+    pub remote: bool,
     /// The CPU-backed worker, for verification. Only the environment turns
     /// it on.
     pub worker: bool,
@@ -160,8 +192,36 @@ impl Enabled {
             "trt" => self.trt,
             "openvino" => self.openvino,
             "llama" => self.llama,
+            "remote" => self.remote,
             "worker" => self.worker,
             _ => false,
+        }
+    }
+}
+
+/// What the CPU lane's switch says, wherever it is drawn or refused. The CPU
+/// cap is the control instead.
+pub const CPU_ALWAYS_ON: &str = "the CPU lane is always on; use the CPU cap to limit it";
+
+/// Whether a lane is on when nothing has been saved for it.
+fn on_by_default(id: &str) -> bool {
+    matches!(id, "cpu" | "gpu" | "ane")
+}
+
+impl Switches {
+    /// The saved choice for one lane, if one was saved.
+    fn get(&self, id: &str) -> Option<bool> {
+        match id {
+            "cpu" => self.cpu,
+            "gpu" => self.gpu,
+            "cuda" => self.cuda,
+            "ane" => self.ane,
+            "trt" => self.trt,
+            "openvino" => self.openvino,
+            "llama" => self.llama,
+            "gpu-beside-ane" => self.gpu_beside_ane,
+            "remote" => self.remote,
+            _ => None,
         }
     }
 }
@@ -169,7 +229,9 @@ impl Enabled {
 /// The switches in force: the environment, then the saved setting, then the
 /// defaults. CPU, GPU and the Neural Engine are on; CUDA, TensorRT for RTX,
 /// OpenVINO and llama.cpp are experimental and off, and each is fetched only
-/// when somebody turns it on.
+/// when somebody turns it on. The CPU is on whatever was saved: a
+/// `settings.json` from before 0.37.0-rc.6 that turned it off reads as on.
+/// Only `SEMLITH_ACCEL`, an override for measurements, can leave it out.
 pub fn enabled() -> Enabled {
     if let Ok(list) = std::env::var(ACCEL_ENV) {
         let has = |name: &str| list.split(',').any(|item| item.trim() == name);
@@ -182,13 +244,14 @@ pub fn enabled() -> Enabled {
             openvino: has("openvino"),
             llama: has("llama"),
             gpu_beside_ane: has("gpu-beside-ane"),
+            remote: has("remote"),
             worker: has("worker"),
             source: "set by the environment",
         };
     }
     let saved = crate::home::Settings::load().accelerators;
     Enabled {
-        cpu: saved.cpu.unwrap_or(true),
+        cpu: true,
         gpu: saved.gpu.unwrap_or(true),
         cuda: saved.cuda.unwrap_or(false),
         ane: saved.ane.unwrap_or(true),
@@ -196,12 +259,61 @@ pub fn enabled() -> Enabled {
         openvino: saved.openvino.unwrap_or(false),
         llama: saved.llama.unwrap_or(false),
         gpu_beside_ane: saved.gpu_beside_ane.unwrap_or(false),
+        remote: saved.remote.unwrap_or(false),
         worker: false,
         source: if saved == Switches::default() {
             "default"
         } else {
             "saved"
         },
+    }
+}
+
+// --------------------------------------------------------------- remote lane
+
+/// A worker on another machine, for a program that embeds this crate and
+/// runs one. It registers a `Remote` with [`set_remote`], and the `remote`
+/// lane frames batches over the channel [`Remote::open`] returns, exactly as
+/// a local worker reads them on its stdin and writes them on its stdout
+/// ([`write_frame`], [`read_frame`]), starting with the worker's hello. The
+/// binary registers none, so it has no remote lane: without one the lane is
+/// not listed, checked, switched or used.
+pub trait Remote: Send + Sync {
+    /// Connect to a worker and hand back the channel. Called on every start,
+    /// so a reconnect is opened afresh.
+    fn open(&self) -> Result<RemoteChannel>;
+    /// Why the lane cannot be turned on now, if it cannot.
+    fn missing(&self) -> Option<String>;
+    /// Fields added to the lane's status and check rows: where its worker is,
+    /// what it last proved.
+    fn describe(&self) -> serde_json::Value;
+}
+
+/// An open channel to a remote worker.
+pub struct RemoteChannel {
+    /// Frames to the worker.
+    pub send: Box<dyn Write + Send>,
+    /// Frames from the worker, or why the channel closed.
+    pub frames: mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
+    /// Where the worker is, for the lane's device line.
+    pub device: String,
+}
+
+static REMOTE: Mutex<Option<Arc<dyn Remote>>> = Mutex::new(None);
+
+/// Register the remote lane's worker, or take it away with `None`.
+pub fn set_remote(remote: Option<Arc<dyn Remote>>) {
+    *REMOTE.lock().unwrap_or_else(|e| e.into_inner()) = remote;
+}
+
+fn remote() -> Option<Arc<dyn Remote>> {
+    REMOTE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Add `extra`'s fields to `row`, both objects.
+fn extend(row: &mut serde_json::Value, extra: serde_json::Value) {
+    if let (Some(row), serde_json::Value::Object(extra)) = (row.as_object_mut(), extra) {
+        row.extend(extra);
     }
 }
 
@@ -252,6 +364,13 @@ pub const SPECS: &[Spec] = &[
         id: "llama",
         label: "llama.cpp",
         variant: "gguf-f16",
+        experimental: true,
+    },
+    Spec {
+        id: "remote",
+        label: "Remote",
+        // Set from the worker's hello: whatever its own lane makes.
+        variant: "fp16-cuda",
         experimental: true,
     },
     Spec {
@@ -361,7 +480,7 @@ impl Lane {
     pub fn token_budget(&self) -> (usize, usize, usize) {
         match self.id {
             // A discrete card is starved by less.
-            "cuda" | "trt" => (2_048, 16_384, 65_536),
+            "cuda" | "trt" | "remote" => (2_048, 16_384, 65_536),
             // Four rows a call, so several calls a batch keep it busy.
             "ane" => (1_024, 4_096, 12_288),
             _ => (512, 4_096, 16_384),
@@ -437,6 +556,8 @@ impl Lane {
         let phase = |s: &Status| match s {
             Status::Compiling { .. } => 1,
             Status::Downloading { .. } => 2,
+            // Timed too, so a run waiting on a start says for how long.
+            Status::Starting => 3,
             _ => 0,
         };
         let (was, now) = (phase(&current), phase(&status));
@@ -685,6 +806,40 @@ pub fn unavailable_here(id: &str) -> Option<String> {
         "llama" if !(apple || x86_windows_or_linux) => {
             Some("no llama.cpp build is pinned for this platform".into())
         }
+        "remote" if remote().is_none() => Some("no remote worker is registered".into()),
+        _ => None,
+    }
+    .or_else(|| missing_hardware(id))
+}
+
+/// Why this machine's hardware cannot run a lane its platform could: no GPU
+/// for the GPU or llama.cpp (Vulkan) lanes, no NVIDIA card and driver for
+/// CUDA and TensorRT, no Intel CPU for OpenVINO. Asked once per process and
+/// kept, so the lanes offered are only those that can run here, without
+/// probing Vulkan or NVML on every poll.
+fn missing_hardware(id: &str) -> Option<String> {
+    static GPU: OnceLock<std::result::Result<String, String>> = OnceLock::new();
+    static NVIDIA: OnceLock<std::result::Result<String, String>> = OnceLock::new();
+    let gpu = || GPU.get_or_init(detect_gpu).as_ref().err();
+    let nvidia = || {
+        NVIDIA
+            .get_or_init(|| crate::cuda::detect().map(|d| d.name))
+            .as_ref()
+            .err()
+    };
+    match id {
+        "gpu" => gpu().map(|why| format!("no GPU this lane can use: {why}")),
+        // Its CPU backend, asked for by name, is a test device: it needs none.
+        "llama" if std::env::var(crate::llama::DEVICE_ENV).is_ok_and(|d| d == "cpu") => None,
+        "llama" => {
+            gpu().map(|why| format!("llama.cpp runs on a GPU, and there is none it can use: {why}"))
+        }
+        "cuda" | "trt" => nvidia().map(|why| format!("needs an NVIDIA GPU and driver: {why}")),
+        "openvino" => {
+            let cpu = crate::system::cpu_name();
+            (!cpu.to_ascii_lowercase().contains("intel"))
+                .then(|| format!("OpenVINO offers Intel devices only, and this CPU is {cpu}"))
+        }
         _ => None,
     }
 }
@@ -744,6 +899,9 @@ pub fn spell_left(ms: u64) -> String {
 /// is on its way, and the CPU is not switched on beside them. The run card and
 /// the terminal say this instead of a rate.
 pub fn waiting_for() -> Option<String> {
+    if let Some(line) = crate::cpucap::paused_line() {
+        return Some(line);
+    }
     if !MANAGED.load(Ordering::Relaxed) {
         return None;
     }
@@ -766,7 +924,15 @@ pub fn waiting_for() -> Option<String> {
             "waiting for the {label} lane to download: {percent} %{}",
             left(eta_ms)
         ),
-        _ => format!("waiting for the {label} lane to start"),
+        // Seconds so far, so a long first start after an update (Core ML
+        // compiling the model again, two minutes on replay 11) still moves.
+        _ => match *lane.began.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some((start, _, _)) if start.elapsed() >= Duration::from_secs(5) => format!(
+                "waiting for the {label} lane to start: {} s so far",
+                start.elapsed().as_secs()
+            ),
+            _ => format!("waiting for the {label} lane to start"),
+        },
     })
 }
 
@@ -807,23 +973,43 @@ pub fn cache_in_use() -> bool {
 }
 
 /// Every lane as the Machine limits card and `semlith accel status` show it.
+///
+/// Each row carries `enabled` (what runs use now), `saved` (what
+/// `settings.json` says, or the default) and `source` (`environment`, `saved`
+/// or `default`), so a page draws the choice somebody made and names an
+/// environment override rather than a switch that snaps back.
 pub fn snapshot() -> serde_json::Value {
     let on = enabled();
+    let from_env = std::env::var(ACCEL_ENV).is_ok();
+    let saved = crate::home::Settings::load().accelerators;
+    let choice = |id: &str| match saved.get(id) {
+        _ if from_env => (on.lane(id), "environment"),
+        Some(value) => (value, "saved"),
+        None => (on_by_default(id), "default"),
+    };
     let cpu = cpu_lane();
     let cache = crate::model_cache_dir().ok();
+    let cpu_rate = cpu.rate();
     let mut rows = vec![serde_json::json!({
         "lane": "cpu",
         "label": "CPU",
         "enabled": on.cpu,
+        "saved": true,
+        "source": if from_env { "environment" } else { "default" },
+        "locked": true,
+        "locked_reason": CPU_ALWAYS_ON,
         "experimental": false,
-        "status": Status::Active,
+        // Active while it embeds, idle otherwise: no longer said Active
+        // whatever it was doing.
+        "status": if cpu_rate > 0.0 { Status::Active } else { Status::Idle },
         "device": crate::system::cpu_name(),
         "variant": cpu.variant(),
-        "rate": round(cpu.rate()),
+        "rate": round(cpu_rate),
     })];
     for lane in lanes() {
         let enabled = on.lane(lane.id);
-        if lane.id == "worker" && !enabled {
+        let (saved_on, source) = choice(lane.id);
+        if (lane.id == "worker" && !enabled) || (lane.id == "remote" && remote().is_none()) {
             continue;
         }
         let status = match unavailable_here(lane.id) {
@@ -837,6 +1023,8 @@ pub fn snapshot() -> serde_json::Value {
             "lane": lane.id,
             "label": spec(lane.id).map_or(lane.id, |s| s.label),
             "enabled": enabled,
+            "saved": saved_on,
+            "source": source,
             "experimental": lane.experimental,
             "status": status,
             "device": lane.device.lock().unwrap_or_else(|e| e.into_inner()).clone(),
@@ -845,6 +1033,11 @@ pub fn snapshot() -> serde_json::Value {
             "installed": installed.map(|dir| dir.is_some()),
             "download_bytes": pack_for(lane.id).map(|pack| pack.bytes()),
         }));
+        if lane.id == "remote"
+            && let (Some(remote), Some(row)) = (remote(), rows.last_mut())
+        {
+            extend(row, remote.describe());
+        }
     }
     let total: f64 = rows.iter().filter_map(|row| row["rate"].as_f64()).sum();
     for row in &mut rows {
@@ -864,18 +1057,191 @@ pub fn snapshot() -> serde_json::Value {
             && unavailable_here(lane.id).is_none()
             && lane.coming()
     });
+    let (cap, cap_source) = crate::cpucap::in_force();
     serde_json::json!({
         "lanes": rows,
         "source": on.source,
+        "cpu_cap": {
+            "percent": cap,
+            "source": cap_source,
+            "measured_percent": crate::cpucap::measured_percent(),
+            "paused": crate::cpucap::paused(),
+        },
         "gpu_beside_ane": on.gpu_beside_ane,
         // Said, not implied: the CPU carries the run whatever its switch says
         // while no worker lane can and none is on its way.
         "cpu_fallback": !on.cpu && !accel_ready && !accel_coming,
+        // What each lane has managed here, measured or from its check: what
+        // a page estimates a run from before it starts.
+        "rates": rates(),
     })
 }
 
 fn round(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
+}
+
+// ----------------------------------------------------------------- lane rates
+
+/// The CPU lane's known-answer check, its speed remembered.
+fn check_cpu() -> Result<Check> {
+    let cache = crate::model_cache_dir()?;
+    let mut model = crate::embed::Model::Granite.load(cache, crate::chunk::MAX_CHARS / 2, true)?;
+    let check = known_answer("cpu", &crate::system::cpu_name(), "int8-cpu", |texts| {
+        let mut got = model
+            .embed(texts, Some(1))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        for vector in &mut got {
+            crate::normalize(vector);
+        }
+        Ok(got)
+    })?;
+    if check.passed {
+        // In batches, as a run embeds: see the worker's figure.
+        let (texts, _) = fixture();
+        let started = Instant::now();
+        model
+            .embed(&texts, Some(8))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        note_known_answer(
+            "cpu",
+            texts.len() as f64 / started.elapsed().as_secs_f64().max(1e-6),
+        );
+    }
+    Ok(check)
+}
+
+/// Give the CPU lane a figure if it has none, so the first estimate on a
+/// fresh machine says something rather than nothing: thirty-two chunks, a
+/// second or two, once.
+pub fn seed_cpu_rate() {
+    // Never a download for it: only a model already on this machine.
+    let cached = crate::model_cache_dir().is_ok_and(|cache| crate::embed::is_cached(&cache));
+    if cached && !rates().contains_key("cpu") {
+        let _ = check_cpu();
+    }
+}
+
+/// What one lane has managed on this machine.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, serde::Deserialize)]
+pub struct Rate {
+    /// Chunks per second, or images per second for `clip`.
+    pub per_s: f64,
+    /// `measured` from runs, or `known-answer` from the lane's check, which
+    /// embeds one chunk at a time and so undersells a batched lane.
+    pub source: RateSource,
+    /// Runs the measured figure is an average of.
+    #[serde(default)]
+    pub runs: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RateSource {
+    Measured,
+    KnownAnswer,
+}
+
+/// Every lane's remembered rate, by lane id (`clip` for images).
+pub fn rates() -> std::collections::BTreeMap<String, Rate> {
+    crate::home::lane_rates_path()
+        .ok()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_rates(rates: &std::collections::BTreeMap<String, Rate>) {
+    if let (Ok(path), Ok(bytes)) = (
+        crate::home::lane_rates_path(),
+        serde_json::to_vec_pretty(rates),
+    ) {
+        let _ = crate::home::write_private(&path, &bytes);
+    }
+}
+
+/// A run measured `per_s` on `lane`: folded into the remembered figure, half
+/// old and half new, so one odd run moves it but does not own it.
+pub fn note_rate(lane: &str, per_s: f64) {
+    if !per_s.is_finite() || per_s <= 0.0 {
+        return;
+    }
+    let mut all = rates();
+    let next = match all.get(lane) {
+        Some(old) if old.source == RateSource::Measured => Rate {
+            per_s: (old.per_s + per_s) / 2.0,
+            source: RateSource::Measured,
+            runs: old.runs.saturating_add(1),
+        },
+        _ => Rate {
+            per_s,
+            source: RateSource::Measured,
+            runs: 1,
+        },
+    };
+    all.insert(lane.to_string(), next);
+    save_rates(&all);
+}
+
+/// A lane's speed on the known-answer fixture in batches, kept only until a
+/// run measures the lane.
+pub fn note_known_answer(lane: &str, per_s: f64) {
+    if !per_s.is_finite() || per_s <= 0.0 {
+        return;
+    }
+    let mut all = rates();
+    if all
+        .get(lane)
+        .is_some_and(|r| r.source == RateSource::Measured)
+    {
+        return;
+    }
+    all.insert(
+        lane.to_string(),
+        Rate {
+            per_s,
+            source: RateSource::KnownAnswer,
+            runs: 0,
+        },
+    );
+    save_rates(&all);
+}
+
+/// Chunks per second the lanes switched on here are expected to manage
+/// together, or `None` when none of them has a figure yet. The prior a run's
+/// time left starts from.
+pub fn expected_rate() -> Option<f64> {
+    let known = rates();
+    let sum: f64 = run_lanes()
+        .iter()
+        .filter_map(|lane| known.get(*lane).map(|r| r.per_s))
+        .sum();
+    (sum > 0.0).then_some(sum)
+}
+
+/// Whether a run's text embeds off the CPU, so the image model, which runs on
+/// the CPU on a thread of its own, works beside it rather than taking turns.
+pub fn images_beside_text() -> bool {
+    run_lanes().iter().any(|lane| *lane != "cpu")
+}
+
+/// The lanes a run would embed text on, as `for_run` chooses them, among
+/// those with a known rate or usable here.
+fn run_lanes() -> Vec<&'static str> {
+    let on = enabled();
+    let known = rates();
+    let usable = |lane: &&str| on.lane(lane) && unavailable_here(lane).is_none();
+    // The lanes a run would use, as `for_run` chooses them: with the Neural
+    // Engine on, the CPU steps aside and the GPU joins only when asked to.
+    let ane = usable(&"ane") && known.contains_key("ane");
+    let lanes: Vec<&str> = [
+        "cpu", "ane", "gpu", "cuda", "trt", "openvino", "llama", "remote",
+    ]
+    .into_iter()
+    .filter(|lane| usable(lane))
+    .filter(|lane| !ane || (*lane != "cpu" && (*lane != "gpu" || on.gpu_beside_ane)))
+    .collect();
+    lanes
 }
 
 /// The names `semlith accel on|off` takes.
@@ -884,10 +1250,12 @@ pub const SWITCH_NAMES: &str = "cpu, gpu, ane, cuda, trt, openvino, llama, gpu-b
 /// Turn a lane on or off, as the page's switch and `semlith accel` do.
 ///
 /// Saved to `settings.json` and read by every run before every batch, which
-/// is the "next batch" the switch promises. Turning a failed lane on again
-/// clears its failure so it is tried afresh. The CPU may be turned off only
-/// while an accelerator lane can carry the work; with none, the refusal says
-/// why. Turning on a lane whose pack is not here fetches it first, with
+/// is the "next batch" the switch promises. Each lane is decided on its own,
+/// so one change of several lanes lands the same in any order. The CPU is
+/// never turned off ([`CPU_ALWAYS_ON`]). A lane that is unavailable here, or
+/// failed, can be turned off but not on, and the refusal says why; turning a
+/// failed lane off clears the failure, so it may be turned on again later.
+/// Turning on a lane whose pack is not here fetches it first, with
 /// `progress` told how far the download has got.
 pub fn set(lane_id: &str, on: bool) -> Result<String> {
     set_with_progress(lane_id, on, &mut |_| {})
@@ -897,27 +1265,27 @@ pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) 
     if std::env::var(ACCEL_ENV).is_ok() {
         bail!("{ACCEL_ENV} is set in this process's environment, so the switches cannot change it");
     }
+    if lane_id == "remote" && remote().is_none() {
+        bail!("there is no lane called remote; the switches are {SWITCH_NAMES}");
+    }
+    if on {
+        refuse_on(lane_id)?;
+    }
     let mut settings = crate::home::Settings::load();
     match (lane_id, on) {
-        ("cpu", false) => {
-            let now = enabled();
-            let can = lanes().iter().any(|l| {
-                l.id != "worker" && now.lane(l.id) && l.usable() && unavailable_here(l.id).is_none()
-            }) && (now.ane || detect_gpu().is_ok());
-            if !can {
-                bail!(
-                    "the CPU cannot be turned off: no accelerator lane is on and usable here ({}), \
-                     so the CPU is what indexes",
-                    detect_gpu()
-                        .err()
-                        .unwrap_or_else(|| "the GPU lane is off".to_string())
-                );
-            }
-            settings.accelerators.cpu = Some(false);
-        }
-        ("cpu", true) => settings.accelerators.cpu = Some(true),
+        ("cpu", false) => bail!("{CPU_ALWAYS_ON}"),
+        // Always on: a saved `false` from an older release is cleared.
+        ("cpu", true) => settings.accelerators.cpu = None,
         ("gpu", _) => settings.accelerators.gpu = Some(on),
         ("gpu-beside-ane", _) => settings.accelerators.gpu_beside_ane = Some(on),
+        ("remote", _) => {
+            // Not this machine's hardware but the embedder's setup: said at
+            // the switch.
+            if on && let Some(why) = remote().and_then(|r| r.missing()) {
+                bail!("{why}");
+            }
+            settings.accelerators.remote = Some(on);
+        }
         (id @ ("ane" | "cuda" | "trt" | "openvino" | "llama"), _) => {
             if on && let Some(why) = unavailable_here(id) {
                 bail!("{why}");
@@ -939,8 +1307,11 @@ pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) 
         (other, _) => bail!("there is no lane called {other}; the switches are {SWITCH_NAMES}"),
     }
     settings.save()?;
-    if on && let Some(found) = lane(lane_id) {
-        found.reset();
+    if !on
+        && let Some(found) = lane(lane_id)
+        && matches!(found.status(), Status::Failed { .. })
+    {
+        found.set(Status::Idle);
     }
     let note = spec(lane_id)
         .filter(|s| s.experimental && on)
@@ -955,6 +1326,36 @@ pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) 
         "{lane_id} {} — runs pick it up at their next batch{note}",
         if on { "on" } else { "off" }
     ))
+}
+
+/// Why a lane may not be turned on now: it cannot run on this machine, its
+/// worker found nothing to run on, or it failed and has not been turned off
+/// since. `Ok` for everything else, including lanes that do not exist (the
+/// switch itself says so).
+fn refuse_on(id: &str) -> Result<()> {
+    if let Some(why) = unavailable_here(id) {
+        bail!("{why}");
+    }
+    let Some(found) = lane(id) else {
+        return Ok(());
+    };
+    // A failure past its cool-down is cleared here, as a run would clear it.
+    found.usable();
+    match found.status() {
+        Status::Unavailable { reason } => {
+            bail!("the {} lane is unavailable here: {reason}", label_of(id))
+        }
+        Status::Failed { reason } => bail!(
+            "the {} lane failed: {reason}; turn it off to clear the failure, or wait {} minutes and it is tried again",
+            label_of(id),
+            LANE_RETRY.as_secs() / 60
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn label_of(id: &str) -> &str {
+    spec(id).map_or(id, |s| s.label)
 }
 
 /// [`set`] for the page: a lane whose pack is not here is switched on once
@@ -972,9 +1373,7 @@ pub fn set_in_background(lane_id: &str) -> Result<String> {
     if std::env::var(ACCEL_ENV).is_ok() {
         bail!("{ACCEL_ENV} is set in this process's environment, so the switches cannot change it");
     }
-    if let Some(why) = unavailable_here(lane_id) {
-        bail!("{why}");
-    }
+    refuse_on(lane_id)?;
     let Some(found) = lane(lane_id) else {
         bail!("there is no lane called {lane_id}; the switches are {SWITCH_NAMES}");
     };
@@ -1098,9 +1497,11 @@ fn deadline() -> Duration {
 
 /// A running worker and the channel its answers arrive on.
 struct Worker {
-    child: std::process::Child,
+    /// A local lane's process; none for the remote lane, whose worker is on
+    /// another machine at the end of a [`Remote`]'s channel.
+    child: Option<std::process::Child>,
     /// `None` only while the worker is being let go.
-    stdin: Option<std::process::ChildStdin>,
+    stdin: Option<Box<dyn Write + Send>>,
     answers: mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
 }
 
@@ -1110,15 +1511,18 @@ impl Drop for Worker {
     /// not gone within two seconds.
     fn drop(&mut self) {
         drop(self.stdin.take());
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            if let Ok(Some(_)) = self.child.try_wait() {
+            if let Ok(Some(_)) = child.try_wait() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -1158,6 +1562,10 @@ fn dispatch(lane: Arc<Lane>, jobs: mpsc::Receiver<Job>) {
                     if worker.is_some() && matches!(lane.id, "ane" | "gpu") && coreml_compiling() {
                         continue;
                     }
+                    // Nor between a run's slices.
+                    if worker.is_some() && kept_warm() {
+                        continue;
+                    }
                     // Idle: the worker goes, and its device memory with it.
                     if worker.take().is_some() && lane.status() == Status::Active {
                         lane.set(Status::Idle);
@@ -1166,7 +1574,7 @@ fn dispatch(lane: Arc<Lane>, jobs: mpsc::Receiver<Job>) {
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
-        } else if sent.len() < WORKER_DEPTH {
+        } else if sent.len() < depth(&lane) {
             jobs.try_recv().ok()
         } else {
             None
@@ -1230,7 +1638,7 @@ fn dispatch(lane: Arc<Lane>, jobs: mpsc::Receiver<Job>) {
             });
             // Another batch may be waiting: send it before reading, so the
             // worker's next batch is already in its pipe.
-            if sent.len() < WORKER_DEPTH {
+            if sent.len() < depth(&lane) {
                 continue;
             }
         }
@@ -1275,20 +1683,7 @@ fn reason_of(status: &Status) -> String {
 pub fn check_all(say: impl Fn(&str)) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     say("checking the CPU lane");
-    let cpu = (|| -> Result<Check> {
-        let cache = crate::model_cache_dir()?;
-        let mut model =
-            crate::embed::Model::Granite.load(cache, crate::chunk::MAX_CHARS / 2, true)?;
-        known_answer("cpu", &crate::system::cpu_name(), "int8-cpu", |texts| {
-            let mut got = model
-                .embed(texts, Some(1))
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            for vector in &mut got {
-                crate::normalize(vector);
-            }
-            Ok(got)
-        })
-    })();
+    let cpu = check_cpu();
     out.push(match cpu {
         Ok(check) => serde_json::to_value(check).unwrap_or_default(),
         Err(e) => serde_json::json!({ "lane": "cpu", "passed": false, "reason": format!("{e:#}") }),
@@ -1308,6 +1703,9 @@ pub fn check_all(say: impl Fn(&str)) -> Vec<serde_json::Value> {
             }
             row
         };
+        if id == "remote" && remote().is_none() {
+            continue;
+        }
         if let Some(why) = unavailable_here(id) {
             if id != "worker" {
                 out.push(row(serde_json::json!({
@@ -1331,13 +1729,22 @@ pub fn check_all(say: impl Fn(&str)) -> Vec<serde_json::Value> {
         say(&format!("checking the {} lane", spec.label));
         let lane = Arc::new(Lane::new(spec));
         out.push(match start(&lane) {
-            Ok((_, hello)) => row(serde_json::json!({
-                "device": hello["device"],
-                "variant": hello["variant"],
-                "cosine": hello["cosine"],
-                "chunks_per_s": hello["chunks_per_s"],
-                "passed": true,
-            })),
+            Ok((_, hello)) => {
+                let mut passed = row(serde_json::json!({
+                    "device": hello["device"],
+                    "variant": hello["variant"],
+                    "cosine": hello["cosine"],
+                    "chunks_per_s": hello["chunks_per_s"],
+                    "passed": true,
+                }));
+                // What the remote lane's worker proved before the check ran.
+                if id == "remote"
+                    && let Some(remote) = remote()
+                {
+                    extend(&mut passed, remote.describe());
+                }
+                passed
+            }
             Err(e) => {
                 let text = format!("{e:#}");
                 match text.strip_prefix("unavailable — ") {
@@ -1366,7 +1773,30 @@ fn adapter_choice() -> Option<String> {
         .filter(|name| !name.trim().is_empty())
 }
 
-/// What a lane's worker is started with: its lane name and a directory.
+/// Start lane `id` once and run its known-answer check: what a worker that
+/// serves another machine does before it serves anyone, so a lane that
+/// cannot run here is said at start rather than to the first client. The
+/// hello on success.
+pub fn check_lane(id: &str) -> Result<serde_json::Value> {
+    let spec = spec(id).with_context(|| format!("there is no lane called {id}"))?;
+    let lane = Arc::new(Lane::new(spec));
+    let (_worker, hello) = start(&lane)?;
+    Ok(hello)
+}
+
+/// The `__embed-worker` arguments for lane `id`, fetching what it needs: what
+/// a worker serving another machine starts for each connection, as a local
+/// run would. The process it names runs [`worker_main`].
+pub fn worker_command(id: &str) -> Result<Vec<String>> {
+    let spec = spec(id).with_context(|| format!("there is no lane called {id}"))?;
+    if id == "remote" {
+        bail!("a worker serves a lane of its own machine, not the remote lane");
+    }
+    let mut args = vec!["__embed-worker".to_string()];
+    args.extend(worker_args(&Arc::new(Lane::new(spec)))?);
+    Ok(args)
+}
+
 fn worker_args(lane: &Arc<Lane>) -> Result<Vec<String>> {
     if let Some(why) = unavailable_here(lane.id) {
         bail!("unavailable — {why}");
@@ -1441,7 +1871,7 @@ fn worker_args(lane: &Arc<Lane>) -> Result<Vec<String>> {
 /// The Core ML worker's protocol: bump it whenever the `__embed-worker ane`
 /// or `gpu-coreml` code, its arguments or its frames change, and a fresh copy
 /// of the binary becomes the worker (see [`coreml_worker`]).
-pub const COREML_WORKER: u32 = 2;
+pub const COREML_WORKER: u32 = 3;
 
 /// Run the Core ML lanes' worker from the binary that is running now rather
 /// than the stable copy: for developing the worker itself.
@@ -1560,6 +1990,23 @@ fn coreml_compiling() -> bool {
 /// which carries the known-answer check. A worker loading models for the
 /// first time says how far it has got before it says hello.
 fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
+    let worker = if lane.id == "remote" {
+        lane.set(Status::Starting);
+        let channel = remote().context("no remote worker is registered")?.open()?;
+        *lane.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(channel.device);
+        Worker {
+            child: None,
+            stdin: Some(channel.send),
+            answers: channel.frames,
+        }
+    } else {
+        spawn(lane)?
+    };
+    hello(lane, worker)
+}
+
+/// A local lane's worker process, its frames on a channel.
+fn spawn(lane: &Arc<Lane>) -> Result<Worker> {
     let mut args = vec!["__embed-worker".to_string()];
     args.extend(worker_args(lane)?);
     lane.set(Status::Starting);
@@ -1590,11 +2037,15 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
             }
         }
     });
-    let worker = Worker {
-        child,
-        stdin: Some(stdin),
+    Ok(Worker {
+        child: Some(child),
+        stdin: Some(Box::new(stdin)),
         answers,
-    };
+    })
+}
+
+/// Wait for a started worker's hello, and with it the known-answer check.
+fn hello(lane: &Arc<Lane>, mut worker: Worker) -> Result<(Worker, serde_json::Value)> {
     // The hello, and with it the known-answer check. Bounded like a batch
     // once the models are loaded; a first load says how far it has got.
     // The deadline is for silence, not for the whole start: every progress
@@ -1659,6 +2110,17 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
         }
         bail!("{reason}");
     }
+    // The remote worker's own figure was timed beside its accelerator, with
+    // no network in it, and promised several times the rate that reaches
+    // this machine. The lane times the fixture over its own channel instead.
+    let measured = if lane.id == "remote" {
+        time_fixture(&mut worker)?
+    } else {
+        hello["batch_per_s"].as_f64()
+    };
+    if let Some(per_s) = measured {
+        note_known_answer(lane.id, per_s);
+    }
     if let Some(device) = hello["device"].as_str() {
         *lane.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(device.to_string());
     }
@@ -1667,6 +2129,42 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
     }
     Ok((worker, hello))
 }
+
+/// The fixture's 32 chunks as one batch through a started worker, timed: the
+/// lane's first rate, network and all.
+fn time_fixture(worker: &mut Worker) -> Result<Option<f64>> {
+    let cache = crate::model_cache_dir()?;
+    let tokenizer = crate::session::tokenizer(&cache)?;
+    let (texts, _) = fixture();
+    let ids = texts
+        .iter()
+        .map(|text| crate::session::encode(&tokenizer, text))
+        .collect::<Result<Vec<_>>>()?;
+    let started = Instant::now();
+    let stdin = worker
+        .stdin
+        .as_mut()
+        .context("the worker is being let go")?;
+    write_frame(stdin, &encode_ids(&ids)).context("sending the fixture")?;
+    let frame = match worker.answers.recv_timeout(deadline()) {
+        Ok(Ok(frame)) => frame,
+        Ok(Err(e)) => bail!("the worker exited during the fixture: {e}"),
+        Err(_) => bail!(
+            "the worker did not answer the fixture within {} s",
+            deadline().as_secs()
+        ),
+    };
+    decode_vectors(&frame, ids.len())?;
+    Ok(Some(
+        ids.len() as f64 / started.elapsed().as_secs_f64().max(1e-6),
+    ))
+}
+
+/// The slowest batched rate a worker lane may show on the fixture and still be
+/// used. Every hardware lane measured is far above it, even on a loaded
+/// machine (an M1's GPU 17.8 and Neural Engine 21 while another run embedded;
+/// an A30's CUDA 863); llvmpipe standing in for an A30 managed 0.7.
+const MIN_LANE_PER_S: f64 = 2.0;
 
 /// A worker's variant as the `'static` name a store's counts use.
 fn static_variant(name: &str) -> Option<&'static str> {
@@ -1824,8 +2322,28 @@ pub struct Check {
     pub variant: String,
     /// The lowest cosine against the fp32 fixture over all 32 chunks.
     pub cosine: f32,
+    /// Every chunk under the floor, by its place in the fixture: whether a
+    /// failure is one long chunk or spread over all of them (#197).
+    pub low: Vec<(usize, f32)>,
     pub chunks_per_s: f64,
     pub passed: bool,
+}
+
+impl Check {
+    /// `3 of 32 chunks below the floor: #4 0.9989, #17 0.9991, #30 0.9989`.
+    pub fn low_line(&self) -> String {
+        let each: Vec<String> = self
+            .low
+            .iter()
+            .map(|(at, cosine)| format!("#{at} {cosine:.4}"))
+            .collect();
+        format!(
+            "{} of {} chunks below the floor: {}",
+            self.low.len(),
+            fixture().0.len(),
+            each.join(", ")
+        )
+    }
 }
 
 /// Embed the fixture with `embed` and score it against the committed vectors.
@@ -1838,14 +2356,6 @@ pub fn known_answer(
     let (texts, expected) = fixture();
     // Each chunk alone, as the fixture was made: padding would change the
     // answer and it is the device being checked, not the batching.
-    let started = Instant::now();
-    let mut worst = 1.0f32;
-    for (text, want) in texts.iter().zip(&expected) {
-        let got = embed(std::slice::from_ref(text))?;
-        let got = got.first().context("no vector came back")?;
-        worst = worst.min(crate::index::cosine(got, want));
-    }
-    let elapsed = started.elapsed().as_secs_f64().max(1e-6);
     // Every variant but the CPU's int8 is full or half precision, and held to
     // the fp16 floor: llama.cpp's GGUF and OpenVINO's are too.
     let floor = if variant == "int8-cpu" {
@@ -1853,11 +2363,25 @@ pub fn known_answer(
     } else {
         MIN_COSINE_FP16
     };
+    let started = Instant::now();
+    let mut worst = 1.0f32;
+    let mut low = Vec::new();
+    for (at, (text, want)) in texts.iter().zip(&expected).enumerate() {
+        let got = embed(std::slice::from_ref(text))?;
+        let got = got.first().context("no vector came back")?;
+        let cosine = crate::index::cosine(got, want);
+        worst = worst.min(cosine);
+        if cosine < floor {
+            low.push((at, cosine));
+        }
+    }
+    let elapsed = started.elapsed().as_secs_f64().max(1e-6);
     Ok(Check {
         lane: lane.to_string(),
         device: device.to_string(),
         variant: variant.to_string(),
         cosine: worst,
+        low,
         chunks_per_s: (texts.len() as f64 / elapsed * 10.0).round() / 10.0,
         passed: worst >= floor,
     })
@@ -1930,16 +2454,56 @@ pub fn worker_main(lane: &str, dir: Option<&Path>, adapter: Option<&str>) -> i32
     // The worker tokenises only here, for the fixture; a run's batches arrive
     // as ids.
     let tokenizer = crate::model_cache_dir().and_then(|cache| crate::session::tokenizer(&cache));
+    let mut batched = None;
     let check = tokenizer.and_then(|tokenizer| {
-        known_answer(lane, &session.device(), session.variant(), |texts| {
+        let check = known_answer(lane, &session.device(), session.variant(), |texts| {
             let batch = texts
                 .iter()
                 .map(|text| crate::session::encode(&tokenizer, text))
                 .collect::<Result<Vec<_>>>()?;
             let rows: Vec<&[u32]> = batch.iter().map(Vec::as_slice).collect();
             session.embed(&rows)
-        })
+        })?;
+        // The check embeds one chunk at a time, which is latency, not what a
+        // run's batches manage: the fixture again in batches of eight, timed,
+        // is this lane's first figure for an estimate.
+        if check.passed {
+            let (texts, _) = fixture();
+            let ids = texts
+                .iter()
+                .map(|text| crate::session::encode(&tokenizer, text))
+                .collect::<Result<Vec<_>>>()?;
+            let started = Instant::now();
+            for group in ids.chunks(8) {
+                let rows: Vec<&[u32]> = group.iter().map(Vec::as_slice).collect();
+                session.embed(&rows)?;
+            }
+            batched = Some(ids.len() as f64 / started.elapsed().as_secs_f64().max(1e-6));
+        }
+        Ok(check)
     });
+    // A lane slower than any GPU is not on one. On a Linux box whose
+    // container lacks the graphics capability, or with no vendor Vulkan
+    // driver, Dawn runs on llvmpipe while the device it reports is still the
+    // card's PCI id, and the "NVIDIA" lane embedded on the CPU at under one
+    // chunk a second (#197, measured on an A30). Refused, saying so.
+    if let (Ok(check), Some(per_s)) = (&check, batched)
+        && check.passed
+        && per_s < MIN_LANE_PER_S
+    {
+        say(
+            &mut out,
+            serde_json::json!({
+                "ok": false,
+                "unavailable": true,
+                "reason": format!(
+                    "{} embedded at {per_s:.1} chunks/s, slower than any GPU, so it is most likely a software renderer standing in for the card (on Linux: the GPU maker's Vulkan driver is missing, or the container has no graphics capability)",
+                    check.device
+                ),
+            }),
+        );
+        return 1;
+    }
     match check {
         Ok(check) if check.passed => say(
             &mut out,
@@ -1949,6 +2513,7 @@ pub fn worker_main(lane: &str, dir: Option<&Path>, adapter: Option<&str>) -> i32
                 "variant": check.variant,
                 "cosine": check.cosine,
                 "chunks_per_s": check.chunks_per_s,
+                "batch_per_s": batched,
             }),
         ),
         Ok(check) => {
@@ -1957,8 +2522,8 @@ pub fn worker_main(lane: &str, dir: Option<&Path>, adapter: Option<&str>) -> i32
                 serde_json::json!({
                     "ok": false,
                     "reason": format!(
-                        "{} failed the known-answer check: cosine {:.4} against the fp32 fixture",
-                        check.device, check.cosine
+                        "{} failed the known-answer check: cosine {:.4} against the fp32 fixture ({})",
+                        check.device, check.cosine, check.low_line()
                     ),
                 }),
             );
@@ -2052,6 +2617,35 @@ pub fn component_dir(cache: &Path, lane: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failed check names every chunk under the floor, not only the worst
+    /// (#197: the NVIDIA report gave the minimum and nothing else).
+    #[test]
+    fn a_failed_check_names_every_chunk_under_the_floor() {
+        let (texts, expected) = fixture();
+        let mut at = 0;
+        let check = known_answer("gpu", "test", "fp16-webgpu", |_| {
+            let mut v = expected[at].clone();
+            // Two chunks bent off their fixture vector, the rest exact.
+            if at == 3 || at == 17 {
+                v[0] += 0.3;
+                v[1] -= 0.3;
+            }
+            at += 1;
+            Ok(vec![v])
+        })
+        .unwrap();
+        assert!(!check.passed);
+        assert_eq!(
+            check.low.iter().map(|l| l.0).collect::<Vec<_>>(),
+            vec![3, 17]
+        );
+        let line = check.low_line();
+        assert!(
+            line.starts_with(&format!("2 of {} chunks below the floor: #3 ", texts.len())),
+            "{line}"
+        );
+    }
 
     /// The Core ML worker is a copy made once and reused, whatever binary asks
     /// for it next, and an earlier protocol's copy goes.

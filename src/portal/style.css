@@ -1097,6 +1097,11 @@ a.kpi:hover {
   background: var(--chip);
   box-shadow: none;
 }
+/* Toggles that can each be on or off (graph edge kinds): off reads off. */
+.seg.toggles > button[aria-pressed="false"] {
+  text-decoration: line-through;
+  opacity: 0.55;
+}
 .seg > button:disabled {
   opacity: 0.45;
 }
@@ -1670,25 +1675,21 @@ button.dial {
   max-height: 280px;
   overflow-y: auto;
 }
-.log.rounded {
-  border-radius: 6px;
-  padding: 8px 12px;
-  min-height: 0;
-}
+/* Counter or time, outcome, then the words: the first two never wrap. */
 .log .ln {
   display: grid;
-  grid-template-columns: 82px 74px minmax(0, 1fr);
+  grid-template-columns: 13ch 10ch minmax(0, 1fr);
   gap: 8px;
   font: 12px/1.6 var(--mono);
   color: var(--code-ink);
 }
-.log.rounded .ln {
-  grid-template-columns: 96px 80px minmax(0, 1fr);
-  font-size: 11.5px;
-}
 .log .ln .a {
   color: var(--code-dim);
   text-align: right;
+  white-space: nowrap;
+}
+.log .ln .b {
+  white-space: nowrap;
 }
 .log .ln .b.ok {
   color: #8cc5a6;
@@ -1702,10 +1703,12 @@ button.dial {
 .log .ln .b.info {
   color: #86aec7;
 }
+/* A log line's path and reason wrap, indented past the first line: the
+ * reason is what the reader acts on. */
 .log .ln .c {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  padding-left: 2ch;
+  text-indent: -2ch;
 }
 .lines {
   padding: 8px 0;
@@ -2171,6 +2174,28 @@ button.gl-row:hover,
   font-size: 13px;
   color: var(--blue-ink);
 }
+.selbar.bulk .what {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.selbar.bulk.ok {
+  background: var(--green-soft);
+}
+.selbar.bulk.ok .what,
+.selbar.bulk.ok > .i {
+  color: var(--green-ink);
+}
+.selbar.bulk.bad {
+  background: var(--red-soft);
+}
+.selbar.bulk.bad .what,
+.selbar.bulk.bad > .i {
+  color: var(--red);
+}
+/* A table a bulk decision is being applied to takes no input until it ends. */
+[inert] {
+  opacity: 0.55;
+}
 .filterbar {
   display: flex;
   align-items: center;
@@ -2338,6 +2363,18 @@ button.gl-row:hover,
   gap: 8px;
   margin-top: 6px;
   flex-wrap: wrap;
+}
+/* A checkbox and its words on one row, as a form row reads: no box. */
+.modal .opt-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.modal .opt-check > span {
+  cursor: pointer;
 }
 .modal .opt {
   display: flex;
@@ -3403,31 +3440,9 @@ button.gl-row:hover,
   color: var(--muted);
   overflow-wrap: anywhere;
 }
-.stage-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 24px;
-  padding: 0 9px;
-  border-radius: 12px;
-  font-size: 12px;
-  border: 1px solid var(--line);
-  color: var(--muted);
-  background: var(--panel);
-}
-.stage-chip.done {
-  color: var(--green-ink);
-  border-color: var(--green-edge);
-  background: var(--green-soft);
-}
-.stage-chip.cur {
-  color: var(--blue-ink);
-  border-color: var(--blue);
-  background: var(--blue-soft);
-}
 .stage-box {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 8px 10px;
   border-radius: 6px;
@@ -3435,6 +3450,32 @@ button.gl-row:hover,
   background: var(--soft);
   font-size: 12.5px;
   color: var(--muted);
+  min-width: 0;
+}
+.stage-box > .dot {
+  margin-top: 5px;
+  flex: none;
+}
+/* The label, then its status on a line of its own: a status never wraps
+ * mid-word beside a long label ("don / e", the 0.37.0-rc.4 walk). */
+.sb-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.sb-label {
+  overflow-wrap: normal;
+}
+.sb-status {
+  font: 11.5px var(--mono);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stage-box.done .sb-status {
+  color: var(--green-ink);
 }
 .stage-box.done {
   color: var(--ink-2);
@@ -3443,9 +3484,13 @@ button.gl-row:hover,
   color: var(--ink);
   border-color: var(--blue);
 }
+/* The dividers are the grid's 1px gaps over a line-coloured track, so they
+ * stay right whichever tile is hidden and however the tiles wrap. */
 .run-stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line-soft);
   border-top: 1px solid var(--line-soft);
   border-bottom: 1px solid var(--line-soft);
 }
@@ -3454,17 +3499,116 @@ button.gl-row:hover,
   display: flex;
   flex-direction: column;
   gap: 2px;
-  border-right: 1px solid var(--line-soft);
+  background: var(--panel);
   min-width: 0;
 }
-.run-stats > div:last-child {
-  border-right: 0;
+.run-stats > div[hidden] {
+  display: none;
 }
 .run-stats .v {
   font: 13.5px var(--mono);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.run-stats .s:empty {
+  display: none;
+}
+.run-stats .s {
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-stats.five {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+/* A run card's Pipeline panel: four lanes of fixed shape — name, bar,
+ * figures — and one status line. */
+.pipe {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px 14px;
+}
+.pipe[hidden],
+.log-view[hidden] {
+  display: none;
+}
+/* A run's log with its stage selector; a finished run's whole log is taller. */
+.log-bar {
+  display: flex;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.log-foot:empty {
+  display: none;
+}
+.log-foot {
+  padding: 6px 16px;
+  font-size: 12px;
+}
+.log-view.tall .log {
+  max-height: 480px;
+}
+.hist-open .log-view {
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.pipe-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) minmax(0, 15em);
+  align-items: center;
+  gap: 12px;
+  padding: 3px 8px;
+  margin: 0 -8px;
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+.pipe-row[hidden] {
+  display: none;
+}
+.pipe-row.sub .pipe-k {
+  padding-left: 12px;
+  color: var(--muted);
+}
+.pipe-k {
+  color: var(--ink-2);
+}
+.pipe-bar.none {
+  display: none;
+}
+/* Write has no bar: its words take the bar's place, left to right. */
+.pipe-row[data-lane="write"] .pipe-v {
+  grid-column: 2 / 4;
+}
+.pipe-v {
+  font: 12px var(--mono);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pipe-status {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  min-height: 1.6em;
+}
+.pipe-status > .dot {
+  flex: none;
+  transform: translateY(-1px);
+}
+.pipe-status .grow {
+  overflow-wrap: anywhere;
+}
+.run-tabs {
+  border-top: 0;
 }
 .lives {
   display: flex;
@@ -3614,9 +3758,7 @@ button.gl-row:hover,
 .attn-row .s {
   color: var(--muted);
   font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-wrap: pretty;
 }
 .agent-row {
   display: grid;
@@ -3646,9 +3788,7 @@ button.gl-row:hover,
 }
 .feed .f .m {
   color: var(--ink-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .live-word {
   display: inline-flex;
@@ -4940,8 +5080,8 @@ button.gl-row:hover,
   .check4 > button:nth-child(-n + 2) {
     border-bottom: 1px solid var(--line-soft);
   }
-  .run-stats > div:nth-child(2) {
-    border-right: 0;
+  .run-stats.five {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .span2 {
     grid-row: auto;
@@ -5093,8 +5233,24 @@ button.gl-row:hover,
   .hide-xs {
     display: none !important;
   }
+  .pipe-row {
+    grid-template-columns: 56px minmax(0, 1fr);
+    row-gap: 2px;
+  }
+  /* A phone keeps the outcome and the words; the counter is the meters'. */
+  .log .ln {
+    grid-template-columns: 10ch minmax(0, 1fr);
+  }
+  .log .ln .a {
+    display: none;
+  }
+  .pipe-row .pipe-v,
+  .pipe-row[data-lane="write"] .pipe-v {
+    grid-column: 2;
+  }
   .q4,
-  .run-stats {
+  .run-stats,
+  .run-stats.five {
     grid-template-columns: minmax(0, 1fr);
   }
   .check4 {
@@ -5103,9 +5259,6 @@ button.gl-row:hover,
   .check4 > button {
     border-right: 0;
     border-bottom: 1px solid var(--line-soft);
-  }
-  .run-stats > div {
-    border-right: 0;
   }
 }
 
@@ -5511,11 +5664,6 @@ button,
   .hist-open {
     padding-left: 14px;
   }
-  .log .ln,
-  .log.rounded .ln {
-    grid-template-columns: 52px 54px minmax(0, 1fr);
-    gap: 6px;
-  }
 }
 @container app (max-width: 759px) {
   /* A review row on a phone: the file and why, then its risk, then the
@@ -5548,4 +5696,39 @@ button,
 }
 .log .ln {
   min-width: 0;
+}
+
+/* Drawn, not written: the mark stays out of the header's text, so a screen
+   reader and a check read "Path", not "Path↕". */
+.sortable .ar.off::after,
+th .sort .ar.off::after {
+  content: "↕";
+  color: inherit;
+}
+.kpi.accent {
+  border: 1.5px solid var(--accent);
+}
+.store-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 8px -16px -12px;
+  padding: 8px 16px;
+  background: var(--soft);
+  border-top: 1px solid var(--line-soft);
+}
+.factchip.red {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.card.amber-edge {
+  border-color: var(--amber-edge);
+}
+.nav-badge.red {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.rb.red {
+  background: var(--red);
 }

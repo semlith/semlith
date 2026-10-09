@@ -1137,6 +1137,26 @@ fn main() -> Result<()> {
     }
 }
 
+/// The CPU cap as `accel status` and `doctor --gpu` print it, from a lane
+/// snapshot's `cpu_cap`.
+fn cpu_cap_line(cap: &serde_json::Value) -> String {
+    let percent = cap["percent"].as_u64().unwrap_or(100);
+    let source = match cap["source"].as_str() {
+        Some("environment") => format!(" (set by {})", semlith::cpucap::ENV),
+        Some("saved") => " (saved)".to_string(),
+        _ => String::new(),
+    };
+    let measured = cap["measured_percent"].as_f64().unwrap_or(0.0);
+    let state = if percent >= 100 {
+        "off".to_string()
+    } else if percent == 0 {
+        "0 %, CPU work paused".to_string()
+    } else {
+        format!("{percent} % of all cores")
+    };
+    format!("CPU cap: {state}{source}; semlith is using {measured:.0} % now")
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -1150,6 +1170,7 @@ fn run() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&checks)?);
             } else {
                 print_gpu_checks(&checks);
+                println!("{}", cpu_cap_line(&semlith::accel::snapshot()["cpu_cap"]));
             }
             if checks
                 .iter()
@@ -1380,6 +1401,7 @@ fn run() -> Result<()> {
                             "off"
                         }
                     );
+                    println!("{}", cpu_cap_line(&status["cpu_cap"]));
                     println!("vector cache: {}", semlith::cache::stats().line());
                 }
             }
@@ -1598,8 +1620,21 @@ fn run() -> Result<()> {
                     if quiet {
                         return;
                     }
-                    if p.outcome == semlith::FileOutcome::Indexing {
+                    if matches!(
+                        p.outcome,
+                        semlith::FileOutcome::Indexing | semlith::FileOutcome::Image
+                    ) {
                         eprintln!("  + {}", display(path));
+                    }
+                    if p.outcome == semlith::FileOutcome::Phase {
+                        eprintln!(
+                            "  · {}{}",
+                            p.phase.as_str(),
+                            p.phase_detail
+                                .as_deref()
+                                .map(|d| format!(": {d}"))
+                                .unwrap_or_default()
+                        );
                     }
                     if p.outcome == semlith::FileOutcome::Refused {
                         eprintln!("  - {}", display(path));
@@ -4029,10 +4064,16 @@ fn print_plan(plan: &semlith::Plan) {
         .eta_ms
         .map(|ms| format!(" · about {} to embed", human_duration(ms as f32 / 1000.0)))
         .unwrap_or_default();
+    let images = if plan.images > 0 {
+        format!(", {} images", plan.images)
+    } else {
+        String::new()
+    };
     eprintln!(
-        "plan: {} to embed ({}{}) · {} unchanged · {not} not indexed · {} need review{eta} · scanned in {:.2}s",
+        "plan: {} to embed ({}, {} chunks{images}{}) · {} unchanged · {not} not indexed · {} need review{eta} · scanned in {:.2}s",
         plan.embed,
         semlith::human_bytes(plan.embed_bytes as i64),
+        plan.chunks,
         if langs.is_empty() {
             String::new()
         } else {
@@ -4126,30 +4167,30 @@ fn read_fleet(flags: &[PathBuf], cwd: &Path, all: bool) -> Result<Fleet> {
 /// How often an index run says where it has got to.
 const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Where the run is, how fast it is going, and how much longer it has.
-///
-/// The estimate is the rate so far applied to the files not yet reached, which
-/// is wrong whenever the rest of the corpus does not look like the part already
-/// walked — so it is printed as an approximation and never as a countdown. A
-/// wrong estimate is still worth far more than a silent hour.
+/// Where the run is, how fast it is going, and how much longer it has: the
+/// engine's own share done and time left ([`semlith::progress`]), the same
+/// figures the portal shows.
 fn predict(p: semlith::IndexProgress, elapsed: std::time::Duration) -> String {
-    // A run waiting for a lane has no rate to give: it says what it waits for.
-    if let Some(waiting) = semlith::accel::waiting_for() {
-        return format!(
-            "{}/{} files, {} chunks, {waiting}",
-            p.scanned, p.total, p.chunks
-        );
-    }
     let secs = elapsed.as_secs_f32().max(0.001);
     let rate = p.chunks as f32 / secs;
-    let left = p.total.saturating_sub(p.scanned);
-    let per_file = secs / p.scanned.max(1) as f32;
+    let images = if p.images_total > 0 {
+        format!(", {}/{} images", p.images, p.images_total)
+    } else {
+        String::new()
+    };
+    // A run waiting for a lane has no rate to give: it says what it waits for.
+    let left = match (&p.phase, p.eta_ms) {
+        (semlith::progress::Phase::Lane, _) => p.phase_detail.clone().unwrap_or_default(),
+        (_, Some(ms)) => format!("~{} left", human_duration(ms as f32 / 1000.0)),
+        (_, None) => "estimating…".to_string(),
+    };
     format!(
-        "{}/{} files, {} chunks, {rate:.0} chunks/s, ~{} left",
+        "{}/{} files, {}/{} chunks{images}, {rate:.0} chunks/s, {:.0}%, {left}",
         p.scanned,
         p.total,
         p.chunks,
-        human_duration(left as f32 * per_file),
+        p.expected_chunks,
+        p.progress * 100.0,
     )
 }
 

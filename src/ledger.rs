@@ -350,42 +350,6 @@ pub fn reply(
     }
 }
 
-/// What one rendered reply cost and what it spared, per store it drew from.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Measured {
-    /// The store's label in the fleet.
-    pub store: String,
-    /// The files the reply named from that store.
-    pub paths: Vec<String>,
-    /// The lines that showed them: what the agent paid for.
-    pub excerpt_tokens: i64,
-    /// Those files read whole: what it would have paid without the index.
-    pub whole_file_tokens: i64,
-}
-
-/// [`reply`]'s arithmetic without the write, for an embedder that keeps its
-/// own ledger — Semlith Cloud records hosted retrievals in its database and
-/// counts them exactly as a local store does. Empty when the reply names no
-/// file: a zero-hit answer.
-pub fn measure(fleet: &Fleet, body: &str) -> Vec<Measured> {
-    let counter = fleet.counter();
-    let members: Vec<(&str, &Semlith)> = fleet.each().collect();
-    shares(&members, &fleet.roots(), body)
-        .into_iter()
-        .map(|share| Measured {
-            store: members[share.member].0.to_string(),
-            whole_file_tokens: share
-                .paths
-                .iter()
-                .filter_map(|p| std::fs::metadata(p).ok())
-                .map(|m| counter.count_bytes(m.len()))
-                .sum(),
-            excerpt_tokens: counter.count(&share.text),
-            paths: share.paths.into_iter().collect(),
-        })
-        .collect()
-}
-
 /// One store's part of a rendered reply: the files it answered with, and the
 /// lines that showed them, which is what the agent paid for.
 #[derive(Debug)]

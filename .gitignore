@@ -6,7 +6,7 @@
 # Publishing credentials — never commit
 .env
 
-# UltraShip: local-only workspace, never pushed
+# Local release workspace, never pushed
 .ultraship/
 
 # Python bytecode from the browser drive.

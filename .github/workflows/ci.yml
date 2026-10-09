@@ -290,12 +290,12 @@ jobs:
               jq -e '.[] | select(.lane == "openvino") | .reason | contains("Intel devices only")' ov.json
               echo "::notice::OpenVINO known answer not run: this runner's CPU is not Intel"
             fi
-            # TensorRT for RTX: the pack fetches and verifies, and with no RTX
-            # card the lane says so and names the fallback.
-            "$bin" accel on trt
+            # TensorRT for RTX: with no NVIDIA card the switch refuses to turn
+            # it on (0.37.0-rc.6), and the check says unavailable and names
+            # the fallback.
+            if "$bin" accel on trt; then echo "trt turned on without an NVIDIA card"; exit 1; fi
             "$bin" doctor --gpu --json | tee trt.json
             jq -e '.[] | select(.lane == "trt") | (.reason | startswith("unavailable")) and (.experimental == true)' trt.json
-            "$bin" accel off trt
           fi
           # llama.cpp's CPU backend: the known answer through its own server.
           SEMLITH_ACCEL=llama SEMLITH_LLAMA_DEVICE=cpu "$bin" doctor --gpu --json | tee llama.json

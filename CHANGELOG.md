@@ -55,6 +55,262 @@ the ledger's real sessions. Data, clones and stores live under
   only when the rest of the segment is a word, one case, or digits:
   `FAKEtokenvalue` and `1234-fake-token` are still dummies.
 
+## [0.37.0] - 2026-10-09
+
+The Semlith Cloud client leaves release candidate. Everything rc.1 to rc.7
+carried ships here; the sections below them say what each added. Nothing changes
+for anybody who never signs in: with no `~/.semlith/cloud.json` the binary makes
+no connection to Semlith Cloud at all.
+
+### In this release, from rc.1 to rc.7
+
+- **Semlith Cloud, from this machine** (rc.1): `semlith cloud login`, `connect`,
+  `status`, `push`, `sync`, `report` and `replay`; an organisation's stores
+  listed beside the local ones with a `remote` badge and answered in one ranked
+  list with them; ledger sync per store, off by default and never the query
+  text; the portal's Cloud page.
+- Images indexed by their bytes, not their extension (rc.2).
+- A vector cache a library caller can give a store of its own (rc.3).
+- An index run that tells the truth about itself everywhere it is shown; the
+  image lane on a thread of its own; checkpoints that no longer drain the
+  lanes; WebGPU on NVIDIA checked against its Vulkan driver (rc.4).
+- A CPU cap, 0-100 % of semlith's own process (`SEMLITH_CPU_CAP`, the Limits
+  card, in steps of 5); the CPU lane always on; lanes this machine's hardware
+  cannot run refused at the switch (rc.6, rc.7).
+
+### Removed
+
+- **The `remote` lane and `semlith worker`** (added in rc.5) are no longer in
+  the binary. `semlith accel on remote` is refused as an unknown lane, the
+  `--endpoint`, `--token-file` and `--policy` options are gone, and
+  `settings.json`'s `remote` object is ignored. A program that embeds the
+  library and runs a worker of its own registers it with `accel::set_remote`
+  (an `accel::Remote` opens the channel the lane frames batches over); without
+  one the lane is not listed, checked, switched or used.
+- `ledger::measure`, which had no caller in the binary.
+- The direct `rustls`, `rcgen`, `ring` and `base64` dependencies, which only the
+  remote lane used.
+
+### Changed
+
+- The published crate carries the source, the tree-sitter queries, the files
+  the binary compiles in and the notices; tests, harnesses, docs and CI stay in
+  the repository.
+
+## [0.37.0-rc.7] - 2026-10-09
+
+### Changed
+
+- **The CPU cap steps by 5.** The Limits card's CPU cap stepper on
+  Settings › Performance moves in steps of 5 % instead of 10, so 75 % can be
+  reached. A value set off
+  that grid (`SEMLITH_CPU_CAP=73`) snaps onto it at the first press.
+  `SEMLITH_CPU_CAP` and `settings.json` still take any whole number 0-100.
+
+## [0.37.0-rc.6] - 2026-10-08
+
+### Added
+
+- **A CPU cap.** `SEMLITH_CPU_CAP`, the Limits card's CPU cap row or
+  `cpu_cap_percent` in `settings.json` sets the most of this machine's CPU
+  semlith's own process may use while it indexes, from 0 to 100 % of every core.
+  semlith reads its own CPU time and holds a rolling two-second window under the
+  cap by pacing file preparation, the CPU lane, the image lane and the writer;
+  while capped, it also keeps files prepared at once, CPU embedding threads and
+  vector encoding inside the cap's share of the cores, so one batch cannot burst
+  past it. 0 % pauses CPU work and the run card says so. Measured on an M1 with
+  eight threads: 25 % and 50 % caps held 30 of 30 one-second samples under the
+  cap plus five points. The Limits card and `semlith accel status` show what
+  semlith is using now beside the cap.
+
+### Changed
+
+- **The CPU lane is always on.** `semlith accel off cpu` refuses, the switch is
+  locked, and a saved "off" from an older release reads as on. The cap is the
+  control instead. Its row says `active` only while it embeds.
+- **The switches tell the truth.** Each lane reports what was saved and where
+  its state came from beside what runs use, so a page draws the choice that was
+  made and names an environment override. Which lanes can run is read from the
+  machine's hardware: no usable GPU makes the GPU and llama.cpp lanes
+  unavailable, no NVIDIA card and driver makes CUDA and TensorRT unavailable,
+  and a non-Intel CPU makes OpenVINO unavailable. An unavailable or failed lane
+  can be switched off but never on, and the refusal says why; switching a failed
+  lane off clears the failure.
+
+### Fixed
+
+- **A first index through a remote GPU is 1.39x faster (#207).** When a file
+  ran past the writer's 256-chunk window, its hand-over committed the window and
+  nothing reopened the transaction, so every remaining row and the file's whole
+  graph went to disk one autocommit at a time. The writer now keeps them in a
+  transaction. microsoft/vscode (353,398 chunks) embedded through the remote
+  lane: median of three 437 s against 606 s for rc.5 (808 against
+  583 chunks a second), the write stage from about 400 s to 215 s (graph 185 to
+  50 s, rows 97 to 15 s). The store is the same: files, chunks, keyword rows,
+  symbols, edges and images match rc.5's counts. The writer's commit (about
+  90 s) is now its largest part; #207 stays open for the rest of the way to 2x.
+- `images` in `index -v`'s write parts now counts only the writer's work, not
+  the image model's own thread.
+
+## [0.37.0-rc.5] - 2026-10-07
+
+### Added
+
+- **A `remote` embedding lane, attested before anything is sent.** `semlith
+  worker` serves a machine's CUDA or TensorRT lane over TLS 1.3 under a key it
+  makes at start; the `remote` lane on another machine checks the worker's CPU
+  and GPU attestation tokens against a policy (signature, issuer, claims, and a
+  nonce bound to the worker's key, so a replay is refused) and only then sends
+  token ids. Texts and vectors stay in the worker's memory. A worker that is
+  refused, cannot prove what the policy asks, or goes away mid-run hands its
+  batches back, and the run finishes on the local lanes with the store a run
+  without it would have left. CUDA matched the local lane at cosine 1.0000
+  through it, and a worker stopped mid-run left a complete store.
+- The portal's lane row and `doctor --gpu` say where the remote lane points and
+  what its attestation proved.
+- People with their own NVIDIA GPU: the CUDA and TensorRT lanes documented and
+  measured (both cosine 1.0000).
+
+## [0.37.0-rc.4] - 2026-10-06
+
+### Fixed
+
+- **An index run tells the truth about itself, everywhere it is shown.** A manual
+  walk of this release found the run view guessed at almost
+  everything: Start sat on "Starting…" with nothing behind it, the stage pills
+  were thresholds on the file count, the log only ever said "indexing", and
+  time left swung from 22 h to 1 h 34 within six percent. Now:
+  - The engine says every phase it enters — finding files, reading and
+    chunking, starting a lane, embedding, loading the image model, finishing
+    embeddings in flight, writing the index, finishing up — with a sentence
+    and its timing, and the run card draws them as a timeline, each step held
+    on screen long enough to read but never ahead of what happened. The log
+    carries the same phase lines.
+  - Progress is the work itself: files read, chunks embedded and images
+    embedded, against an expected total the scan counts exactly and each file
+    corrects as it is chunked. The bar only climbs and reaches 100 % only at
+    the end.
+  - Time left is that work over a smoothed rate, seeded by what this
+    machine's lanes have managed (remembered per lane in `lane-rates.json`,
+    first measured by embedding the known-answer fixture in batches). It moves
+    at most a quarter in ten seconds, holds while a lane loads or the index is
+    written, and follows the work when the work changes. The wizard's Index
+    step estimates before Start, for the lanes ticked.
+  - Start lands on the run view at once and shows each request it makes; a
+    person's decisions are recorded with the run and applied as its first
+    phase. A decision on hundreds of files in the store's Review tab is one
+    request per hundred, with a progress line, and the files it lets in are
+    indexed as a run of their own.
+  - The scan before a review is a run that reports its walk, the files read,
+    hashed and checked, and the rules, so the Review card follows it.
+  - The wizard and the store's Runs tab draw the same run card.
+  - Lanes stay loaded between a run's slices: on the walk the Neural Engine's
+    worker went idle during each slice's drain and save, and every slice
+    waited two minutes for it to load again.
+  - `semlith index -v` prints the phases and the same figures.
+  - A reviewed run counts its scan's whole total from its first second. It
+    starts on the recently committed files while the walk finishes, and
+    counted only those 48 until then, so the walk's run said "about 25 min"
+    for an hour's work.
+  - Every stage is on the run's log as its own lines (files read and chunked,
+    embedding every two seconds with each lane's rate, each index save), and
+    the whole log is kept beside the store: the run history shows every line
+    of a finished run, paged by `/api/index/history/log`, where it had kept the
+    last 200.
+- A run no longer stops to drain at each checkpoint (#203). A checkpoint saves
+  what has been embedded and records as indexed only the files whose every
+  chunk has landed, and a long run gives the writer back to the watcher only
+  when the watcher has changes or another job is queued. On a manual walk
+  each 45-second slice had been followed by 10 to 12 minutes of "finishing
+  embeddings in flight" on the CPU.
+- Images are embedded on a thread of their own, so the text lanes keep
+  embedding while the image model works; it had run on the writer and left the
+  Neural Engine idle through a stretch of screenshots (#203).
+- A run admitted behind another job on its store's writer can be taken out of
+  the queue; the button said "nothing waiting in the queue".
+- Time left counts the embedding alone. Files read stayed in its rate, and
+  reading runs ahead of the lanes in bursts, so a 1,500-file run embedding at
+  18 chunks/s with 6,000 chunks left said "about 3 min". A held phase (a lane
+  starting, a save) is no longer sampled into the rate either: a Core ML first
+  start of 135 s after an update had put it 110 % over for minutes. While a
+  lane starts, the line counts its seconds.
+- The images total counts images with the image model and, on a reviewed run,
+  the plan's from the first second (it read 1 / 34, then 2 / 18, then 55 / 55);
+  the drain's "still embedding" no longer counts the window being filled twice.
+- A long run gives the writer to file changes in its folders every five
+  minutes rather than every 45 seconds, since each hand-over drains the lanes;
+  a queued job still waits at most 45 seconds.
+- Creating or deleting a store no longer waits for a search or graph in
+  progress to finish.
+- A phase said again with nothing new is logged once; under a stage filter the
+  log folds a phase line that repeats the last one shown.
+- The run log has one reader per run, shared by every card that shows it: the
+  wizard's rebuilt card added every line twice.
+- A progress bar redrawn in place moves: the page patched its width as a style
+  attribute, which the portal's content-security policy drops, so the bar kept
+  its first width while its percentage climbed.
+- The WebGPU lane on Linux refuses to start when Vulkan has only a software
+  device, and names the hardware device it uses. The known-answer failure on
+  NVIDIA (#197) was never NVIDIA: the rented containers it was measured on lack
+  the graphics capability, so Dawn ran on llvmpipe on the CPU while the device
+  still reported the card. On a real NVIDIA Vulkan driver the
+  lane passes at a minimum cosine of 0.99997 and embeds 1,408 chunks/s, against
+  CUDA's 2,784 on the same card. A worker lane that embeds the fixture at under
+  2 chunks/s is also refused, as a backstop.
+- A failed accelerator lane is tried again on the first run ten minutes after
+  it failed, and the failure is written to the daemon's log. One transient
+  load failure of the Neural Engine lane had left every run on the CPU until
+  the daemon restarted (#188).
+- A scoped search is no slower than an unscoped one on a large store: a
+  `<repo>/**` scope is a range of a path index rather than a GLOB over every
+  path, and the eight most recent resolved scopes are kept, so an agent moving
+  between repositories does not resolve each one again (#183).
+- A file that became empty, too large or unreadable is evicted, so its old
+  chunks stop answering searches; an unusable image's vectors go with its rows.
+- A query longer than CLIP's 77 tokens is never a confident image match. A
+  screenshot of text had ranked first for 57 of 102 SWE-bench issues.
+- A key-like secret whose random part happens to open on `FAKE` or `DUMMY` is
+  no longer taken for a declared test dummy.
+- Long log lines, attention rows and feed entries in the portal wrap instead of
+  cutting off the reason.
+- `measure_the_store_at_scale` takes each size's idle RSS as the median of five
+  fresh opens, so a bimodal first figure on a hosted runner no longer fails the
+  release suite (#199).
+
+### Added
+
+- The portal matches Semlith Cloud on what the two share: full text on hover
+  for anything cut off and a tip on every progress bar; sortable columns marked;
+  filters and tabs kept across a reload, and the setup wizard too; a busy
+  wizard button that says what it is doing; search store chips, the budget tip
+  and the store before each result path; the ledger's read bars on one scale
+  (a session that sent more than the whole file overflowed), its savings tables
+  and chain footer; a "chain verified" chip on reports; a store error card and
+  nav badge, an empty Stores state and a Sources table in Inside the index; the
+  Review tab's loading state and the wizard's "nothing in the grey zone" note.
+
+### Changed
+
+- `semlith index -v` splits the writer's time by part: rows and their keyword
+  index, eviction, graph, vectors, commits, saves, hashes and the vector cache
+  (#198). On a rented NVIDIA L4 the writer was about 30 % of a 93,563-chunk run,
+  the same on the container's local disk as on its network volume, and nearly
+  all of it SQLite: chunk rows, symbols and edges, and commits. The writer's
+  per-row inserts now reuse prepared statements, which cut its time by 6–8 %
+  there, and a chunk's keyword entry is written by its insert rather than a
+  trigger, which cost twice the row's own insert (measured on 8,000 chunks of a
+  real store). An older binary that puts the trigger back is undone at the
+  next write.
+- A failed known-answer check names every chunk under the floor, not only the
+  worst (#197).
+- `semlith setup` says what `--hook-mode gate` buys where the choice is made,
+  and docs/clients.md records the measurement behind it (#189).
+
+### Security
+
+- rustls 0.23.45, past RUSTSEC-2026-0285 (TLS 1.3 handshake messages accepted
+  across encryption levels).
+
 ## [0.37.0-rc.3] - 2026-10-05
 
 ### Added
@@ -63,19 +319,18 @@ the ledger's real sessions. Data, clones and stores live under
   `Semlith::vector_cache` takes a `cache::Location` (a file and a cap), and
   that store's index runs read and write that cache and never the machine's.
   A cap of 0 turns the cache off for that store only. `cache::stats_at` reports
-  one cache's rows, size and hit rate, and `cache::clear` deletes one. Semlith
-  Cloud gives each organisation its own, so no customer's run reads another's
-  vectors. The binary never sets one: its machine-wide cache, the
+  one cache's rows, size and hit rate, and `cache::clear` deletes one. The
+  binary never sets one: its machine-wide cache, the
   `SEMLITH_VECTOR_CACHE_MB` cap and the portal's cache settings are unchanged.
 
 ### Changed
 
 - `semlith cloud status` reports how many chunks the organisation indexed this
-  month against its cap (`212,400 of 2,650,000 chunks indexed`), as Semlith
-  Cloud 0.4.0 meters indexing in chunks; `semlith cloud push` states the host's
-  estimate (`about 1,400 chunks to index`) and its `--json` report carries
-  `estimate_chunks`. Against a host before Cloud 0.4.0 both read the minutes it
-  sends, as before.
+  month against its cap (`12,400 of 100,000 chunks indexed`) when the host
+  counts chunks; `semlith cloud push` states the host's estimate
+  (`about 1,400 chunks to index`) and its `--json` report carries
+  `estimate_chunks`. Against a host that counts minutes both read the minutes
+  it sends, as before.
 
 ## [0.37.0-rc.2] - 2026-10-04
 
@@ -359,7 +614,7 @@ Chrome and Firefox write no path into a field and go straight to the lookup.
 Every drop ends in the paste box when nothing finds it. On Windows a Windows
 Search answer on any drive counts, not only under the profile.
 
-### From the owner's walk
+### From a manual walk
 
 **Read and decided the way people use it.** Every dropdown is the portal's
 own, drawn like the Graph's store picker. Long paths lose their start, never
@@ -399,8 +654,7 @@ it follows file changes (`watch`), whether its retrievals are recorded
 (`record`) and whether its walks honour `.gitignore`. The keys are additive in
 `registry.json`, and their defaults are what every store did before.
 
-**Review decides several files at once.** Owner decision of 2026-10-01: a
-person may now decide about many refused files in one request
+**Review decides several files at once.** A person may now decide about many refused files in one request
 (`POST /api/refused/decide`: in, redact, out, reset); each file is still its
 own decision and its own ledger row, a credential file is still never let in,
 and no agent can reach the route. Keep out is a recorded decision that leaves
@@ -821,8 +1075,8 @@ live, reclaimable and the reclaimable share — `semlith_stats` carries the same
 figures, and the Stores page has a Disk column, a Compact action that asks with
 the bytes it will give back, and an On disk tile that now sums the stores
 themselves rather than the source they indexed. The crate exposes
-`Semlith::compact` and `Semlith::footprint` so Semlith Cloud can do the same for
-org stores.
+`Semlith::compact` and `Semlith::footprint` so an embedder can do the same for
+the stores it hosts.
 
 **A reader sees a writer's new shards.** A long-lived reader — an MCP server, the
 portal — re-read the shard directory only when it opened a store, so a shard a
@@ -2354,7 +2608,7 @@ that replays every one of their reproductions as a standing gate.
 - A store holds only what its roots cover. The index boundary treated the whole
   home directory as inside every store's boundary, so any store on the machine
   could swallow any other's corpus and be allowed — the `semlith` store held 262
-  files belonging to `ultraship`, every search across all stores returned them
+  files belonging to another store, every search across all stores returned them
   twice, and the store label on the duplicate was wrong. The home directory is
   now the fallback only for a store with no registered roots. A store reconciles
   what it should not hold when the daemon opens it, logging the count and showing

@@ -187,6 +187,12 @@ pub fn settings_path() -> Result<PathBuf> {
 /// The price table `semlith prices update` downloaded, when it has been run.
 /// Tool-written state like `settings.json`; delete it to go back to the
 /// table built into the binary.
+/// What each embedding lane has managed on this machine, in chunks per
+/// second: what an estimate before a run is taken from.
+pub fn lane_rates_path() -> Result<PathBuf> {
+    Ok(home_or_error()?.join("lane-rates.json"))
+}
+
 pub fn prices_path() -> Result<PathBuf> {
     Ok(home_or_error()?.join("prices.json"))
 }
@@ -254,10 +260,14 @@ pub struct Settings {
     pub runs_at_once: Option<usize>,
     pub embed_threads: Option<usize>,
     pub index_memory_mb: Option<usize>,
+    /// The most of this machine's CPU semlith's own process may use while it
+    /// indexes, 0-100 %. Absent means 100, no cap. See [`crate::cpucap`].
+    #[serde(default)]
+    pub cpu_cap_percent: Option<u8>,
     /// Whether the ledger's Session replay tab may read this machine's agent
-    /// transcripts. Absent means on from 0.35.0 (the owner's decision: the
-    /// panel is the ledger's answer to "was it enough", and off by default
-    /// meant nobody saw it). A file that wrote `false` stays off. Read it
+    /// transcripts. Absent means on from 0.35.0 (the panel is the ledger's
+    /// answer to "was it enough", and off by default meant nobody saw it). A
+    /// file that wrote `false` stays off. Read it
     /// through [`Settings::replay_on`], never with an `unwrap_or` of its own.
     #[serde(default)]
     pub session_replay: Option<bool>,

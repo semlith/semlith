@@ -145,7 +145,14 @@ class Transcript:
         self.handle = open(path, "w", encoding="utf-8")
 
     def line(self, text=""):
-        print(text)
+        # A console that cannot encode a character (cp1252 on Windows, "↕")
+        # gets it escaped; the transcript file keeps it as written. A check's
+        # message must never stop the run.
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+            print(text.encode(encoding, "backslashreplace").decode(encoding, "replace"))
         self.handle.write(text + "\n")
         self.handle.flush()
 
@@ -154,6 +161,13 @@ class Transcript:
 
 
 def main():
+    # Titles and messages carry characters a Windows console's code page has
+    # not got ("↕", "›"); they are escaped there rather than ending the run.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
     parser = argparse.ArgumentParser(
         description="Replay the 2026-09-17 regression drive, and the v6 view checks, "
         "against a live portal."
@@ -228,6 +242,15 @@ def main():
             issue = known.get(check_id)
             failure = None
             skipped = None
+            # Every check starts from the pages' defaults: page state and the
+            # wizard now survive a reload (per viewer), so one check's filters
+            # would otherwise be the next one's starting point.
+            try:
+                drive.eval("(() => { try { for (const k of Object.keys(localStorage)) if (k.startsWith('semlith-ui:')) localStorage.removeItem(k);"
+                           " sessionStorage.removeItem('semlith-wz'); if (typeof KEPT !== 'undefined') KEPT.length = 0;"
+                           " if (typeof state !== 'undefined') state.wz = null; } catch (e) {} return true; })()")
+            except Exception:
+                pass
             try:
                 function(drive)
             except findings.Skipped as reason:

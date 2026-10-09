@@ -57,9 +57,10 @@ pub struct Report {
     /// denominator this module exists to refuse.
     pub window: String,
     pub blocks: Vec<Block>,
-    /// Where it was generated, when not on this machine: an embedder that
-    /// keeps the data elsewhere (Semlith Cloud) says so, and the local line's
-    /// "nothing left it" is not claimed for it. Absent from JSON when unset.
+    /// Where it was generated, when not on this machine: a program that
+    /// embeds the library and keeps the data elsewhere says so, and the local
+    /// line's "nothing left it" is not claimed for it. Absent from JSON when
+    /// unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
 }
@@ -160,9 +161,7 @@ impl Window {
 
 /// The five reports, and nothing else.
 ///
-/// The ones the v4 design keeps. Team roll-up, the compliance pack, CI impact
-/// mode, signed reports and build attestation need a team ledger or a shared
-/// container, so they belong to Semlith Cloud rather than to this binary.
+/// The reports this binary makes, each from what one machine holds.
 pub const KINDS: [(&str, &str); 5] = [
     ("savings", "Retrieval savings"),
     ("access", "AI access audit"),

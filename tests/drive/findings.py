@@ -24,9 +24,9 @@ surface that now carries it (the Index page's run cards are a store's Runs tab;
 its folder pickers are the wizard's Sources step; Machine limits is Settings ›
 Performance; Impact is Graph › Blast radius; About is Settings › About). Where
 v6 deliberately reversed an old rule, the check asserts the new rule and says
-"0.35.0 owner decision" beside it: v6 as drawn wins over older rules, and the
-owner named the three biggest reversals (bulk decisions in review, session
-replay on by default, a runtime ledger recording switch). That comment is the
+"0.35.0 design decision" beside it: v6 as drawn wins over older rules, and the
+three biggest reversals are bulk decisions in review, session replay on by
+default and a runtime ledger recording switch. That comment is the
 only way a check's meaning is allowed to change.
 
 The `v6.*` checks at the end are new in 0.35.0: one or more per view and flow,
@@ -53,6 +53,7 @@ ambiguity so the next person can see the choice was made rather than assumed.
 
 import json
 import random
+import shutil
 import string
 import os
 import re
@@ -70,8 +71,9 @@ CHECKS = []
 # repeated because several checks share them and a guessed selector that
 # matches nothing turns a check into a check of nothing.
 
-#: A live run's card on a store's Runs tab — `sdRuns()` draws one
-#: `card blue-edge pad` per run that is not finished, above the History card.
+#: A live run's card on a store's Runs tab — `sdRuns()` draws one `runCard()`
+#: (`card run-card blue-edge`, the wizard's card too) per run that is not
+#: finished, above the History card.
 LIVE_CARD = "#main .card.blue-edge"
 
 #: One finished run on a store's Runs tab — `sdRuns()`'s History rows, one per
@@ -338,10 +340,10 @@ def wait_for_run(d, store_name, timeout=RUN_FINISHES, run_id=None):
     )
 
 
-def indexed_fixture(d, path):
+def indexed_fixture(d, path, timeout=RUN_FINISHES):
     """Index a fixture folder and wait for it, returning the store name."""
     run_id, store_name = start_index(d, path)
-    wait_for_run(d, store_name, run_id=run_id)
+    wait_for_run(d, store_name, run_id=run_id, timeout=timeout)
     return store_name
 
 
@@ -752,7 +754,7 @@ def _(d):
     # card with Pause and Stop, and a finished one is a History row with none.
     #
     # The old check also required a finished card to offer Remove.
-    # 0.35.0 owner decision (v6 as drawn): finished runs are not dismissed by hand any more —
+    # 0.35.0 design decision (v6 as drawn): finished runs are not dismissed by hand any more —
     # they leave the live area by themselves and are kept, newest first, in a
     # History that survives a restart. What the finding was about is unchanged
     # and asserted in full: nothing about a run that is over offers to pause it
@@ -1006,7 +1008,7 @@ def _(d):
     # And the portal carries that string rather than a clock of its own: the
     # browser's own time was the other half of the disagreement.
     #
-    # 0.35.0 owner decision (v6 as drawn): the Retrievals table prints a short
+    # 0.35.0 design decision (v6 as drawn): the Retrievals table prints a short
     # clock — "today 14:02" — and hangs the row's full `when`, offset and all,
     # on that cell as its tooltip. So the assertion is that the newest row's
     # cell carries `when` exactly, and that the clock it prints is that
@@ -1356,7 +1358,7 @@ def _(d):
 @finding("2.6", "finished runs leave the live area by themselves, and the active run sorts first")
 def _(d):
     # The finding: finished runs could not be dismissed and buried the live one
-    # under them. 0.35.0 owner decision (v6 as drawn): there is nothing to
+    # under them. 0.35.0 design decision (v6 as drawn): there is nothing to
     # dismiss by hand — a run that finishes leaves the live area of its store's
     # Runs tab for History on its own, and History is kept across restarts. The
     # half of the finding that is about order is asserted as before: a live run
@@ -2038,7 +2040,7 @@ def _(d):
     # that showed what it would write was secondary, so the destructive button
     # was reachable without ever seeing the preview.
     #
-    # 0.35.0 owner decision (v6 as drawn): there is no separate dry run. Each
+    # 0.35.0 design decision (v6 as drawn): there is no separate dry run. Each
     # client registers in one click, and the exact command or file that click
     # writes is printed beside the button before it can be pressed; the wizard's
     # Connect step lists what it will write per client above its Register. So
@@ -2305,7 +2307,7 @@ def _(d):
 
 @finding("3.23", "the theme control can return to following the system")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): the theme control is Light, Dark and
+    # 0.35.0 design decision (v6 as drawn): the theme control is Light, Dark and
     # System side by side rather than a cycle, and the root always carries the
     # resolved scheme in `data-theme` — "system" writes whichever one the OS
     # prefers, and follows it live. The finding's property is asserted on that:
@@ -2344,7 +2346,7 @@ def _(d):
 def _(d):
     # The finding: one destination, three names. Read in two parts from 0.26.1.
     #
-    # 0.35.0 owner decision (v6 as drawn): the header's launcher reads "Ask the
+    # 0.35.0 design decision (v6 as drawn): the header's launcher reads "Ask the
     # index a question" and the Search box it opens says how to ask — "Ask in
     # words, or paste an identifier" — so the box's placeholder is guidance, not
     # a second name for the launcher. What stays asserted is that the launcher
@@ -2562,7 +2564,7 @@ def _(d):
     # rendered at full contrast like the folders that could — what a row looked
     # like did not say what it did.
     #
-    # 0.35.0 owner decision (v6 as drawn): a single file is a source in its own
+    # 0.35.0 design decision (v6 as drawn): a single file is a source in its own
     # right, so the wizard's picker offers files for selection beside folders.
     # The property asserted is the finding's — a row reads as what it does: a
     # file row carries the same checkbox a folder row does, and ticking it
@@ -2962,7 +2964,7 @@ def _(d):
 
 @finding("5.1", "the sidebar is every page, in three groups, in order")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): nine pages in three groups. Files is
+    # 0.35.0 design decision (v6 as drawn): nine pages in three groups. Files is
     # a store's own tab, Index is the store wizard, Inside the index is a tab of
     # Stores, Impact is Graph › Blast radius, Cloud, Doctor and About are
     # sections of Settings and Agents.
@@ -3119,7 +3121,7 @@ def _(d):
     for wanted in ["Markdown", "CSV", "JSON"]:
         if wanted not in texts_of(d, "#main .tabs button"):
             fail("the sessions table cannot export %s" % wanted)
-    # 0.35.0 owner decision (v6 as drawn): three filters — client, store and
+    # 0.35.0 design decision (v6 as drawn): three filters — client, store and
     # tier — where there were two. Still no one model picked for every row: a
     # session's saving is priced at the model it ran on.
     selects = d.eval("[...document.querySelectorAll('#main .filterbar .dd')].map(s => s.getAttribute('aria-label'))")
@@ -3127,7 +3129,7 @@ def _(d):
     if d.eval("!!document.querySelector('[aria-label=\"Cost at\"]')"):
         fail("the sessions table still prices every session at one chosen model")
     # The Model column comes with the Usage-from-client-logs switch, which is
-    # where the model each session ran on is read from (0.35.0 owner decision:
+    # where the model each session ran on is read from (0.35.0 design decision:
     # usage from logs is a Ledger switch). Saved comes with a priced session.
     was = bool((d.api("/api/ledger").get("usage") or {}).get("enabled"))
     try:
@@ -3145,7 +3147,7 @@ def _(d):
 
 @finding("5.7", "session replay is on by default, and Privacy can turn it off and on")
 def _(d):
-    # 0.35.0 owner decision: session replay defaults to on (a settings file that
+    # 0.35.0 design decision: session replay defaults to on (a settings file that
     # never wrote the key reads as on; one that wrote off stays off). The old
     # check asserted the opposite default. Asserted now: replay is on in this
     # drive's pristine home, the Ledger's replay tab shows the on state, and
@@ -3276,7 +3278,7 @@ def open_welcome(d):
 
 @finding("6.1", "the first-run screen carries what the v6 design's welcome carries")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): five steps, Connect being the fifth;
+    # 0.35.0 design decision (v6 as drawn): five steps, Connect being the fifth;
     # the version as a chip beside the wordmark; the machine checks on the
     # right, the first naming the address the daemon answers on. The v4 screen's
     # `--no-ledger` sentence is not on v6's welcome — it is on the Ledger page,
@@ -3308,7 +3310,7 @@ def _(d):
 
 @finding("6.2", "Skip for now lands on Home")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): the first run's Skip for now is on
+    # 0.35.0 design decision (v6 as drawn): the first run's Skip for now is on
     # the wizard's last step, Connect, and lands on Home — the page about this
     # machine's index — rather than on the welcome's own Stores link it was in v4.
     reach_connect_step(d, "skipper")
@@ -3499,7 +3501,7 @@ def _(d):
 @finding("7.2", "every page ends with the design's floor under its last card")
 def _(d):
     """The v6 design's page is `20px 24px 28px`, and `14px 14px 24px` on a
-    phone, so the floor is 28px and 24px (0.35.0 owner decision: v6 as drawn,
+    phone, so the floor is 28px and 24px (0.35.0 design decision: v6 as drawn,
     where v4's was 44px at both). Search and Graph are the recorded exceptions:
     full-height pages whose canvas fills the frame."""
     a_store(d)
@@ -3969,7 +3971,9 @@ def _(d):
         stores_before = sidebar_stores(d)
         press(d, CARD, "Stop…")
         d.wait_for("!!document.querySelector(%s)" % json.dumps(MODAL), what="the Stop dialog")
-        ticked = d.eval("(document.querySelector('#stop-delete') || {}).checked")
+        # 0.37.0-rc.4 walk 3: the option is the Review table's checkbox
+        # (role=checkbox, aria-checked), not a native input.
+        ticked = d.eval("(() => { const b = document.querySelector('#stop-delete'); return b ? b.getAttribute('aria-checked') === 'true' : null; })()")
         if ticked is not True:
             fail(
                 "the Stop dialog for %s, a store this run is creating, left 'Also "
@@ -4008,7 +4012,7 @@ def _(d):
     rebuilt card put new controls in place of the focused one.
 
     The old check also removed a finished card and pressed "Remove all
-    finished". 0.35.0 owner decision (v6 as drawn): a finished run leaves the
+    finished". 0.35.0 design decision (v6 as drawn): a finished run leaves the
     live area for History by itself, which is the "run finishing" asserted
     here; there is no card to remove by hand.
     """
@@ -4092,8 +4096,11 @@ new Promise(done => {
     const word = (card.querySelector('.pill') || {}).textContent || '';
     if (!/indexing|catching up/.test(word)) return;
     rates.samples++;
-    const line = (card.querySelector('.t-mono-sm') || {}).textContent || '';
-    const m = /(—|[\d.,]+) chunks\/s/.exec(line);
+    // The RATE tile of the one run card (0.37.0-rc.4, W8): "N chunks/s",
+    // or "—" before the first batch.
+    const tile = [...card.querySelectorAll('.run-stats > div')].find(t => /RATE/.test((t.querySelector('.eyebrow') || {}).textContent || ''));
+    const line = ((tile && tile.querySelector('.v')) || {}).textContent || '';
+    const m = /^(—|[\d.,]+)(?: chunks\/s)?$/.exec(line.trim());
     if (!m) rates.missing.push(line.slice(0, 80) || '(empty)');
     else if (m[1] === '—' && rates.numbered) rates.lapsed.push(line.slice(0, 80));
     else if (m[1] !== '—') rates.numbered = true;
@@ -4158,6 +4165,9 @@ def _(d):
         d.reset_viewport()
         still_open(d, STILL_VIEWPORT, "store/%s/runs" % store)
         d.wait_for("!!%s" % CARD, what="the live run's card")
+        # 0.37.0-rc.4 design decision (W8): the live card is the wizard's run
+        # card. Its log grows a line per file; its Pipeline is fixed in shape,
+        # so nothing else on the tab may be rebuilt.
         seen = observe(d, CARD, ".log", 20000, rate=True)
         if seen["loading"]:
             fail("the loader appeared %d time(s) on the Runs tab during a live run" % seen["loading"])
@@ -4306,7 +4316,7 @@ def _(d):
     on it must not delete it by default, and the dialog says what is at stake.
     (A store the run is creating is offered, ticked: 8.1.)
 
-    0.35.0 owner decision (v6 as drawn): for a store that held files the delete
+    0.35.0 design decision (v6 as drawn): for a store that held files the delete
     option is not offered at all, which is the old "unticked" made stronger,
     and the dialog's sentence is the design's — what the run embedded is undone
     and the store is left exactly as it was before the run — where the v4
@@ -4390,11 +4400,13 @@ def _(d):
         stop_quietly(d, store)
 
 
-@finding("8.7", "Settings › Performance lists the accelerator lanes, with the CPU active")
+@finding("8.7", "Settings › Performance lists the accelerator lanes, with the CPU always on")
 def _(d):
     """One row per lane `/api/accel` reports, each a switch with its device, its
-    state and its share of the work. The CPU is always a lane and always
-    active; CI runners have no GPU, so nothing here depends on one.
+    state and its share of the work. The CPU is always a lane and always on,
+    its switch locked (0.37.0-rc.6; it reads idle until it embeds); every
+    other switch draws what was saved. CI runners have no GPU, so nothing here
+    depends on one.
 
     Turning a lane on that needs a download says what it downloads before
     anything is posted: the dialog is opened and cancelled, and the lane is
@@ -4416,8 +4428,11 @@ def _(d):
         if wanted not in names:
             fail("the lanes card has no %s row; it lists %r" % (wanted, names))
     cpu = rows[names.index("CPU")]
-    if "active" not in cpu["state"]:
-        fail("the CPU row reads %r; the CPU lane is always active" % cpu["state"])
+    if "always on" not in cpu["state"] or cpu["on"] != "true":
+        fail("the CPU row reads %r (switch %s); the CPU lane is always on" % (cpu["state"], cpu["on"]))
+    locked = d.eval("(document.querySelector('#main .lane-row button[aria-label=\"CPU lane\"]') || {}).disabled")
+    if locked is not True:
+        fail("the CPU lane's switch can be pressed; it is locked on")
     # Matched by name: from 0.35.0 the lanes this machine cannot run are
     # listed after the others, under their own line, and read "off".
     by_label = {(l.get("label") or l["lane"]): l for l in lanes}
@@ -4425,9 +4440,12 @@ def _(d):
         lane = by_label.get(name)
         if lane is None:
             fail("the lanes card lists %r, which /api/accel does not report" % name)
-        if row["on"] != ("true" if lane.get("enabled") else "false"):
-            fail("the %s switch reads %s and the daemon has it %s"
-                 % (row["title"], row["on"], "on" if lane.get("enabled") else "off"))
+        # The switch draws the saved choice (0.37.0-rc.6), or what the
+        # environment set when it set the lanes.
+        want = lane.get("enabled") if lane.get("source") == "environment" else lane.get("saved", lane.get("enabled"))
+        if row["on"] != ("true" if want else "false"):
+            fail("the %s switch reads %s and the daemon has it saved %s"
+                 % (row["title"], row["on"], "on" if want else "off"))
         unavailable = (lane.get("status") or {}).get("state") == "unavailable"
         if unavailable:
             if row["share"] != "off":
@@ -4477,7 +4495,7 @@ def _(d):
     if len(rows) < len(downloads):
         fail("the list has %d rows; /api/privacy lists %d downloads" % (len(rows), len(downloads)))
     for row, download in zip(rows, downloads):
-        # 0.35.0 owner decision (revised v6 design): the portal never names the
+        # 0.35.0 design decision (revised v6 design): the portal never names the
         # embedding model, so the row is the route's words without the bracketed
         # model detail — "the embedding model", not which one. Everything else
         # in the row is still the route's.
@@ -4499,7 +4517,7 @@ def _(d):
 
 # ---------------------------------------------------------------- 0.29.0
 #
-# The eleven portal fixes the owner found using 0.28.0, one check each.
+# The eleven portal fixes found by using 0.28.0 by hand, one check each.
 
 
 @finding("9.1", "a running card counts down from the daemon's estimate, not up from submission")
@@ -4515,7 +4533,9 @@ def _(d):
         run = None
         while time.time() < deadline:
             run = run_by_id(d, run_id)
-            if not run or run.get("status") in TERMINAL or run.get("eta_ms") is not None:
+            # Both: a run-truth daemon has a time left as soon as the files
+            # are counted, which can be a poll before the first byte is read.
+            if not run or run.get("status") in TERMINAL or (run.get("eta_ms") is not None and run.get("bytes")):
                 break
             time.sleep(0.5)
         if not run or run.get("status") in TERMINAL:
@@ -4526,9 +4546,16 @@ def _(d):
         if not run.get("bytes_total") or not (0 < run.get("bytes", 0) <= run["bytes_total"]):
             fail("the snapshot's bytes are %r of %r" % (run.get("bytes"), run.get("bytes_total")))
         d.open_view("store/%s/runs" % store)
-        d.wait_for("(() => { const c = %s; return !!c && /left|almost done|estimating/.test(c.innerText); })()" % CARD,
+        # 0.37.0-rc.4: the one run card says its time left in its TIME LEFT
+        # meter as "about 12 min" or "under a minute" (the run-truth spec's
+        # words), where the old card's line read "12 min left".
+        d.wait_for("(() => { const c = %s; return !!c && /left|almost done|estimating|about \\d+ (min|h)|under a minute/.test("
+                   "[...c.querySelectorAll('.run-stats .v, .t-mono-sm')].map(n => n.textContent).join(' ')); })()" % CARD,
                    timeout=20, what="%s's card to show the time left" % store)
-        text = d.eval("(%s).innerText" % CARD)
+        # The card without its log: since 0.37.0-rc.4 the log sits inside the
+        # card (one run card everywhere), and its lines carry the wall-clock
+        # time they were said, which is a label, not a clock counting up.
+        text = d.eval("(() => { const c = (%s).cloneNode(true); c.querySelectorAll('.log').forEach((l) => l.remove()); return c.innerText; })()" % CARD)
         if re.search(r"\b\d{2}:\d{2}\b", text):
             fail("the running card still shows a clock: %r" % text[:200])
     finally:
@@ -4572,7 +4599,7 @@ def _(d):
 
 @finding("9.4", "every paginated table opens at the design's page size")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): tables open at 10 rows a page, and a
+    # 0.35.0 design decision (v6 as drawn): tables open at 10 rows a page, and a
     # store's Files table at 25, where v4's opened at 5. The property is that a
     # table opens at its stated size and shows no more rows than that.
     store = a_store(d)
@@ -4598,7 +4625,7 @@ def _(d):
 
 @finding("9.5", "each store's Forget asks in a confirm that names it, and takes it")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): the Stores list has no multi-select,
+    # 0.35.0 design decision (v6 as drawn): the Stores list has no multi-select,
     # so stores are forgotten one by one from each row's menu — the bulk confirm
     # that named every store it would delete has no v6 surface. What it was for
     # is asserted per store: the confirm names the store it deletes, and when it
@@ -4644,7 +4671,7 @@ def _(d):
         if clipped:
             fail("with the side column scrolled to its %s, %s is cut off" % (scrolled, clipped))
     # 0.29.0 kept a long name to one line with an ellipsis and the full name on
-    # hover. 0.35.0 owner decision (v6 as drawn): the name breaks across lines
+    # hover. 0.35.0 design decision (v6 as drawn): the name breaks across lines
     # and is shown whole. Either way the property is that the name is never
     # cut off with nothing carrying the rest, which is asserted on both shapes.
     sym = d.eval(
@@ -4892,7 +4919,7 @@ def _(d):
         rows = decision_rows(d)
         want("the files the review step asks about", sorted(r["file"] for r in rows), ["alpha.txt", "beta.txt"])
         for r in rows:
-            # 0.35.0 owner decision: three decisions per file — Keep out, Redact
+            # 0.35.0 design decision: three decisions per file — Keep out, Redact
             # & index, Index — taken on the row, one file or a selection at a
             # time, each logged per file. Where 0.30.0 read "Accept redacted",
             # "Accept as-is" and "Keep refused" through a dialog.
@@ -5071,7 +5098,7 @@ def _(d):
     dirs = [r["name"] for r in tree["rows"] if r["dir"]]
     if names[:len(dirs)] != dirs:
         fail("the tree does not order folders before files: %r" % names)
-    # The owner's third walk: chips on an explorer were no use, so a tree offers
+    # The third manual walk: chips on an explorer were no use, so a tree offers
     # none it does not apply.
     chips = d.eval("[...document.querySelectorAll('#main .row .chip')].filter(c => c.offsetParent !== null).map(c => c.textContent.trim())")
     want("the chips offered beside the tree", chips, [])
@@ -5108,7 +5135,7 @@ def _(d):
         " rows: [...t.querySelectorAll('tbody tr')].map(tr => ({cells: [...tr.cells].map(td => (td.innerText || '').trim()),"
         " buttons: [...tr.querySelectorAll('button:not([role=checkbox])')].map(b => b.textContent.trim())}))}; })()" % table
     )
-    # 0.35.0 owner decision (v6 as drawn): the Decisions table is Path,
+    # 0.35.0 design decision (v6 as drawn): the Decisions table is Path,
     # Outcome, Why and By — yours and the rules' together, undo on any of yours —
     # where 0.30.0 listed only the person's with a "Likely real" confidence.
     for label in ("Path", "Outcome", "Why", "By"):
@@ -5130,7 +5157,7 @@ def _(d):
     if any(os.path.basename(r["path"]) == "alpha.txt" and r.get("accepted") for r in after):
         fail("Undo left alpha.txt accepted: %s" % json.dumps(after)[:400])
 
-    # 0.35.0 owner decision: decisions take a list — bulk is allowed — and each
+    # 0.35.0 design decision: decisions take a list — bulk is allowed — and each
     # file is still logged as its own decision, by the person. Where 0.30.0
     # refused a list with a 400.
     status, answer = d.api_result("/api/refused/decide", method="POST",
@@ -5146,7 +5173,7 @@ def _(d):
 
 @finding("10.7", "a finished run states what it did, and the store says what it did not index and what needs review")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): a finished run's History row states
+    # 0.35.0 design decision (v6 as drawn): a finished run's History row states
     # what it indexed, in how many chunks and how long it took; what the run
     # did not index and what waits for a decision are the store's Review tab —
     # the Waiting card and the rules' rows in Decisions — rather than a plan
@@ -5169,7 +5196,7 @@ def _(d):
 
 @finding("10.8", "the sidebar's Stores item counts the files waiting for a decision")
 def _(d):
-    # 0.35.0 owner decision (v6 as drawn): the Stores item carries an amber
+    # 0.35.0 design decision (v6 as drawn): the Stores item carries an amber
     # count of files waiting for a decision, where 0.30.0's fourth walk had
     # taken it off. Asserted: the count is the daemon's, and it is not shown
     # when nothing waits.
@@ -5212,7 +5239,7 @@ def _(d):
             fail("the held scan's card does not say it is held for review")
         press_in(d, CARD, "Stop…")
         d.wait_for("!!document.querySelector(%s)" % json.dumps(MODAL), what="the discard confirm")
-        if d.eval("(document.querySelector('#stop-delete') || {}).checked") is not True:
+        if d.eval("(document.querySelector('#stop-delete') || {}).getAttribute?.('aria-checked')") != "true":
             fail("discarding the scan of a new folder does not offer, ticked, to delete its empty store")
         d.modal_press("Stop and undo")
         deadline = time.time() + 20
@@ -5849,7 +5876,8 @@ def _(d):
     ledger = d.api("/api/ledger")
     want("the Queries recorded tile", kpi(d, "Queries recorded")["v"], grouped(ledger.get("queries")))
     sessions = ledger.get("sessions") or []
-    want("the sessions on the first page", d.eval("document.querySelectorAll('#main table tbody tr').length"), min(10, len(sessions)))
+    # The tabbed card's table: the savings tables (2026-10-07) sit above it.
+    want("the sessions on the first page", d.eval("document.querySelectorAll('#main .card:has([role=tab]) table tbody tr').length"), min(10, len(sessions)))
     no_console_errors(d, "Ledger › Sessions")
 
 
@@ -5860,10 +5888,10 @@ def _(d):
     time.sleep(0.5)
     open_clean(d, "ledger/retrievals", fresh=True)
     rows = d.api("/api/ledger").get("rows") or []
-    want("the retrievals on the first page", d.eval("document.querySelectorAll('#main table tbody tr').length"), min(10, len(rows)))
+    want("the retrievals on the first page", d.eval("document.querySelectorAll('#main .card:has([role=tab]) table tbody tr').length"), min(10, len(rows)))
     press_text(d, "#main .filterbar button", "Zero-hit only")
     zero = [r for r in rows if r.get("hits") == 0]
-    want("the zero-hit retrievals", d.eval("document.querySelectorAll('#main table tbody tr').length"), min(10, len(zero)))
+    want("the zero-hit retrievals", d.eval("document.querySelectorAll('#main .card:has([role=tab]) table tbody tr').length"), min(10, len(zero)))
     no_console_errors(d, "Ledger › Retrievals")
 
 
@@ -6008,6 +6036,1155 @@ def _(d):
     if ("%s models priced" % grouped(prices.get("models"))) not in view_text(d):
         fail("the Prices card does not count the daemon's %s priced models" % prices.get("models"))
     no_console_errors(d, "Settings › About")
+
+
+@finding("rc4.1", "a run's bar follows what is read and embedded, not 99 % from the start")
+def _(d):
+    run = wait_for_run(d, a_store(d))
+    if run.get("progress") != 1.0:
+        fail("a finished run reports progress %r, not 1.0" % run.get("progress"))
+    open_clean(d, "stores", fresh=True)
+    # The 0.37.0-rc.3 shape: an eighth of the files read, embedding keeping
+    # up, so pending_share is 0.002 and the bar read 99 %.
+    early = d.eval(
+        "runPct({store: 'rc4', id: 1, started_at: 'a', status: 'running', progress: 0.125,"
+        " pending_share: 0.002, bytes: 125, bytes_total: 1000, scanned: 561, total: 4349})"
+    )
+    if not 12 <= early <= 13:
+        fail("an eighth read reads %r %%, not about 12 %%" % early)
+    later = d.eval(
+        "runPct({store: 'rc4', id: 1, started_at: 'a', status: 'running', progress: 0.1})"
+    )
+    if later < early:
+        fail("the bar went backwards within a run: %r then %r" % (early, later))
+    full = d.eval(
+        "runPct({store: 'rc4', id: 2, started_at: 'b', status: 'running', progress: 0.999})"
+    )
+    if full >= 100:
+        fail("a running run reads %r %%" % full)
+    no_console_errors(d, "run progress")
+
+
+# ------------------------------------------------- 0.37.0-rc.4 run truth (rc4.x)
+#
+# The manual walk of 2026-10-06 (items W1-W7):
+# Start sat on "Starting…", the run card's stage pills were guesses, the scan
+# card's stages were thresholds on a paced fraction, bulk decisions said
+# nothing while they ran, and the Index step's estimate read "—". Each check
+# drives the page the way the walk did. Where a figure comes from a field only
+# a run-truth daemon sends, the check asserts it when the daemon sends it and
+# says so when it does not.
+
+#: Records every decide POST's body and can hold any request for a while, so a
+#: check can see batches, `defer`, and a slow request's waiting line.
+FETCH_SPY = r"""
+(() => {
+  if (window.__spy) return true;
+  const spy = window.__spy = {decides: [], delay: {}};
+  const real = window.fetch.bind(window);
+  window.fetch = async (input, init) => {
+    const url = String((input && input.url) || input);
+    if (url.includes('/api/refused/decide') && init && init.body) spy.decides.push(JSON.parse(init.body));
+    const hold = Object.entries(spy.delay).find(([part]) => url.includes(part));
+    if (hold) await new Promise(r => setTimeout(r, hold[1]));
+    return real(input, init);
+  };
+  return true;
+})()
+"""
+
+#: Samples the run card every 50 ms: each status line it showed (and when),
+#: whether it was the start sequence's, and the Pipeline panel's height.
+PIPE_SAMPLER = r"""
+(() => {
+  const seen = window.__pipe = {lines: [], heights: [], lanes: []};
+  const real = window.__realSetInterval || window.setInterval;
+  seen.timer = real(() => {
+    const card = document.querySelector('.wz-body .run-card');
+    if (!card) return;
+    const st = card.querySelector('.pipe-status');
+    const text = st ? st.textContent.trim() : '';
+    const last = seen.lines[seen.lines.length - 1];
+    if (!last || last[0] !== text) seen.lines.push([text, Date.now(), !!(st && st.classList.contains('starting'))]);
+    const pipe = card.querySelector('.pipe');
+    if (pipe && !pipe.hidden && !st.classList.contains('starting') && card.querySelector('.pipe-row'))
+      seen.heights.push(Math.round(pipe.getBoundingClientRect().height));
+    const lanes = [...card.querySelectorAll('.pipe-row')].map(r => r.getAttribute('data-lane')).join(',');
+    if (lanes && !seen.lanes.includes(lanes)) seen.lanes.push(lanes);
+  }, 50);
+  return true;
+})()
+"""
+
+
+def secret_tree(d, name, count):
+    """`count` files the scan refuses and a person may review, for a bulk
+    decision that has to go in more than one batch."""
+    root = os.path.join(d.fixtures.root, "%s-%d" % (name, random.randint(0, 10**9)))
+    os.makedirs(root)
+    for i in range(count):
+        with open(os.path.join(root, "conf-%03d.txt" % i), "w") as f:
+            f.write("# settings %d\nkey = \"%s\"\n" % (i, live_aws()))
+    with open(os.path.join(root, "lib.rs"), "w") as f:
+        f.write("pub fn callee() -> u32 { 1 }\n")
+    return root
+
+
+@finding("rc4.2", "Start lands on the run view at once and says each step on one line, the decisions recorded first")
+def _(d):
+    d.clear_console()
+    d.eval("try { localStorage.removeItem('semlith-run-tab'); } catch (e) {}")
+    root = review_tree(d, "rc4start")
+    name = wizard_to(d, 3, root=root)
+    held = held_run(d, root)
+    press_text(d, ".wz-body button", "Apply suggestions to 2 undecided", "applying the suggestions")
+    press_text(d, ".wz-foot button", "Continue to index", "Continue to index")
+    wz_step(d, 4)
+    d.eval(FETCH_SPY)
+    # A slow request says what it waits for: the settings save is held 2.6 s.
+    d.eval("window.__spy.delay['/api/store/settings'] = 2600; true")
+    d.eval(PIPE_SAMPLER)
+    clicked = d.eval("(() => { const b = [...document.querySelectorAll('.wz-foot button')].find(b => /Start indexing/.test(b.textContent));"
+                     " if (!b) return null; window.__clicked = Date.now(); b.click(); return true; })()")
+    if not clicked:
+        fail("the Index step offers no Start indexing")
+    try:
+        # At once: the run view, with its first step, not a busy button alone.
+        landed = d.eval("new Promise(done => { const t0 = window.__clicked; const tick = setInterval(() => {"
+                        " const c = document.querySelector('.wz-body .run-card .pipe-status');"
+                        " if (c || Date.now() - t0 > 3000) { clearInterval(tick); done(c ? Date.now() - t0 : null); } }, 20); })")
+        if landed is None or landed > 500:
+            fail("Start took %s ms to show the run view; it lands there at once" % landed)
+        first = text_of(d, ".wz-body .run-card .pipe-status", "the start sequence's line")
+        if not first.startswith("Recording 2 decisions"):
+            fail("the start sequence does not begin with the decisions recorded: %r" % first)
+        if d.eval("document.querySelectorAll('.wz-body .run-card .pipe-status').length") != 1:
+            fail("the start sequence is drawn as more than one line")
+        d.wait_for("/^Saving the store's settings… — Waiting for the daemon to save the settings/.test("
+                   "(document.querySelector('.wz-body .run-card .pipe-status') || {}).textContent || '')",
+                   timeout=6, what="the held settings save to say what it waits for")
+        decides = d.eval("window.__spy.decides")
+        if not decides or any(not b.get("defer") for b in decides):
+            fail("the wizard's decisions were not sent with defer: true, so they were applied run-less "
+                 "before the run (W1): %s" % json.dumps(decides)[:300])
+        final = wait_for_run(d, held["store"], run_id=held["id"])
+        if final.get("status") != "done":
+            fail("the started run ended %s" % final.get("status"))
+        d.wait_for("!!document.querySelector('.wz-body .done-banner')", timeout=30, what="the done card after the run")
+        seen = d.eval("window.__pipe")
+        lines = seen["lines"]
+        steps = [re.split(r"…| — ", l[0])[0] for l in lines if l[2]]
+        for want_label in ("Recording 2 decisions", "Saving the store's settings", "Starting the run"):
+            if want_label not in steps:
+                fail("the start sequence never said %r: %r" % (want_label, steps))
+        names = [p.get("phase") for p in final.get("phases") or []]
+        if names and "decisions" not in names:
+            fail("the run that took the wizard's decisions has no decisions phase: %r" % names)
+        if names and "Applying decisions" not in steps:
+            fail("the start sequence never showed the run applying the decisions: %r" % steps)
+        # Minimum dwell on the start sequence's line, seen on the real page:
+        # each step held >= 0.7 s (sampled every 50 ms, so 0.6 s is the floor).
+        start = [(re.split(r"…| — ", l[0])[0], l[1]) for l in lines if l[2]]
+        firsts = [start[0]] + [start[k] for k in range(1, len(start)) if start[k][0] != start[k - 1][0]]
+        short = [(firsts[k][0], firsts[k + 1][1] - firsts[k][1]) for k in range(len(firsts) - 1) if firsts[k + 1][1] - firsts[k][1] < 600]
+        if short:
+            fail("a start step was on the line for under 0.7 s: %r" % short)
+        # The Pipeline: the four lanes in order (images hidden, there are
+        # none), one height for the whole run, and a status after the start.
+        want("the Pipeline's lanes", seen["lanes"], ["read,chunk,embed,images,write"])
+        if len(set(seen["heights"])) > 1:
+            fail("the Pipeline changed height across polls: %r" % sorted(set(seen["heights"])))
+        after = [l[0] for l in lines if not l[2] and l[0]]
+        if not after:
+            fail("the Pipeline never said what is slowest once the run started: %r" % lines)
+    finally:
+        release_held(d, held)
+    no_console_errors(d, "the start sequence")
+    d.eval("window.__spy.delay = {}; true")
+    del name
+
+
+@finding("rc4.3", "the pipeline's lanes say their numbers on hover, nothing names a slowest step, and every log line has its stage")
+def _(d):
+    a_store(d)
+    open_clean(d, "stores", fresh=True)
+    seen = d.eval(r"""
+    (() => {
+      const t0 = 1791275400000;
+      const steps = [0, 50, 100, 150].map((d, i) => ({label: 'p' + i, at: t0 + d}));
+      const out = [];
+      for (const now of [t0 + 200, t0 + 600, t0 + 950, t0 + 1650, t0 + 2400, t0 + 2500])
+        out.push(dwell('rc4.3', steps, now).steps.length);
+      const late = dwell('rc4.3-late', steps, t0 + 10000).steps.length;
+      const one = dwell('rc4.3-one', steps.slice(0, 1), t0 + 9000).steps.length;
+      const base = {store: 'x', id: 1, status: 'running', scanned: 3148, total: 3987, rows: 79810,
+        expected_chunks: 90479, chunks: 74742, images: 12, images_total: 451, backlog: 5000,
+        lane_rates: {ane: 230.1, cpu: 31}, saves: 3, saved_at: Date.now() - 30000, save_ms: 300,
+        phase: 'drain', phase_detail: '4,864 chunks still embedding'};
+      const node = pipeline(base);
+      const done = pipeline({...base, status: 'done', elapsed_ms: 872000});
+      const home = {roots: [{path: '/Users/me/notes'}]};
+      const L = (ev) => logLines(ev, home).map(l => [l[0], l[2], l[3]]);
+      return {out, late, one,
+        rows: [...node.querySelectorAll('.pipe-row')].map(r => [r.getAttribute('data-lane'), r.querySelector('.pipe-v').textContent,
+               (r.querySelector('.bar') || {getAttribute: () => null}).getAttribute('data-tip'), r.querySelector('.pipe-v').getAttribute('data-tip')]),
+        slow: node.querySelectorAll('.slow').length,
+        status: node.querySelector('.pipe-status').textContent,
+        done: done.querySelector('.pipe-status').textContent,
+        full: [...done.querySelectorAll('.pipe-row .bar > i')].every(i => parseFloat(i.style.width) === 100),
+        noImages: pipeline({...base, images_total: 0, saves: 0}).querySelectorAll('.pipe-row')[3].hidden,
+        notYet: pipeline({...base, saves: 0}).querySelector('[data-lane=write] .pipe-v').textContent,
+        read: L({event: 'file', outcome: 'indexing', path: '/Users/me/notes/a/b.md', why: '12 chunks', scanned: 1, total: 2}),
+        skipped: L({event: 'file', outcome: 'skipped', path: '/Users/me/notes/x.bin', why: 'binary', scanned: 2, total: 2}),
+        image: L({event: 'file', outcome: 'image', path: '/Users/me/notes/p.png', at: 1791275400}),
+        embed: L({event: 'embed', embedded: 7968, delta: 512, expected: 15666, lanes: {ane: 51}, at: 1791275400}),
+        write: L({event: 'write', saves: 3, ms: 400, embedded: 7968, rows: 8000, at: 1791275400}),
+        phases: ['walk', 'read', 'embed', 'images', 'lane', 'drain', 'save', 'finalize', 'decisions'].map(p => logLines({event: 'phase', phase: p, at: 1791275400})[0][0]),
+        done_line: logLines({event: 'done', indexed: 1, chunks: 4, at: 1791275400})[0][0],
+        embedTime: logLines({event: 'embed', embedded: 1, delta: 1, expected: 2, at: 1791275400})[0][1],
+        left: runLeftText({status: 'running', phases: [], eta_ms: 754000, elapsed_ms: 1000, progress: 0.5})};
+    })()
+    """)
+    want("steps shown at 0.2, 0.6, 0.95, 1.65, 2.4 and 2.5 s after four phases in 0.15 s", seen["out"], [1, 1, 2, 3, 4, 4])
+    want("steps shown when the page meets the run 10 s late", seen["late"], 4)
+    want("steps shown when only one phase has happened", seen["one"], 1)
+    want("the lanes, in order, with their figures and hover text", seen["rows"], [
+        ["read", "3,148 / 3,987 files", "Read · 3,148 of 3,987 files · 78 %", "3,148 / 3,987 files"],
+        ["chunk", "79,810 chunks made", "Chunk · 79,810 of 90,479 chunks made · 88 %", "79,810 chunks made"],
+        ["embed", "74,742 / 90,479", "Embed · 74,742 of 90,479 chunks · 82 %", "74,742 / 90,479"],
+        ["images", "12 / 451", "images · 12 of 451 images · 2 %", "12 / 451"],
+        ["write", "index saved 3 times · last 30 s ago (0.3 s)", None, "index saved 3 times · last 30 s ago (0.3 s)"],
+    ])
+    # Walk 3: the slowest-step feature is gone — no highlighted lane, no line
+    # naming one; the status line is the run's own phase.
+    want("lanes highlighted as slowest", seen["slow"], 0)
+    want("the status line of a draining run", seen["status"], "Finishing embeddings in flight — 4,864 chunks still embedding")
+    if re.search(r"slowest", seen["status"], re.I):
+        fail("the status line still names a slowest step: %r" % seen["status"])
+    want("a finished run's status line", seen["done"], "done in 14m 32s · 3 saves")
+    if not seen["full"]:
+        fail("a finished run's lanes are not all full")
+    want("a run with no images hides the images row", seen["noImages"], True)
+    want("Write before the first save", seen["notYet"], "not yet")
+    want("a text file's lines (read, then chunk)", seen["read"], [["read", "read", "a/b.md"], ["chunk", "chunk", "a/b.md → 12 chunks"]])
+    want("a skipped file's line", seen["skipped"], [["read", "skipped", "x.bin — binary"]])
+    want("an image's line", seen["image"], [["embed", "image", "p.png"]])
+    want("an embed line", seen["embed"], [["embed", "embed", "+512 chunks · 7,968 / 15,666 · Neural Engine 51/s"]])
+    want("a write line", seen["write"], [["write", "write", "index saved (3rd) in 0.4 s · 7,968 searchable"]])
+    want("the stage of each phase line", seen["phases"], ["read", "read", "embed", "embed", "embed", "embed", "write", "write", None])
+    want("the stage of a done line", seen["done_line"], None)
+    if not re.match(r"^\d\d:\d\d$", seen["embedTime"] or ""):
+        fail("an embed line's first column is not its time: %r" % seen["embedTime"])
+    want("a run-truth run's time left", seen["left"], "about 13 min")
+    no_console_errors(d, "the pipeline")
+
+
+@finding("rc4.4", "the scan card follows the scan's phases, each for 0.7 s, under a Scanning… heading")
+def _(d):
+    d.clear_console()
+    wizard_to(d, 2)
+    root = clean_tree(d, "rc4scan")
+    wizard_mode(d, "Paste a path")
+    d.type(".wz-body .box input", root)
+    d.press("Enter")
+    d.wait_for("document.querySelectorAll('.wz-body .src-row').length > 0", what="the pasted folder as a source")
+    # Intervals the page starts from here on can be held, so the card can be
+    # measured at four widths while it is on screen; the sampler is not held.
+    d.eval(r"""
+    (() => {
+      window.__realSetInterval = window.__realSetInterval || window.setInterval.bind(window);
+      window.setInterval = (fn, ms, ...a) => window.__realSetInterval(() => { if (!window.__hold) fn(); }, ms, ...a);
+      const seen = window.__scan = {cur: [], heads: [], index: []};
+      seen.timer = window.__realSetInterval(() => {
+        const box = document.querySelector('.wz-body .stage-box.cur');
+        const word = box ? box.getAttribute('data-stage') : (document.querySelector('.wz-body .stage-box') ? '' : 'gone');
+        if (!seen.cur.length || seen.cur[seen.cur.length - 1][0] !== word) seen.cur.push([word, Date.now()]);
+        if (document.querySelector('.wz-body .stage-box')) {
+          seen.heads.push((document.querySelector('.wz-head .h') || {}).textContent);
+          const row = [...document.querySelectorAll('.sum-row')].find(r => /INDEX/.test(r.innerText));
+          seen.index.push(row ? row.querySelector('.v').textContent : null);
+        }
+      }, 50);
+      return true;
+    })()
+    """)
+    press_text(d, ".wz-foot button", "Scan 1 source", "Scan 1 source")
+    d.wait_for("!!document.querySelector('.wz-body .stage-box.cur[data-stage=\"read\"], .wz-body .stage-box.cur[data-stage=\"credentials\"]')",
+               timeout=30, what="the scan card to reach its second stage")
+    d.eval("window.__hold = true")
+    bad = []
+    try:
+        for width in (1440, 1024, 768, 390):
+            d.set_viewport(width, 900, mobile=width < 500)
+            pause(d, 60)
+            for box in d.eval(r"""[...document.querySelectorAll('.wz-body .stage-box')].map(b => {
+                const l = b.querySelector('.sb-label').getBoundingClientRect(), s = b.querySelector('.sb-status');
+                const r = s.getBoundingClientRect(), lh = parseFloat(getComputedStyle(s).lineHeight) || 16;
+                return {stage: b.getAttribute('data-stage'), below: r.top >= l.bottom - 1, oneLine: r.height <= lh * 1.5,
+                        fits: s.scrollWidth <= s.clientWidth + 1 || getComputedStyle(s).textOverflow === 'ellipsis', text: s.textContent}; })"""):
+                if not (box["below"] and box["oneLine"]):
+                    bad.append("%dpx %s %r: %s" % (width, box["stage"], box["text"], "beside its label" if not box["below"] else "wraps"))
+    finally:
+        d.reset_viewport()
+        d.eval("window.__hold = false")
+    if bad:
+        fail("a stage's status is not on one line of its own under its label: %s" % "; ".join(bad[:4]))
+    d.wait_for("!!document.querySelector('.wz-body .q4')", timeout=60, what="the review step after the scan")
+    seen = d.eval("clearInterval(window.__scan.timer), window.__scan")
+    order = [c[0] for c in seen["cur"] if c[0] not in ("", "gone")]
+    want("the stages the scan card went through", order, ["walk", "read", "credentials", "rules"])
+    cur = seen["cur"]
+    short = [(cur[i][0], cur[i + 1][1] - cur[i][1]) for i in range(len(cur) - 1) if cur[i][0] not in ("", "gone") and cur[i + 1][1] - cur[i][1] < 600]
+    if short:
+        fail("a scan stage was current for under 0.7 s: %r" % short)
+    heads = set(seen["heads"])
+    want("the heading while the scan card is up", heads, {"Scanning…"})
+    if any(v != "after the scan" for v in seen["index"]):
+        fail("the sidebar's INDEX row read %r during the scan" % sorted(set(seen["index"])))
+    if text_of(d, ".wz-head .h", "the heading after the scan") == "Scanning…":
+        fail("the heading still reads Scanning… on the review step")
+    no_console_errors(d, "the scan card")
+    press_text(d, "header.top button", "Exit setup", "leaving the wizard")
+    if d.modal_open():
+        d.modal_press("Delete store")
+
+
+@finding("rc4.5", "a bulk decision shows its progress in batches of 100, holds the table, and ends on a done line")
+def _(d):
+    d.clear_console()
+    store = indexed_fixture(d, secret_tree(d, "rc4bulk", 150))
+    d.open_view("store/%s/review" % store, fresh=True)
+    d.wait_for("document.querySelectorAll('#main .dec-list .dec-grid').length >= 150", timeout=30,
+               what="150 files waiting for a decision")
+    d.eval(FETCH_SPY)
+    d.eval("window.__spy.delay['/api/refused/decide'] = 400; true")
+    d.eval(r"""
+    (() => {
+      const seen = window.__bulk = {lines: [], inert: false};
+      seen.timer = setInterval(() => {
+        const bar = document.querySelector('#main .selbar.bulk');
+        const t = bar ? bar.innerText.trim() : '';
+        if (t && seen.lines[seen.lines.length - 1] !== t) seen.lines.push(t);
+        if (bar && !/applied|stopped/.test(t) && document.querySelector('#main .dec-list[inert]')) seen.inert = true;
+      }, 20);
+      return true;
+    })()
+    """)
+    d.eval("document.querySelector('#main .dec-grid.head [role=checkbox]').click()")
+    d.wait_for("!!document.querySelector('#main .selbar:not(.bulk)')", what="the selection bar")
+    press_text(d, "#main .selbar button", "Keep out", "Keep out on the selection")
+    d.wait_for("/applied to|stopped at/.test((document.querySelector('#main .selbar.bulk') || {}).innerText || '')",
+               timeout=60, what="the bulk decision to end")
+    seen = d.eval("clearInterval(window.__bulk.timer), window.__bulk")
+    sizes = [len(b["files"]) for b in d.eval("window.__spy.decides")]
+    want("the decide requests' sizes", sizes, [100, 50])
+    progress = [l for l in seen["lines"] if l.startswith("Applying 'Keep out' to 150 files…")]
+    counts = [l.rsplit("…", 1)[1].strip() for l in progress]
+    if "0 / 150" not in counts or "100 / 150" not in counts:
+        fail("the progress line did not count the batches: %r" % seen["lines"])
+    if not seen["inert"]:
+        fail("the table took input while the decision was applied")
+    if not re.search(r"'Keep out' applied to 150 files", seen["lines"][-1]):
+        fail("the bulk decision did not end on a done line: %r" % seen["lines"][-1])
+    kept = [r for s in d.api("/api/refused")["stores"] if s["store"] == store for r in s["rows"] if r.get("accepted") in ("refused", "kept")]
+    want("files kept out", len(kept), 150)
+    no_console_errors(d, "the store's bulk decision")
+    # The wizard records locally, at once, and says so in the same place.
+    d.clear_console()
+    root = review_tree(d, "rc4wzbulk")
+    wizard_to(d, 3, root=root)
+    held = held_run(d, root)
+    try:
+        d.eval("document.querySelector('.wz-body .dec-grid.head [role=checkbox]').click()")
+        press_text(d, ".wz-body .selbar button", "Keep out", "Keep out on the wizard's selection")
+        line = text_of(d, ".wz-body .selbar.bulk", "the wizard's bulk line")
+        if not re.search(r"'Keep out' recorded for 2 files — applied when the run starts", line):
+            fail("the wizard's bulk decision says %r" % line)
+        # Before leaving: dropping a held scan's store is the leave flow's, not this.
+        no_console_errors(d, "bulk decisions")
+    finally:
+        press_text(d, "header.top button", "Exit setup", "leaving the wizard")
+        if d.modal_open():
+            d.modal_press("Delete store")
+        release_held(d, held)
+
+
+#: A card's shape: every element's tag and first class, depth first, leaving
+#: out what grows (the log's lines).
+CARD_SHAPE = r"""
+(sel => {
+  const card = document.querySelector(sel);
+  if (!card) return null;
+  const out = [];
+  const walk = (n, depth) => {
+    out.push(depth + ':' + n.tagName.toLowerCase() + '.' + ((n.getAttribute('class') || '').split(' ')[0]));
+    if (n.matches('.log')) return;
+    for (const k of n.children) if (k.tagName !== 'svg') walk(k, depth + 1);
+  };
+  walk(card, 0);
+  return {shape: out, run: card.getAttribute('data-run'), cls: card.className,
+          stats: [...card.querySelectorAll('.run-stats .eyebrow')].map(e => e.textContent),
+          steps: card.querySelectorAll('.pipe .pipe-row').length};
+})
+"""
+
+
+@finding("rc4.7", "the wizard's Index step and the store's Runs tab draw a live run with the same card")
+def _(d):
+    """W8: one run card, the wizard's, wherever a live run is
+    shown in full. The same run is read on both pages while it is live."""
+    d.clear_console()
+    root = d.fixtures.unique("rc4same", count=1500)
+    name = wizard_to(d, 4, root=root)
+    press_text(d, ".wz-foot button", "Start indexing", "Start indexing")
+    d.wait_for("!!document.querySelector('.wz-body .run-card[data-run]')", timeout=60, what="the wizard's run card")
+    wizard = d.eval("(%s)('.wz-body .run-card[data-run]')" % CARD_SHAPE)
+    store, run_id = wizard["run"].rsplit(":", 1)
+    try:
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("!!document.querySelector('#main .run-card[data-run=%s]')" % json.dumps(wizard["run"]), timeout=30,
+                   what="the same run's card on the Runs tab")
+        tab = d.eval("(%s)('#main .run-card[data-run=%s]')" % (CARD_SHAPE, json.dumps(wizard["run"]).replace("'", "\\'")))
+        live = run_by_id(d, int(run_id))
+        if not live or live.get("status") in TERMINAL:
+            skip("the run finished before the Runs tab was read; the machine is faster than the corpus")
+        want("the card's classes on the two pages", tab["cls"], wizard["cls"])
+        want("the card's counters on the two pages", tab["stats"], wizard["stats"])
+        if tab["shape"] != wizard["shape"]:
+            diff = [(a, b) for a, b in zip(wizard["shape"], tab["shape"]) if a != b][:4]
+            fail("the two pages draw the run differently (wizard vs Runs tab): %r" % (diff or (len(wizard["shape"]), len(tab["shape"]))))
+        if tab["steps"] != 5:
+            fail("the Runs tab's card draws %d pipeline lanes, not Read, Chunk, Embed, images and Write" % tab["steps"])
+        no_console_errors(d, "the run card on two pages")
+    finally:
+        stop_quietly(d, store)
+    del name
+
+
+@finding("rc4.8", "a run card's Pipeline | Log strip switches the panel, and the choice is kept")
+def _(d):
+    d.eval("try { localStorage.removeItem('semlith-run-tab'); } catch (e) {}")
+    run_id, store = start_index(d, d.fixtures.unique("rc4tabs", count=1500))
+    card = "document.querySelector('#main .run-card')"
+    shown = ("(() => { const c = %s; return c && {pipe: !c.querySelector('.pipe').hidden, log: !c.querySelector('.log-view').hidden,"
+             " tab: (c.querySelector('.run-tabs .tab[aria-selected=true]') || {}).textContent}; })()" % card)
+    try:
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("!!%s" % card, timeout=30, what="the run's card")
+        want("the panel first shown", d.eval(shown), {"pipe": True, "log": False, "tab": "Pipeline"})
+        press_text(d, "#main .run-card .run-tabs .tab", "Log", "the Log tab")
+        want("the panel after pressing Log", d.eval(shown), {"pipe": False, "log": True, "tab": "Log"})
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("!!%s" % card, timeout=30, what="the run's card after a reload")
+        want("the panel after a reload", d.eval(shown), {"pipe": False, "log": True, "tab": "Log"})
+        press_text(d, "#main .run-card .run-tabs .tab", "Pipeline", "the Pipeline tab")
+        want("the panel after pressing Pipeline", d.eval(shown), {"pipe": True, "log": False, "tab": "Pipeline"})
+        no_console_errors(d, "the run card's tabs")
+    finally:
+        d.eval("try { localStorage.removeItem('semlith-run-tab'); } catch (e) {}")
+        stop_quietly(d, store)
+
+
+@finding("rc4.9", "the Stop dialog's delete option is a checkbox and its words on one row, with no box")
+def _(d):
+    run_id, store = start_index(d, d.fixtures.unique("rc4stop", count=1500))
+    try:
+        running(d, run_id, store)
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for(card_offers(CARD, "Stop…"), what="the live run's card, offering Stop")
+        for width, height, mobile in ((1440, 900, False), (390, 844, True)):
+            d.set_viewport(width, height, mobile=mobile)
+            press_in(d, CARD, "Stop…")
+            d.wait_for("!!document.querySelector('#stop-delete')", what="the Stop dialog's delete option")
+            row = d.eval(r"""(() => { const box = document.querySelector('#stop-delete'), label = box.closest('.opt-check');
+                const words = label.querySelector(':scope > span'), a = box.getBoundingClientRect(), b = words.getBoundingClientRect();
+                const cs = getComputedStyle(label), bs = getComputedStyle(box);
+                const ink = getComputedStyle(document.body).getPropertyValue('--ink').trim();
+                const probe = document.createElement('i'); probe.style.color = ink; document.body.append(probe);
+                const inkRgb = getComputedStyle(probe).color; probe.remove();
+                return {overlap: Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top), beside: b.left >= a.right - 1,
+                        shadow: cs.boxShadow, modalClass: label.classList.contains('modal'),
+                        reviewBox: box.classList.contains('cb') && box.getAttribute('role') === 'checkbox' && box.tagName !== 'INPUT',
+                        fill: bs.backgroundColor, ink: inkRgb, checked: box.getAttribute('aria-checked')}; })()""")
+            if row["overlap"] <= 0 or not row["beside"]:
+                fail("at %dpx the checkbox and its words are not on one row: %r" % (width, row))
+            if row["shadow"] != "none" or row["modalClass"]:
+                fail("at %dpx the option is drawn as a box with a shadow: %r" % (width, row))
+            if not row["reviewBox"] or row["checked"] != "true" or row["fill"] != row["ink"]:
+                fail("at %dpx the option is not the Review table's checkbox, ticked in ink: %r" % (width, row))
+            # Its words tick it too.
+            d.eval("document.querySelector('#stop-delete').closest('.opt-check').querySelector(':scope > span').click()")
+            want("the option after pressing its words", d.eval("document.querySelector('#stop-delete').getAttribute('aria-checked')"), "false")
+            d.modal_press("Keep running")
+            d.wait_for("!document.querySelector('#stop-delete')", what="the dialog to close")
+    finally:
+        d.reset_viewport()
+        stop_quietly(d, store)
+
+
+def log_view_lines(d, scope):
+    """The stage words of every line in the log views under `scope`."""
+    return d.eval("[...document.querySelectorAll(%s)].map(v => [...v.querySelectorAll('.log .ln .b')].map(b => b.textContent))" % json.dumps(scope + " .log-view"))
+
+
+@finding("rc4.10", "a run's log shows every stage, filters by stage on every log at once, and keeps the choice")
+def _(d):
+    d.eval("try { localStorage.removeItem('semlith-log-stage'); localStorage.removeItem('semlith-run-tab'); } catch (e) {}")
+    store = indexed_fixture(d, d.fixtures.unique("rc4log", count=60))
+    try:
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("document.querySelectorAll('#main .hist-open .log-view .log .ln').length > 5", timeout=30,
+                   what="the newest run's whole log in History")
+        words = set(w for v in log_view_lines(d, "#main") for w in v)
+        for word in ("read", "chunk", "embed", "write", "phase", "done"):
+            if word not in words:
+                fail("the run's log has no %r line: %r" % (word, sorted(words)))
+        allowed = {"read": {"read", "skipped", "refused", "failed", "unchanged", "phase"}, "chunk": {"chunk"},
+                   "embed": {"embed", "image", "phase"}, "write": {"write", "phase"}}
+        # Under All every phase line is shown, repeats and all.
+        phases_all = d.eval("[...document.querySelectorAll('#main .log-view')].map(v => [...v.querySelectorAll('.log .ln')].filter(l => l.querySelector('.b').textContent === 'phase').length)")
+        for stage, label in (("read", "Read"), ("chunk", "Chunk"), ("embed", "Embed"), ("write", "Write")):
+            press_text(d, "#main .log-view .log-bar button", label, "the %s stage" % label)
+            seen = set(w for v in log_view_lines(d, "#main") for w in v)
+            if not seen or not seen <= allowed[stage]:
+                fail("under %s the log shows %r" % (label, sorted(seen)))
+            # Under a stage, a phase line never repeats the last phase line
+            # shown (the cloud's foldPhases, 2026-10-07).
+            repeats = d.eval("[...document.querySelectorAll('#main .log-view')].flatMap(v => { let last = null; const out = [];"
+                             " for (const l of v.querySelectorAll('.log .ln')) { if (l.querySelector('.b').textContent !== 'phase') continue;"
+                             " const t = l.querySelector('.c').textContent; if (t === last) out.push(t); last = t; } return out; })")
+            if repeats:
+                fail("under %s a phase line repeats the one before it: %r" % (label, repeats[:3]))
+        # The rule itself, on the lines the cloud's example gives: under Embed,
+        # [Embedding, +5, Embedding, +6, Draining, Embedding] reads
+        # [Embedding, +5, +6, Draining, Embedding]; under All nothing folds.
+        folded = d.eval("(() => { const keep = LOG_STAGE; const lines = [['embed','','phase','Embedding'],['embed','','embed','+5'],['embed','','phase','Embedding'],"
+                        "['embed','','embed','+6'],['embed','','phase','Draining'],['embed','','phase','Embedding']];"
+                        " try { LOG_STAGE = 'embed'; const a = lines.filter(foldPhases()).map(e => e[3]); LOG_STAGE = 'all'; const b = lines.filter(foldPhases()).length; return [a, b]; }"
+                        " finally { LOG_STAGE = keep; } })()")
+        want("the fold on the cloud's example", folded, [["Embedding", "+5", "+6", "Draining", "Embedding"], 6])
+        want("the stage kept", d.eval("localStorage.getItem('semlith-log-stage')"), "write")
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("document.querySelectorAll('#main .hist-open .log-view .log .ln').length > 0", timeout=30, what="the log after a reload")
+        want("the stage pressed after a reload", text_of(d, "#main .log-view .log-bar button[aria-pressed=true]", "the pressed stage"), "Write")
+        press_text(d, "#main .log-view .log-bar button", "All", "the All stage")
+        want("the phase lines under All once a stage was picked and dropped",
+             d.eval("[...document.querySelectorAll('#main .log-view')].map(v => [...v.querySelectorAll('.log .ln')].filter(l => l.querySelector('.b').textContent === 'phase').length)"), phases_all)
+        # Embed and Write lines carry the time, not a file counter.
+        firsts = d.eval("[...document.querySelectorAll('#main .log-view .ln')].filter(l => /^(embed|write)$/.test(l.querySelector('.b').textContent)).map(l => l.querySelector('.a').textContent)")
+        if not firsts or any(not re.match(r"^\d\d:\d\d$", f) for f in firsts):
+            fail("an embed or write line's first column is not a time: %r" % firsts[:5])
+        no_console_errors(d, "the run log's stages")
+    finally:
+        d.eval("try { localStorage.removeItem('semlith-log-stage'); } catch (e) {}")
+
+
+@finding("rc4.11", "History shows a run's whole log from its file, page by page, in the live card's renderer")
+def _(d):
+    # Three thousand files, so the log runs past one page: ten minutes for a
+    # hosted Windows runner's CPU, where it embedded past the default four.
+    store = indexed_fixture(d, d.fixtures.unique("rc4hist", count=3000), timeout=600)
+    hist = [h for h in d.api("/api/index/runs").get("history") or [] if h.get("store") == store]
+    if not hist or not hist[0].get("log_file"):
+        fail("the run's history row carries no log_file: %s" % json.dumps(hist[:1])[:300])
+    key = hist[0]["log_file"]
+    total, more, start = 0, True, 0
+    while more:
+        page = d.api("/api/index/history/log?%s" % urllib.parse.urlencode({"store": store, "log": key, "from": start, "limit": 20000}))
+        total += len(page.get("lines") or [])
+        start += len(page.get("lines") or [])
+        more = page.get("more") and page.get("lines")
+    d.eval("try { localStorage.removeItem('semlith-log-stage'); } catch (e) {}")
+    d.open_view("store/%s/runs" % store, fresh=True)
+    view = "document.querySelector('#main .hist-open .log-view')"
+    d.wait_for("!!%s && %s.__lines().length > 0" % (view, view), timeout=30, what="the history log's first page")
+    pages = 0
+    while d.eval("/Load more/.test((%s.querySelector('.log-foot') || {}).textContent || '')" % view) and pages < 10:
+        d.eval("[...%s.querySelectorAll('.log-foot button')].find(b => /Load more/.test(b.textContent)).click()" % view)
+        d.wait_for("!/Reading the log/.test(%s.querySelector('.log-foot').textContent)" % view, timeout=30, what="the next page")
+        pages += 1
+    want("the lines the history view read", d.eval("%s.__lines().length" % view), total)
+    if total > 5000 and not pages:
+        fail("a %d-line log was shown without a second page" % total)
+    if "the whole log" not in d.eval("%s.querySelector('.log-foot').textContent" % view):
+        fail("the history log does not say it holds the whole log")
+    paths = d.eval("[...%s.querySelectorAll('.ln')].filter(l => l.querySelector('.b').textContent === 'read').slice(0, 5).map(l => l.querySelector('.c').textContent)" % view)
+    if not paths or any(p.startswith("/") for p in paths):
+        fail("the history log's paths are not under the store's root: %r" % paths)
+    no_console_errors(d, "the history log")
+
+
+@finding("rc4.12", "every progress bar and every cut-off figure on a run card says itself in full on hover")
+def _(d):
+    # Eight thousand files: on the Neural Engine fifteen hundred are done in
+    # three seconds, and the log check below needs the run still going.
+    run_id, store = start_index(d, d.fixtures.unique("rc4tips", count=8000))
+    try:
+        running(d, run_id, store)
+        d.eval("try { localStorage.removeItem('semlith-run-tab'); } catch (e) {}")
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("!!document.querySelector('#main .run-card .pipe-row .bar')", timeout=30, what="the run card's pipeline")
+        bars = d.eval("[...document.querySelectorAll('#main .run-card .bar, header .run-pill .bar')].filter(b => b.offsetParent).map(b => b.getAttribute('data-tip'))")
+        if not bars or any(not t or not re.search(r"\d", t) or "%" not in t for t in bars):
+            fail("a run bar says nothing, or no numbers, on hover: %r" % bars)
+        cut = d.eval("[...document.querySelectorAll('#main .run-card .pipe-v, #main .run-card .run-stats .v, #main .run-card .run-stats .s, #main .run-card .pipe-status .grow')]"
+                     ".filter(n => n.offsetParent && n.scrollWidth > n.clientWidth + 1).map(n => [n.textContent, n.getAttribute('data-tip')])")
+        bad = [c for c in cut if not c[1] or not c[1].startswith(c[0])]
+        if bad:
+            fail("cut-off text with no full text on hover: %r" % bad[:4])
+        no_console_errors(d, "the run card's tooltips")
+        # Past the ring's 500 lines, the live log is read whole from the run's
+        # file: a page opened late still holds every line from the first.
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            live = run_by_id(d, run_id) or {}
+            if (live.get("log_from") or 0) > 0 or live.get("status") in TERMINAL:
+                break
+            time.sleep(0.5)
+        if live.get("status") in TERMINAL:
+            fail("the run ended before its log passed the ring's 500 lines, so the whole-log read was not seen; grow the corpus")
+        if (live.get("log_from") or 0) > 0:
+            d.open_view("store/%s/runs" % store, fresh=True)
+            d.wait_for("!!document.querySelector('#main .run-card .log-view')", timeout=30, what="the run card's log")
+            d.wait_for("document.querySelector('#main .run-card .log-view').__lines().length > %d" % (live["log_from"] + 10), timeout=30,
+                       what="the live log to be read from the run's first line (the ring starts at %d)" % live["log_from"])
+            first = d.eval("(document.querySelector('#main .run-card .log-view').__lines()[0] || {}).seq")
+            if first not in (0, 1, None):
+                fail("the live log starts at line %r, not the run's first" % first)
+    finally:
+        stop_quietly(d, store)
+
+
+@finding("rc4.6","the Index step's estimate is this machine's lanes over the plan, and moves as a lane is switched")
+def _(d):
+    accel = d.api("/api/accel")
+    rates = accel.get("rates")
+    if not rates:
+        skip("this daemon sends no lane rates (/api/accel `rates`), so there is nothing to estimate from")
+    d.clear_console()
+    name = wizard_to(d, 4)
+    lanes = [l for l in accel["lanes"] if (l.get("status") or {}).get("state") != "unavailable"]
+    other = next((l for l in lanes if l["lane"] != "cpu" and (rates.get(l["lane"]) or {}).get("per_s")), None)
+    if not other:
+        skip("no lane besides the CPU has a rate here, so switching one cannot move the estimate")
+
+    def reading():
+        return d.eval("(() => { const k = [...document.querySelectorAll('.wz-body .kpi')].find(k => /Estimate/i.test(k.innerText));"
+                      " return k ? {ms: Number(k.getAttribute('data-estimate-ms')), text: k.innerText,"
+                      " foot: document.querySelector('.wz-foot').innerText} : null; })()")
+
+    before = reading()
+    if not before or not before["ms"]:
+        fail("the Index step shows no estimate: %r" % before)
+    if "on this machine" not in before["text"] or "on this machine" not in before["foot"]:
+        fail("the estimate is not labelled as this machine's: %r" % before)
+    was = other["enabled"]
+    label = other.get("label") or other["lane"]
+    card = ("[...document.querySelectorAll('.wz-body .pick-card')].find(c =>"
+            " ((c.querySelector('.t') || {}).textContent || '').trim() === %s)" % json.dumps(label))
+
+    def switch(on):
+        """Press the lane's card and read the estimate once the daemon's
+        answer is drawn, so both readings come from the same rates."""
+        if not d.eval("(() => { const c = %s; if (!c) return false; c.click(); return true; })()" % card):
+            fail("the Index step offers no %s lane card" % label)
+        d.wait_for("(() => { const c = %s; return !!c && c.getAttribute('aria-pressed') === %s; })()" % (card, json.dumps(str(on).lower())),
+                   timeout=15, what="%s to read %s" % (label, "on" if on else "off"))
+        pause(d, 1500)
+        return reading()
+
+    try:
+        plan = (run_for(d, name) or {}).get("plan") or {}
+        if plan.get("chunks") is None:
+            skip("the held plan counts no chunks: %s" % json.dumps(plan)[:200])
+
+        def expected():
+            """The plan's chunks over the rates of the lanes a run would use:
+            the Neural Engine alone when it is on (the GPU beside it only when
+            asked), every lane that is on otherwise."""
+            a = d.api("/api/accel")
+            r = a.get("rates") or {}
+            on = [l["lane"] for l in a["lanes"] if l.get("enabled") and (l.get("status") or {}).get("state") != "unavailable"]
+            if "ane" in on and r.get("ane"):
+                on = [x for x in on if x != "cpu" and (x != "gpu" or a.get("gpu_beside_ane"))]
+            per_s = sum((r.get(x) or {}).get("per_s") or 0 for x in on)
+            return round(plan["chunks"] / per_s * 1000) if per_s else None
+
+        first = switch(not was)
+        first_want = expected()
+        second = switch(was)
+        second_want = expected()
+        if first["ms"] == second["ms"] and first_want != second_want:
+            fail("the estimate did not move when %s was switched: %r ms both ways" % (label, first["ms"]))
+        for seen, wanted, state in ((first, first_want, not was), (second, second_want, was)):
+            if wanted and abs(seen["ms"] - wanted) > max(2, wanted * 0.02):
+                fail("with %s %s the estimate reads %r ms; the plan's %d chunks over the lanes' rates is %r ms"
+                     % (label, "on" if state else "off", seen["ms"], plan["chunks"], wanted))
+    finally:
+        now = next((l for l in d.api("/api/accel")["lanes"] if l["lane"] == other["lane"]), {})
+        if now.get("enabled") != was:
+            d.api_result("/api/accel", method="POST", body={"lane": other["lane"], "action": "on" if was else "off"})
+        press_text(d, "header.top button", "Exit setup", "leaving the wizard")
+        if d.modal_open():
+            d.modal_press("Delete store")
+    no_console_errors(d, "the Index step's estimate")
+
+
+# ------------------------------------------------- parity with the cloud
+#
+# 2026-10-07: the core portal brought level with Semlith Cloud's web pages on
+# what the two share. One check per item.
+
+
+def slow_posts(d, ms):
+    """Hold every POST the page sends for `ms` before it goes, so a busy state
+    can be read while it lasts. `fast_posts` puts fetch back."""
+    d.eval("(() => { if (!window.__fetch) window.__fetch = window.fetch;"
+           " window.fetch = (u, o) => (o && /post/i.test(o.method || '') ? new Promise(r => setTimeout(r, %d)).then(() => window.__fetch(u, o)) : window.__fetch(u, o));"
+           " return true; })()" % ms)
+
+
+def fast_posts(d):
+    d.eval("(() => { if (window.__fetch) window.fetch = window.__fetch; return true; })()")
+
+
+def leave_wizard(d):
+    """Out of the wizard, deleting the store it made, as rc4.6 leaves it."""
+    for label in ("Exit setup", "Back to welcome", "Cancel"):
+        if d.eval("[...document.querySelectorAll('header.top button')].some(b => b.textContent.trim() === %s)" % json.dumps(label)):
+            press_text(d, "header.top button", label, "leaving the wizard")
+            break
+    # The question is asked once the page has looked at the store's runs.
+    d.wait_for("!!document.querySelector(%s) || !/^#\\/new/.test(location.hash)" % json.dumps(cdp.Drive.MODAL), timeout=10, what="the wizard to ask or leave")
+    if d.modal_open():
+        d.modal_press("Delete store")
+    d.wait_for("!/^#\\/new/.test(location.hash)", timeout=20, what="the wizard to close")
+
+
+def parity_shots(d, route, slug, reopen=True):
+    """`route` (or, with `reopen` off, what is on screen) in light and dark at
+    1440px and 390px, into `<out>/shots/par-<theme>-<width>-<slug>.png`."""
+    folder = os.path.join(d.out_dir, "shots")
+    os.makedirs(folder, exist_ok=True)
+    try:
+        for theme in ("light", "dark"):
+            d.eval("try { localStorage.setItem('semlith-theme', %s); document.documentElement.setAttribute('data-theme', %s); } catch (e) {} true" % (json.dumps(theme), json.dumps(theme)))
+            for width, height, mobile in ((1440, 900, False), (390, 844, True)):
+                d.set_viewport(width, height, mobile=mobile)
+                if reopen:
+                    d.open_view(route, fresh=True)
+                pause(d, 500)
+                d.screenshot(os.path.join(folder, "par-%s-%d-%s.png" % (theme, width, slug)))
+    finally:
+        d.reset_viewport()
+        d.eval("try { localStorage.removeItem('semlith-theme'); } catch (e) {} true")
+
+
+def untipped_bars(d):
+    return d.eval("[...document.querySelectorAll('#main .bar, header .bar')].filter(b => b.offsetParent && !(b.getAttribute('data-tip') || '').trim()).length")
+
+
+@finding("par.1", "every progress bar has a tip, and any text cut off with an ellipsis shows its whole text on hover")
+def _(d):
+    store = a_store(d)
+    d.clear_console()
+    for route in ("home", "stores", "stores/inside", "store/%s" % store, "ledger"):
+        d.open_view(route, fresh=True)
+        pause(d, 400)
+        bad = untipped_bars(d)
+        if bad:
+            fail("%s draws %d progress bar(s) with no tip" % (route, bad))
+    # A cut-off node nobody gave a tip: the tooltip finds it by its ellipsis.
+    found = d.eval(r"""(() => {
+        const n = document.createElement('span');
+        n.className = 'ell';
+        n.textContent = 'a sentence long enough that a sixty-pixel box has to cut it off with an ellipsis';
+        n.style.display = 'inline-block'; n.style.width = '60px';
+        document.querySelector('#main').append(n);
+        const f = tip.find(n); n.remove();
+        return f && {title: f.title, full: f.full};
+    })()""")
+    want("the tooltip for an untipped cut-off text", found,
+         {"title": "a sentence long enough that a sixty-pixel box has to cut it off with an ellipsis", "full": True})
+    # And text that fits says nothing.
+    fits = d.eval("(() => { const n = document.createElement('span'); n.className = 'ell'; n.textContent = 'short';"
+                  " document.querySelector('#main').append(n); const f = tip.find(n); n.remove(); return f; })()")
+    want("the tooltip for text that fits", fits, None)
+    no_console_errors(d, "bar and ellipsis tips")
+
+
+@finding("par.2", "an unsorted sortable column shows ↕, the sorted one its direction, and the ledger's ratio KPI carries the accent")
+def _(d):
+    a_store(d)
+    d.open_view("stores", fresh=True)
+    # The unsorted mark is drawn by CSS, so it is read from ::after, and the
+    # header's own text stays its label alone.
+    heads = d.eval("[...document.querySelectorAll('#main .sortable, #main th .sort')].map(h => { const a = h.querySelector('.ar');"
+                   " if (!a) return null; const off = a.classList.contains('off');"
+                   " return [off ? getComputedStyle(a, '::after').content.replace(/\"/g, '') : a.textContent, off, h.textContent.includes('↕')]; }).filter(Boolean)")
+    if any(h[2] for h in heads):
+        fail("a header's text carries the ↕ mark, so it reads as part of the label: %r" % heads)
+    if not heads:
+        fail("the Stores list has no sortable column headers")
+    off = [h for h in heads if h[1]]
+    if not off or any(h[0] != "↕" for h in off):
+        fail("an unsorted column does not read ↕: %r" % heads)
+    on = [h for h in heads if not h[1]]
+    if len(on) > 1 or any(h[0] not in ("↑", "↓") for h in on):
+        fail("the sorted column does not read its direction: %r" % heads)
+    ledger = d.api("/api/ledger")
+    d.open_view("ledger", fresh=True)
+    accent = d.eval("(() => { const k = [...document.querySelectorAll('#main .kpi')].find(k => /Fewer tokens/i.test(k.textContent)); return k ? k.classList.contains('accent') : null; })()")
+    want("the Fewer tokens KPI's accent (on when the ledger has a ratio)", accent, bool(ledger.get("ratio")))
+
+
+@finding("par.3", "page filters and tabs survive a reload, per viewer, and so does the setup wizard")
+def _(d):
+    a_store(d)
+    d.open_view("stores", fresh=True)
+    d.type('#main input[aria-label="Filter stores"]', "zz-kept")
+    pause(d, 200)
+    d.open_view("stores", fresh=True)
+    want("the Stores filter after a reload", d.eval("document.querySelector('#main input[aria-label=\"Filter stores\"]').value"), "zz-kept")
+    want("where it is kept", d.eval("JSON.parse(localStorage.getItem('semlith-ui:stores') || '{}').filter"), "zz-kept")
+    d.type('#main input[aria-label="Filter stores"]', "")
+    pause(d, 200)
+    # The ledger's tier filter, a dropdown rather than a field.
+    d.open_view("ledger", fresh=True)
+    d.eval("lg.tier = 'measured'; repaint(); true")
+    d.open_view("ledger", fresh=True)
+    want("the ledger's tier after a reload", d.eval("lg.tier"), "measured")
+    d.eval("lg.tier = 'all'; repaint(); true")
+    # The wizard, mid-way, comes back on its own step with its own store.
+    name = wizard_to(d, 2)
+    try:
+        d.open_view("new", fresh=True)
+        wz_step(d, 2)
+        want("the wizard's store after a reload", d.eval("state.wz && state.wz.created"), name)
+    finally:
+        leave_wizard(d)
+    if any(r["name"] == name for r in stores(d)):
+        fail("leaving the restored wizard did not delete its empty store %s" % name)
+    want("the kept wizard once left", d.eval("sessionStorage.getItem('semlith-wz')"), None)
+    # A wizard opened from Welcome starts blank and keeps the store it just
+    # made, even when the store list it asked for as it opened answers after
+    # the create (CI under load: the late, older list read as "the store is
+    # gone" and wiped the wizard mid-step).
+    d.eval("sessionStorage.setItem('semlith-wz', JSON.stringify({step: 3, name: 'wz-stale', created: 'wz-stale', sources: [], at: Date.now()})); true")
+    d.open_view("welcome", fresh=True)
+    # On a loaded runner the store list read as the wizard opens can answer
+    # after Create, older than it. Here every store list for a few seconds
+    # is the one from before the store was made, and the agents answer late
+    # so the wizard's opening reads finish after Create.
+    d.eval("(() => { if (!window.__fetch) window.__fetch = window.fetch; const old = JSON.stringify(data.stores); const until = Date.now() + 6000;"
+           " window.fetch = async (u, o) => { const get = !(o && /post/i.test(o.method || ''));"
+           " if (get && /\\/api\\/agents(\\?|$)/.test(String(u))) await new Promise(r => setTimeout(r, 3000));"
+           " if (get && /\\/api\\/stores(\\?|$)/.test(String(u)) && Date.now() < until) {"
+           "   return new Response(old, {status: 200, headers: {'content-type': 'application/json'}}); }"
+           " return window.__fetch(u, o); };"
+           " return true; })()")
+    try:
+        d.eval("delete data.agents; true")
+        press_text(d, ".welcome-card button", "Create your first store", "Create your first store")
+        wz_step(d, 1)
+        name = "wz-%d" % random.randint(10000, 99999)
+        d.type('.wz-body input[aria-label="Store name"]', name)
+        d.eval("(() => { const b = [...document.querySelectorAll('.wz-foot button')].find(b => /Create store/.test(b.textContent)); b.disabled = false; b.click(); return true; })()")
+        wz_step(d, 2)
+        pause(d, 6500)
+        want("the wizard's store once every list has answered", d.eval("state.wz && state.wz.created"), name)
+        wz_step(d, 2)
+    finally:
+        fast_posts(d)
+        leave_wizard(d)
+
+
+@finding("par.4", "the wizard's primary button spins with aria-busy while it works, Back is locked meanwhile, and a long name says the 40-character limit")
+def _(d):
+    wizard_to(d, 1)
+    name_box = '.wz-body input[aria-label="Store name"]'
+    d.type(name_box, "a" * 41)
+    hint = text_of(d, ".wz-body .hint-l", "the name's message")
+    want("the message for a 41-character name", hint, "At most 40 characters — this one has 41.")
+    name = "wz-busy-%d" % random.randint(10000, 99999)
+    d.type(name_box, name)
+    slow_posts(d, 1500)
+    try:
+        d.eval("[...document.querySelectorAll('.wz-foot button')].find(b => /Create store/.test(b.textContent)).click(); true")
+        pause(d, 300)
+        busy = d.eval("(() => { const b = document.querySelector('.wz-foot .btn.primary'); return b && {busy: b.classList.contains('busy'), aria: b.getAttribute('aria-busy'), text: b.textContent.trim()}; })()")
+        want("the Create button while the store is made", busy, {"busy": True, "aria": "true", "text": "Creating…"})
+    finally:
+        fast_posts(d)
+    wz_step(d, 2)
+    leave_wizard(d)
+    # Back, locked while Start is at work on the Index step.
+    name = wizard_to(d, 4)
+    slow_posts(d, 1500)
+    try:
+        d.eval("[...document.querySelectorAll('.wz-foot button')].find(b => /Start indexing/.test(b.textContent)).click(); true")
+        pause(d, 300)
+        foot = d.eval("(() => { const bs = [...document.querySelectorAll('.wz-foot button')]; const back = bs.find(b => /Back/.test(b.textContent)), p = document.querySelector('.wz-foot .btn.primary');"
+                      " return {back: !!back && back.disabled, aria: p && p.getAttribute('aria-busy')}; })()")
+        want("Back and the primary button while Start works", foot, {"back": True, "aria": "true"})
+        # Once the run exists the button is the next step's, even while Start
+        # is still at work, and it answers a press (CI: v6.6 pressed a
+        # "Next: connect agents" drawn busy and stayed on step 4).
+        d.wait_for("[...document.querySelectorAll('.wz-foot button')].some(b => /Next: connect agents/.test(b.textContent))",
+                   timeout=60, what="the run to start")
+        nxt = d.eval("(() => { const b = [...document.querySelectorAll('.wz-foot button')].find(b => /Next: connect agents/.test(b.textContent));"
+                     " return {busy: b.classList.contains('busy'), aria: b.getAttribute('aria-busy')}; })()")
+        want("Next: connect agents as soon as it is drawn", nxt, {"busy": False, "aria": None})
+        press_text(d, ".wz-foot button", "Next: connect agents", "Next: connect agents")
+        wz_step(d, 5)
+    finally:
+        fast_posts(d)
+        stop_quietly(d, name)
+
+
+@finding("par.5", "Search shows a chip per store, a tip on the token budget, asks a restored query again, and puts \"store ›\" before each path")
+def _(d):
+    a = indexed_fixture(d, d.fixtures.unique("parsra", count=4))
+    b = indexed_fixture(d, d.fixtures.unique("parsrb", count=4))
+    named = [s["name"] for s in stores(d) if s.get("files")]
+    d.open_view("search", fresh=True)
+    chips = d.eval("[...document.querySelectorAll('#main .store-strip button')].map(b => b.textContent)")
+    want("the store chips", sorted(chips), sorted(["all stores"] + named))
+    d.type(SEARCH_BOX, "corpus file")
+    d.press("Enter")
+    d.wait_for("document.querySelectorAll(%s).length > 0" % json.dumps(RESULT_CARD), timeout=30, what="search results")
+    heads = d.eval("[...document.querySelectorAll('#main .hit-head')].map(h => h.firstElementChild.textContent)")
+    if not heads or any(not h.endswith(" ›") or h[:-2] not in named for h in heads):
+        fail("a result does not start with its store and ›: %r" % heads[:4])
+    budget = d.eval("(() => { const b = [...document.querySelectorAll('#main .bar')].find(x => x.getAttribute('data-tip') === 'Token budget'); return b && b.getAttribute('data-tip-rows'); })()")
+    if not budget or "sent::" not in budget or "budget::" not in budget:
+        fail("the token budget bar has no tip with what was sent and the budget: %r" % budget)
+    press_text(d, "#main .store-strip button", a, "the %s chip" % a)
+    d.wait_for("(document.querySelector('#main .store-strip button[aria-pressed=true]') || {}).textContent === %s" % json.dumps(a), what="the chip pressed")
+    d.wait_for("[...document.querySelectorAll('#main .hit-head')].length > 0 && [...document.querySelectorAll('#main .hit-head')].every(h => h.firstElementChild.textContent === %s)" % json.dumps(a + " ›"),
+               timeout=30, what="results from %s alone" % a)
+    d.open_view("search", fresh=True)
+    want("the query after a reload", d.eval("document.querySelector(%s).value" % json.dumps(SEARCH_BOX)), "corpus file")
+    d.wait_for("document.querySelectorAll(%s).length > 0" % json.dumps(RESULT_CARD), timeout=30, what="the restored query asked again")
+    # Only the newest request's answer is drawn: an older answer that lands
+    # last (the restored query's re-ask racing a filter, drive 2.7 on
+    # Windows) is dropped.
+    landed = d.eval("""(async () => {
+      const real = window.fetch;
+      window.fetch = (u, o) => /query=older/.test(String(u))
+        ? new Promise(r => setTimeout(r, 1200)).then(() => real(u, o)).then(r => r.json())
+            .then(j => new Response(JSON.stringify({...j, __tag: 'older'}), {status: 200, headers: {'content-type': 'application/json'}}))
+        : real(u, o);
+      try {
+        sr.query = 'older'; runSearch();
+        await new Promise(r => setTimeout(r, 50));
+        sr.query = 'corpus file'; await runSearch();
+        await new Promise(r => setTimeout(r, 1800));
+        return (sr.result && sr.result.__tag) || 'newest';
+      } finally { window.fetch = real; }
+    })()""")
+    want("the answer drawn after an older one landed last", landed, "newest")
+    d.eval("sr.store = ''; sr.query = ''; sr.result = null; repaint(); true")
+    del b
+
+
+@finding("par.6", "the Ledger's read bars share one scale, savings are tabled by agent and by store, and its foot states the chain and retention")
+def _(d):
+    a_store(d)
+    L = d.api("/api/ledger")
+    d.open_view("ledger", fresh=True)
+    fills = d.eval("[...document.querySelectorAll('#main .card')].filter(c => /What agents read, against/.test(c.innerText)).flatMap(c => [...c.querySelectorAll('.bar')].map(b => b.firstElementChild.getBoundingClientRect().width / b.getBoundingClientRect().width))")
+    if len(fills) != 2:
+        fail("the read card has %d bars, not 2" % len(fills))
+    if any(f > 1.001 for f in fills):
+        fail("a read bar runs past its track: %r" % fills)
+    whole, sent = L.get("whole_file_tokens") or 0, L.get("excerpt_tokens") or 0
+    if max(whole, sent) and abs(max(fills) - 1) > 0.01:
+        fail("the larger read bar is not full: %r (whole %d, sent %d)" % (fills, whole, sent))
+    for title, key in (("Savings by agent", "client"), ("Savings by store", "store")):
+        rows = d.eval("(() => { const c = [...document.querySelectorAll('#main .card')].find(c => (c.querySelector('.card-t') || {}).textContent === %s);"
+                      " return c ? c.querySelectorAll('tbody tr:not(.empty-row)').length : null; })()" % json.dumps(title))
+        if rows is None:
+            fail("the Ledger has no %s table" % title)
+        groups = len({s.get(key) for s in L.get("sessions") or []})
+        if groups and rows != min(groups, 10):
+            fail("%s lists %d rows; the daemon's sessions have %d %ss" % (title, rows, groups, key))
+    foot = text_of(d, "#main .ledger-foot", "the ledger's foot")
+    if "rows kept" not in foot or "hash chain" not in foot:
+        fail("the foot does not state retention and the chain: %r" % foot)
+    if L.get("intact") is False and "breaks" not in foot:
+        fail("the chain does not verify but the foot says %r" % foot)
+
+
+@finding("par.7", "Reports' savings net line says whether the ledger's chain verifies")
+def _(d):
+    a_store(d)
+    intact = d.api("/api/ledger").get("intact") is not False
+    d.open_view("reports", fresh=True)
+    d.wait_for("[...document.querySelectorAll('#main .factchip')].some(c => /^chain (verified|broken)$/.test(c.textContent))", timeout=60, what="the chain chip")
+    chip = d.eval("[...document.querySelectorAll('#main .factchip')].map(c => c.textContent).find(t => /^chain/.test(t))")
+    want("the chain chip", chip, "chain verified" if intact else "chain broken")
+
+
+@finding("par.8", "a store in error shows an error card and a red ! in the nav; no store says so; Inside the index tables every source")
+def _(d):
+    root = d.fixtures.unique("parerr", count=2)
+    store = indexed_fixture(d, root)
+    shutil.rmtree(root)
+    try:
+        d.open_view("store/%s" % store, fresh=True)
+        d.wait_for("!!document.querySelector('#main .store-error')", timeout=20, what="the store's error card")
+        card = text_of(d, "#main .store-error", "the error card")
+        if "gone" not in card or "Re-index" not in card:
+            fail("the error card does not say what is gone and offer Re-index: %r" % card)
+        review = sum(s.get("review") or 0 for s in d.api("/api/refused").get("stores") or [])
+        badge = d.eval("(() => { const b = document.querySelector('[data-badge=stores]'); return b && {hidden: b.hidden, text: b.textContent, red: b.classList.contains('red')}; })()")
+        want("the Stores nav badge", badge, {"hidden": False, "text": str(review), "red": False} if review else {"hidden": False, "text": "!", "red": True})
+        d.open_view("stores/inside", fresh=True)
+        d.wait_for("!!document.querySelector('#main .inside-sources')", timeout=30, what="the Sources table")
+        want_rows = sum(len(s.get("roots") or []) for s in stores(d))
+        seen = d.eval("document.querySelector('#main .inside-sources .grid-wrap').innerText")
+        if store not in seen or "missing" not in seen:
+            fail("the Sources table does not list %s's missing root: %r" % (store, seen[:300]))
+        meta_line = text_of(d, "#main .inside-sources .card-h", "the Sources card head")
+        if not meta_line.startswith("Sources") or ("%d source" % want_rows) not in meta_line:
+            fail("the Sources card counts %r; the stores hold %d roots" % (meta_line, want_rows))
+        # However many sources there are, a missing one is on the first page:
+        # CI's home held more than ten, and the store sorting after them was
+        # on page two. Drawn here from a cache of twelve, the missing last.
+        first = d.eval("(() => { const keep = data.stores; GRID_VIEWS.delete('inside:sources');"
+                       " data.stores = {stores: Array.from({length: 12}, (_, i) => ({name: 's' + String(i).padStart(2, '0'), files: 1, chunks: 1, roots: [{path: '/r/' + i, present: i !== 11}]}))};"
+                       " try { return insideSources().querySelector('tbody tr').innerText; } finally { data.stores = keep; GRID_VIEWS.delete('inside:sources'); } })()")
+        if "missing" not in first or "s11" not in first:
+            fail("with twelve sources the missing one is not first: %r" % first)
+        # With no store at all the router shows Welcome, so the list's own
+        # empty state is drawn here from an empty cache.
+        empty_list = d.eval("(() => { const keep = data.stores; data.stores = {stores: []}; try { return storesList().innerText; } finally { data.stores = keep; } })()")
+        if "No store yet" not in empty_list or "Create one" not in empty_list:
+            fail("the Stores list with no store does not offer to create one: %r" % empty_list[:200])
+        parity_shots(d, "store/%s" % store, "store-error")
+    finally:
+        d.api_result("/api/store/delete", method="POST", body={"store": store})
+
+
+@finding("par.9", "the Review tab spins while it reads, and a scan with nothing to decide says the grey zone is empty")
+def _(d):
+    store = a_store(d)
+    d.open_view("store/%s/review" % store, fresh=True)
+    spun = d.eval("(() => { data.refused = {stores: []}; sdReview.asked = {}; repaint(); const n = document.querySelector('#main .review-loading'); return n && n.textContent; })()")
+    want("the Review tab while it reads", spun, "Reading what waits for you…")
+    d.wait_for("!document.querySelector('#main .review-loading')", timeout=20, what="the Review tab once read")
+    wizard_to(d, 3)
+    try:
+        banner = text_of(d, ".wz-body .grey-zone", "the grey zone banner")
+        want("the banner", banner, "Nothing in the grey zone. Credential files are left out without asking.")
+        parity_shots(d, "new", "wizard-grey-zone", reopen=False)
+    finally:
+        leave_wizard(d)
+
+
+@finding("par.10", "one log follower per run, shared by every card: two cards on one run never show a line twice")
+def _(d):
+    d.eval("try { localStorage.setItem('semlith-run-tab', 'log'); } catch (e) {}")
+    # Eight thousand files, so the run is still going while it is watched (on
+    # the Neural Engine fifteen hundred are done in three seconds).
+    run_id, store = start_index(d, d.fixtures.unique("parlog", count=8000))
+    try:
+        running(d, run_id, store)
+        d.open_view("store/%s/runs" % store, fresh=True)
+        d.wait_for("!!document.querySelector('#main .run-card .log-view')", timeout=30, what="the run card's log")
+        # Every log read takes 400 ms, as on a busy machine, and is counted.
+        d.eval("(() => { window.__logGets = 0; if (!window.__fetch) window.__fetch = window.fetch;"
+               " window.fetch = (u, o) => /\\/api\\/index\\/log\\?/.test(String(u)) ? (window.__logGets++, new Promise(r => setTimeout(r, 400)).then(() => window.__fetch(u, o))) : window.__fetch(u, o);"
+               " return true; })()")
+        # Two more cards follow the same run while the first is on screen, as
+        # the wizard's rebuilt card did beside the one it replaced.
+        d.eval("(() => { const r = data.runs.runs.find(x => x.id === %d); for (let i = 0; i < 2; i++) {"
+               " const v = document.createElement('div'); v.hidden = true; v.__redraw = () => {}; document.body.append(v); followLog(r, v); }"
+               " return true; })()" % run_id)
+        pause(d, 4500)
+        gets = d.eval("window.__logGets")
+        live = run_by_id(d, run_id) or {}
+        lines = d.eval("document.querySelector('#main .run-card .log-view').__lines().map(l => l.seq).filter(s => s != null)")
+        dup = len(lines) - len(set(lines))
+        if dup:
+            fail("the log holds %d line(s) twice with three cards on one run" % dup)
+        if live.get("status") not in TERMINAL and gets > 6:
+            fail("%d log reads in 4.5 s at 400 ms each: more than one follower is polling the run" % gets)
+    finally:
+        fast_posts(d)
+        d.eval("try { localStorage.removeItem('semlith-run-tab'); } catch (e) {}")
+        stop_quietly(d, store)
+
+
+@finding("par.11", "a forced load answers from after it was asked, never from a request that left before; a plain load shares the one in flight")
+def _(d):
+    a_store(d)
+    d.open_view("home", fresh=True)
+    name = "par-forced-%d" % random.randint(10000, 99999)
+    out = d.eval("""(async () => {
+      const real = window.fetch; let gets = 0;
+      window.fetch = (u, o) => {
+        const get = !(o && /post/i.test(o.method || ''));
+        // Answered by the daemon at once, handed to the page late: a reply
+        // from before the create that arrives after it.
+        if (get && /\\/api\\/stores(\\?|$)/.test(String(u))) { gets++; return real(u, o).then(r => new Promise(done => setTimeout(() => done(r), 1500))); }
+        return real(u, o);
+      };
+      try {
+        // Nothing of the page's own in flight first (the poll), so the
+        // request counted is this check's. (The poll may load the list again
+        // once it sees the create, so later requests are not counted.)
+        while (loading.stores) await loading.stores.catch(() => {});
+        gets = 0;
+        delete data.stores;
+        const early = load('stores', true);          // leaves before the create
+        const shared = load('stores');               // shares it: no request of its own
+        const same = shared === early;
+        await new Promise(r => setTimeout(r, 50));
+        const sharedGets = gets;
+        await new Promise(r => setTimeout(r, 300));
+        await post('/api/store/create', {name: %s, kind: 'both'});
+        const fresh = await load('stores', true);    // must see the store
+        const before = await early, joined = await shared;
+        return {same, sharedGets, fresh: fresh.stores.some(s => s.name === %s),
+                early: before.stores.some(s => s.name === %s), joined: joined === before,
+                cache: data.stores.stores.some(s => s.name === %s)};
+      } finally { window.fetch = real; }
+    })()""" % ((json.dumps(name),) * 4))
+    try:
+        want("the forced load after the create", out, {"same": True, "sharedGets": 1, "fresh": True, "early": False, "joined": True, "cache": True})
+    finally:
+        d.api_result("/api/store/delete", method="POST", body={"store": name})
+
+
+@finding("par.shots", "each view the parity pass changed, in light and dark, at 1440px and 390px")
+def _(d):
+    store = a_store(d)
+    views = ["home", "stores", "stores/inside", "store/%s" % store, "store/%s/review" % store, "search", "ledger", "reports"]
+    folder = os.path.join(d.out_dir, "shots")
+    os.makedirs(folder, exist_ok=True)
+    try:
+        for theme in ("light", "dark"):
+            d.eval("try { localStorage.setItem('semlith-theme', %s); } catch (e) {}" % json.dumps(theme))
+            for width, height, mobile in ((1440, 900, False), (390, 844, True)):
+                d.set_viewport(width, height, mobile=mobile)
+                for view in views:
+                    d.open_view(view, fresh=True)
+                    if view == "search":
+                        d.type(SEARCH_BOX, "corpus file")
+                        d.press("Enter")
+                        d.wait_for("document.querySelectorAll(%s).length > 0" % json.dumps(RESULT_CARD), timeout=30, what="search results")
+                    pause(d, 600)
+                    slug = re.sub(r"[^a-z0-9]+", "-", view.lower()).strip("-")
+                    d.screenshot(os.path.join(folder, "par-%s-%d-%s.png" % (theme, width, slug)))
+                wizard_to(d, 1)
+                d.type('.wz-body input[aria-label="Store name"]', "a" * 41)
+                d.screenshot(os.path.join(folder, "par-%s-%d-wizard-name.png" % (theme, width)))
+                leave_wizard(d)
+    finally:
+        d.reset_viewport()
+        d.eval("try { localStorage.removeItem('semlith-theme'); } catch (e) {}")
 
 
 @finding("v6.shots", "every v6 view, in light and dark, at 1440px and 390px")

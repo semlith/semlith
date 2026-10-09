@@ -1421,7 +1421,7 @@ Semlith Cloud's client. Nothing below is reached by a machine that never ran
 
 | Surface | Change |
 |---|---|
-| CLI commands added | `cloud login [<org>] [--host] [--token]`, `logout`, `status [--json]`, `connect <org> [--store <name>…]`, `disconnect <org>`, `push <org>/<store> <dir> [--wait] [--json]`, `sync <store> on\|off [--org]`, `report <org> <kind> [--format] [--window] [--model] [--stores] [--out]`, `replay [<session>] [--org]`. Against `infra/docs/cloud-api.md`'s `/v1` routes. |
+| CLI commands added | `cloud login [<org>] [--host] [--token]`, `logout`, `status [--json]`, `connect <org> [--store <name>…]`, `disconnect <org>`, `push <org>/<store> <dir> [--wait] [--json]`, `sync <store> on\|off [--org]`, `report <org> <kind> [--format] [--window] [--model] [--stores] [--out]`, `replay [<session>] [--org]`. Against the Semlith Cloud API's `/v1` routes. |
 | `~/.semlith/cloud.json` | New, owner-only: `{machine, entries: [{host, org, token, plan?, added}]}`. Tool-written state, not a configuration file. A token is sent only to the `host` it is stored with. |
 | `registry.json` | A top-level `remote` map, `<org>/<store>` → `{host, org, store, mcp_url}`, absent while empty. Not entries in `stores`: an older binary walks those as directories. An older binary ignores the map and drops it on its next write; `semlith cloud connect` puts it back. Store entries gain `cloud_sync: {org, since}`, absent while off. |
 | The ledger | `retrievals` gains `synced_at`, additive and outside the chain; `FORMAT_VERSION` does not move. |
@@ -1430,6 +1430,32 @@ Semlith Cloud's client. Nothing below is reached by a machine that never ran
 | Routes added | `GET /api/cloud`, `GET /api/cloud/status`, `POST /api/cloud/sync`, `/api/cloud/connect`, `/api/cloud/disconnect`, `/api/cloud/push`, `/api/cloud/report`, `/api/cloud/replay`. `/api/stores` gains `remote`, `/api/about` and `/api/privacy` gain `cloud`. |
 | `semlith doctor` | A cloud line, and `cloud: {signed_in, orgs}` in `--json`. |
 | Library | `Semlith::index_paths_under`, `index_rest_under` and `undo_run`; `mcp::Session` gains `host`. |
+
+The `remote` lane and `semlith worker` are not in the binary from 0.37.0
+(0.37.0-rc.5 to rc.7 had them); `semlith accel on remote` is refused as an
+unknown lane, and `settings.json`'s `remote` object is ignored. In the library
+the `remote` and `attest` modules and `ledger::measure` are gone; a program
+that runs a worker of its own registers it with `accel::set_remote` (an
+`accel::Remote` returning an `accel::RemoteChannel`), and only then does the
+`remote` lane exist.
+
+### 0.37.0-rc.6: the CPU cap and lane truth
+
+| Surface | Change |
+|---|---|
+| CLI | `accel off cpu` now always refuses: the CPU lane is always on. `accel on <lane>` refuses a lane this machine's hardware cannot run (no usable GPU for `gpu` and `llama`, no NVIDIA card and driver for `cuda` and `trt`, a non-Intel CPU for `openvino`) and a lane that failed. `accel status` and `doctor --gpu` print the CPU cap. |
+| `settings.json` | `cpu_cap_percent` (0-100, absent = 100). A saved `accelerators.cpu: false` is read as on and cleared by the next save. An older binary ignores `cpu_cap_percent`. |
+| Environment | `SEMLITH_CPU_CAP` (0-100) ahead of the saved setting. |
+| `GET /api/accel` | Each lane row gains `saved` and `source` (`environment`, `saved`, `default`); the CPU row gains `locked` and `locked_reason` and its `status` is `active` only while it embeds. The body gains `cpu_cap` (`percent`, `source`, `measured_percent`, `paused`). |
+| `POST /api/index/settings` | Takes `cpu_cap_percent`; outside 0-100 is a 400, and a value `SEMLITH_CPU_CAP` sets is a 409. The `limits` it and the runs route answer with gain `cpu_cap_percent` and `cpu_measured_percent`. |
+| Library | `cpucap` module; `accel::CPU_ALWAYS_ON`; `embed::threads_in_force` never exceeds the cap's share of the cores. |
+| Portal parity | The cap is a row on Settings › Performance › Limits; the CPU switch is locked there. |
+
+### 0.37.0-rc.7: the CPU cap steps by 5
+
+| Surface | Change |
+|---|---|
+| Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
 ## What a break would look like
 

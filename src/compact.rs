@@ -18,8 +18,8 @@
 //! given, and turbovec encodes the same rows to the same bytes however they are
 //! batched. Semlith never calibrates, which is what makes that hold.
 //!
-//! The CLI, the daemon, the portal route and Semlith Cloud all call this one
-//! function, so the four cannot disagree about what compacting means.
+//! The CLI, the daemon, the portal route and the library's embedders all call
+//! this one function, so none of them can disagree about what compacting means.
 
 use crate::index::{self, VectorIndex};
 use crate::{BIT_WIDTH, GENERATION, Semlith, generation, image, lock, now, store};
