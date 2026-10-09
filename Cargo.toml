@@ -1,6 +1,6 @@
 [package]
 name = "semlith"
-version = "0.37.0-rc.7"
+version = "0.37.0"
 edition = "2024"
 rust-version = "1.90"
 description = "A fast local vector store for AI agents — index files once, keep it current as you save, and answer questions across all of it in milliseconds without leaving the machine."
@@ -10,8 +10,23 @@ license = "Apache-2.0"
 readme = "README.md"
 keywords = ["vector-search", "embeddings", "rag", "mcp", "semantic-search"]
 categories = ["command-line-utilities", "database", "text-processing"]
-# CI config and local credentials are not part of the crate.
-exclude = [".env", ".github", "assets/portal", "packs", "tests/fixtures/coreml"]
+# What the crate ships: the source, what it compiles in, and the notices.
+# Tests, harnesses, docs and CI stay in the repository.
+include = [
+    "src/**",
+    "queries/**",
+    "docs/clients.md",
+    "docs/skill/**",
+    "tests/fixtures/gpu/known-answer.*",
+    "examples/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE",
+    "THIRD-PARTY-NOTICES",
+]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -126,10 +141,6 @@ flate2 = { version = "1.1", default-features = false, features = ["rust_backend"
 # laying anything out, which is why `report::pdf` typesets in a fixed-width
 # base-14 face — the layout is arithmetic, not a font metrics table.
 pdf-writer = "0.15.0"
-rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
-rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
-ring = "0.17"
-base64 = "0.23"
 
 # The Neural Engine lane: Core ML called from Rust, macOS only. Bindings, not
 # a framework of their own — the models are Apple's format and the runtime is

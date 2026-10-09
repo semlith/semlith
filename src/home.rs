@@ -265,9 +265,9 @@ pub struct Settings {
     #[serde(default)]
     pub cpu_cap_percent: Option<u8>,
     /// Whether the ledger's Session replay tab may read this machine's agent
-    /// transcripts. Absent means on from 0.35.0 (the owner's decision: the
-    /// panel is the ledger's answer to "was it enough", and off by default
-    /// meant nobody saw it). A file that wrote `false` stays off. Read it
+    /// transcripts. Absent means on from 0.35.0 (the panel is the ledger's
+    /// answer to "was it enough", and off by default meant nobody saw it). A
+    /// file that wrote `false` stays off. Read it
     /// through [`Settings::replay_on`], never with an `unwrap_or` of its own.
     #[serde(default)]
     pub session_replay: Option<bool>,
@@ -288,9 +288,6 @@ pub struct Settings {
     /// the experimental lanes off.
     #[serde(default)]
     pub accelerators: crate::accel::Switches,
-    /// The remote embedding lane: where its worker is and how it is trusted.
-    #[serde(default)]
-    pub remote: crate::remote::Settings,
     /// The WebGPU adapter to prefer, by a substring of its name. Absent means
     /// semlith's own choice: a discrete GPU over an integrated one.
     #[serde(default)]

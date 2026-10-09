@@ -57,8 +57,9 @@ fn exactly_the_experimental_lanes_say_so() {
     let rows = status(home.path());
     for row in rows["lanes"].as_array().unwrap() {
         let id = row["lane"].as_str().unwrap();
-        let want = matches!(id, "cuda" | "trt" | "openvino" | "llama" | "remote");
+        let want = matches!(id, "cuda" | "trt" | "openvino" | "llama");
         assert_eq!(row["experimental"], want, "{id}");
+        assert_ne!(id, "remote", "the binary registers no remote lane");
     }
     let text = Command::new(env!("CARGO_BIN_EXE_semlith"))
         .args(["accel", "status"])
@@ -149,6 +150,16 @@ fn every_lane_says_what_was_saved_and_where_it_came_from() {
     let env: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(lane(&env, "gpu")["source"], "environment");
     assert_eq!(lane(&env, "gpu")["enabled"], false);
+}
+
+#[test]
+fn the_binary_has_no_remote_lane_to_turn_on() {
+    let home = tempfile::tempdir().unwrap();
+    let out = semlith(home.path(), &["accel", "on", "remote"], &[]);
+    assert!(!out.status.success(), "remote turned on");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("there is no lane called remote"), "{said}");
+    assert!(!said.contains("remote,"), "{said}");
 }
 
 #[test]

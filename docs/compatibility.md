@@ -1421,7 +1421,7 @@ Semlith Cloud's client. Nothing below is reached by a machine that never ran
 
 | Surface | Change |
 |---|---|
-| CLI commands added | `cloud login [<org>] [--host] [--token]`, `logout`, `status [--json]`, `connect <org> [--store <name>…]`, `disconnect <org>`, `push <org>/<store> <dir> [--wait] [--json]`, `sync <store> on\|off [--org]`, `report <org> <kind> [--format] [--window] [--model] [--stores] [--out]`, `replay [<session>] [--org]`. Against `infra/docs/cloud-api.md`'s `/v1` routes. |
+| CLI commands added | `cloud login [<org>] [--host] [--token]`, `logout`, `status [--json]`, `connect <org> [--store <name>…]`, `disconnect <org>`, `push <org>/<store> <dir> [--wait] [--json]`, `sync <store> on\|off [--org]`, `report <org> <kind> [--format] [--window] [--model] [--stores] [--out]`, `replay [<session>] [--org]`. Against the Semlith Cloud API's `/v1` routes. |
 | `~/.semlith/cloud.json` | New, owner-only: `{machine, entries: [{host, org, token, plan?, added}]}`. Tool-written state, not a configuration file. A token is sent only to the `host` it is stored with. |
 | `registry.json` | A top-level `remote` map, `<org>/<store>` → `{host, org, store, mcp_url}`, absent while empty. Not entries in `stores`: an older binary walks those as directories. An older binary ignores the map and drops it on its next write; `semlith cloud connect` puts it back. Store entries gain `cloud_sync: {org, since}`, absent while off. |
 | The ledger | `retrievals` gains `synced_at`, additive and outside the chain; `FORMAT_VERSION` does not move. |
@@ -1431,21 +1431,13 @@ Semlith Cloud's client. Nothing below is reached by a machine that never ran
 | `semlith doctor` | A cloud line, and `cloud: {signed_in, orgs}` in `--json`. |
 | Library | `Semlith::index_paths_under`, `index_rest_under` and `undo_run`; `mcp::Session` gains `host`. |
 
-### 0.37.0-rc.5: the remote lane
-
-Nothing below is reached by a machine that never turns the `remote` lane on or
-runs `semlith worker`.
-
-| Surface | Change |
-|---|---|
-| CLI commands added | `worker [--listen ADDR] [--lane L] [--attest-cpu CMD] [--attest-gpu CMD] [--max-connections N]`, needing `SEMLITH_WORKER_TOKEN`. `accel on remote` takes `--endpoint`, `--token-file` and `--policy`. |
-| Lanes | `remote` joins the switches, experimental and off by default. `doctor --gpu` checks it and prints what its attestation proved. |
-| `settings.json` | `accelerators.remote`, and a `remote` object with `endpoint`, `token` and `policy` (a path). An older binary ignores both. |
-| Environment | `SEMLITH_REMOTE_ENDPOINT`, `SEMLITH_REMOTE_TOKEN`, `SEMLITH_REMOTE_POLICY` ahead of the saved settings; `SEMLITH_WORKER_TOKEN` for the worker. |
-| `GET /api/accel` | The `remote` row gains `endpoint` and `attestation` (`state` `attested`, `off` or `refused`, with `summary` or `reason`, and `at`). |
-| The wire | TLS 1.3, then a JSON hello `{v: 1, token, nonce}` and the worker's `{ok, version, lane, cpu, gpu}`, then the `__embed-worker` frames unchanged. `v` moves if any of it changes. |
-| Library | `accel::worker_command`, `accel::check_lane`, the `attest` and `remote` modules. |
-| Portal parity | `worker` has no portal view, like `start` and `mcp`: it runs on a GPU machine with no store and no portal. The machine using it shows it on the remote lane's row (endpoint, attestation). |
+The `remote` lane and `semlith worker` are not in the binary from 0.37.0
+(0.37.0-rc.5 to rc.7 had them); `semlith accel on remote` is refused as an
+unknown lane, and `settings.json`'s `remote` object is ignored. In the library
+the `remote` and `attest` modules and `ledger::measure` are gone; a program
+that runs a worker of its own registers it with `accel::set_remote` (an
+`accel::Remote` returning an `accel::RemoteChannel`), and only then does the
+`remote` lane exist.
 
 ### 0.37.0-rc.6: the CPU cap and lane truth
 
