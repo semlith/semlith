@@ -6547,22 +6547,31 @@ fn collapse_copies(hits: &mut Vec<(Hit, f32)>) {
 /// at definitions, so a chunk opening with a doc comment is about the
 /// function below it, not the one whose last two lines it overlaps. Then the
 /// innermost definition containing the chunk's first line, then the innermost
-/// overlapping it at all.
+/// overlapping it at all. Except when the definition holding the first line
+/// ends inside the chunk and covers more of it than the one starting inside:
+/// a chunk that is most of `main` and the first two lines of the next item is
+/// `main`'s.
 pub(crate) fn enclosing_definition(
     symbols: &[(u32, u32, String, String)],
     start: u32,
     end: u32,
 ) -> Option<(u32, String, String)> {
-    let starts_inside = symbols
-        .iter()
-        .filter(|(s, _, _, _)| *s >= start && *s <= end)
-        .min_by_key(|(s, e, _, _)| (*s, std::cmp::Reverse(e.saturating_sub(*s))));
+    let covered =
+        |(s, e, _, _): &&(u32, u32, String, String)| (*e).min(end).saturating_sub((*s).max(start));
     let contains = || {
         symbols
             .iter()
             .filter(|(s, e, _, _)| *s <= start && *e >= start)
             .min_by_key(|(s, e, _, _)| e.saturating_sub(*s))
     };
+    let starts_inside = symbols
+        .iter()
+        .filter(|(s, _, _, _)| *s >= start && *s <= end)
+        .min_by_key(|(s, e, _, _)| (*s, std::cmp::Reverse(e.saturating_sub(*s))))
+        .filter(|inside| {
+            !contains()
+                .is_some_and(|before| before.1 < inside.0 && covered(&before) > covered(inside))
+        });
     let overlaps = || {
         symbols
             .iter()
@@ -7442,6 +7451,40 @@ fn semlithignore_for(dir: &Path) -> Option<ignore::gitignore::Gitignore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn def(start: u32, end: u32, name: &str) -> (u32, u32, String, String) {
+        (start, end, name.to_string(), "function".to_string())
+    }
+
+    /// A chunk that is most of one function and the first two lines of the
+    /// next is about the first: ripgrep's `examples/walk.rs` 25-53 is `main`'s
+    /// body, and it was labelled with the enum that opens on line 52.
+    #[test]
+    fn a_chunk_is_named_for_the_definition_it_is_mostly_about() {
+        let symbols = [def(5, 50, "main"), def(52, 55, "DirEntry")];
+        let (_, name, _) = enclosing_definition(&symbols, 25, 53).unwrap();
+        assert_eq!(name, "main");
+    }
+
+    /// A chunk opening on the last lines of one function and running into the
+    /// next is still the next one's, as is a chunk opening on a doc comment.
+    #[test]
+    fn a_chunk_that_starts_on_a_tail_belongs_to_the_definition_below() {
+        let symbols = [def(1, 12, "before"), def(14, 40, "after")];
+        let (_, name, _) = enclosing_definition(&symbols, 11, 30).unwrap();
+        assert_eq!(name, "after");
+        let (_, name, _) = enclosing_definition(&symbols, 13, 30).unwrap();
+        assert_eq!(name, "after");
+    }
+
+    /// A method starting inside a chunk that begins in its impl is the method:
+    /// the innermost definition is more use than its parent.
+    #[test]
+    fn a_nested_definition_starting_inside_the_chunk_wins_over_its_parent() {
+        let symbols = [def(1, 100, "Impl"), def(20, 60, "method")];
+        let (_, name, _) = enclosing_definition(&symbols, 18, 50).unwrap();
+        assert_eq!(name, "method");
+    }
 
     /// Two scopes asked in turn both stay resolved (#183): a one-entry memo
     /// resolved each of them again on every call.
