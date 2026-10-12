@@ -937,8 +937,10 @@ pub fn waiting_for() -> Option<String> {
 }
 
 /// The variants a cached vector may be for this process's runs, best first:
-/// what its lanes make, then the CPU's. A cached vector of any of them is as
-/// good as embedding it again here, which is the point of the cache.
+/// what its lanes make, then the CPU's, then every other lane's. A cached
+/// vector of any of them is as good as embedding it again here, which is the
+/// point of the cache - including one a lane this machine lacks made, such as
+/// a remote GPU worker's fp16-cuda (#54).
 pub fn cache_variants() -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     if MANAGED.load(Ordering::Relaxed) {
@@ -960,6 +962,15 @@ pub fn cache_variants() -> Vec<&'static str> {
         }
     }
     out.push("int8-cpu");
+    let others = SPECS
+        .iter()
+        .map(|spec| spec.variant)
+        .chain(["fp16-coreml-gpu"]);
+    for variant in others {
+        if !out.contains(&variant) {
+            out.push(variant);
+        }
+    }
     out
 }
 
@@ -2617,6 +2628,32 @@ pub fn component_dir(cache: &Path, lane: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A vector another lane made, here or on a remote worker, is as good as
+    /// embedding the text again, so a run looks every variant up after its
+    /// own (#54: the cloud's CPU runs never found the GPU worker's fp16-cuda
+    /// vectors, because no lane on the box makes them).
+    #[test]
+    fn a_run_looks_up_every_variant_after_its_own() {
+        let variants = cache_variants();
+        for spec in SPECS {
+            assert!(
+                variants.contains(&spec.variant),
+                "{} is never looked up",
+                spec.variant
+            );
+        }
+        for variant in ["fp16-coreml-gpu", "fp16-cuda"] {
+            assert!(variants.contains(&variant), "{variant} is never looked up");
+        }
+        let mut unique = variants.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), variants.len(), "a variant looked up twice");
+        if !MANAGED.load(Ordering::Relaxed) {
+            assert_eq!(variants[0], "int8-cpu", "this process's own variant first");
+        }
+    }
 
     /// A failed check names every chunk under the floor, not only the worst
     /// (#197: the NVIDIA report gave the minimum and nothing else).
