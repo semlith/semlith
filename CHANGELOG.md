@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.1] - 2026-10-12
+
+### Fixed
+
+**A cached vector made on another lane is used.** An index run looked up only
+the variants its own lanes make, then the CPU's, so a vector a remote GPU
+worker embedded (fp16-cuda) was never found by a run on a machine without
+that lane - Semlith Cloud's CPU runs and impact checks embedded again what its
+GPU worker had already embedded (semlith-cloud #54). A run now tries every
+lane's variant after its own; a miss costs a few more point lookups in the
+cache, against an embed of milliseconds.
+
+### Dependencies
+
+tree-sitter-haskell 0.24.1, tree-sitter-php 0.25.1, tree-sitter-graphql 0.3.0
+and the patch-update group (#221).
+
 ## [0.38.0] - 2026-10-10
 
 ### The public scorecard
