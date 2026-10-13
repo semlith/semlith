@@ -25,6 +25,18 @@ is put back exactly as it was when the pass ends, however it ends, and at
 the start of the next write if a crash came between. Later passes are
 unchanged.
 
+Measured on the M1, a first import of vscode (353,398 chunks) on the Neural
+Engine lane, three runs each, alternating with 0.38.1: commit 39.8 s to
+26.8 s and the whole write 79.1 s to 68.3 s (medians), peak memory 601 MB to
+637 MB, and identical stores - chunks, vectors, files, symbols and edges.
+That run is bound by the embedder (about 2,000 s), so its total does not
+move; the saving shows where the writer was the bound. Through the remote
+lane to a confidential G4, the same import went from 926.8 to 1,141.5
+chunks a second (381 s to 310 s, medians of three), commit from 35.9 s to
+18.3 s and the whole write from 76.0 s to 51.9 s. The writer is no longer
+what that run waits on: two thirds of it is waiting on the GPU, which embeds
+at about 1,200 chunks a second.
+
 **Store format 5: turbovec 1.1 (#219).** The vector index moves from
 turbovec 1.0.0 to 1.1.2, whose files are its format v8. 1.1 reads the v7
 files earlier versions wrote as they are and writes a file back as v8 the
