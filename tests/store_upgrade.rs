@@ -174,7 +174,8 @@ fn search_finds_the_same_file_before_and_after_the_move() {
     };
 
     assert!(top(&mut s).ends_with("beekeeping.txt"), "{}", top(&mut s));
-    s.forget(Path::new(&format!("{CORPUS}/volcano.txt"))).unwrap();
+    s.forget(Path::new(&format!("{CORPUS}/volcano.txt")))
+        .unwrap();
     assert_eq!(
         semlith::store::format(s.db()).unwrap(),
         semlith::store::FORMAT_VERSION
