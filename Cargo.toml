@@ -1,6 +1,6 @@
 [package]
 name = "semlith"
-version = "0.38.1"
+version = "0.39.0"
 edition = "2024"
 rust-version = "1.90"
 description = "A fast local vector store for AI agents — index files once, keep it current as you save, and answer questions across all of it in milliseconds without leaving the machine."
@@ -64,7 +64,10 @@ rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
-turbovec = "1.0.0"
+# 1.1 reads the v7 files 1.0 wrote and writes v8, which 1.0 cannot read: a
+# store this build writes to is format 5 (see `store::TURBOVEC_V8`), so the
+# floor is the version that writes it.
+turbovec = "1.1.2"
 notify = "8.2.0"
 # The structure half of the store. One parser plus a grammar for every language
 # `filter::LANGUAGES` advertises. Where a grammar ships its own `TAGS_QUERY`
