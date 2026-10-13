@@ -63,8 +63,47 @@ fn live(kind: &str) -> String {
 }
 
 /// Twenty random characters of a generated key, for the generic rule.
+///
+/// The generic rule rightly lets two kinds of value through, and a uniform
+/// draw spells each now and then: one with no lower-case letter reads as a
+/// `SCREAMING_SNAKE` variable name (about once in 53 000 draws), and one below
+/// `MIN_ENTROPY`'s 3.2 bits per character reads as a placeholder (about once
+/// in 77 000). Together they failed this file on Windows CI for #219 (#222).
+/// A value here is meant to look live, so such a draw is drawn again, as
+/// `keyscan::forge` redraws a sequential one: it must hold a lower-case letter
+/// and at least 14 distinct characters. Fourteen of twenty bounds the entropy
+/// from below at 3.34 bits — the most skewed spread, one character seven times
+/// and thirteen once each, scores that — so no kept draw can fall under 3.2.
 fn random20() -> String {
-    live("GitHub token")[4..24].to_string()
+    loop {
+        let value = live("GitHub token")[4..24].to_string();
+        let distinct = value
+            .chars()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if value.chars().any(|c| c.is_ascii_lowercase()) && distinct >= 14 {
+            return value;
+        }
+    }
+}
+
+/// The generic rule refuses every value `random20` hands out. Ten thousand
+/// draws, because the failure this guards against (#222) came once in tens of
+/// thousands: a single draw passing says nothing about the fixture.
+#[test]
+fn every_random20_draw_is_refused_by_the_generic_rule() {
+    for _ in 0..10_000 {
+        let value = random20();
+        let matches = semlith::keyscan::scan("config.txt", &format!("api_key = \"{value}\"\n"));
+        assert!(
+            semlith::keyscan::refuses(&matches),
+            "a random20 draw of {} distinct characters was not refused: {matches:?}",
+            value
+                .chars()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        );
+    }
 }
 
 /// A `.txt` per shape, named after nothing in the deny-list so the only rule

@@ -120,7 +120,8 @@ format 1.
 | 1 | vectors in one `index.tv` | 0.1.0 through 0.6.0 |
 | 2 | vectors in an `index/` directory of fixed-size shards | 0.7.0 through 0.21.0 |
 | 3 | Markdown chunks cut at their headings, embedded with the heading path in front | 0.22.0 through 0.24.0 |
-| 4 | code chunks embedded with the definition they sit inside | 0.25.0 and later |
+| 4 | code chunks embedded with the definition they sit inside | 0.25.0 through 0.38.1 |
+| 5 | format 4 whose vector files may be turbovec v8 | 0.39.0 and later |
 
 **A binary refuses a store whose format is newer than it knows**, naming both
 numbers. Misreading a newer store does not look like an error; it looks like a
@@ -130,7 +131,8 @@ Do not point a pre-0.6.0 binary at a store 0.7.0 or later created.
 
 **Forwards, every store still opens.** A newer binary reads, searches and
 indexes into an older store without re-embedding and without changing its
-format number. A format-1 store is never migrated: its quantized vectors cannot
+format number, except that 0.39.0's first write moves format 4 to 5 (below).
+A format-1 store is never migrated: its quantized vectors cannot
 be split back out, so moving to shards means deleting the store and indexing
 again.
 
@@ -143,9 +145,21 @@ where it was. The run says on its first line that it is re-indexing and why.
 Until that pass, the store answers as it did. Rolling back from format 4 means
 re-indexing under the older binary.
 
+**Format 5 re-embeds nothing.** 0.39.0 moved to turbovec 1.1, which reads the
+v7 vector files earlier releases wrote and writes v8 the next time it saves one.
+A semlith before 0.39.0 cannot load v8, so the first write to a format-4 store
+(an index pass, a `forget`, anything that saves) moves the row to 5 before
+anything is saved; the vector files then follow shard by shard, each as it is
+next written. Reading, searching and `stats` move nothing, so a store 0.39.0 has
+only read still opens under 0.38.1. Once moved, an older binary refuses the
+store with its usual "upgrade semlith" message rather than misreading a v8
+file. Rolling back from format 5 means restoring the store from before the
+upgrade or re-indexing under the older binary.
+
 **Added tables and columns do not move the number.** The schema is applied with
 `CREATE TABLE IF NOT EXISTS` (and nullable `ALTER TABLE` additions) on every
-open, while `format_version` is written only when a store is created; bumping it
+open, while `format_version` is written only when a store is created (and by the
+re-chunking pass and the format-5 move above); bumping it
 would strand every existing store and make the previous release refuse stores
 the new one had merely opened. The number guards the vector layout and what the
 model was shown, where misreading is silent. An older binary never reads a table
