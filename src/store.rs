@@ -401,9 +401,23 @@ impl Drop for Writing<'_> {
 /// whose Markdown chunks are cut at their headings and carry the heading path
 /// as embedding context. 4 is a store written by 0.25.0 and later, whose code
 /// chunks carry the definition they sit inside — its signature and the first
-/// line of its doc comment — as embedding context. A binary understands every
-/// format up to its own, so this one reads all four and creates the newest.
-pub const FORMAT_VERSION: u32 = 4;
+/// line of its doc comment — as embedding context. 5 is a store 0.39.0 or
+/// later has written to: its vector files may be turbovec's v8, which a binary
+/// before 0.39.0 cannot load. A binary understands every format up to its own,
+/// so this one reads all five and creates the newest.
+pub const FORMAT_VERSION: u32 = 5;
+
+/// The first format whose vector files may be turbovec's v8.
+///
+/// Nothing about the rows, the chunks or the vectors' values changes: turbovec
+/// 1.1 reads a v7 file as it is and writes it back as v8 the next time that
+/// file is saved, so a store moves shard by shard rather than in one pass.
+/// What changes is which binaries can read it — turbovec 1.0 refuses a v8 file
+/// as "not a turbovec index" — so the format number moves before the first
+/// write, and an older semlith refuses the whole store with its own message
+/// instead of failing on whichever shard it loads first. See
+/// [`mark_vector_format`].
+pub const TURBOVEC_V8: u32 = 5;
 
 /// The first format that keeps its vectors in shards.
 pub const SHARDED_FORMAT: u32 = 2;
@@ -452,6 +466,110 @@ pub fn format(db: &Connection) -> Result<u32> {
 }
 
 pub const FORMAT_KEY: &str = "format_version";
+
+/// Move a format-4 store to [`TURBOVEC_V8`] before this binary writes to it.
+///
+/// Called where every write starts, because any write may save a vector file
+/// and a saved file is v8. Only format 4 moves here: a store below it re-chunks
+/// on its first full pass and is stamped with the current format when that
+/// pass ends, and stamping it now would skip that pass. A format-1 store has no
+/// key and a single `index.tv`; stamping it would make it read as sharded.
+pub fn mark_vector_format(db: &Connection) -> Result<()> {
+    if format(db)? == CODE_CONTEXT {
+        set_meta(db, FORMAT_KEY, &TURBOVEC_V8.to_string())?;
+    }
+    Ok(())
+}
+
+/// Meta key present while a store's first import is under way (#210).
+///
+/// Set by the pass that finds the store empty and removed by the pass that
+/// ends with nothing left pending, so a first import the cloud runs in slices
+/// of a few hundred files is one first import, not one slice of it.
+pub const FIRST_IMPORT_KEY: &str = "first_import";
+
+/// Meta key holding the keyword index's `automerge` setting from before a
+/// first import held it at 0: a number, or `default` when the store had none.
+const AUTOMERGE_HELD_KEY: &str = "fts_automerge_held";
+
+/// FTS5's own `automerge` when its config table has no row for it.
+const AUTOMERGE_DEFAULT: i64 = 4;
+
+/// Whether this pass is part of a store's first import, starting one when the
+/// store is empty.
+pub fn first_import(db: &Connection, empty: bool) -> Result<bool> {
+    if get_meta(db, FIRST_IMPORT_KEY)?.is_some() {
+        return Ok(true);
+    }
+    if empty {
+        set_meta(db, FIRST_IMPORT_KEY, "1")?;
+    }
+    Ok(empty)
+}
+
+/// The first import ran to its end: later passes write as any other does.
+pub fn end_first_import(db: &Connection) -> Result<()> {
+    db.execute("DELETE FROM meta WHERE k = ?1", params![FIRST_IMPORT_KEY])?;
+    Ok(())
+}
+
+/// Stop FTS5 merging segments while a first import writes (#210).
+///
+/// Every commit flushes the keyword index's pending terms into a new segment,
+/// and with `automerge` on FTS5 merges segments as part of that commit: about
+/// a sixth of a remote-GPU first import's commit time. Held at 0 a merge waits
+/// until `crisismerge` segments pile up at one level, which still bounds what
+/// a search reads. The setting persists in the store, so what it was is kept
+/// in `meta` first and [`release_automerge`] puts it back — after the pass,
+/// and at the start of the next write if a crash came between.
+pub fn hold_automerge(db: &Connection) -> Result<()> {
+    if get_meta(db, AUTOMERGE_HELD_KEY)?.is_some() {
+        return Ok(());
+    }
+    let was: Option<i64> = db
+        .query_row(
+            "SELECT v FROM chunks_fts_config WHERE k = 'automerge'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    set_meta(
+        db,
+        AUTOMERGE_HELD_KEY,
+        &was.map_or_else(|| "default".to_string(), |n| n.to_string()),
+    )?;
+    db.execute(
+        "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('automerge', 0)",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Put back the `automerge` setting [`hold_automerge`] recorded, if any.
+///
+/// A store that had no row gets none back: the value is set through FTS5 so
+/// every connection's cached copy is the default again, then the row is
+/// removed with the connection's defensive mode lifted for that one statement,
+/// since the config table is FTS5's and refuses ordinary writes.
+pub fn release_automerge(db: &Connection) -> Result<()> {
+    let Some(was) = get_meta(db, AUTOMERGE_HELD_KEY)? else {
+        return Ok(());
+    };
+    let value = was.parse().unwrap_or(AUTOMERGE_DEFAULT);
+    db.execute(
+        "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('automerge', ?1)",
+        params![value],
+    )?;
+    if was == "default" {
+        use rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE;
+        db.set_db_config(SQLITE_DBCONFIG_DEFENSIVE, false)?;
+        let removed = db.execute("DELETE FROM chunks_fts_config WHERE k = 'automerge'", []);
+        db.set_db_config(SQLITE_DBCONFIG_DEFENSIVE, true)?;
+        removed?;
+    }
+    db.execute("DELETE FROM meta WHERE k = ?1", params![AUTOMERGE_HELD_KEY])?;
+    Ok(())
+}
 
 /// Refuse a store a later semlith wrote, rather than misreading it.
 ///
@@ -5140,6 +5258,80 @@ mod tests {
         // The format this binary wrote is of course readable.
         set_meta(&db, FORMAT_KEY, &FORMAT_VERSION.to_string()).unwrap();
         check_format(&db).unwrap();
+    }
+
+    #[test]
+    fn only_a_format_4_store_moves_to_format_5_before_a_write() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        // No key: format 1, a single index file; stamping would read it as
+        // sharded.
+        mark_vector_format(&db).unwrap();
+        assert!(get_meta(&db, FORMAT_KEY).unwrap().is_none());
+        // Format 3 re-chunks on its first full pass, which stamps it.
+        set_meta(&db, FORMAT_KEY, "3").unwrap();
+        mark_vector_format(&db).unwrap();
+        assert_eq!(format(&db).unwrap(), 3);
+        set_meta(&db, FORMAT_KEY, &CODE_CONTEXT.to_string()).unwrap();
+        mark_vector_format(&db).unwrap();
+        assert_eq!(format(&db).unwrap(), TURBOVEC_V8);
+        assert_eq!(TURBOVEC_V8, FORMAT_VERSION);
+    }
+
+    fn automerge_row(db: &Connection) -> Option<i64> {
+        db.query_row(
+            "SELECT v FROM chunks_fts_config WHERE k = 'automerge'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    #[test]
+    fn a_held_automerge_is_put_back_as_it_was() {
+        let db = Connection::open_in_memory().unwrap();
+        db.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
+            .unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+
+        // No row before: none after, and nothing left in meta.
+        assert_eq!(automerge_row(&db), None);
+        hold_automerge(&db).unwrap();
+        assert_eq!(automerge_row(&db), Some(0));
+        // Held twice (a slice after a crash) still remembers the first value.
+        hold_automerge(&db).unwrap();
+        release_automerge(&db).unwrap();
+        assert_eq!(automerge_row(&db), None);
+        assert!(get_meta(&db, AUTOMERGE_HELD_KEY).unwrap().is_none());
+        // Released with nothing held is nothing.
+        release_automerge(&db).unwrap();
+        assert_eq!(automerge_row(&db), None);
+
+        // A store's own value comes back.
+        db.execute(
+            "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('automerge', 8)",
+            [],
+        )
+        .unwrap();
+        hold_automerge(&db).unwrap();
+        assert_eq!(automerge_row(&db), Some(0));
+        release_automerge(&db).unwrap();
+        assert_eq!(automerge_row(&db), Some(8));
+    }
+
+    #[test]
+    fn a_first_import_lasts_until_a_pass_ends_it() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        assert!(!first_import(&db, false).unwrap(), "a store with rows");
+        assert!(
+            first_import(&db, true).unwrap(),
+            "an empty store starts one"
+        );
+        assert!(first_import(&db, false).unwrap(), "the next slice is in it");
+        end_first_import(&db).unwrap();
+        assert!(!first_import(&db, false).unwrap());
     }
 
     fn seeded() -> Connection {

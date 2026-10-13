@@ -121,7 +121,10 @@ impl Scope {
         };
         Self {
             model,
-            chunker: crate::store::FORMAT_VERSION,
+            // The chunking rule, not the store format: format 5 changed only
+            // the vector files' encoding, and keying on it would have thrown
+            // away every cached embedding for text cut the same way.
+            chunker: crate::store::CODE_CONTEXT,
             truncation: crate::chunk::MAX_CHARS / 2,
         }
     }

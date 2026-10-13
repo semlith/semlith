@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-10-13
+
+### Changed
+
+**A first import commits less (#210).** The writer commits a window's rows
+before it hands their ids to the embed stage, and on a first import through
+a fast lane those commits were the largest part of the write: 87 to 98 s of a
+437 s vscode run through a remote GPU, each a WAL write, often a checkpoint,
+and a keyword-index flush. While a store's first import runs - from the pass
+that finds it empty to the pass that ends with nothing pending, so an import
+run in slices is one import - the writer hands over windows of 1024 chunks
+rather than 256, commits rows between files every 2 s rather than every
+250 ms, and holds FTS5's automerge at 0. The rule that a window never goes
+out carrying a row that could still roll back stands. The automerge setting
+is put back exactly as it was when the pass ends, however it ends, and at
+the start of the next write if a crash came between. Later passes are
+unchanged.
+
+Measured on the M1, a first import of vscode (353,398 chunks) on the Neural
+Engine lane, three runs each, alternating with 0.38.1: commit 39.8 s to
+26.8 s and the whole write 79.1 s to 68.3 s (medians), peak memory 601 MB to
+637 MB, and identical stores - chunks, vectors, files, symbols and edges.
+That run is bound by the embedder (about 2,000 s), so its total does not
+move; the saving shows where the writer was the bound. Through the remote
+lane to a confidential G4, the same import went from 926.8 to 1,141.5
+chunks a second (381 s to 310 s, medians of three), commit from 35.9 s to
+18.3 s and the whole write from 76.0 s to 51.9 s. The writer is no longer
+what that run waits on: two thirds of it is waiting on the GPU, which embeds
+at about 1,200 chunks a second.
+
+**Store format 5: turbovec 1.1 (#219).** The vector index moves from
+turbovec 1.0.0 to 1.1.2, whose files are its format v8. 1.1 reads the v7
+files earlier versions wrote as they are and writes a file back as v8 the
+next time it saves it, so a store moves shard by shard with no migration and
+no re-embed. The first write by 0.39.0 to a format-4 store records format 5,
+and a semlith before 0.39.0 then refuses the store with its usual "upgrade
+semlith" message instead of failing on the first v8 shard it loads.
+**The upgrade is one way**: rolling back means restoring the store from
+before the upgrade, or re-indexing under the older binary. The vector cache
+keys on the chunking rule rather than the store format, so cached embeddings
+carry over.
+
+### Fixed
+
+**The credential-scan test no longer fails on an unlucky draw (#222).** Its
+generic fixture was twenty random characters, and about three draws in a
+hundred thousand were ones the generic rule rightly lets through - all
+upper-case and digits, which reads as a variable name, or below its entropy
+floor. The fixture now draws again until the value is one the rule is meant
+to catch, and a test checks ten thousand draws.
+
 ## [0.38.1] - 2026-10-12
 
 ### Fixed
