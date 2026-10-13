@@ -132,6 +132,24 @@ const SORT_WINDOW: usize = 256;
 /// The longest an index pass holds written rows uncommitted.
 const ROW_COMMIT: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// [`SORT_WINDOW`] while a store's first import runs (#210).
+///
+/// The writer commits before every hand-over, so a window's ids never go out
+/// carrying a row that could still roll back — and on a first import through
+/// a fast lane those commits were the largest part of the write: 87 to 98 s
+/// of a 437 s vscode run through a remote GPU, each one a WAL write, often a
+/// checkpoint, and a keyword-index flush. Four times the window is a quarter
+/// of the commits. A window holds token ids, so the stage's windows in flight
+/// grow from about 7 MB to about 30 MB. Later passes keep the smaller window,
+/// whose rows reach readers sooner.
+const FIRST_IMPORT_WINDOW: usize = 1024;
+
+/// [`ROW_COMMIT`] while a store's first import runs (#210): a store filling
+/// from empty answers keyword and graph questions about what it has read up
+/// to two seconds later, for a commit every two seconds rather than four a
+/// second between windows.
+const FIRST_IMPORT_ROW_COMMIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// How often a pass says how far it has got while the writer waits on the
 /// devices. A window lands every 256 chunks, which on a slow CPU is a quarter
 /// of a minute of a run card standing still; batches come back far oftener.
@@ -2962,11 +2980,18 @@ impl Semlith {
         store::read_only(&self.db, false)?;
         // Before anything is saved: a vector file this binary writes is
         // turbovec v8, which a semlith before 0.39.0 cannot load.
-        let out = store::mark_vector_format(&self.db).and_then(|()| body(self));
+        // And a keyword-index setting a first import held, if a crash left it
+        // held (see `store::hold_automerge`).
+        let out = store::mark_vector_format(&self.db)
+            .and_then(|()| store::release_automerge(&self.db))
+            .and_then(|()| body(self));
         // A pass that failed part-way leaves its open transaction committed,
         // as its autocommitted statements always were: the rows carry the
         // pending hash, which is what makes the next run redo them.
         let _ = self.tx_commit();
+        // Put back whatever the pass held, stopped, failed or finished alike.
+        // Best effort: if it fails, the next write puts it back first.
+        let _ = store::release_automerge(&self.db);
         let _ = store::read_only(&self.db, true);
         out
     }
@@ -3225,6 +3250,17 @@ impl Semlith {
         let (cpu_back, cpu_returned) = std::sync::mpsc::channel();
         let prepare_threads = pipeline::prepare_threads();
         let gitignore = self.gitignore;
+        // A store filling from empty commits less and holds its keyword
+        // index's merges until the pass ends (#210); see `FIRST_IMPORT_WINDOW`.
+        let first_import = store::first_import(&self.db, self.is_empty())?;
+        if first_import {
+            store::hold_automerge(&self.db)?;
+        }
+        let (window_size, row_commit) = if first_import {
+            (FIRST_IMPORT_WINDOW, FIRST_IMPORT_ROW_COMMIT)
+        } else {
+            (SORT_WINDOW, ROW_COMMIT)
+        };
 
         std::thread::scope(|scope| -> Result<()> {
             let prefetch = pipeline::Prefetch::start(scope, first, sealed, &ctx, prepare_threads);
@@ -4046,7 +4082,7 @@ impl Semlith {
                     // chunks into thousands of pieces, and holding them all makes
                     // peak memory a function of the largest file in the corpus
                     // rather than of the window.
-                    if window.ids.len() >= SORT_WINDOW {
+                    if window.ids.len() >= window_size {
                         report.bytes = bytes_before + file_bytes * (ord as u64 + 1) / count as u64;
                         if !self.hand_over(
                             scope,
@@ -4124,7 +4160,7 @@ impl Semlith {
                 // take seconds to fill on a store of small files. Committed at
                 // least this often, so a store filling from cold answers
                 // keyword and graph questions about what it has read so far.
-                if committed.elapsed() >= ROW_COMMIT {
+                if committed.elapsed() >= row_commit {
                     self.tx_commit()?;
                     committed = std::time::Instant::now();
                 }
@@ -4450,6 +4486,11 @@ impl Semlith {
         // run that was stopped, or an index of one directory leaves files
         // behind on the old rule, and a meta row saying otherwise would be a
         // claim about files this run never opened.
+        // Likewise the first import ends only with a pass that left nothing
+        // behind; a slice that yielded hands the next one the same settings.
+        if first_import && report.pending.is_empty() && !report.stopped {
+            store::end_first_import(&self.db)?;
+        }
         if rechunk && sweep && report.pending.is_empty() && !report.stopped {
             store::set_meta(
                 &self.db,
