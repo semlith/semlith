@@ -77,7 +77,10 @@ fn live(kind: &str) -> String {
 fn random20() -> String {
     loop {
         let value = live("GitHub token")[4..24].to_string();
-        let distinct = value.chars().collect::<std::collections::HashSet<_>>().len();
+        let distinct = value
+            .chars()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         if value.chars().any(|c| c.is_ascii_lowercase()) && distinct >= 14 {
             return value;
         }
@@ -95,7 +98,10 @@ fn every_random20_draw_is_refused_by_the_generic_rule() {
         assert!(
             semlith::keyscan::refuses(&matches),
             "a random20 draw of {} distinct characters was not refused: {matches:?}",
-            value.chars().collect::<std::collections::HashSet<_>>().len()
+            value
+                .chars()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
         );
     }
 }
