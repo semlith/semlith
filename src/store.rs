@@ -401,9 +401,23 @@ impl Drop for Writing<'_> {
 /// whose Markdown chunks are cut at their headings and carry the heading path
 /// as embedding context. 4 is a store written by 0.25.0 and later, whose code
 /// chunks carry the definition they sit inside — its signature and the first
-/// line of its doc comment — as embedding context. A binary understands every
-/// format up to its own, so this one reads all four and creates the newest.
-pub const FORMAT_VERSION: u32 = 4;
+/// line of its doc comment — as embedding context. 5 is a store 0.39.0 or
+/// later has written to: its vector files may be turbovec's v8, which a binary
+/// before 0.39.0 cannot load. A binary understands every format up to its own,
+/// so this one reads all five and creates the newest.
+pub const FORMAT_VERSION: u32 = 5;
+
+/// The first format whose vector files may be turbovec's v8.
+///
+/// Nothing about the rows, the chunks or the vectors' values changes: turbovec
+/// 1.1 reads a v7 file as it is and writes it back as v8 the next time that
+/// file is saved, so a store moves shard by shard rather than in one pass.
+/// What changes is which binaries can read it — turbovec 1.0 refuses a v8 file
+/// as "not a turbovec index" — so the format number moves before the first
+/// write, and an older semlith refuses the whole store with its own message
+/// instead of failing on whichever shard it loads first. See
+/// [`mark_vector_format`].
+pub const TURBOVEC_V8: u32 = 5;
 
 /// The first format that keeps its vectors in shards.
 pub const SHARDED_FORMAT: u32 = 2;
@@ -452,6 +466,20 @@ pub fn format(db: &Connection) -> Result<u32> {
 }
 
 pub const FORMAT_KEY: &str = "format_version";
+
+/// Move a format-4 store to [`TURBOVEC_V8`] before this binary writes to it.
+///
+/// Called where every write starts, because any write may save a vector file
+/// and a saved file is v8. Only format 4 moves here: a store below it re-chunks
+/// on its first full pass and is stamped with the current format when that
+/// pass ends, and stamping it now would skip that pass. A format-1 store has no
+/// key and a single `index.tv`; stamping it would make it read as sharded.
+pub fn mark_vector_format(db: &Connection) -> Result<()> {
+    if format(db)? == CODE_CONTEXT {
+        set_meta(db, FORMAT_KEY, &TURBOVEC_V8.to_string())?;
+    }
+    Ok(())
+}
 
 /// Refuse a store a later semlith wrote, rather than misreading it.
 ///

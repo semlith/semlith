@@ -2960,7 +2960,9 @@ impl Semlith {
     /// run is the state this is here to prevent.
     fn writing<T>(&mut self, body: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         store::read_only(&self.db, false)?;
-        let out = body(self);
+        // Before anything is saved: a vector file this binary writes is
+        // turbovec v8, which a semlith before 0.39.0 cannot load.
+        let out = store::mark_vector_format(&self.db).and_then(|()| body(self));
         // A pass that failed part-way leaves its open transaction committed,
         // as its autocommitted statements always were: the rows carry the
         // pending hash, which is what makes the next run redo them.
