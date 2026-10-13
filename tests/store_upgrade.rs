@@ -23,7 +23,9 @@ use semlith::Semlith;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Where 0.38.1 indexed the fixture's corpus.
+/// Where the fixture's corpus was when 0.38.1 indexed it, as the rows hold it.
+/// Joined with `/` rather than `Path::join`, whose `\` on Windows names a
+/// path the store never held.
 const CORPUS: &str = "/private/tmp/claude-501/fixture-0.38.1/corpus";
 
 /// How many files, and so chunks, the fixture holds.
@@ -106,7 +108,7 @@ fn the_fixture_is_a_format_4_store_with_v7_vectors() {
 fn a_write_moves_the_store_to_format_5_and_v8() {
     let dir = fixture();
     let mut s = open(dir.path());
-    let (chunks, _) = s.forget(&Path::new(CORPUS).join("chess.md")).unwrap();
+    let (chunks, _) = s.forget(Path::new(&format!("{CORPUS}/chess.md"))).unwrap();
     assert_eq!(chunks, 1, "the fixture's chess.md is one chunk");
 
     assert_eq!(
@@ -172,7 +174,7 @@ fn search_finds_the_same_file_before_and_after_the_move() {
     };
 
     assert!(top(&mut s).ends_with("beekeeping.txt"), "{}", top(&mut s));
-    s.forget(&Path::new(CORPUS).join("volcano.txt")).unwrap();
+    s.forget(Path::new(&format!("{CORPUS}/volcano.txt"))).unwrap();
     assert_eq!(
         semlith::store::format(s.db()).unwrap(),
         semlith::store::FORMAT_VERSION
