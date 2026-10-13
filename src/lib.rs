@@ -4094,6 +4094,7 @@ impl Semlith {
                             &mut clock,
                             &mut |n| {
                                 report.batched = n;
+                                report.threads = live_threads(report.threads);
                                 say_file(
                                     &mut on_file,
                                     &report,
@@ -4193,6 +4194,7 @@ impl Semlith {
                             &mut clock,
                             &mut |n| {
                                 report.batched = n;
+                                report.threads = live_threads(report.threads);
                                 say_file(
                                     &mut on_file,
                                     &report,
@@ -4266,6 +4268,7 @@ impl Semlith {
                     &mut clock,
                     &mut |n| {
                         report.batched = n;
+                        report.threads = live_threads(report.threads);
                         say_file(
                             &mut on_file,
                             &report,
@@ -4957,6 +4960,7 @@ impl Semlith {
                         && let Some(n) = progress.due(&running.batched)
                     {
                         report.batched = n;
+                        report.threads = live_threads(report.threads);
                         tick(report);
                     }
                 }
@@ -6503,6 +6507,20 @@ thread_local! {
 }
 
 /// The reading for [`CANONICAL_CALLS`], for the test that pins the cost.
+/// The CPU lane's thread count for a progress line said while the writer
+/// waits, or `known` before the lane has embedded a batch.
+///
+/// A window's landing refreshes the card's count, and a first import's window
+/// is 1024 chunks: on the CPU alone that is half a minute in which a count
+/// saved on Machine limits is already in force but the card would still show
+/// the old one. Every progress line carries the lane's own count instead.
+fn live_threads(known: usize) -> usize {
+    match pipeline::CPU_THREADS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => known,
+        live => live,
+    }
+}
+
 pub fn canonical_calls() -> u64 {
     CANONICAL_CALLS.with(|c| c.get())
 }
