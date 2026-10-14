@@ -123,7 +123,7 @@ pub fn parse_worker_line(stores: &[(String, PathBuf)]) -> (bool, String) {
             false,
             format!(
                 "{} file(s) crashed a parser and are refused, e.g. {} in {store} ({}); \
-                 `semlith refused accept <path> --as-is` tries one again",
+                 semlith refused accept <path> --as-is tries one again",
                 crashed.len(),
                 crate::plain(&first.path),
                 first.reason

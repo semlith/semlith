@@ -79,7 +79,11 @@ fn s02_a_slow_add_and_an_index_do_not_stall_other_agents_or_the_portal() {
         "POST",
         "/mcp",
         &bearer,
-        &call(9, "semlith_search", serde_json::json!({ "query": "warm up" })),
+        &call(
+            9,
+            "semlith_search",
+            serde_json::json!({ "query": "warm up" }),
+        ),
     );
     assert_eq!(status, 200, "{body}");
 
