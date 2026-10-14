@@ -1,5 +1,6 @@
 //! S01: a file that aborts a parser costs one refused file, never the process.
 
+#[allow(unused_imports)]
 use super::*;
 
 /// The three shapes that abort tree-sitter's block grammars at depth 300, and

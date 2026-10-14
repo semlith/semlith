@@ -150,13 +150,15 @@ jobs:
       # binary — a real second responsibility rather than a few more lines.
       # Raised from 185 in 0.36.0 for the third: checking the archive's
       # GitHub attestation with gh, and saying when it could not.
+      # Raised from 235 to 275 in 0.40.0 for the release signature check:
+      # the trusted key list, the ssh-keygen verify and its refusals.
       - name: Line budget
         run: |
           for f in install.sh install.ps1; do
             lines=$(wc -l < "$f")
             echo "$f: $lines lines"
-            if [ "$lines" -ge 235 ]; then
-              echo "::error::$f is $lines lines; the budget is under 235"
+            if [ "$lines" -ge 275 ]; then
+              echo "::error::$f is $lines lines; the budget is under 275"
               exit 1
             fi
           done

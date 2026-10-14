@@ -1,5 +1,6 @@
 //! S03: an agent key reads by default; tools/call obeys its scope.
 
+#[allow(unused_imports)]
 use super::*;
 
 const WRITES: [&str; 3] = ["semlith_add", "semlith_index", "semlith_forget"];

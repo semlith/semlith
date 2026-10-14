@@ -1,5 +1,6 @@
 //! S07: indexing a repository never runs a program its git config names.
 
+#[allow(unused_imports)]
 use super::*;
 
 /// A repository whose config would make any `git log` run `gpg.program`: the

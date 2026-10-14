@@ -6702,13 +6702,16 @@ pub fn open_regular(path: &Path) -> std::io::Result<(std::fs::File, std::fs::Met
         // FILE_FLAG_OPEN_REPARSE_POINT: open the link itself, never its target.
         options.custom_flags(0x0020_0000);
     }
-    let file = options.open(path).map_err(|e| {
-        #[cfg(unix)]
+    let file = options.open(path);
+    #[cfg(unix)]
+    let file = file.map_err(|e| {
         if e.raw_os_error() == Some(libc::ELOOP) {
-            return std::io::Error::other("it is a symbolic link, not a file");
+            std::io::Error::other("it is a symbolic link, not a file")
+        } else {
+            e
         }
-        e
-    })?;
+    });
+    let file = file?;
     let meta = file.metadata()?;
     #[cfg(windows)]
     {
