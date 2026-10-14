@@ -5540,12 +5540,28 @@ impl crate::mcp::Writer for Writer {
         // the writer has run it and answers with the summary, which is the
         // guarantee it has always had. The run is in the store's snapshot too,
         // so the portal shows an agent's index beside the page's own.
-        let (_run, progress) = self
+        let (run, progress) = self
             .0
             .index(&store, paths.to_vec())
             .map_err(|e| e.to_string())?;
         let mut last = None;
-        for event in progress {
+        // Bounded as the in-process path is: a client cuts a call off at its
+        // own timeout, so past the budget the agent is told the run goes on
+        // rather than being left waiting on a run of unknown length.
+        let deadline = std::time::Instant::now() + crate::mcp::index_budget();
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = match progress.recv_timeout(left) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Ok(format!(
+                        "Still indexing after {} s; the run (#{run}) continues in the \
+                         background. Call semlith_stats to see when it has finished.",
+                        crate::mcp::index_budget().as_secs()
+                    ));
+                }
+            };
             match event["event"].as_str() {
                 Some("error") => {
                     return Err(event["error"]

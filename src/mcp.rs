@@ -106,6 +106,41 @@ pub fn answer(
     ))
 }
 
+/// Answer a write tool's call without the fleet, when this process forwards
+/// writes to a writer. `None` for anything else, which the caller answers
+/// through [`answer`] under its fleet's lock.
+///
+/// The three write tools hand their work to the writer and wait on it — an
+/// index run, a fetch from the network. Before 0.40.0 the daemon held its MCP
+/// fleet's lock for all of that, so one slow `semlith_add` stalled every other
+/// agent's search, then the proxies' heartbeats, then the portal. They need
+/// nothing from the fleet, so they are answered here, outside it.
+pub fn answer_unlocked(writer: &dyn Writer, request: &Value, session: &Session) -> Option<Value> {
+    let id = request.get("id").cloned()?;
+    if request.get("method").and_then(Value::as_str) != Some("tools/call") {
+        return None;
+    }
+    let params = request.get("params").cloned().unwrap_or(json!({}));
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    // A refusal writes a ledger row, which needs a store: those go the locked
+    // way, and are quick.
+    if !session.writes || !matches!(name, "semlith_index" | "semlith_add" | "semlith_forget") {
+        return None;
+    }
+    let mut empty = Fleet::empty();
+    let mut session = session.clone();
+    Some(reply(
+        &id,
+        dispatch(
+            &mut empty,
+            Some(writer),
+            "tools/call",
+            &params,
+            &mut session,
+        ),
+    ))
+}
+
 /// Who is on the other end of this connection, and which conversation it is.
 ///
 /// The ledger is the reason this exists. Before 0.15.0 a retrieval by an agent
@@ -2272,7 +2307,7 @@ fn render_ends(ends: &[crate::store::EdgeEnd], shorten: &dyn Fn(&str) -> String)
 /// Overridable because clients disagree about how long a tool call may take,
 /// and the person who knows which client this is, is the one who wrote its
 /// configuration — not the model on the other end of the tool.
-fn index_budget() -> Duration {
+pub fn index_budget() -> Duration {
     match std::env::var("SEMLITH_MCP_INDEX_BUDGET") {
         Ok(v) => match v.trim().parse::<u64>() {
             Ok(seconds) => Duration::from_secs(seconds),

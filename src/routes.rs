@@ -5661,27 +5661,11 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
         revision,
         method == "tools/call",
     );
-    // A method that is about the server rather than about a corpus is answered
-    // whether or not anything is indexed: an agent connecting to a fresh
-    // install should be told which tools exist, not that the daemon is broken.
-    let corpus_free = matches!(method, "initialize" | "tools/list" | "ping")
-        || method.starts_with("notifications/")
-        // A machine whose only stores are remote still answers from them.
-        || !crate::cloud::remote_stores().is_empty();
-    if let Err(e) = state.open_mcp_fleet()
-        && !corpus_free
-    {
-        return Response::error(409, &e.to_string());
+    // A notification is answered before any lock: it carries no id, needs no
+    // answer, and must never wait behind another agent's call.
+    if body.get("id").is_none() {
+        return Response::new(200, "application/json; charset=utf-8", Vec::new());
     }
-
-    let writer = daemon::Writer(Arc::clone(state));
-    let mut fleet = state.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner());
-    let mut nothing = crate::fleet::Fleet::empty();
-    let fleet = match fleet.as_mut() {
-        Some(fleet) => fleet,
-        None if corpus_free => &mut nothing,
-        None => return Response::error(409, "this daemon has no store open"),
-    };
 
     // The client named itself at `initialize` and never again, so the name the
     // ledger records comes from what was noted then. The transport's session id
@@ -5697,6 +5681,33 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
         mcp_session.client = named;
         mcp_session.version = version;
     }
+    // Writes are handed to the writer without the fleet's lock (S02).
+    let writer = daemon::Writer(Arc::clone(state));
+    if let Some(value) = crate::mcp::answer_unlocked(&writer, &body, &mcp_session) {
+        return Response::json(&value);
+    }
+
+    // A method that is about the server rather than about a corpus is answered
+    // whether or not anything is indexed: an agent connecting to a fresh
+    // install should be told which tools exist, not that the daemon is broken.
+    let corpus_free = matches!(method, "initialize" | "tools/list" | "ping")
+        || method.starts_with("notifications/")
+        // A machine whose only stores are remote still answers from them.
+        || !crate::cloud::remote_stores().is_empty();
+    if let Err(e) = state.open_mcp_fleet()
+        && !corpus_free
+    {
+        return Response::error(409, &e.to_string());
+    }
+
+    let mut fleet = state.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner());
+    let mut nothing = crate::fleet::Fleet::empty();
+    let fleet = match fleet.as_mut() {
+        Some(fleet) => fleet,
+        None if corpus_free => &mut nothing,
+        None => return Response::error(409, "this daemon has no store open"),
+    };
+
     let response = match crate::mcp::answer(fleet, Some(&writer), &body, &mut mcp_session) {
         Some(value) => Response::json(&value),
         // A notification. Answered with an empty 200 rather than an empty JSON
