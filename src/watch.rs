@@ -273,7 +273,11 @@ pub fn run_held(
                     Err(e) => progress(Progress::Error(e.to_string())),
                 }
             }
-            waiting_events.retain(|path| !stopped.iter().any(|root| path.starts_with(root)));
+            // A deletion is kept whatever run it fell under: dropping it left
+            // the deleted file in the store, answering for text that is gone.
+            waiting_events.retain(|path| {
+                !path.exists() || !stopped.iter().any(|root| path.starts_with(root))
+            });
             let paths = admissible(&roots, waiting_events, store.gitignore);
             if !paths.is_empty() && !(held.defer)(&paths) {
                 let started = Instant::now();

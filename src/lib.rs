@@ -3614,6 +3614,7 @@ impl Semlith {
                 // same silent `skipped`, and a person looking at two thousand of
                 // them could not tell an empty `__init__.py` from a file the
                 // operating system would not open.
+                let read_mtime: Option<i64>;
                 let (hash, len, text, units, found, ready) = match prepared {
                     pipeline::Prepared::Refused(_) => unreachable!("handled above"),
                     // Taken by the scan phase a moment ago and unchanged since:
@@ -3622,11 +3623,12 @@ impl Semlith {
                     pipeline::Prepared::Unchanged {
                         size,
                         mtime,
+                        read_mtime,
                         file_bytes,
                     } => {
                         report.bytes += file_bytes;
                         self.tx_begin()?;
-                        store::heal_stamps(&self.db, &key, size as i64, mtime, now())?;
+                        store::heal_stamps(&self.db, &key, size as i64, mtime, read_mtime, now())?;
                         report.unchanged += 1;
                         say_file(
                             &mut on_file,
@@ -3683,6 +3685,7 @@ impl Semlith {
                     pipeline::Prepared::Same {
                         len,
                         mtime,
+                        read_mtime,
                         file_bytes,
                         rescan: rescanned,
                         regraph: regraphed,
@@ -3747,7 +3750,14 @@ impl Semlith {
                         // nothing is re-embedded, and the freshness rule itself
                         // stays as conservative as it was.
                         if let Some(mtime) = mtime {
-                            store::heal_stamps(&self.db, &key, len as i64, mtime, now())?;
+                            store::heal_stamps(
+                                &self.db,
+                                &key,
+                                len as i64,
+                                mtime,
+                                read_mtime,
+                                now(),
+                            )?;
                         }
                         report.unchanged += 1;
                         say_file(
@@ -3945,12 +3955,14 @@ impl Semlith {
                         len,
                         hash,
                         file_bytes,
+                        read_mtime: seen,
                         text,
                         units,
                         found,
                         ready,
                     } => {
                         report.bytes += file_bytes;
+                        read_mtime = seen;
                         (hash, len, text, units, found, ready)
                     }
                 };
@@ -4128,6 +4140,7 @@ impl Semlith {
 
                 let timed = std::time::Instant::now();
                 let file_id = store::insert_file(&self.db, &key, PENDING, len, now())?;
+                store::set_read_mtime(&self.db, file_id, read_mtime)?;
                 // Written down the moment it has a row, not when it is finished:
                 // a stop can now land inside a file, and the undo has to take the
                 // half-embedded file out along with the finished ones.
@@ -4490,6 +4503,23 @@ impl Semlith {
             let timed = std::time::Instant::now();
             let _ = cache.record(&fresh, &hits, report.cache_lookups as u64);
             self.write_parts.add("cache", timed);
+        }
+
+        // A file deleted after it was read and before its rows landed would
+        // stay in the store as a path that no longer exists: its delete event
+        // was seen while this run held the writer, against rows that did not
+        // exist yet. One `stat` per file this call wrote, and anything gone
+        // leaves now rather than at the next full sweep.
+        let mut ghosts = 0usize;
+        for key in &written {
+            if !Path::new(key).exists() {
+                let (chunks, images) = self.evict(key)?;
+                ghosts += usize::from(chunks + images > 0);
+            }
+        }
+        if ghosts > 0 {
+            report.removed += ghosts;
+            self.save()?;
         }
 
         // A stopped slice still commits what it embedded. Undoing is the
@@ -6371,20 +6401,10 @@ impl Semlith {
     /// was indexed. The same conservative rule search uses.
     fn mark_span_freshness(&self, span: &mut Span) -> Result<()> {
         let stamps = store::file_stamps(&self.db, std::slice::from_ref(&span.path))?;
-        let Some((bytes, indexed_at)) = stamps.get(&span.path) else {
+        let Some(stamp) = stamps.get(&span.path) else {
             return Ok(());
         };
-        span.fresh = match std::fs::metadata(&span.path) {
-            Ok(meta) => {
-                meta.len() as i64 == *bytes
-                    && meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .is_none_or(|d| d.as_secs() as i64 <= *indexed_at)
-            }
-            Err(_) => false,
-        };
+        span.fresh = std::fs::metadata(&span.path).is_ok_and(|meta| stamp.fresh(&meta));
         Ok(())
     }
 
@@ -6437,7 +6457,7 @@ impl Semlith {
         let stamps = store::file_stamps(&self.db, &paths)?;
         let mut fresh: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
         for path in &paths {
-            let Some((bytes, indexed_at)) = stamps.get(path) else {
+            let Some(stamp) = stamps.get(path) else {
                 // The store has no row for this path. It cannot be said to
                 // have changed, and claiming it had would be a warning about
                 // nothing.
@@ -6445,15 +6465,7 @@ impl Semlith {
                 continue;
             };
             let state = match std::fs::metadata(path) {
-                Ok(meta) => {
-                    let size_matches = meta.len() as i64 == *bytes;
-                    let unmodified = meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .is_none_or(|d| d.as_secs() as i64 <= *indexed_at);
-                    size_matches && unmodified
-                }
+                Ok(meta) => stamp.fresh(&meta),
                 // Gone or unreadable. The excerpt in hand is the only copy
                 // there is, and it is certainly not current.
                 Err(_) => false,

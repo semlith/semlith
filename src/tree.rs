@@ -59,7 +59,7 @@ struct File {
     symbols: usize,
     firsts: Vec<String>,
     /// The size and modification time recorded at indexing, when there are.
-    stamp: Option<(i64, i64)>,
+    stamp: Option<store::Stamp>,
 }
 
 impl File {
@@ -67,15 +67,8 @@ impl File {
     /// a file an answer shows, so a view of one folder does not `stat` every
     /// file in the store.
     fn stale(&self) -> bool {
-        self.stamp.is_some_and(|(bytes, at)| {
-            std::fs::metadata(&self.path).is_ok_and(|m| {
-                m.len() as i64 != bytes
-                    || m.modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .is_some_and(|d| d.as_secs() as i64 > at)
-            })
-        })
+        self.stamp
+            .is_some_and(|stamp| std::fs::metadata(&self.path).is_ok_and(|m| !stamp.fresh(&m)))
     }
 }
 

@@ -640,7 +640,7 @@ const FTS_BUILT: &str = "fts_built";
 /// never sees them. That is the whole reason `format_version` does not move —
 /// the same reasoning `docs/compatibility.md` records for the graph tables.
 fn add_columns(db: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 20] = [
+    const ADDITIONS: [(&str, &str, &str); 21] = [
         ("edges", "hint", "TEXT"),
         // 0.16.0: the line the reference was written on.
         ("edges", "line", "INTEGER"),
@@ -694,6 +694,10 @@ fn add_columns(db: &Connection) -> Result<()> {
         // "not counted": a format with no unit, or a file an older binary
         // wrote, which the next index pass counts without re-embedding it.
         ("files", "units", "INTEGER"),
+        // 0.40.0: the file's mtime in nanoseconds when it was read, which is
+        // what freshness compares now (see `Stamp::fresh`). NULL on a row an
+        // older binary wrote; an older binary ignores the column.
+        ("files", "read_mtime", "INTEGER"),
     ];
     for (table, column, kind) in ADDITIONS {
         if has_column(db, table, column)? {
@@ -3736,18 +3740,76 @@ pub fn symbols_in_files(
 pub fn file_stamps(
     db: &Connection,
     paths: &[String],
-) -> Result<std::collections::HashMap<String, (i64, i64)>> {
+) -> Result<std::collections::HashMap<String, Stamp>> {
     if paths.is_empty() {
         return Ok(Default::default());
     }
     let holes = vec!["?"; paths.len()].join(", ");
-    let sql = format!("SELECT path, bytes, indexed_at FROM files WHERE path IN ({holes})");
+    let sql =
+        format!("SELECT path, bytes, indexed_at, read_mtime FROM files WHERE path IN ({holes})");
     let mut stmt = db.prepare(&sql)?;
     let args = paths.iter().cloned().map(Value::Text);
     let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
-        Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?)))
+        Ok((
+            r.get::<_, String>(0)?,
+            Stamp {
+                bytes: r.get(1)?,
+                indexed_at: r.get(2)?,
+                read_mtime: r.get(3)?,
+            },
+        ))
     })?;
     Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
+}
+
+/// What a file looked like when it was read for the store, and the one rule
+/// every surface judges "edited since it was indexed" by.
+#[derive(Debug, Clone, Copy)]
+pub struct Stamp {
+    pub bytes: i64,
+    pub indexed_at: i64,
+    /// The file's modification time when it was read, in nanoseconds. `None`
+    /// on a row an older binary wrote.
+    pub read_mtime: Option<i64>,
+}
+
+/// A file's modification time in nanoseconds since the epoch.
+pub fn mtime_ns(meta: &std::fs::Metadata) -> Option<i64> {
+    meta.modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_nanos() as i64)
+}
+
+impl Stamp {
+    /// Whether the file on disk is still the one the store read.
+    ///
+    /// With the mtime the read saw, the two must be equal. Before 0.40.0 the
+    /// rule was "not modified after `indexed_at`", and `indexed_at` is when the
+    /// row was written, after the read: an edit that kept the size and landed
+    /// between the read and the write read as fresh, and the store's old text
+    /// was served as current. A row an older binary wrote keeps that rule.
+    pub fn fresh(&self, meta: &std::fs::Metadata) -> bool {
+        if meta.len() as i64 != self.bytes {
+            return false;
+        }
+        match self.read_mtime {
+            Some(ns) => mtime_ns(meta) == Some(ns),
+            None => meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .is_none_or(|d| d.as_secs() as i64 <= self.indexed_at),
+        }
+    }
+}
+
+/// Record the modification time a file's read saw. See [`Stamp::fresh`].
+pub fn set_read_mtime(db: &Connection, file_id: i64, read_mtime: Option<i64>) -> Result<()> {
+    db.prepare_cached("UPDATE files SET read_mtime = ?1 WHERE id = ?2")?
+        .execute(params![read_mtime, file_id])?;
+    Ok(())
 }
 
 /// The classes a not-indexed row falls into (2.3), and the dummy list.
@@ -4039,11 +4101,18 @@ pub fn delete_graph(db: &Connection, file_id: i64) -> Result<()> {
 /// as current as the file; it is the stamps that freshness is judged by that
 /// were behind. A row already current is not written, so an unchanged tree's
 /// pass writes nothing.
-pub fn heal_stamps(db: &Connection, path: &str, bytes: i64, mtime: i64, now: i64) -> Result<()> {
+pub fn heal_stamps(
+    db: &Connection,
+    path: &str,
+    bytes: i64,
+    mtime: i64,
+    read_mtime: Option<i64>,
+    now: i64,
+) -> Result<()> {
     db.execute(
-        "UPDATE files SET bytes = ?2, indexed_at = MAX(?3, ?4)
-         WHERE path = ?1 AND (bytes != ?2 OR indexed_at < ?3)",
-        params![path, bytes, mtime, now],
+        "UPDATE files SET bytes = ?2, indexed_at = MAX(?3, ?4), read_mtime = ?5
+         WHERE path = ?1 AND (bytes != ?2 OR indexed_at < ?3 OR read_mtime IS NOT ?5)",
+        params![path, bytes, mtime, now, read_mtime],
     )?;
     Ok(())
 }

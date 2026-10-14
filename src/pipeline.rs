@@ -401,6 +401,8 @@ pub enum Prepared {
     Unchanged {
         size: u64,
         mtime: i64,
+        /// The mtime in nanoseconds, from the open handle. See `store::Stamp`.
+        read_mtime: Option<i64>,
         file_bytes: u64,
     },
     /// Opened (or not) and found unusable before or while reading.
@@ -413,6 +415,7 @@ pub enum Prepared {
     Same {
         len: u64,
         mtime: Option<i64>,
+        read_mtime: Option<i64>,
         file_bytes: u64,
         /// The text and what the scan found, when the scan rules moved.
         rescan: Option<(String, Vec<keyscan::Match>)>,
@@ -443,6 +446,9 @@ pub enum Prepared {
         len: u64,
         hash: String,
         file_bytes: u64,
+        /// The mtime in nanoseconds the read saw, taken from the handle before
+        /// the bytes were read. See `store::Stamp`.
+        read_mtime: Option<i64>,
         text: String,
         /// Pages, slides or cells, for a counted format.
         units: Option<i64>,
@@ -514,6 +520,7 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
         return Prepared::Unchanged {
             size: *size,
             mtime: *mtime,
+            read_mtime: crate::store::mtime_ns(meta),
             file_bytes,
         };
     }
@@ -565,6 +572,14 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
         }
     };
     let hash = blake3::hash(&bytes).to_hex().to_string();
+    // Debug builds only: delete the named file the moment it has been read,
+    // which is the window a deletion has to land in to leave a ghost row.
+    #[cfg(debug_assertions)]
+    if std::env::var("SEMLITH_FAULT_DELETE")
+        .is_ok_and(|name| path.file_name().is_some_and(|n| n.to_string_lossy() == name))
+    {
+        let _ = std::fs::remove_file(path);
+    }
     let now = Clocks::tick(&ctx.clocks.read, started);
     let len = bytes.len() as u64;
 
@@ -611,6 +626,7 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
         return Prepared::Same {
             len,
             mtime: measured.as_ref().map(mtime_of),
+            read_mtime: measured.as_ref().and_then(crate::store::mtime_ns),
             file_bytes,
             rescan,
             regraph,
@@ -677,6 +693,7 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
         len,
         hash,
         file_bytes,
+        read_mtime: measured.as_ref().and_then(crate::store::mtime_ns),
         text,
         units,
         found,
