@@ -2943,7 +2943,7 @@ pub fn unfilled(db: &Connection, since: i64) -> Result<Vec<Unfilled>> {
                 COALESCE(query_id, '')
            FROM retrievals
           WHERE usage_source IS NULL AND at >= ?1 AND client NOT IN ('cli', 'portal')
-            AND COALESCE(tool, '') NOT IN ('raw-read', 'note')
+            AND COALESCE(tool, '') NOT IN ('raw-read', 'note', 'refused')
           ORDER BY at, id",
     )?;
     let rows = q.query_map(params![since], |r| {
@@ -3239,7 +3239,7 @@ pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
     let mut stmt = db.prepare(&format!(
         "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, hash,
                 query_id, {USAGE_COLUMNS}
-         FROM retrievals WHERE COALESCE(tool, '') != 'note' ORDER BY id DESC LIMIT ?1"
+         FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused') ORDER BY id DESC LIMIT ?1"
     ))?;
     let rows = stmt.query_map(params![limit as i64], |r| {
         Ok(Retrieval {
@@ -3284,7 +3284,7 @@ pub enum LedgerScope {
 pub fn ledger_keys(db: &Connection, store: &str, scope: LedgerScope) -> Result<Vec<String>> {
     let sql = match scope {
         LedgerScope::All => {
-            "SELECT DISTINCT query_id, id FROM retrievals WHERE COALESCE(tool, '') != 'note'"
+            "SELECT DISTINCT query_id, id FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused')"
         }
         LedgerScope::Credited => "SELECT DISTINCT query_id, id FROM retrievals WHERE hits > 0",
         LedgerScope::Estimated => {
@@ -3316,7 +3316,7 @@ pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)), COUNT(DISTINCT client),
                 COALESCE(SUM(excerpt_tokens), 0),
                 COALESCE(SUM(whole_file_tokens), 0) FROM retrievals
-         WHERE COALESCE(tool, '') != 'note'",
+         WHERE COALESCE(tool, '') NOT IN ('note', 'refused')",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?)
@@ -3369,7 +3369,7 @@ pub fn ledger_savings_since(db: &Connection, since: i64) -> Result<Savings> {
     )?;
     let total: i64 = db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE at >= ?1 AND COALESCE(tool, '') != 'note'",
+         WHERE at >= ?1 AND COALESCE(tool, '') NOT IN ('note', 'refused')",
         [since],
         |r| r.get(0),
     )?;
@@ -3439,7 +3439,7 @@ pub fn ledger_misses(db: &Connection) -> Result<Misses> {
     )?;
     let zero_hit: i64 = db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE hits = 0 AND (tool IS NULL OR tool NOT IN (?1, 'note'))",
+         WHERE hits = 0 AND (tool IS NULL OR tool NOT IN (?1, 'note', 'refused'))",
         params![crate::ledger::RAW_READ],
         |r| r.get(0),
     )?;
@@ -3464,7 +3464,7 @@ pub struct Misses {
 /// How many retrievals each client made, most first.
 pub fn ledger_clients(db: &Connection) -> Result<Vec<(String, i64)>> {
     let mut stmt = db.prepare(
-        "SELECT client, COUNT(*) FROM retrievals WHERE COALESCE(tool, '') != 'note'
+        "SELECT client, COUNT(*) FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused')
          GROUP BY client ORDER BY COUNT(*) DESC, client",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -3474,6 +3474,10 @@ pub fn ledger_clients(db: &Connection) -> Result<Vec<(String, i64)>> {
 /// The `tool` of a ledger note: a row the chain carries that is not a
 /// retrieval, and no total counts.
 pub const NOTE_TOOL: &str = "note";
+
+/// The `tool` of a call refused because the agent key is read-only; `query`
+/// names the tool. Not a retrieval, so no total counts it either.
+pub const REFUSED_TOOL: &str = "refused";
 
 /// The rows a note has re-anchored the chain after: their ids.
 fn acknowledged(db: &Connection) -> Result<std::collections::HashSet<i64>> {
@@ -4394,9 +4398,9 @@ pub fn corpus(db: &Connection, language_of: impl Fn(&str) -> String) -> Result<C
             // `micros`, which is what the column is called. Asking for `ms`
             // did not fail loudly — the row read errored and the fallback
             // reported a store that had never been queried.
-            "SELECT micros / 1000 FROM retrievals WHERE COALESCE(tool, '') != 'note'
+            "SELECT micros / 1000 FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused')
               ORDER BY micros LIMIT 1 OFFSET (SELECT COUNT(*) FROM retrievals
-              WHERE COALESCE(tool, '') != 'note') / 2",
+              WHERE COALESCE(tool, '') NOT IN ('note', 'refused')) / 2",
             [],
             |r| r.get(0),
         )
@@ -4478,7 +4482,7 @@ pub fn ledger_sessions(db: &Connection, limit: usize) -> Result<Vec<SessionRow>>
                     AND r2.client = retrievals.client AND r2.model IS NOT NULL
                   GROUP BY r2.model ORDER BY COUNT(*) DESC LIMIT 1)
          FROM retrievals
-         WHERE COALESCE(tool, '') != 'note'
+         WHERE COALESCE(tool, '') NOT IN ('note', 'refused')
          GROUP BY COALESCE(session, ''), client
          ORDER BY MAX(at) DESC
          LIMIT ?1",
@@ -4507,7 +4511,7 @@ pub fn ledger_sessions(db: &Connection, limit: usize) -> Result<Vec<SessionRow>>
 /// what this machine actually served rather than what it can serve.
 pub fn ledger_latency(db: &Connection) -> Result<(i64, i64)> {
     let mut stmt = db.prepare(
-        "SELECT micros FROM retrievals WHERE COALESCE(tool, '') != 'note' ORDER BY micros",
+        "SELECT micros FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused') ORDER BY micros",
     )?;
     let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
     let all: Vec<i64> = rows.collect::<rusqlite::Result<_>>()?;
@@ -4547,7 +4551,7 @@ pub fn ledger_zero_hit_queries_since(
 ) -> Result<Vec<(String, i64)>> {
     let mut stmt = db.prepare(
         "SELECT query, COUNT(*) AS n FROM retrievals WHERE hits = 0 AND at >= ?1
-           AND COALESCE(tool, '') != 'note'
+           AND COALESCE(tool, '') NOT IN ('note', 'refused')
          GROUP BY query ORDER BY n DESC, query LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {
@@ -4581,7 +4585,7 @@ pub struct RetrievalRow {
 pub fn ledger_retrievals(db: &Connection, since: i64, limit: usize) -> Result<Vec<RetrievalRow>> {
     let mut stmt = db.prepare(
         "SELECT at, client, COALESCE(tool, ''), query, hits, excerpt_tokens, whole_file_tokens
-         FROM retrievals WHERE at >= ?1 AND COALESCE(tool, '') != 'note'
+         FROM retrievals WHERE at >= ?1 AND COALESCE(tool, '') NOT IN ('note', 'refused')
          ORDER BY at DESC, id DESC LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {

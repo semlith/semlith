@@ -9966,6 +9966,7 @@ function seAccess() {
         btn({ class: "btn xs", onclick: rotateKey }, "Rotate"),
       ),
       el("span", { class: "muted t-sm pretty", text: `Only the HTTP form needs it. A registered client launches semlith mcp, which reads ${shortPath(a.key_path || "~/.semlith/agent.key", 40)} itself, so rotating reconfigures nothing.${P.key_grace_seconds ? ` The previous key keeps working for ${Math.ceil(P.key_grace_seconds / 60)} more minutes.` : ""}` }),
+      toggleRow(a.key_scope === "write", "Allow writes", a.key_scope === "write" ? "Scope: write. Agents may index, add and forget as well as read." : "Scope: read. Agents search and read; index, add and forget are refused.", setKeyScope, { plain: true }),
     ),
     el(
       "div",
@@ -9995,6 +9996,18 @@ async function revealKey() {
   const out = await act(() => post("/api/agents/reveal", {}));
   if (out) {
     seUi.reveal = out.key;
+    repaint();
+  }
+}
+
+async function setKeyScope(write) {
+  if (write) {
+    const ok = await ask({ title: "Let agents write?", body: "An agent with the key could then start index runs, fetch URLs into a store with add, and remove files from the index. A model can be steered by what it reads, so allow this only for agents you trust.", ok: "Allow writes" });
+    if (!ok) return;
+  }
+  const out = await act(() => post("/api/agents/scope", { write }), write ? "Agents may write" : "Agents are read-only");
+  if (out) {
+    await loadMany(["agents"], true);
     repaint();
   }
 }

@@ -4283,6 +4283,18 @@ pub fn run(
     // do.
     let key = crate::home::agent_key()?;
     server.set_agent_key(&key);
+    // Keys from before 0.40.0 had no scope and could write. Said once, the
+    // first start that finds no scope file, and the file is written so the
+    // line is not repeated.
+    if let Ok(scope) = crate::home::agent_scope_path()
+        && !scope.exists()
+    {
+        let _ = crate::home::set_agent_scope(false);
+        report(
+            "agent key: read-only from 0.40.0 (search and read); `semlith key --scope write` \
+             lets agents index, add and forget",
+        );
+    }
     server.set_mcp_open(mcp_http);
     if mcp_http {
         report(&format!(

@@ -10,9 +10,14 @@ fn nesting_corpus(dir: &Path) {
     std::fs::write(dir.join("quotes.md"), "> ".repeat(d) + "x\n").unwrap();
     let list: String = (0..d).map(|i| "  ".repeat(i) + "- a\n").collect();
     std::fs::write(dir.join("list.md"), list).unwrap();
-    let seq: String = (0..d).map(|i| "  ".repeat(i) + "-\n").collect::<String>() + &"  ".repeat(d) + "- x\n";
+    let seq: String =
+        (0..d).map(|i| "  ".repeat(i) + "-\n").collect::<String>() + &"  ".repeat(d) + "- x\n";
     std::fs::write(dir.join("seq.yaml"), seq).unwrap();
-    std::fs::write(dir.join("notes.md"), "# Notes\n\nAn ordinary file beside them.\n").unwrap();
+    std::fs::write(
+        dir.join("notes.md"),
+        "# Notes\n\nAn ordinary file beside them.\n",
+    )
+    .unwrap();
 }
 
 const HOSTILE: [&str; 3] = ["quotes.md", "list.md", "seq.yaml"];
@@ -47,19 +52,6 @@ fn begins(home: &Path, name: &str) -> usize {
     n
 }
 
-fn walk(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            out.extend(walk(&path));
-        } else {
-            out.push(path);
-        }
-    }
-    out
-}
-
 /// S01: the three files that aborted 0.39.0 leave the CLI and the daemon
 /// running, each refused with a parser-crash reason, and neither a catch-up
 /// nor a restart parses them again. The nesting cap is switched off (debug
@@ -86,7 +78,8 @@ fn s01_a_file_that_aborts_a_parser_is_refused_once_and_never_loops() {
     let rows = crashed_rows(&refused);
     for name in HOSTILE {
         let row = rows.iter().find(|(p, _)| p.ends_with(name));
-        let (_, reason) = row.unwrap_or_else(|| panic!("{name} is not refused as crashed: {rows:?}"));
+        let (_, reason) =
+            row.unwrap_or_else(|| panic!("{name} is not refused as crashed: {rows:?}"));
         assert!(reason.starts_with("parser crashed"), "{name}: {reason}");
     }
     let before: Vec<usize> = HOSTILE.iter().map(|n| begins(&home, n)).collect();
@@ -99,8 +92,16 @@ fn s01_a_file_that_aborts_a_parser_is_refused_once_and_never_loops() {
             crashed_rows(&daemon.api("/api/refused")).len() >= HOSTILE.len()
         });
         assert!(daemon.alive(), "round {round}: the daemon died on catch-up");
-        assert!(listed, "round {round}: the portal does not list the refusals");
-        let (status, _) = daemon.send("GET", "/api/about", &format!("Semlith-Token: {}\r\n", daemon.token), "");
+        assert!(
+            listed,
+            "round {round}: the portal does not list the refusals"
+        );
+        let (status, _) = daemon.send(
+            "GET",
+            "/api/about",
+            &format!("Semlith-Token: {}\r\n", daemon.token),
+            "",
+        );
         assert_eq!(status, 200, "round {round}: the daemon does not answer");
         drop(daemon);
     }

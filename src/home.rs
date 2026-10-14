@@ -414,6 +414,48 @@ pub fn rotate_agent_key() -> Result<String> {
     Ok(key)
 }
 
+/// Where the agent key's scope is kept: `read` or `write`, beside the key.
+pub fn agent_scope_path() -> Result<PathBuf> {
+    Ok(home_or_error()?.join("agent.scope"))
+}
+
+/// Whether an agent may call the tools that change a store: index, add and
+/// forget.
+///
+/// Read-only unless the owner said otherwise. A key is a file on disk that a
+/// client hands to whatever model it runs, and a model can be told what to do
+/// by any page or file it reads; before 0.40.0 that key could start runs,
+/// remove files from the index and send data out through `semlith_add`'s URL.
+/// No file, an unreadable one and anything but `write` all read as `read`, so
+/// every key that existed before 0.40.0 is read-only from its first start.
+pub fn agent_may_write() -> bool {
+    agent_scope_path()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .is_some_and(|s| s.trim() == "write")
+}
+
+/// Set the agent key's scope.
+pub fn set_agent_scope(write: bool) -> Result<()> {
+    let path = agent_scope_path()?;
+    if let Some(parent) = path.parent() {
+        secure_dir(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .with_context(|| format!("writing the agent scope to {}", path.display()))?;
+    use std::io::Write;
+    writeln!(file, "{}", if write { "write" } else { "read" })?;
+    Ok(())
+}
+
 pub fn is_agent_key(value: &str) -> bool {
     let Some(body) = value.strip_prefix(AGENT_KEY_PREFIX) else {
         return false;

@@ -30,10 +30,14 @@ fn model_cache() -> PathBuf {
     std::env::var_os("SEMLITH_MODEL_CACHE")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap())
-                .join(".cache")
-                .join("semlith")
-                .join("models")
+            PathBuf::from(
+                std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .unwrap(),
+            )
+            .join(".cache")
+            .join("semlith")
+            .join("models")
         })
 }
 
@@ -111,7 +115,9 @@ impl Daemon {
         let Ok(mut stream) = TcpStream::connect(("127.0.0.1", self.port)) else {
             return (0, String::new());
         };
-        stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n{headers}\
              Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -130,12 +136,20 @@ impl Daemon {
             .and_then(|l| l.split_whitespace().nth(1))
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let body = text.split_once("\r\n\r\n").map_or("", |(_, b)| b).to_string();
+        let body = text
+            .split_once("\r\n\r\n")
+            .map_or("", |(_, b)| b)
+            .to_string();
         (status, body)
     }
 
     fn api(&self, path: &str) -> Value {
-        let (status, body) = self.send("GET", path, &format!("Semlith-Token: {}\r\n", self.token), "");
+        let (status, body) = self.send(
+            "GET",
+            path,
+            &format!("Semlith-Token: {}\r\n", self.token),
+            "",
+        );
         if status != 200 {
             return Value::Null;
         }
@@ -163,8 +177,24 @@ fn until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
     done()
 }
 
+/// Every file under `dir`, recursively.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
 // One module per finding, each in its own file, so findings land without
 // touching each other's tests.
+#[path = "security/races.rs"]
+mod races;
 #[path = "security/s01.rs"]
 mod s01;
 #[path = "security/s02.rs"]
@@ -187,5 +217,3 @@ mod s09;
 mod s10;
 #[path = "security/s11.rs"]
 mod s11;
-#[path = "security/races.rs"]
-mod races;

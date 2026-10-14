@@ -174,6 +174,7 @@ fn dispatch(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/airgap") => airgap(request),
         (_, true, "/api/login-item") => login_item(state, request),
         (_, true, "/api/agents/reveal") => reveal(state),
+        (_, true, "/api/agents/scope") => agent_scope(request),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
         // MCP over HTTP, on the path a client's configuration names. The
@@ -2831,6 +2832,23 @@ fn reveal(state: &Arc<State>) -> Response {
     Response::json(&json!({ "key": state.server.agent_key() }))
 }
 
+/// Settings › Agents' write switch: `{"write": true}` lets the agent key call
+/// index, add and forget. The session token is the owner; the key cannot
+/// reach this route.
+fn agent_scope(request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(write) = body.get("write").and_then(Value::as_bool) else {
+        return Response::error(400, "write must be true or false");
+    };
+    match crate::home::set_agent_scope(write) {
+        Ok(()) => Response::json(&json!({ "scope": if write { "write" } else { "read" } })),
+        Err(e) => Response::error(500, &format!("{e:#}")),
+    }
+}
+
 /// What the tool list costs a session, in tokens, and how that was counted.
 ///
 /// Once per session, before the agent has asked anything: it is the standing
@@ -2899,6 +2917,8 @@ fn agents(state: &Arc<State>) -> Response {
         // asked anything. A cost a user should be able to see rather than one
         // they would have to capture traffic to discover.
         "tool_list_bytes": crate::mcp::tool_list_bytes(),
+        // What the agent key may do: `read` unless the owner allowed writes.
+        "key_scope": if crate::home::agent_may_write() { "write" } else { "read" },
         // And in the unit an agent is billed in. Measured with a store's own
         // tokenizer where one is loaded, and labelled with which counter said
         // so -- the same two tiers the ledger uses, because a token count
@@ -5670,6 +5690,9 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     // The proxy's header, never this daemon's own ancestry: the daemon is
     // serving the request, not hosting the client.
     mcp_session.host = host.map(str::to_string);
+    // The portal holds the session token and is the owner. An agent — over
+    // `/mcp` with the key, or through a stdio proxy — gets the key's scope.
+    mcp_session.writes = transport == "portal" || crate::home::agent_may_write();
     if let Some((named, version)) = state.client_name(&session, transport) {
         mcp_session.client = named;
         mcp_session.version = version;

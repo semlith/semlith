@@ -171,10 +171,16 @@ enum Command {
         no_mcp_http: bool,
     },
 
-    /// Show or rotate the agent key that authenticates the HTTP MCP endpoint.
+    /// Show or rotate the agent key that authenticates the HTTP MCP endpoint,
+    /// or set what it may do.
     Key {
         #[command(subcommand)]
-        what: KeyCommand,
+        what: Option<KeyCommand>,
+
+        /// `read` (the default) lets agents search and read; `write` also lets
+        /// them index, add and forget.
+        #[arg(long, value_parser = ["read", "write"])]
+        scope: Option<String>,
     },
 
     /// Move an existing store directory into the store home and register it,
@@ -1274,6 +1280,7 @@ fn run() -> Result<()> {
                         "stale": stale,
                     },
                     "proof": proof,
+                    "agent_key_scope": if semlith::home::agent_may_write() { "write" } else { "read" },
                     "parse_worker": semlith::doctor::crashed_files(&stores)
                         .into_iter()
                         .map(|(store, p)| serde_json::json!({
@@ -1306,6 +1313,16 @@ fn run() -> Result<()> {
                     ),
                     (None, None) => {}
                 }
+                println!(
+                    "  {:<4} {:<20} {}",
+                    "ok  ",
+                    "agent key scope",
+                    if semlith::home::agent_may_write() {
+                        "write: agents may index, add and forget (`semlith key --scope read` revokes)"
+                    } else {
+                        "read: agents search and read; `semlith key --scope write` lets them index, add and forget"
+                    }
+                );
                 let (parsers_ok, parsers) = semlith::doctor::parse_worker_line(&stores);
                 println!(
                     "  {:<4} {:<20} {parsers}",
@@ -3585,7 +3602,41 @@ fn run() -> Result<()> {
             )?;
         }
 
-        Command::Key { what } => match what {
+        Command::Key {
+            what: None,
+            scope: Some(scope),
+        } => {
+            let write = scope == "write";
+            semlith::home::set_agent_scope(write)?;
+            if write {
+                println!("Agents may now index, add and forget as well as read.");
+                println!("`semlith key --scope read` takes it back.");
+            } else {
+                println!("Agents may search and read; index, add and forget are refused.");
+            }
+            println!("Takes effect on an agent's next call; nothing restarts.");
+        }
+        Command::Key {
+            what: None,
+            scope: None,
+        } => {
+            let scope = if semlith::home::agent_may_write() {
+                "write"
+            } else {
+                "read"
+            };
+            println!("Agent key scope: {scope}. `semlith key show` prints the key.");
+        }
+        Command::Key {
+            what: Some(_),
+            scope: Some(_),
+        } => {
+            anyhow::bail!("give --scope on its own: `semlith key --scope write`");
+        }
+        Command::Key {
+            what: Some(what),
+            scope: None,
+        } => match what {
             KeyCommand::Show { quiet } => {
                 let key = semlith::home::agent_key()?;
                 if quiet {

@@ -544,6 +544,37 @@ pub fn graph(
     }
 }
 
+/// Record a tool call refused because the agent key is read-only.
+///
+/// One row in the first open store, under its own tool name so no total counts
+/// it as a retrieval: it answered nothing and replaced nothing. It is in the
+/// ledger so the owner can see an agent tried.
+pub fn refusal(fleet: &Fleet, who: &Who<'_>, tool: &str) {
+    if !enabled() {
+        return;
+    }
+    let Some((_, store)) = fleet.each().next() else {
+        return;
+    };
+    let _ = write(
+        store.db(),
+        &store::NewRetrieval {
+            client: who.client,
+            session: who.session,
+            client_version: who.version,
+            tool: store::REFUSED_TOOL,
+            query: tool,
+            hits: 0,
+            micros: 0,
+            excerpt_tokens: 0,
+            whole_file_tokens: 0,
+            stale_hits: 0,
+            tokenizer: fleet.counter().label(),
+            query_id: &query_id(),
+        },
+    );
+}
+
 /// Record one brief, from the brief itself rather than from its rendering.
 ///
 /// [`reply`] recovers the files an answer named by reading them back out of the
