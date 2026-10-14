@@ -233,6 +233,20 @@ fn spawn() -> Result<Worker, Stop> {
             }
         })
         .map_err(|e| Stop::Unavailable(format!("starting the parse worker's reader: {e}")))?;
+    // The worker says hello once it is up. Its start — a cold exec of a large
+    // binary, the first after an upgrade, a busy disk — is not the file's
+    // time: a deadline that counted it refused healthy files as timed out,
+    // and the journal then kept them refused.
+    match answers.recv_timeout(Duration::from_secs(120)) {
+        Ok(Ok(_)) => {}
+        _ => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Stop::Unavailable(
+                "the parse worker started but never said it was ready".into(),
+            ));
+        }
+    }
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let tail = Arc::clone(&stderr);
     let stderr_reader = std::thread::Builder::new()
@@ -386,6 +400,14 @@ pub fn worker_main() -> i32 {
     limit_memory(limit);
     let mut input = BufReader::new(std::io::stdin().lock());
     let mut out = BufWriter::new(std::io::stdout().lock());
+    // Hello: an empty answer, before the first request.
+    if write_frame(&mut out, b"")
+        .and_then(|_| write_frame(&mut out, b""))
+        .and_then(|_| out.flush())
+        .is_err()
+    {
+        return 0;
+    }
     loop {
         let mut op = [0u8];
         if input.read_exact(&mut op).is_err() {

@@ -1923,14 +1923,19 @@ function noteRuns() {
   // reader is.
   const now = {};
   for (const r of data.runs?.runs || []) now[r.id] = r.status;
+  let finished = false;
   for (const [id, before] of Object.entries(lastRunState)) {
     const after = now[id];
     if (LIVE_RUN.has(before) && after === "done") {
+      finished = true;
       const run = (data.runs.runs || []).find((x) => String(x.id) === id);
       if (run && !(state.screen === "wizard" && state.wz && state.wz.store === run.store)) toast(`${run.store} is indexed and ready`);
     }
   }
   lastRunState = now;
+  // What a run refused or let in is only known once it ends: a file tried
+  // again from Decisions comes back refused, or indexed, after its run.
+  if (finished) refresh(["refused", "decisions"]);
   for (const fn of [...runsListeners]) {
     try {
       fn();

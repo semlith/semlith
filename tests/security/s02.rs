@@ -72,6 +72,16 @@ fn s02_a_slow_add_and_an_index_do_not_stall_other_agents_or_the_portal() {
         ],
     ));
     let bearer = format!("Authorization: Bearer {}\r\n", daemon.key());
+    // One search first, so the measured one is not the one that opens the
+    // fleet and loads the query model: the claim is about waiting on other
+    // calls, not about a cold start.
+    let (status, body) = daemon.send(
+        "POST",
+        "/mcp",
+        &bearer,
+        &call(9, "semlith_search", serde_json::json!({ "query": "warm up" })),
+    );
+    assert_eq!(status, 200, "{body}");
 
     // One agent's add, held by the drip server.
     let (d, b, o) = (daemon.clone(), bearer.clone(), origin.clone());

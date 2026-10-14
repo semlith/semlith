@@ -3,7 +3,10 @@
 use super::*;
 
 fn listed(daemon: &Daemon, name: &str) -> bool {
-    daemon.api("/api/files?tree=1&depth=9").to_string().contains(name)
+    daemon
+        .api("/api/files?tree=1&depth=9")
+        .to_string()
+        .contains(name)
 }
 
 /// A same-size edit that lands between the read and the row's write — its
@@ -20,7 +23,12 @@ fn races_a_same_size_edit_after_the_read_is_stale() {
     std::fs::write(&file, "# Note\n\nalpha alpha alpha\n").unwrap();
     // Read an hour ago, as far as its mtime says.
     let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
-    std::fs::File::options().write(true).open(&file).unwrap().set_modified(hour_ago).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(hour_ago)
+        .unwrap();
     let out = run(&home, &["index", corpus.to_str().unwrap()], &[]);
     assert!(out.status.success());
 
@@ -53,13 +61,27 @@ fn races_a_file_deleted_mid_run_leaves_no_ghost() {
     std::fs::create_dir_all(&corpus).unwrap();
     std::fs::write(corpus.join("keep.md"), "# Keep\n\nstays\n").unwrap();
     std::fs::write(corpus.join("ghost.md"), "# Ghost\n\ndeleted mid-run\n").unwrap();
-    let out = run(&home, &["index", corpus.to_str().unwrap()], &[("SEMLITH_FAULT_DELETE", "ghost.md")]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(!corpus.join("ghost.md").exists(), "the hook did not delete the file (an old binary has none)");
+    let out = run(
+        &home,
+        &["index", corpus.to_str().unwrap()],
+        &[("SEMLITH_FAULT_DELETE", "ghost.md")],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !corpus.join("ghost.md").exists(),
+        "the hook did not delete the file (an old binary has none)"
+    );
     let out = run(&home, &["files"], &[]);
     let files = String::from_utf8_lossy(&out.stdout);
     assert!(files.contains("keep.md"), "{files}");
-    assert!(!files.contains("ghost.md"), "a deleted file is still in the store:\n{files}");
+    assert!(
+        !files.contains("ghost.md"),
+        "a deleted file is still in the store:\n{files}"
+    );
 }
 
 /// A deletion that arrives while a run holds the writer is kept when that run
@@ -72,12 +94,19 @@ fn races_a_stopped_run_keeps_the_deletions_that_queued_behind_it() {
     let root = dir.path().join("corpus");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("doomed.md"), "# Doomed\n\nto be deleted during a run\n").unwrap();
+    std::fs::write(
+        root.join("doomed.md"),
+        "# Doomed\n\nto be deleted during a run\n",
+    )
+    .unwrap();
     let out = run(&home, &["index", root.to_str().unwrap()], &[]);
     assert!(out.status.success());
 
     let daemon = Daemon::start(&home, &[]);
-    assert!(until(Duration::from_secs(60), || listed(&daemon, "doomed.md")), "not served");
+    assert!(
+        until(Duration::from_secs(60), || listed(&daemon, "doomed.md")),
+        "not served"
+    );
     // A run with enough to embed that it is still going when it is stopped.
     let more = root.join("more");
     std::fs::create_dir_all(&more).unwrap();
@@ -90,7 +119,10 @@ fn races_a_stopped_run_keeps_the_deletions_that_queued_behind_it() {
     let (status, said) = daemon.send("POST", "/api/index", &token, &body);
     assert_eq!(status, 200, "{said}");
     assert!(
-        until(Duration::from_secs(120), || daemon.api("/api/files")["total"].as_i64().unwrap_or(0) > 3),
+        until(
+            Duration::from_secs(120),
+            || daemon.api("/api/files")["total"].as_i64().unwrap_or(0) > 3
+        ),
         "the run never started embedding"
     );
     std::fs::remove_file(root.join("doomed.md")).unwrap();

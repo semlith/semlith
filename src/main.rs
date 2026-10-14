@@ -25,7 +25,19 @@ enum Reconcile {
 
 /// A local semantic cache for AI agents.
 #[derive(Parser)]
-#[command(name = "semlith", version, about, long_about = None)]
+// `--version` names the key releases are signed with on a second line; the
+// first stays `semlith <version>`, which scripts compare. A test holds the id
+// to `upgrade::SIGNING_KEY_ID`.
+#[command(
+    name = "semlith",
+    version,
+    long_version = concat!(
+        env!("CARGO_PKG_VERSION"),
+        "\nreleases signed by SHA256:a5oJmrakIwDHEWTDWqWe51Ttt6m2tQ0dsGzIqyxDuxs"
+    ),
+    about,
+    long_about = None
+)]
 struct Cli {
     /// Store directory (also settable with SEMLITH_STORE). Repeatable for
     /// `search`, `stats`, `files` and `mcp`, which read every store named;

@@ -575,9 +575,10 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
     // Debug builds only: delete the named file the moment it has been read,
     // which is the window a deletion has to land in to leave a ghost row.
     #[cfg(debug_assertions)]
-    if std::env::var("SEMLITH_FAULT_DELETE")
-        .is_ok_and(|name| path.file_name().is_some_and(|n| n.to_string_lossy() == name))
-    {
+    if std::env::var("SEMLITH_FAULT_DELETE").is_ok_and(|name| {
+        path.file_name()
+            .is_some_and(|n| n.to_string_lossy() == name)
+    }) {
         let _ = std::fs::remove_file(path);
     }
     let now = Clocks::tick(&ctx.clocks.read, started);
