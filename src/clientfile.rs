@@ -315,15 +315,7 @@ fn write_one(stanza: &Stanza, path: &Path) -> Result<()> {
         back_up(path)?;
     }
 
-    // Through a neighbouring temporary file. A half-written `settings.json` is
-    // a client that will not start, and this runs across a dozen of them.
-    let temp = path.with_extension(format!(
-        "{}.semlith-tmp",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("")
-    ));
-    std::fs::write(&temp, &next).with_context(|| format!("writing {}", temp.display()))?;
-    std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
-    Ok(())
+    rewrite(path, &next)
 }
 
 /// Take semlith's entry out of every user-level file of this client that
@@ -366,12 +358,7 @@ pub fn unregister_files(client: &Client) -> Result<Vec<PathBuf>> {
             continue;
         }
         back_up(&path)?;
-        let temp = path.with_extension(format!(
-            "{}.semlith-tmp",
-            path.extension().and_then(|e| e.to_str()).unwrap_or("")
-        ));
-        std::fs::write(&temp, &next).with_context(|| format!("writing {}", temp.display()))?;
-        std::fs::rename(&temp, &path).with_context(|| format!("replacing {}", path.display()))?;
+        rewrite(&path, &next)?;
         changed.push(path);
     }
     Ok(changed)
@@ -422,6 +409,69 @@ pub fn back_up(path: &Path) -> Result<()> {
     }
     std::fs::copy(path, &backup).with_context(|| format!("backing up to {}", backup.display()))?;
     Ok(())
+}
+
+/// Replace a file semlith does not own — a client's config, a hook file, a
+/// shell rc — with `text`. Every such rewrite goes through here.
+///
+/// Through a neighbouring temporary file and a rename, because a half-written
+/// `settings.json` is a client that will not start and a half-written rc is a
+/// login shell that will not. Two things a bare rename got wrong:
+///
+/// - A symlink is written through, to its target, beside which the temporary
+///   file goes. Renaming over the link turned a dotfiles user's link into a
+///   stray copy that the next sync silently overwrote.
+/// - The file keeps its mode. The temporary file used to take the umask's
+///   0644, so a config narrowed to 0600 because it holds other tokens came
+///   back readable by every account. A new file is 0600: guessing narrow is
+///   the safe direction.
+pub(crate) fn rewrite(path: &Path, text: &str) -> Result<()> {
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            std::fs::canonicalize(path).with_context(|| {
+                format!(
+                    "{} is a link to a file that does not exist; nothing was written",
+                    path.display()
+                )
+            })?
+        }
+        _ => path.to_path_buf(),
+    };
+    let mut name = target.file_name().unwrap_or_default().to_os_string();
+    name.push(".semlith-tmp");
+    let temp = target.with_file_name(name);
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(&target).map_or(0o600, |m| m.permissions().mode() & 0o7777)
+    };
+    let written = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            // Never wider than 0600 while it is being written; the exact mode
+            // after, since `mode()` here is filtered through the umask.
+            options.mode(0o600);
+            let mut file = options.open(&temp)?;
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            file.write_all(text.as_bytes())
+        }
+        #[cfg(not(unix))]
+        options.open(&temp)?.write_all(text.as_bytes())
+    })();
+    let replaced = written
+        .with_context(|| format!("writing {}", temp.display()))
+        .and_then(|()| {
+            std::fs::rename(&temp, &target)
+                .with_context(|| format!("replacing {}", target.display()))
+        });
+    if replaced.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    replaced
 }
 
 /// `existing` with the documented stanza's keys set into it.
@@ -747,5 +797,60 @@ mod tests {
         if !cfg!(target_os = "macos") {
             assert_eq!(resolve(&s), None);
         }
+    }
+
+    /// S09: a rewrite keeps the file's mode, writes through a symlink rather
+    /// than replacing it, and makes a new file 0600.
+    #[cfg(unix)]
+    #[test]
+    fn a_rewrite_keeps_the_mode_and_the_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        let narrowed = dir.path().join("settings.json");
+        std::fs::write(&narrowed, "{}").unwrap();
+        std::fs::set_permissions(&narrowed, std::fs::Permissions::from_mode(0o600)).unwrap();
+        rewrite(&narrowed, "{\"a\":1}\n").unwrap();
+        assert_eq!(mode(&narrowed), 0o600);
+        assert_eq!(std::fs::read_to_string(&narrowed).unwrap(), "{\"a\":1}\n");
+
+        let wide = dir.path().join("wide.json");
+        std::fs::write(&wide, "{}").unwrap();
+        std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o664)).unwrap();
+        rewrite(&wide, "{}\n").unwrap();
+        assert_eq!(
+            mode(&wide),
+            0o664,
+            "the mode is kept exactly, not through the umask"
+        );
+
+        let real = dir.path().join("dotfiles").join("mcp.json");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "{}").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let link = dir.path().join("mcp.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        rewrite(&link, "{\"b\":2}\n").unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "{\"b\":2}\n");
+        assert_eq!(mode(&real), 0o640);
+
+        let fresh = dir.path().join("new.json");
+        rewrite(&fresh, "{}\n").unwrap();
+        assert_eq!(mode(&fresh), 0o600);
+
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .chain(std::fs::read_dir(real.parent().unwrap()).unwrap())
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".semlith-tmp"))
+            .collect();
+        assert!(left.is_empty(), "temporary files left behind: {left:?}");
     }
 }
