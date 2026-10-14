@@ -26,7 +26,10 @@ fn a_parser_that_dies_costs_one_worker_and_names_the_reason() {
     let ok = worker::read(Path::new("ok.rs"), b"fn main() {}\n", true).expect("a clean read");
     let (text, _) = ok.text.unwrap().unwrap();
     assert_eq!(text, "fn main() {}\n");
-    assert!(ok.graph.unwrap().unwrap().is_some(), "a Rust file has a graph");
+    assert!(
+        ok.graph.unwrap().unwrap().is_some(),
+        "a Rust file has a graph"
+    );
 
     // The real trigger: tree-sitter-md's external scanner overflows its
     // 1024-byte buffer and the C assert aborts the process.
@@ -59,5 +62,9 @@ fn a_parser_that_dies_costs_one_worker_and_names_the_reason() {
     // A graph asked for on text already decided goes through a worker too.
     let graph = worker::graph(Path::new("deep.yaml"), &("- ".repeat(300) + "x\n"));
     assert!(matches!(graph, Err(Stop::Crashed(_))), "{graph:?}");
-    assert!(worker::graph(Path::new("fine.yaml"), "a: 1\n").unwrap().is_ok());
+    assert!(
+        worker::graph(Path::new("fine.yaml"), "a: 1\n")
+            .unwrap()
+            .is_ok()
+    );
 }

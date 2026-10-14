@@ -111,8 +111,9 @@ pub fn read(path: &Path, bytes: &[u8], with_graph: bool) -> Result<Parsed, Stop>
     let (head, text) = call(op, path, bytes)?;
     let mut read: Parsed = decode(&head)?;
     if let Ok(Ok((t, _))) = &mut read.text {
-        *t = String::from_utf8(text)
-            .map_err(|_| Stop::Unavailable("the parse worker sent text that is not UTF-8".into()))?;
+        *t = String::from_utf8(text).map_err(|_| {
+            Stop::Unavailable("the parse worker sent text that is not UTF-8".into())
+        })?;
     }
     Ok(read)
 }
@@ -570,12 +571,26 @@ pub const JOURNAL: &str = "parse-journal";
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 enum Line {
-    Begin { path: String, hash: String },
-    End { path: String },
-    Crash { path: String, hash: String, reason: String },
+    Begin {
+        path: String,
+        hash: String,
+    },
+    End {
+        path: String,
+    },
+    Crash {
+        path: String,
+        hash: String,
+        reason: String,
+    },
     /// Begun and never ended when a process stopped, once.
-    Suspect { path: String, hash: String },
-    Clear { path: String },
+    Suspect {
+        path: String,
+        hash: String,
+    },
+    Clear {
+        path: String,
+    },
 }
 
 /// A file a parser crashed on, refused until its content changes or a person
@@ -795,7 +810,11 @@ mod tests {
         };
         die(dir.path());
         let j = Journal::open(dir.path()).unwrap();
-        assert_eq!(j.refused("/b.yaml", "h"), None, "once is a stop, not a crash");
+        assert_eq!(
+            j.refused("/b.yaml", "h"),
+            None,
+            "once is a stop, not a crash"
+        );
         j.write(&Line::Begin {
             path: "/b.yaml".into(),
             hash: "h".into(),
@@ -824,7 +843,10 @@ mod tests {
             hash: "h".into(),
         });
         drop(j);
-        assert_eq!(Journal::open(dir.path()).unwrap().refused("/c.md", "h"), None);
+        assert_eq!(
+            Journal::open(dir.path()).unwrap().refused("/c.md", "h"),
+            None
+        );
     }
 
     #[test]

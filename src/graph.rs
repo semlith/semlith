@@ -3663,8 +3663,14 @@ mod nesting_tests {
         // The same shapes at a depth people write are left to the grammar.
         let list: String = (0..40).map(|i| "  ".repeat(i) + "- a\n").collect();
         assert!(!too_nested("markdown", &list));
-        assert!(!too_nested("markdown", "> a quote\n>> a reply\n- item\n  - sub\n"));
-        assert!(!too_nested("rust", &quotes), "only the block grammars are capped");
+        assert!(!too_nested(
+            "markdown",
+            "> a quote\n>> a reply\n- item\n  - sub\n"
+        ));
+        assert!(
+            !too_nested("rust", &quotes),
+            "only the block grammars are capped"
+        );
     }
 }
 

@@ -583,7 +583,9 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
         let mut extracted = None;
         let mut regraph = None;
         if scanning || counting || graphing {
-            match parse(ctx, &key, &hash, || crate::worker::read(path, &bytes, graphing)) {
+            match parse(ctx, &key, &hash, || {
+                crate::worker::read(path, &bytes, graphing)
+            }) {
                 Err(crate::worker::Stop::Crashed(reason)) => {
                     Clocks::tick(&ctx.clocks.extract, now);
                     return Prepared::Crashed { reason, file_bytes };
@@ -695,7 +697,9 @@ pub fn take_ready(
 ) -> anyhow::Result<Ready> {
     let graph = match graph {
         Some(graph) => graph,
-        None => crate::worker::graph(path, text).map_err(|stop| anyhow::anyhow!("{}", stop.reason()))?,
+        None => {
+            crate::worker::graph(path, text).map_err(|stop| anyhow::anyhow!("{}", stop.reason()))?
+        }
     };
     let extraction = graph.map_err(|e| anyhow::anyhow!(e))?;
     let chunks = crate::contained(|| {

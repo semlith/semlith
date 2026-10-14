@@ -4052,16 +4052,14 @@ impl Semlith {
                         std::time::Instant::now(),
                     ),
                     (None, Some(ready)) => ready,
-                    (None, None) => {
-                        pipeline::take_ready(
-                            &path,
-                            &text,
-                            None,
-                            &ctx,
-                            None,
-                            std::time::Instant::now(),
-                        )
-                    }
+                    (None, None) => pipeline::take_ready(
+                        &path,
+                        &text,
+                        None,
+                        &ctx,
+                        None,
+                        std::time::Instant::now(),
+                    ),
                 };
                 drop(text);
                 let pipeline::Ready {
