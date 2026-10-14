@@ -359,6 +359,19 @@ its source, size, when it happens and whether it is cached.
 | `semlith upgrade` | `github.com` | when you run it |
 | Semlith Cloud | the host you signed in to | only after `semlith cloud login` |
 
+**Releases are signed.** From v0.40.0 every release archive and its
+`SHA256SUMS` carry an ed25519 signature made by the release workflow with the
+project's key (an OpenSSH `SSHSIG`, namespace `file`, beside each file as
+`.sig`). The public half is built into the binary — `semlith --version` prints
+its id, `SHA256:a5oJmrakIwDHEWTDWqWe51Ttt6m2tQ0dsGzIqyxDuxs` — and into
+`install.sh` and `install.ps1`. `semlith upgrade` verifies the signature before
+it writes or unpacks anything, and both installers verify it with
+`ssh-keygen -Y verify` before the checksum; a missing, unparseable, untrusted or
+wrong signature stops all three. A checksum from the same release only proves
+the archive is the one the release names; the signature proves who made the
+release. If the key ever changes, one release trusts both the old and the new
+key, so an older binary can still upgrade to it.
+
 `--airgap` refuses every download unless it is already in the model cache, and
 names what it refused. An accelerator lane runs in its own worker process, so a
 driver crash ends that worker and its lane, not the daemon. The llama.cpp server

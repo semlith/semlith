@@ -79,8 +79,25 @@ it held after it was indexed had its rows deleted, but its keyword terms, its
 `exact.f32` vectors and its vector-cache entries stayed. All three go in the
 same run, FTS5 runs with secure delete, and the store is vacuumed.
 
+**Releases are signed (S06).** `semlith upgrade` trusted a `SHA256SUMS`
+fetched from the same release as the archive, so whoever could replace release
+assets could replace both. Every archive and `SHA256SUMS` is now signed by the
+release workflow with the project's ed25519 key (OpenSSH `SSHSIG`, as a
+`.sig` beside each). `upgrade` verifies it with the key built into the binary
+before anything is written; `install.sh` and `install.ps1` verify it with
+`ssh-keygen -Y verify` before the checksum; all three fail closed. `semlith
+--version` names the key on a second line. **Break:** the new installers and
+`upgrade` cannot install v0.39.0 or earlier, which are unsigned.
+
+**Idle sockets no longer lock anyone out (S11).** Thirty-two connections that
+sent nothing filled every slot and the next request, the token holder's
+included, got 503. The request head is read on its connection's own thread,
+with a 10 s deadline and a 16 KiB cap (408, 431), and idle connections are
+capped at eight per address and 48 in all, the oldest silent one closed first.
+
 **cargo audit on every push.** A new CI job checks the dependency tree
-against the RustSec database.
+against the RustSec database. rustls moves to 0.23.46 for
+RUSTSEC-2026-0346 to 0349, published after the audit.
 
 ### Fixed
 
@@ -91,6 +108,9 @@ deletions included; deletions are now applied. An edit that kept the size and
 landed between a file's read and its row's write read as fresh, because
 freshness compared the mtime with the insert time; the mtime the read saw is
 kept (`files.read_mtime`, additive) and must match.
+
+**Decisions shows a retried file's outcome without a reload.** The page
+refreshes the refusals when a run ends.
 
 ## [0.39.0] - 2026-10-13
 

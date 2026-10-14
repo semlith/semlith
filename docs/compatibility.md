@@ -26,8 +26,8 @@ a break.
 | The portal's session credential | A `Semlith-Token` request header. A write also needs a JSON content type, and `Sec-Fetch-Site: same-origin` from any client that sends fetch metadata. |
 | Where the daemon binds | `127.0.0.1` only. Widening it would be a break, and no flag will ever do it. |
 | The default port | `7365`. A taken port is an error, not a reassignment. |
-| The install scripts | `install.sh` and `install.ps1` stay at the root of the `main` branch, so the two `raw.githubusercontent.com` URLs in the README keep working. They honour `SEMLITH_VERSION`, `SEMLITH_HOME`, `SEMLITH_YES` and `SEMLITH_NO_SERVICE`, and verify the download against the release's `SHA256SUMS` before writing anything. If `semlith.com` ever serves the installers, it redirects to these URLs rather than replacing them. |
-| Release archives | One archive per target, named `semlith-<tag>-<target>`, holding a directory of that name with the binary in it, and a `SHA256SUMS` asset beside them in GNU `sha256sum` format. Linux archives also hold `libonnxruntime.so`, and every file in an archive is unpacked. `semlith upgrade` and both scripts read that layout. |
+| The install scripts | `install.sh` and `install.ps1` stay at the root of the `main` branch, so the two `raw.githubusercontent.com` URLs in the README keep working. They honour `SEMLITH_VERSION`, `SEMLITH_HOME`, `SEMLITH_YES` and `SEMLITH_NO_SERVICE`, and verify `SHA256SUMS.sig` with `ssh-keygen -Y verify` and then the download against `SHA256SUMS` before writing anything. If `semlith.com` ever serves the installers, it redirects to these URLs rather than replacing them. |
+| Release archives | One archive per target, named `semlith-<tag>-<target>`, holding a directory of that name with the binary in it, and a `SHA256SUMS` asset beside them in GNU `sha256sum` format. From v0.40.0 each also has a `.sig` beside it: an OpenSSH `SSHSIG` (namespace `file`) by the key `semlith --version` names. Linux archives also hold `libonnxruntime.so`, and every file in an archive is unpacked. `semlith upgrade` and both scripts read that layout. |
 | Store layout | A store directory holds `store.db` beside its vectors: `index.tv` in format 1, an `index/` directory of shards from format 2. Which binary reads which store is under [Store format](#store-format). |
 | The formats that are read | The list in the README's *What gets indexed* only grows. What is extracted from a file is not covered. |
 | Language names | The set `--lang` accepts only grows. A name that resolves today resolves tomorrow, to at least the files it resolves to now. Which extensions or filenames make up a name may grow. |
@@ -746,6 +746,10 @@ store 0.40.0 wrote opens under 0.39.0.
 | `semlith doctor` | An `agent key scope` line and a `parse worker` line; `--json` gains `agent_key_scope` and `parse_worker`. |
 | MCP `semlith_index` through the daemon | Answers after the index budget (45 s, `SEMLITH_MCP_INDEX_BUDGET`) with the run still going, rather than waiting for the run to end. |
 | `semlith cloud login` | A `verification_uri_complete` that is not a plain page on the configured host is printed, not opened. |
+| **Break: installing and upgrading** | `semlith upgrade`, `install.sh` and `install.ps1` refuse a release without a valid signature by a trusted key, so they no longer install v0.39.0 or earlier (unsigned); pin an older version through `cargo install semlith --version`. Both installers need `ssh-keygen` from OpenSSH 8.1 or later. |
+| `semlith --version` | A second line names the release signing key. The first line is unchanged. |
+| HTTP | A request head that takes more than 10 s gets 408, one over 16 KiB gets 431, and a ninth idle connection from one address closes the oldest. |
+| llama-server lane | The key reaches the server through `LLAMA_API_KEY`, and the server binds a port of its own choosing. |
 | Library | `worker` module; `mcp::Session` gains `writes`; `pipeline::take_ready` takes the worker's extraction; `pipeline::Prepared` gains `Crashed`; `store::file_stamps` returns `store::Stamp`; `open_regular` and `git` are public. |
 
 ### 0.38.0
