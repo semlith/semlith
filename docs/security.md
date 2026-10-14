@@ -402,6 +402,11 @@ parsed again, across restarts; a file that was mid-parse when the whole process
 died twice is refused the same way. Changing the file clears it, and *Try
 again* (or `semlith refused accept <path> --as-is`) gives it one more worker.
 
+Running out of time while making a file's outline costs the outline only: the
+text is read again on its own and indexed without one, as a parse that passes
+tree-sitter's own two-second limit always was. A file is refused for time only
+when its text cannot be read in time.
+
 The Markdown and YAML grammars are also given at most 128 levels of nesting —
 both abort at about 260. A file nested deeper keeps its text in the store and
 has no outline.

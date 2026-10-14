@@ -16,6 +16,7 @@ fn a_parser_that_dies_costs_one_worker_and_names_the_reason() {
     unsafe {
         std::env::set_var("SEMLITH_NO_NESTING_CAP", "1");
         std::env::set_var("SEMLITH_FAULT_HANG", "hang.txt");
+        std::env::set_var("SEMLITH_FAULT_GRAPH_HANG", "graph-hang.rs");
         std::env::set_var("SEMLITH_FAULT_ALLOC", "alloc.txt");
         std::env::set_var("SEMLITH_PARSE_DEADLINE_MS", "3000");
         std::env::set_var(worker::MEMORY_ENV, "256");
@@ -50,6 +51,13 @@ fn a_parser_that_dies_costs_one_worker_and_names_the_reason() {
         Err(Stop::Crashed(reason)) => assert_eq!(reason, "parser timed out after 3 s"),
         other => panic!("a hang was not cut off: {other:?}"),
     }
+
+    // Out of time while the graph is being made: the text survives, without
+    // a graph, rather than the file being refused.
+    let slow = worker::read(Path::new("graph-hang.rs"), b"fn main() {}\n", true)
+        .expect("the text is read again alone");
+    assert_eq!(slow.text.unwrap().unwrap().0, "fn main() {}\n");
+    assert!(matches!(slow.graph, Some(Ok(None))), "{:?}", slow.graph);
 
     match worker::read(Path::new("alloc.txt"), b"x", false) {
         Err(Stop::Crashed(reason)) => assert!(

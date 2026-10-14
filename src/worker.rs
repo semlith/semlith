@@ -108,7 +108,21 @@ pub fn read(path: &Path, bytes: &[u8], with_graph: bool) -> Result<Parsed, Stop>
     if !enabled() {
         return Ok(serve_read(path, bytes, with_graph));
     }
-    let (head, text) = call(op, path, bytes)?;
+    let (head, text) = match call(op, path, bytes) {
+        // Out of time with the graph asked for: the graph is what takes long
+        // on a large file — tree-sitter's own parse is capped at two seconds,
+        // but collecting a big tree's definitions is not. Before 0.40.0 that
+        // ran with no limit at all. Losing the graph is what the parser's own
+        // two-second cap already costs a file, so the text is read again, alone,
+        // and indexed without one. Only text that cannot be read in time
+        // refuses the file.
+        Err(Stop::Crashed(reason)) if with_graph && reason.starts_with("parser timed out") => {
+            let mut read = read(path, bytes, false)?;
+            read.graph = Some(Ok(None));
+            return Ok(read);
+        }
+        answer => answer?,
+    };
     let mut read: Parsed = decode(&head)?;
     if let Ok(Ok((t, _))) = &mut read.text {
         *t = String::from_utf8(text).map_err(|_| {
@@ -155,6 +169,14 @@ fn serve_read(path: &Path, bytes: &[u8], with_graph: bool) -> Parsed {
 }
 
 fn serve_graph(path: &Path, text: &str) -> Result<Option<Extraction>, String> {
+    // Debug builds only: hang while making the graph, never while reading.
+    #[cfg(debug_assertions)]
+    if std::env::var("SEMLITH_FAULT_GRAPH_HANG").is_ok_and(|name| {
+        path.file_name()
+            .is_some_and(|n| n.to_string_lossy() == name)
+    }) {
+        std::thread::sleep(Duration::from_secs(3600));
+    }
     crate::contained(|| crate::graph::extract(path, text))
         .and_then(|r| r)
         .map_err(|e| format!("{e:#}"))
