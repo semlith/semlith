@@ -8,8 +8,9 @@
 //! requests — "it refused" and "it refused after asking" are different claims.
 //!
 //! `SEMLITH_RELEASES_ORIGIN` points the redirect, the archive and `SHA256SUMS`
-//! at the fixture. It exists for this file and is deliberately not in
-//! `docs/compatibility.md`.
+//! at the fixture, and `SEMLITH_EXTRA_RELEASE_KEY` trusts the throwaway key
+//! the fixture signs it with. Both exist for these tests, are read only by a
+//! debug build, and are deliberately not in `docs/compatibility.md`.
 
 #![cfg(unix)]
 
@@ -229,7 +230,8 @@ fn run(installed: &Installed, origin: &str, args: &[&str], airgap: bool) -> Outp
         .arg("upgrade")
         .args(args)
         .env("SEMLITH_HOME", &installed.home)
-        .env("SEMLITH_RELEASES_ORIGIN", origin);
+        .env("SEMLITH_RELEASES_ORIGIN", origin)
+        .env("SEMLITH_EXTRA_RELEASE_KEY", &signing_key().1);
     if airgap {
         command.env("SEMLITH_AIRGAP", "1");
     }
@@ -249,6 +251,40 @@ fn run(installed: &Installed, origin: &str, args: &[&str], airgap: bool) -> Outp
     panic!("semlith stayed busy for a second of retries")
 }
 
+/// A throwaway release key, made once per test process. `upgrade` trusts it
+/// through `SEMLITH_EXTRA_RELEASE_KEY`, which only a debug build reads, so
+/// every fixture release here is signed the way a real one is.
+fn signing_key() -> &'static (PathBuf, String) {
+    static KEY: std::sync::OnceLock<(PathBuf, String)> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let key = dir.join("release");
+        let out = Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", "fixture", "-f"])
+            .arg(&key)
+            .output()
+            .expect("ssh-keygen, which signs the fixture release");
+        assert!(out.status.success(), "ssh-keygen failed: {out:?}");
+        let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+        (key, public.trim().to_string())
+    })
+}
+
+/// `ssh-keygen -Y sign -n file`, as `release.yml` signs SHA256SUMS.
+fn sign(sums: &str) -> Vec<u8> {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("SHA256SUMS");
+    std::fs::write(&file, sums).unwrap();
+    let out = Command::new("ssh-keygen")
+        .args(["-Y", "sign", "-n", "file", "-f"])
+        .arg(&signing_key().0)
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "ssh-keygen -Y sign failed: {out:?}");
+    std::fs::read(dir.path().join("SHA256SUMS.sig")).unwrap()
+}
+
 fn routes(release: &Release, sums: &str) -> HashMap<String, Vec<u8>> {
     let base = format!("/semlith/semlith/releases/download/{NEWER}");
     HashMap::from([
@@ -257,6 +293,7 @@ fn routes(release: &Release, sums: &str) -> HashMap<String, Vec<u8>> {
             release.archive.clone(),
         ),
         (format!("{base}/SHA256SUMS"), sums.as_bytes().to_vec()),
+        (format!("{base}/SHA256SUMS.sig"), sign(sums)),
     ])
 }
 

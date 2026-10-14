@@ -1,6 +1,7 @@
 #!/bin/sh
 # Install semlith from a GitHub release: download this platform's binary, verify
-# it against SHA256SUMS and its build provenance, then hand off to `semlith setup`.
+# the signature on SHA256SUMS, the archive against it and its build provenance,
+# then hand off to `semlith setup`. Needs ssh-keygen (OpenSSH 8.1+) to verify.
 # SEMLITH_VERSION=v0.10.0  pin a release tag (default: the latest release)
 # SEMLITH_HOME=<dir>       install into <dir>/bin (default: ~/.semlith/bin)
 # SEMLITH_YES=1            answer yes to every `semlith setup` prompt
@@ -16,6 +17,13 @@ origin=https://github.com
 # curl may speak only the origin's scheme, which is https in every shipped copy.
 # Derived so that a copy pointed at an http fixture differs in that line alone.
 proto="=${origin%%:*}"
+# The keys a release may be signed with, one allowed_signers line each, the
+# same list as SIGNING_KEYS in src/upgrade.rs (key id
+# SHA256:a5oJmrakIwDHEWTDWqWe51Ttt6m2tQ0dsGzIqyxDuxs). A key rotation ships both
+# keys for one release: add the new key as a second line here, in install.ps1
+# and in upgrade.rs, publish that release still signed by the old key, then
+# sign with the new one and drop the old line a release later.
+signers='semlith-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICMTHiHMzeSHzzc+8UDZHUzJcvb6XGUBb+TJdFes91xm'
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
@@ -110,10 +118,30 @@ pick_tools() {
   fi
 }
 
-# The checksum proves the archive matches SHA256SUMS, and both came from the
-# same place. The attestation proves who built it: signed for the archive's
-# digest by this repository's release workflow. gh is optional, so its absence
-# is said rather than fatal; a gh that checks and does not confirm is fatal.
+# The signature proves SHA256SUMS came from whoever holds the semlith release
+# key, which a stolen GitHub token does not give anyone. Checked with
+# `ssh-keygen -Y verify` because it ships with macOS and every mainstream Linux
+# and Windows, so there is no extra tool to fetch first. Releases before v0.40.0
+# are unsigned and this installer refuses them: that is the price of failing
+# closed, and an older release can still be installed by hand.
+verify_signature() {
+  command -v ssh-keygen >/dev/null 2>&1 ||
+    die "need ssh-keygen (OpenSSH 8.1 or later) to verify the release signature; install openssh-client (apt, dnf) or openssh (apk, pacman); nothing was installed"
+  printf '%s\n' "$signers" > "$tmp/allowed_signers"
+  if ssh-keygen -Y verify -f "$tmp/allowed_signers" -I semlith-release -n file \
+      -s "$tmp/SHA256SUMS.sig" < "$tmp/SHA256SUMS" > "$tmp/verify.log" 2>&1; then
+    say "Signature verified: SHA256SUMS is signed by the semlith release key"
+  else
+    cat "$tmp/verify.log" >&2
+    die "signature check failed: SHA256SUMS is not signed by the semlith release key (ssh-keygen -Y needs OpenSSH 8.1 or later); nothing was installed"
+  fi
+}
+
+# The checksum proves the archive matches SHA256SUMS, and the signature above
+# that SHA256SUMS is the project's. The attestation proves who built it: signed
+# for the archive's digest by this repository's release workflow. gh is
+# optional, so its absence is said rather than fatal; a gh that checks and does
+# not confirm is fatal.
 verify_provenance() {
   manual="To check it yourself: gh attestation verify $archive --repo $repo"
   # Attestations start with v0.36.0: an older tag has none, and refusing it
@@ -186,7 +214,12 @@ main() {
   fetch "$base/$archive" "$tmp/$archive"
   say "Downloading SHA256SUMS"
   fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS"
+  say "Downloading SHA256SUMS.sig"
+  fetch "$base/SHA256SUMS.sig" "$tmp/SHA256SUMS.sig" ||
+    die "$tag has no SHA256SUMS.sig, so it cannot be verified. Releases before v0.40.0 are unsigned and this installer does not install them; nothing was installed"
 
+  say "Verifying signature"
+  verify_signature
   say "Verifying checksum"
   grep "  $archive\$" "$tmp/SHA256SUMS" >"$tmp/expected" ||
     die "SHA256SUMS has no entry for $archive"

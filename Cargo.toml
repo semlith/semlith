@@ -129,6 +129,11 @@ ts-parser-perl = "2.0.0"
 # Already in the tree under hf-hub; named here so `upgrade` can use them
 # directly. Neither adds a crate to the build.
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
+# Both already compiled for ureq's rustls lane, with these features, on every
+# target; named so `upgrade` can verify a release's ed25519 signature (ring)
+# and read its armour (base64). Naming them compiles nothing new.
+ring = "0.17"
+base64 = "0.23"
 # Reading only: `deflate-flate2` is the decompressor and nothing else. The
 # default feature set adds every compressor and cipher the format allows, none
 # of which semlith needs to read a document.

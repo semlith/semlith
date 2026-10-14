@@ -98,7 +98,43 @@ const WORKERS: usize = 8;
 
 /// The largest request line and header block accepted. A browser's is under
 /// 2 KiB; anything near this is not a browser.
+///
+/// Counted as the bytes arrive rather than once a line is complete, so it is
+/// also the cap on any one line: a header that never sends its newline is
+/// refused at 16 KiB instead of growing a `String` at loopback speed.
 const MAX_HEADERS: usize = 16 * 1024;
+
+/// How many idle connections — open, and silent for [`IDLE_GRACE`] — one
+/// address may keep. A ninth closes the oldest.
+///
+/// A browser opens up to six spare sockets per origin ahead of the requests it
+/// puts on them, and re-opens one that was closed, so eight is room for a
+/// portal tab and a client beside it. Every local process connects from the
+/// same loopback address, so on this server it is in effect the cap on idle
+/// connections overall — which is the point: before 0.40.0 an idle socket
+/// counted against [`MAX_CONNECTIONS`] for 30 s, and 32 of them were a 503 for
+/// everyone (S11).
+const IDLE_PER_PEER: usize = 8;
+
+/// How long a connection that has sent nothing is safe from
+/// [`IDLE_PER_PEER`]. A request's bytes land with its connect on loopback, but
+/// the thread that reads them can wait for a core, and closing a connection
+/// before its thread has looked refuses a real request in a burst of them --
+/// twenty at once in `tests/daemon.rs` did exactly that with no grace.
+const IDLE_GRACE: Duration = Duration::from_millis(250);
+
+/// The most connections waiting for their head at once, from anyone. Past it
+/// the oldest that has sent nothing is closed, or failing that the oldest: a
+/// flood inside [`IDLE_GRACE`] or of dribbling senders is still bounded. Each
+/// costs a thread and two descriptors, and a daemon run as a login service may
+/// have 256 descriptors in all, so this stays well under that.
+const MAX_WAITING: usize = 48;
+
+/// How often a connection still waiting for its head looks up to see whether
+/// it was closed to make room. Shutting a socket wakes a blocked read on
+/// macOS and Linux at once; this bounds how long an evicted connection's
+/// thread can outlive its slot anywhere that does not.
+const HEAD_POLL: Duration = Duration::from_secs(1);
 
 /// The largest request body accepted. The only bodies this server takes are
 /// small JSON objects naming paths.
@@ -113,7 +149,9 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// The read timeout above catches a socket that goes quiet; this catches one
 /// that never does — a byte a second is not a stalled connection and would
 /// hold a worker for as long as the sender felt like. Ten seconds is far more
-/// than any request over loopback needs.
+/// than any request over loopback needs. It is checked before every read of
+/// the head as well as after the body: until 0.40.0 the head was read with no
+/// deadline at all, before the token was looked at.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 
 /// How many connections may be in hand at once.
@@ -123,7 +161,9 @@ const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 /// together, because what it is protecting against is memory and file
 /// descriptors rather than worker time. Past it the answer is 503 and the
 /// connection closes, which is what a local client should see from a daemon
-/// that is already at its limit.
+/// that is already at its limit. A connection counts once its request head has
+/// arrived; before that it is bounded by [`MAX_WAITING`] instead, so the two
+/// together are the most this server holds.
 const MAX_CONNECTIONS: usize = 32;
 
 /// Set when the accept loop should be woken so it can notice `stop`.
@@ -356,6 +396,134 @@ impl Drop for InFlight {
     }
 }
 
+impl InFlight {
+    /// A place in `count`, lifting the process's priority while it is held.
+    fn taken(count: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::Relaxed);
+        Self(Arc::clone(count), crate::priority::request())
+    }
+
+    /// Move this place to `count`; the priority lift comes along.
+    fn move_to(&mut self, count: &Arc<std::sync::atomic::AtomicUsize>) {
+        count.fetch_add(1, Ordering::Relaxed);
+        std::mem::replace(&mut self.0, Arc::clone(count)).fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// A connection whose request head has arrived whole, on its way to a worker.
+struct Ready {
+    stream: TcpStream,
+    /// Holds whatever of the body arrived with the head.
+    reader: BufReader<TcpStream>,
+    request: Request,
+    in_flight: InFlight,
+    accepted: std::time::Instant,
+}
+
+/// What a waiting connection's thread and [`Pending`] both see: whether any
+/// byte has arrived, and whether the connection was closed to make room.
+#[derive(Default)]
+struct HeadState {
+    heard: AtomicBool,
+    evicted: AtomicBool,
+}
+
+/// A connection still waiting for its head.
+struct Waiting {
+    state: Arc<HeadState>,
+    peer: std::net::IpAddr,
+    since: std::time::Instant,
+    /// A handle to close it by while its thread is blocked reading.
+    handle: TcpStream,
+    /// Its place in the count. Held here rather than on its thread, so closing
+    /// it frees the place at once whether or not the platform wakes the read
+    /// its thread is blocked in.
+    slot: InFlight,
+}
+
+/// The connections that have not sent a whole request head yet, oldest first.
+///
+/// They hold no worker — the head is read on the connection's own thread —
+/// and no place under [`MAX_CONNECTIONS`], which idle sockets used to fill. What
+/// they cost is a thread and two descriptors each, bounded by
+/// [`IDLE_PER_PEER`] and [`MAX_WAITING`].
+#[derive(Default)]
+struct Pending(std::collections::VecDeque<Waiting>);
+
+impl Pending {
+    /// Hold a connection as waiting, then close whatever that leaves over the
+    /// limits: idle connections past [`IDLE_PER_PEER`] for its address, then
+    /// anything past [`MAX_WAITING`]. Always the oldest, because the newest is
+    /// the one most likely to be a request about to arrive.
+    fn admit(
+        &mut self,
+        peer: std::net::IpAddr,
+        handle: TcpStream,
+        slot: InFlight,
+    ) -> Arc<HeadState> {
+        let state = Arc::new(HeadState::default());
+        self.0.push_back(Waiting {
+            state: Arc::clone(&state),
+            peer,
+            since: std::time::Instant::now(),
+            handle,
+            slot,
+        });
+        let idle = |w: &Waiting| {
+            w.peer == peer
+                && !w.state.heard.load(Ordering::Relaxed)
+                && w.since.elapsed() >= IDLE_GRACE
+        };
+        while self.0.iter().filter(|w| idle(w)).count() > IDLE_PER_PEER {
+            let Some(at) = self.0.iter().position(idle) else {
+                break;
+            };
+            self.evict(at);
+        }
+        while self.0.len() > MAX_WAITING {
+            // Never the one just admitted, unless everything else is talking.
+            let older = self.0.len() - 1;
+            let at = self
+                .0
+                .iter()
+                .take(older)
+                .position(|w| !w.state.heard.load(Ordering::Relaxed))
+                .unwrap_or(0);
+            self.evict(at);
+        }
+        state
+    }
+
+    fn evict(&mut self, at: usize) {
+        if let Some(gone) = self.0.remove(at) {
+            gone.state.evicted.store(true, Ordering::Relaxed);
+            trace(&gone.handle, || {
+                "closed while waiting, to make room".to_string()
+            });
+            let _ = gone.handle.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    /// The place of a connection whose head arrived, or nothing if it was
+    /// closed to make room in the meantime.
+    fn release(&mut self, state: &Arc<HeadState>) -> Option<InFlight> {
+        let at = self.0.iter().position(|w| Arc::ptr_eq(&w.state, state))?;
+        self.0.remove(at).map(|w| w.slot)
+    }
+}
+
+/// Why a request head was refused, as the status it is answered with.
+#[derive(Debug)]
+struct HeadRefused(u16);
+
+impl std::fmt::Display for HeadRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "request head refused with {}", self.0)
+    }
+}
+
+impl std::error::Error for HeadRefused {}
+
 /// The agent key, and the one it replaced.
 ///
 /// `previous` is kept valid until this process exits so that a session in
@@ -499,7 +667,7 @@ impl Server {
         stop: &'static AtomicBool,
         refused: impl Fn(Refusal) + Send + Sync + 'static,
     ) -> Result<()> {
-        let (tx, rx) = mpsc::channel::<(TcpStream, InFlight)>();
+        let (tx, rx) = mpsc::channel::<Ready>();
         // Behind a slot, so shutdown can close the pool while a socket is
         // still waiting for its first byte: a waiting thread holding a sender
         // of its own would keep every worker's `recv` open until its read
@@ -508,6 +676,10 @@ impl Server {
         let rx = Arc::new(Mutex::new(rx));
         let refused = Arc::new(refused);
         let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        // Places held by connections still waiting for their head; nothing
+        // reads it, but every `InFlight` counts somewhere.
+        let waiting = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         // Refused requests are answered by a thread of their own. Holding a
         // worker for the delay would mean eight wrong tokens at once could stop
@@ -559,7 +731,7 @@ impl Server {
                             let guard = rx.lock().unwrap_or_else(|e| e.into_inner());
                             guard.recv()
                         };
-                        let Ok((stream, in_flight)) = next else {
+                        let Ok(ready) = next else {
                             return;
                         };
                         let hold = |stream, in_flight| {
@@ -580,7 +752,7 @@ impl Server {
                                 port,
                             }
                         };
-                        if let Some(class) = answer(stream, in_flight, &handler, &auth, &hold) {
+                        if let Some(class) = answer(ready, &handler, &auth, &hold) {
                             refused(class);
                         }
                     }
@@ -615,14 +787,15 @@ impl Server {
                     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
                     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
 
-                    // Counted here rather than on a worker: a connection that
-                    // is still queued is still a connection this process is
-                    // holding open, and the flood that matters never reaches a
-                    // worker at all.
-                    let taken = live.fetch_add(1, Ordering::Relaxed);
-                    trace(&stream, || format!("accepted, {} live", taken + 1));
-                    let in_flight = InFlight(Arc::clone(&live), crate::priority::request());
-                    if taken >= MAX_CONNECTIONS {
+                    // Counted from the moment a head has arrived, queued or
+                    // not: a connection waiting on a worker is still one this
+                    // process is holding open. A connection that has not sent
+                    // its head yet is bounded by `Pending` instead, so idle
+                    // sockets cannot fill this count (S11).
+                    let busy = live.load(Ordering::Relaxed);
+                    trace(&stream, || format!("accepted, {busy} live"));
+                    if busy >= MAX_CONNECTIONS {
+                        let in_flight = InFlight::taken(&live);
                         // Off the accept loop: it may wait for the request.
                         std::thread::spawn(move || {
                             refuse_busy(stream);
@@ -630,25 +803,70 @@ impl Server {
                         });
                         continue;
                     }
-                    // To the pool only once it has said something. A browser
-                    // opens sockets ahead of the requests it will put on them,
-                    // and a worker that took one sat in `read_head` until the
-                    // 30 s read timeout: eight of them held the whole pool, and
-                    // the requests behind them queued past the limit into 503s
-                    // and, on Windows, resets (#181). A sleeping thread per
-                    // waiting socket is what that costs now, and the limit
-                    // above bounds how many.
+                    // To the pool only once its whole head has arrived. A
+                    // browser opens sockets ahead of the requests it will put
+                    // on them, and a worker that took one sat in `read_head`
+                    // until the 30 s read timeout: eight of them held the
+                    // whole pool, and the requests behind them queued past the
+                    // limit into 503s and, on Windows, resets (#181). Until
+                    // 0.40.0 the first byte was enough, so eight sockets that
+                    // each sent one byte and then dribbled held the pool just
+                    // the same (S11). The head is read here, on the socket's
+                    // own thread, against the request deadline, and
+                    // `Pending` bounds how many such threads there can be.
+                    let accepted = std::time::Instant::now();
+                    let (Ok(peer), Ok(handle)) = (stream.peer_addr(), stream.try_clone()) else {
+                        continue;
+                    };
+                    let state = pending.lock().unwrap_or_else(|e| e.into_inner()).admit(
+                        peer.ip(),
+                        handle,
+                        InFlight::taken(&waiting),
+                    );
                     let pool = Arc::clone(&pool);
+                    let pending = Arc::clone(&pending);
+                    let refused = Arc::clone(&refused);
+                    let live = Arc::clone(&live);
                     std::thread::spawn(move || {
-                        let mut first = [0u8; 1];
-                        let peeked = stream.peek(&mut first);
-                        if matches!(peeked, Ok(n) if n > 0)
-                            && let Some(tx) =
-                                pool.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-                        {
-                            let _ = tx.send((stream, in_flight));
-                        } else {
-                            trace(&stream, || format!("closed before a request: {peeked:?}"));
+                        let mut reader = BufReader::new(stream);
+                        let head = read_head(&mut reader, accepted, &state);
+                        let Some(mut in_flight) = pending
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .release(&state)
+                        else {
+                            return;
+                        };
+                        match head {
+                            Ok(Some(request)) => {
+                                in_flight.move_to(&live);
+                                let _ = reader.get_ref().set_read_timeout(Some(IO_TIMEOUT));
+                                if let (Ok(stream), Some(tx)) = (
+                                    reader.get_ref().try_clone(),
+                                    pool.lock().unwrap_or_else(|e| e.into_inner()).as_ref(),
+                                ) {
+                                    let _ = tx.send(Ready {
+                                        stream,
+                                        reader,
+                                        request,
+                                        in_flight,
+                                        accepted,
+                                    });
+                                }
+                            }
+                            Ok(None) => {
+                                trace(reader.get_ref(), || "closed before a request".to_string())
+                            }
+                            Err(e) => {
+                                trace(reader.get_ref(), || format!("bad request head: {e:#}"));
+                                let status = e.downcast_ref::<HeadRefused>().map_or(400, |r| r.0);
+                                let _ = write_response(
+                                    reader.get_mut(),
+                                    Response::new(status, "text/plain", Vec::new()),
+                                );
+                                drop(in_flight);
+                                refused(Refusal::Malformed);
+                            }
                         }
                     });
                     // A worker that ended for any reason is replaced here, so
@@ -808,34 +1026,23 @@ fn refuse_busy(mut stream: TcpStream) {
 /// than guesses at a secret, and delaying them would only slow down the person
 /// who made a mistake.
 fn answer(
-    mut stream: TcpStream,
-    in_flight: InFlight,
+    ready: Ready,
     handler: &Handler,
     auth: &Auth,
     hold: &impl Fn(TcpStream, InFlight),
 ) -> Option<Refusal> {
-    let started = std::time::Instant::now();
-    let mut reader = match stream.try_clone().map(BufReader::new) {
-        Ok(reader) => reader,
-        Err(_) => return Some(Refusal::Malformed),
-    };
-
-    // The head first, and only the head. Everything that can refuse this
-    // request is decided from it, so a request that is going to be refused
-    // never has its body read into memory — which is what keeps a thousand
-    // cross-origin attempts from costing a thousand bodies' worth of it.
-    let mut request = match read_head(&mut reader) {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            trace(&stream, || "closed with no request".to_string());
-            return None;
-        }
-        Err(e) => {
-            trace(&stream, || format!("bad request head: {e:#}"));
-            let _ = write_response(&mut stream, Response::new(400, "text/plain", Vec::new()));
-            return Some(Refusal::Malformed);
-        }
-    };
+    // The head was read before this request reached a worker, and only the
+    // head. Everything that can refuse this request is decided from it, so a
+    // request that is going to be refused never has its body read into
+    // memory — which is what keeps a thousand cross-origin attempts from
+    // costing a thousand bodies' worth of it.
+    let Ready {
+        mut stream,
+        mut reader,
+        mut request,
+        in_flight,
+        accepted: started,
+    } = ready;
 
     // Host first: a request from a foreign origin is refused before the token
     // is even compared, so a wrong guess and a right one cost the same.
@@ -1074,23 +1281,75 @@ fn same(a: &str, b: &str) -> bool {
 ///
 /// Split from the body on purpose. Every rule that can refuse a request is
 /// decided from what is here, so a refusal costs the head and nothing more.
-fn read_head(reader: &mut BufReader<TcpStream>) -> Result<Option<Request>> {
+///
+/// Read before the token is looked at, so it is bounded three ways: by
+/// [`MAX_HEADERS`] as the bytes arrive (431), by [`REQUEST_DEADLINE`] from the
+/// moment the connection was accepted however steadily they arrive (408), and
+/// by `state.evicted`, which [`Pending`] sets when it closes this connection to
+/// make room. `state.heard` tells [`Pending`] a byte has arrived, so the
+/// connection is not idle. A connection that sent nothing before any of those is closed with no
+/// answer: it is a browser's spare, and bytes sent before a request are bytes
+/// the browser reads as the answer to the request it later puts there.
+fn read_head(
+    reader: &mut BufReader<TcpStream>,
+    accepted: std::time::Instant,
+    state: &HeadState,
+) -> Result<Option<Request>> {
     let mut head = String::new();
+    let mut line: Vec<u8> = Vec::new();
     let mut read = 0;
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
+        let nothing_yet = read == 0;
+        let left = REQUEST_DEADLINE.saturating_sub(accepted.elapsed());
+        if left.is_zero() || state.evicted.load(Ordering::Relaxed) {
+            if nothing_yet {
+                return Ok(None);
+            }
+            return Err(HeadRefused(408).into());
+        }
+        reader
+            .get_ref()
+            .set_read_timeout(Some(left.min(HEAD_POLL)))?;
+        let buf = match reader.fill_buf() {
+            Ok(buf) => buf,
+            // A slice of the deadline passed; the checks above decide.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            // Reset or shut before a byte: as good as closed.
+            Err(_) if nothing_yet => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        if buf.is_empty() {
             // The peer closed before sending anything: a browser probing a
             // connection it then did not use. Not a refusal, not an error.
-            return Ok(head.is_empty().then_some(None).flatten());
+            anyhow::ensure!(nothing_yet, "the connection closed mid-head");
+            return Ok(None);
         }
-        read += n;
-        anyhow::ensure!(read <= MAX_HEADERS, "request headers too large");
-        if line == "\r\n" || line == "\n" {
+        state.heard.store(true, Ordering::Relaxed);
+        let (taken, complete) = match buf.iter().position(|b| *b == b'\n') {
+            Some(at) => (at + 1, true),
+            None => (buf.len(), false),
+        };
+        read += taken;
+        if read > MAX_HEADERS {
+            return Err(HeadRefused(431).into());
+        }
+        line.extend_from_slice(&buf[..taken]);
+        reader.consume(taken);
+        if !complete {
+            continue;
+        }
+        let text = String::from_utf8(std::mem::take(&mut line)).context("head is not UTF-8")?;
+        if text == "\r\n" || text == "\n" {
             break;
         }
-        head.push_str(&line);
+        head.push_str(&text);
     }
 
     let mut lines = head.lines();
@@ -1298,7 +1557,9 @@ fn reason(status: u16) -> &'static str {
         401 => "Unauthorized",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
         409 => "Conflict",
+        431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         _ => "OK",
     }

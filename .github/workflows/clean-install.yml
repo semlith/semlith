@@ -3,10 +3,13 @@ name: clean-install
 # A published release, installed the way a user installs it: the installer
 # attached to that release, on machines that have never seen semlith. Then the
 # same installer handed an archive with one byte changed and a SHA256SUMS
-# rewritten to match it, which only the provenance check can catch.
+# rewritten to match it, which the signature on SHA256SUMS must catch before
+# the checksum is even looked at; and the same release with SHA256SUMS.sig
+# missing, which must be refused rather than installed unverified.
 #
 # Run it after the release workflow has published the tag:
-#   gh workflow run clean-install.yml -f version=v0.36.0
+#   gh workflow run clean-install.yml -f version=v0.40.0
+# Releases before v0.40.0 are unsigned, and the installers refuse them.
 on:
   workflow_dispatch:
     inputs:
@@ -47,6 +50,10 @@ jobs:
           SEMLITH_NO_SERVICE: "1"
         run: |
           sh install.sh 2>&1 | tee install.log
+          if ! grep -q '^Signature verified:' install.log; then
+            echo "::error::the installer did not report the SHA256SUMS signature verifying"
+            exit 1
+          fi
           if ! grep -q '^Provenance verified:' install.log; then
             echo "::error::the installer did not report gh attestation verify passing"
             exit 1
@@ -54,7 +61,7 @@ jobs:
 
       - name: Version
         run: |
-          got=$("$HOME/.semlith/bin/semlith" --version)
+          got=$("$HOME/.semlith/bin/semlith" --version | head -n 1)
           echo "$got"
           if [ "$got" != "semlith ${VERSION#v}" ]; then
             echo "::error::installed '$got', expected semlith ${VERSION#v}"
@@ -84,39 +91,53 @@ jobs:
           $code = $LASTEXITCODE
           Write-Output $log
           if ($code -ne 0) { throw "install.ps1 exited $code" }
+          if ($log -notmatch 'Signature verified:') { throw 'the installer did not report the SHA256SUMS signature verifying' }
           if ($log -notmatch 'Provenance verified:') { throw 'the installer did not report gh attestation verify passing' }
-          $got = & "$HOME\.semlith\bin\semlith.exe" --version
+          $got = (& "$HOME\.semlith\bin\semlith.exe" --version | Select-Object -First 1)
           $want = 'semlith ' + $env:VERSION.TrimStart('v')
           Write-Output $got
           if ($got -ne $want) { throw "installed '$got', expected $want" }
 
   # The installer has one origin and takes no other from the environment, so a
   # copy is pointed at a loopback server by rewriting that one line, as
-  # tests/install.rs does. The checksum passes because SHA256SUMS was rewritten
-  # with the archive; the attestation cannot be, so the install must fail there.
+  # tests/install.rs does. SHA256SUMS is rewritten with the archive, so the
+  # checksum alone would pass; the release's real SHA256SUMS.sig no longer
+  # matches it, and without the private key nobody can make one that does. So
+  # the install must fail on the signature, before the checksum runs. Then the
+  # signature is removed altogether, which must fail too rather than install
+  # unverified.
   tamper:
     runs-on: ubuntu-latest
     steps:
       - name: Tampered release refused
         run: |
-          case "$VERSION" in v[0-9]*) ;; *) echo "::error::version must be a tag such as v0.36.0"; exit 1 ;; esac
+          case "$VERSION" in v[0-9]*) ;; *) echo "::error::version must be a tag such as v0.40.0"; exit 1 ;; esac
           archive="semlith-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
           dir="srv/$REPO/releases/download/$VERSION"
           mkdir -p "$dir" home
-          gh release download "$VERSION" --repo "$REPO" --pattern install.sh --pattern "$archive"
-          mv "$archive" "$dir/"
+          gh release download "$VERSION" --repo "$REPO" --pattern install.sh --pattern "$archive" --pattern SHA256SUMS.sig
+          mv "$archive" SHA256SUMS.sig "$dir/"
           python3 -c 'import sys; p=sys.argv[1]; b=bytearray(open(p,"rb").read()); b[len(b)//2]^=1; open(p,"wb").write(b)' "$dir/$archive"
           (cd "$dir" && sha256sum "$archive" > SHA256SUMS)
           sed 's#^origin=https://github.com$#origin=http://127.0.0.1:8000#' install.sh > tampered.sh
           grep -q '^origin=http://127.0.0.1:8000$' tampered.sh
           python3 -m http.server 8000 --bind 127.0.0.1 --directory srv >/dev/null 2>&1 &
           for _ in $(seq 50); do curl -fs http://127.0.0.1:8000/ >/dev/null && break; sleep 0.2; done
+
           code=0
           SEMLITH_VERSION="$VERSION" SEMLITH_HOME="$PWD/home" sh tampered.sh > out.log 2>&1 || code=$?
           cat out.log
           [ "$code" -ne 0 ] || { echo "::error::the installer accepted a tampered archive"; exit 1; }
-          grep -q "$archive: OK" out.log || { echo "::error::failed before the checksum passed, so the attestation was never tested"; exit 1; }
-          grep -q 'provenance check failed' out.log || { echo "::error::failed, but not on provenance"; exit 1; }
+          grep -q 'signature check failed' out.log || { echo "::error::failed, but not on the signature"; exit 1; }
+          ! grep -q "$archive: OK" out.log || { echo "::error::the checksum ran before the signature was checked"; exit 1; }
+          [ ! -e home/bin/semlith ] || { echo "::error::a binary was installed"; exit 1; }
+
+          rm "$dir/SHA256SUMS.sig"
+          code=0
+          SEMLITH_VERSION="$VERSION" SEMLITH_HOME="$PWD/home" sh tampered.sh > unsigned.log 2>&1 || code=$?
+          cat unsigned.log
+          [ "$code" -ne 0 ] || { echo "::error::the installer accepted a release with no signature"; exit 1; }
+          grep -q 'has no SHA256SUMS.sig' unsigned.log || { echo "::error::failed, but not on the missing signature"; exit 1; }
           [ ! -e home/bin/semlith ] || { echo "::error::a binary was installed"; exit 1; }
 
   tamper-windows:
@@ -126,13 +147,13 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
-          if ($env:VERSION -notmatch '^v[0-9]') { throw 'version must be a tag such as v0.36.0' }
+          if ($env:VERSION -notmatch '^v[0-9]') { throw 'version must be a tag such as v0.40.0' }
           $archive = "semlith-$($env:VERSION)-x86_64-pc-windows-msvc.zip"
           $dir = "srv/$($env:REPO)/releases/download/$($env:VERSION)"
           New-Item -ItemType Directory -Path $dir, home -Force | Out-Null
-          gh release download $env:VERSION --repo $env:REPO --pattern install.ps1 --pattern $archive
+          gh release download $env:VERSION --repo $env:REPO --pattern install.ps1 --pattern $archive --pattern SHA256SUMS.sig
           if ($LASTEXITCODE -ne 0) { throw 'could not download the release files' }
-          Move-Item $archive $dir
+          Move-Item $archive, 'SHA256SUMS.sig' $dir
           $path = (Resolve-Path (Join-Path $dir $archive)).Path
           $bytes = [IO.File]::ReadAllBytes($path)
           $mid = [int][math]::Floor($bytes.Length / 2)
@@ -153,7 +174,14 @@ jobs:
           $code = $LASTEXITCODE
           Write-Output $log
           if ($code -eq 0) { throw 'the installer accepted a tampered archive' }
-          if ($log -notmatch 'provenance check failed') { throw 'failed, but not on provenance' }
+          if ($log -notmatch 'signature check failed') { throw 'failed, but not on the signature' }
+          if (Test-Path home\bin\semlith.exe) { throw 'a binary was installed' }
+          Remove-Item (Join-Path $dir 'SHA256SUMS.sig')
+          $log = & powershell -NoProfile -ExecutionPolicy Bypass -File tampered.ps1 *>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Output $log
+          if ($code -eq 0) { throw 'the installer accepted a release with no signature' }
+          if ($log -notmatch 'has no SHA256SUMS.sig') { throw 'failed, but not on the missing signature' }
           if (Test-Path home\bin\semlith.exe) { throw 'a binary was installed' }
           # The refusal above is the pass. A powershell step exits with the
           # last native command's code, which is the installer's 1, so the step
