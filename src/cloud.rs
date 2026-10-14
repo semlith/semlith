@@ -1626,9 +1626,7 @@ pub fn push(
 
 /// The commit a working tree is at, when it is a git checkout.
 fn git_head(dir: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = crate::git(dir)
         .args(["rev-parse", "HEAD"])
         .stderr(std::process::Stdio::null())
         .output()
