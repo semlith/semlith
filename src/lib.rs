@@ -841,6 +841,11 @@ pub struct Span {
     /// was out of date. See [`Semlith::read_within`].
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub from_disk: bool,
+    /// The path is no longer the regular file that was indexed — a link, a
+    /// device, or moved under a linked folder — so its current bytes were
+    /// not read. The text is the store's last copy.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub replaced: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<String>,
 }
@@ -3063,7 +3068,7 @@ impl Semlith {
         // refusal about the file's own contents: see `Refusal`.
         let evicted = if refusal.credential {
             let key = path.to_string_lossy().into_owned();
-            let (chunks, images) = self.evict(&key)?;
+            let (chunks, images) = self.evict_secret(&key)?;
             chunks + images
         } else {
             0
@@ -3709,7 +3714,7 @@ impl Semlith {
                                 1,
                                 now(),
                             )?;
-                            let (gone, images) = self.evict(&key)?;
+                            let (gone, images) = self.evict_secret(&key)?;
                             report.removed += usize::from(gone + images > 0);
                             report
                                 .refused
@@ -4010,7 +4015,7 @@ impl Semlith {
                             )?;
                             // A file that held no credential when it was indexed
                             // and holds one now leaves the store on this run.
-                            let (gone, images) = self.evict(&key)?;
+                            let (gone, images) = self.evict_secret(&key)?;
                             let evicted = gone + images;
                             report.removed += usize::from(evicted > 0);
                             let why = if evicted > 0 {
@@ -5314,6 +5319,28 @@ impl Semlith {
         self.evict_as(key, true)
     }
 
+    /// [`Self::evict`] for a file refused for what it holds: everything derived
+    /// from its text goes now, not at the next full pass — the rows and the
+    /// keyword index's terms (scrubbed before the run ends), each chunk's
+    /// full-precision vector in `exact.f32`, and the vector cache's entries.
+    fn evict_secret(&mut self, key: &str) -> Result<(usize, usize)> {
+        let ids: Vec<u64> = store::chunk_ids_of(&self.db, key)?;
+        let vectors: Vec<Vec<f32>> = ids.iter().filter_map(|id| self.exact.get(*id)).collect();
+        let evicted = self.evict(key)?;
+        self.exact.zero(&ids)?;
+        let mut caches: Vec<cache::Location> = cache::Location::machine().into_iter().collect();
+        if let Some(own) = &self.vector_cache {
+            caches.push(own.clone());
+        }
+        for at in caches {
+            if let Some(mut cache) = cache::Cache::open_in(&at) {
+                let _ = cache.forget_vectors(&vectors);
+            }
+        }
+        self.scrub |= evicted.0 + evicted.1 > 0;
+        Ok(evicted)
+    }
+
     /// [`Self::evict`], keeping the file's definitions as history or not.
     fn evict_as(&mut self, key: &str, retire: bool) -> Result<(usize, usize)> {
         // Read before the delete: the cascade that removes the rows is what
@@ -6247,6 +6274,7 @@ impl Semlith {
             symbol_kind: None,
             fresh: true,
             from_disk: false,
+            replaced: false,
             store: None,
         };
         self.name_enclosing_symbol(&mut span)?;
@@ -6268,9 +6296,31 @@ impl Semlith {
     /// chunks exists to prevent. A file whose bytes hash the same as the row
     /// is not re-read at all — its stamps are behind, not its text (1.4).
     fn read_from_disk(&self, span: &mut Span, start: u32, end: u32) -> Result<()> {
-        let Ok(bytes) = std::fs::read(&span.path) else {
+        // The stored path is canonical; one that no longer resolves to itself
+        // has a link in it now, and one the deny-list names is never read.
+        let at = Path::new(&span.path);
+        if canonical(at) != at || filter::denied(at).is_some_and(|d| d != filter::Denied::Hidden) {
+            span.replaced = at.exists();
             return Ok(());
+        }
+        let file = match open_regular(at) {
+            Ok((file, _)) => file,
+            Err(_) => {
+                span.replaced = at.symlink_metadata().is_ok();
+                return Ok(());
+            }
         };
+        let mut bytes = Vec::new();
+        {
+            use std::io::Read;
+            if file
+                .take(chunk::MAX_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
         if bytes.len() as u64 > chunk::MAX_FILE_BYTES {
             return Ok(());
         }
@@ -6608,6 +6658,86 @@ fn live_threads(known: usize) -> usize {
         0 => known,
         live => live,
     }
+}
+
+/// Open a file that should be a regular file at exactly this path, refusing
+/// anything that is not one by the time it is open.
+///
+/// The one way semlith opens a file's bytes to index or to serve. A path that
+/// was a file when it was walked can be a symbolic link, a FIFO or a device by
+/// the time it is read; `std::fs::read` follows the link and reads whatever it
+/// names, and before 0.40.0 the `read` fallback served `~/.kube/config` that
+/// way to an agent. So the last component is opened without following a link
+/// (`O_NOFOLLOW`; a reparse point is refused on Windows), without blocking on
+/// a FIFO, and the open handle — not the path — is checked to be a regular
+/// file. The caller caps what it reads from it.
+///
+/// ponytail: a directory above the file swapped for a link between the
+/// caller's check and this open is caught by the caller comparing
+/// [`canonical`] with the path, not by walking with `openat`; do that if a
+/// race inside one call matters.
+pub fn open_regular(path: &Path) -> std::io::Result<(std::fs::File, std::fs::Metadata)> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: open the link itself, never its target.
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path).map_err(|e| {
+        #[cfg(unix)]
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            return std::io::Error::other("it is a symbolic link, not a file");
+        }
+        e
+    })?;
+    let meta = file.metadata()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT
+        if meta.file_attributes() & 0x400 != 0 {
+            return Err(std::io::Error::other("it is a link, not a file"));
+        }
+    }
+    if !meta.is_file() {
+        return Err(std::io::Error::other("it is not a regular file"));
+    }
+    Ok((file, meta))
+}
+
+/// `git -C dir` with everything a repository's own config could make it run
+/// switched off.
+///
+/// semlith runs `git log` in every repository it indexes, and the repository
+/// is untrusted input like its files: an extracted archive or a synced folder
+/// can carry a `.git/config` whose `log.showSignature` and `gpg.program` make
+/// that `git log` run a program of its choosing, or whose `core.fsmonitor` and
+/// hooks do the same for other commands. Every invocation goes through here.
+pub fn git(dir: &Path) -> std::process::Command {
+    let (null, never) = if cfg!(windows) {
+        ("NUL", "NUL")
+    } else {
+        ("/dev/null", "/bin/false")
+    };
+    let mut cmd = std::process::Command::new("git");
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "core.fsmonitor=false"])
+        .arg("-c")
+        .arg(format!("core.hooksPath={null}"))
+        .arg("-c")
+        .arg(format!("gpg.program={never}"))
+        .args(["-c", "log.showSignature=false", "-c", "core.pager=cat"])
+        .stdin(std::process::Stdio::null());
+    cmd
 }
 
 pub fn canonical_calls() -> u64 {
@@ -7243,11 +7373,10 @@ fn recent_head(
     let each = (HEAD_FILES / repos.len().max(1)).max(4);
     for root in repos {
         let mut taken = 0;
-        let Ok(log) = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&root)
+        let Ok(log) = git(&root)
             .args([
                 "log",
+                "--no-show-signature",
                 "-n",
                 "60",
                 "--name-only",
@@ -7356,10 +7485,15 @@ fn git_recency(paths: &[PathBuf]) -> std::collections::HashMap<PathBuf, i64> {
     }
     let mut out = std::collections::HashMap::new();
     for top in tops {
-        let Ok(log) = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&top)
-            .args(["log", "-n", COMMITS, "--name-only", "--format=%x00%ct"])
+        let Ok(log) = git(&top)
+            .args([
+                "log",
+                "--no-show-signature",
+                "-n",
+                COMMITS,
+                "--name-only",
+                "--format=%x00%ct",
+            ])
             .stderr(std::process::Stdio::null())
             .output()
         else {

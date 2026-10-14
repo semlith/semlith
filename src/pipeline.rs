@@ -496,8 +496,10 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
     let _cap = crate::cpucap::slot();
     let started = Instant::now();
     let key = path.to_string_lossy();
-    let opened = std::fs::File::open(path);
-    let measured = opened.as_ref().ok().and_then(|f| f.metadata().ok());
+    // Opened once, without following a link, and checked on the handle: a
+    // file swapped for a link or a FIFO after the walk is refused, not read.
+    let opened = crate::open_regular(path);
+    let measured = opened.as_ref().ok().map(|(_, m)| m.clone());
     let file_bytes = crate::embeddable_bytes(measured.clone());
     if !ctx.rechunk
         && !ctx.rescan
@@ -538,7 +540,7 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
             file_bytes,
         };
     }
-    let read = opened.and_then(|file| {
+    let read = opened.and_then(|(file, _)| {
         use std::io::Read;
         let mut bytes = Vec::new();
         file.take(cap + 1).read_to_end(&mut bytes).map(|_| bytes)

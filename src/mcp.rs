@@ -1224,7 +1224,9 @@ fn call_local(
                     (Some(name), None) => format!(" · {name}"),
                     _ => String::new(),
                 };
-                let state = if span.from_disk {
+                let state = if span.replaced {
+                    " · stale; file replaced since indexing (not a regular file now), not read"
+                } else if span.from_disk {
                     " · read from disk, not yet re-indexed"
                 } else if !span.fresh {
                     " · stale"

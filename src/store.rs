@@ -322,6 +322,24 @@ fn open_once(path: &Path) -> Result<Connection> {
     add_columns(&db)?;
     check_format(&db)?;
     backfill_fts(&db)?;
+    // The keyword index's own secure delete: a removed row's terms leave the
+    // index's segments at once rather than at their next merge, so a file
+    // refused for a secret leaves no searchable term behind (S10). A setting
+    // the index keeps, written once; older binaries read it unchanged.
+    let set: bool = db
+        .query_row(
+            "SELECT 1 FROM chunks_fts_config WHERE k = 'secure-delete' AND v = 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !set {
+        db.execute(
+            "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('secure-delete', 1)",
+            [],
+        )?;
+    }
     // Everything above is the schema this binary needs in place before the
     // store is usable at all; from here the connection writes only when a
     // writer asks.
@@ -1000,6 +1018,19 @@ pub fn all_hashes(db: &Connection) -> Result<std::collections::HashMap<String, S
 
 /// Drop a file and its chunks, returning the chunk ids so the caller can
 /// evict them from the vector index too.
+/// The ids of a file's chunks.
+pub fn chunk_ids_of(db: &Connection, path: &str) -> Result<Vec<u64>> {
+    let mut stmt = db.prepare_cached(
+        "SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.path = ?1",
+    )?;
+    let rows = stmt.query_map(params![path], |r| r.get::<_, i64>(0))?;
+    Ok(rows
+        .collect::<Result<Vec<i64>, _>>()?
+        .into_iter()
+        .map(|i| i as u64)
+        .collect())
+}
+
 pub fn delete_file(db: &Connection, path: &str, now: i64) -> Result<Vec<u64>> {
     retire_symbols(db, path, now)?;
     delete_file_unretired(db, path)

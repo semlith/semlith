@@ -227,6 +227,35 @@ impl Cache {
         count(&self.db, "rows")
     }
 
+    /// Drop every entry holding one of `vectors`, wherever it is keyed.
+    ///
+    /// For a chunk refused because it held a secret. The key is a hash of the
+    /// text as it was embedded, with a context the store does not keep, so it
+    /// cannot be recomputed; the vector is what the entry holds, and it is
+    /// what must go. One pass over the cache, with `secure_delete` so the
+    /// freed pages are zeroed. Rare enough to pay for.
+    pub fn forget_vectors(&mut self, vectors: &[Vec<f32>]) -> Result<usize> {
+        if vectors.is_empty() {
+            return Ok(0);
+        }
+        self.db.pragma_update(None, "secure_delete", "ON")?;
+        let tx = self.db.transaction()?;
+        let mut gone = 0usize;
+        {
+            let mut stmt = tx.prepare("DELETE FROM vectors WHERE vector = ?1")?;
+            for vector in vectors {
+                let bytes: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+                gone += stmt.execute(params![bytes])?;
+            }
+        }
+        tx.execute(
+            "UPDATE counts SET v = MAX(0, v - ?1) WHERE k = 'rows'",
+            params![gone as i64],
+        )?;
+        tx.commit()?;
+        Ok(gone)
+    }
+
     /// The vector for one key, if the cache holds it.
     pub fn get(&self, key: &[u8; 32]) -> Option<Vec<f32>> {
         let bytes: Vec<u8> = self
