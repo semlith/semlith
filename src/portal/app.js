@@ -3862,6 +3862,7 @@ function wizardScreen() {
       ["excluded", "Ignored by .gitignore and the rules", "What each repository already asks tools to skip, and what is outside the roots"],
       ["policy", "Build output, lockfiles and oversize files", "Generated, or over the size cap, so searching it only adds noise"],
       ["unindexable", "No text to read", "Binary, empty, or a format with no text layer"],
+      ["crashed", "Crashed a parser", "A reader stopped on it; kept out so it cannot stop semlith again. Try again from Decisions"],
       ["credential", "Credential files", "Keys, tokens and .env files — never offered for indexing"],
     ]
       .map(([cls, label, desc]) => ({ cls, label, desc, count: P.notIndexed[cls] || (cls === "credential" ? P.credential : 0), paths: P.paths[cls] || [] }))
@@ -4898,7 +4899,7 @@ async function stopRun(r) {
 
 
 function classWord(cls) {
-  return { content: "Secret-shaped value", policy: "Policy", credential: "Credential file", unindexable: "No text", excluded: "Excluded", dummy: "Test dummy" }[cls] || cls || "";
+  return { content: "Secret-shaped value", policy: "Policy", credential: "Credential file", unindexable: "No text", crashed: "Parser crashed", excluded: "Excluded", dummy: "Test dummy" }[cls] || cls || "";
 }
 
 function maskedOf(match) {
@@ -6157,7 +6158,7 @@ function detailOf(s) {
   return (data.detail?.stores || []).find((x) => x.name === s.name) || s;
 }
 
-const OUTCOME_TONE = { accepted: "blue", "never indexed": "red", "redacted · indexed": "amber", "read as image": "green", "kept out": "grey", skipped: "grey" };
+const OUTCOME_TONE = { accepted: "blue", "never indexed": "red", "parser crashed": "red", "redacted · indexed": "amber", "read as image": "green", "kept out": "grey", skipped: "grey" };
 
 /* One bulk decision pattern for the wizard's Review step and a store's Review
  * tab (spec §3.5, W6): while it is applied the selection bar is its progress
@@ -6354,7 +6355,7 @@ function sdReview(s, holder) {
       { key: "outcome", label: "Outcome", sort: (d) => d.outcome, render: (d) => pill(d.outcome, OUTCOME_TONE[d.outcome] || "grey", { dot: false }) },
       { key: "why", label: "Why", cls: "dim c-why", sort: (d) => (d.why || "").toLowerCase(), render: (d) => d.why || "" },
       { key: "by", label: "By", cls: "ms nowrap", sort: (d) => d.by, render: (d) => (d.at && d.by === "you" ? `you · ${ago(d.at)}` : d.by) },
-      { key: "x", label: "", cls: "r", render: (d) => (d.can_undo ? lnk("Undo", () => decide([d.path], "reset")) : null) },
+      { key: "x", label: "", cls: "r", render: (d) => (d.can_undo ? lnk("Undo", () => decide([d.path], "reset")) : d.can_retry ? lnk("Try again", () => decide([d.path], "in")) : null) },
     ],
     actions: (selIds, clear) => [btn({ class: "btn xs", onclick: () => (decide(selIds, "reset"), clear()) }, "Undo selected")],
   });
@@ -6383,7 +6384,7 @@ function sdReview(s, holder) {
         dropdown({
           label: "Outcome",
           value: sdUi.decOut,
-          options: ["all", "never indexed", "skipped", "read as image", "accepted", "redacted · indexed", "kept out"].map((o) => [o, o === "all" ? "All outcomes" : o]),
+          options: ["all", "never indexed", "parser crashed", "skipped", "read as image", "accepted", "redacted · indexed", "kept out"].map((o) => [o, o === "all" ? "All outcomes" : o]),
           onChange: (v) => ((sdUi.decOut = v), repaint()),
         }),
         seg(
@@ -6407,9 +6408,9 @@ sdReview.asked = {};
 
 /** A refusal row as a Decisions-table row, for a daemon that sends no table. */
 function decisionFromRow(r) {
-  const outcome = r.accepted ? (r.accepted === "redacted" ? "redacted · indexed" : r.accepted === "refused" || r.accepted === "kept" ? "kept out" : "accepted") : r.class === "credential" ? "never indexed" : r.class === "dummy" ? "accepted" : r.class === "unindexable" && /image/.test(r.rule) ? "read as image" : "skipped";
+  const outcome = r.accepted ? (r.accepted === "redacted" ? "redacted · indexed" : r.accepted === "refused" || r.accepted === "kept" ? "kept out" : "accepted") : r.class === "credential" ? "never indexed" : r.class === "crashed" ? "parser crashed" : r.class === "dummy" ? "accepted" : r.class === "unindexable" && /image/.test(r.rule) ? "read as image" : "skipped";
   const mine = !!r.accepted;
-  return { path: r.path, outcome, why: r.rule, by: mine ? "you" : "rules", at: r.last_seen, can_undo: mine };
+  return { path: r.path, outcome, why: r.rule, by: mine ? "you" : "rules", at: r.last_seen, can_undo: mine, can_retry: r.class === "crashed" && !mine };
 }
 
 // ---------------------------------------------------------------- run logs

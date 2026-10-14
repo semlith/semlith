@@ -3729,6 +3729,10 @@ pub mod class {
     pub const EXCLUDED: &str = "excluded";
     /// Indexed: every match was a declared test dummy.
     pub const DUMMY: &str = "dummy";
+    /// (f) a parser crashed, ran out of memory or out of time on it. The rule
+    /// is the reason. Not reviewable — there is nothing in it to review — but
+    /// accepting it tries it once more.
+    pub const CRASHED: &str = "crashed";
 
     /// Whether a person may accept a row of this class.
     pub fn reviewable(class: &str) -> bool {
@@ -3805,7 +3809,7 @@ pub fn refusals(db: &Connection) -> Result<Vec<Refused>> {
                 r.last_seen, a.mode
          FROM refusals r LEFT JOIN acceptances a ON a.path = r.path
          ORDER BY CASE r.class WHEN 'content' THEN 0 WHEN 'policy' THEN 1 WHEN 'credential' THEN 2
-                  WHEN 'dummy' THEN 3 WHEN 'unindexable' THEN 4 ELSE 5 END, r.path",
+                  WHEN 'crashed' THEN 3 WHEN 'dummy' THEN 4 WHEN 'unindexable' THEN 5 ELSE 6 END, r.path",
     )?;
     let rows = stmt.query_map([], |r| {
         let class: String = r.get(1)?;

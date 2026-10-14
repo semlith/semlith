@@ -402,9 +402,10 @@ enum Command {
 
     /// Every file that was not indexed, and why; accept or revoke one.
     ///
-    /// Five classes: a secret-shaped value (reviewable), a credential file
+    /// Six classes: a secret-shaped value (reviewable), a credential file
     /// (never acceptable), a policy limit such as the size cap (reviewable),
-    /// a file no reader can take, and your own ignore rules. A secret row
+    /// a file no reader can take, a file that crashed a parser (accept
+    /// `--as-is` tries it once more), and your own ignore rules. A secret row
     /// carries a 0-100 % estimate that it is real, with the signals behind
     /// it, and never the value.
     Refused {
@@ -620,6 +621,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// The parse worker: reads files' bytes on stdin for the daemon and the
+    /// CLI, so a parser that aborts takes this process and not theirs. Started
+    /// by semlith and nothing else; not part of the interface.
+    #[command(name = "__parse-worker", hide = true)]
+    ParseWorker,
 
     /// An accelerator lane's worker: embeds batches on stdin for the daemon.
     /// Started by the daemon and nothing else; not part of the interface.
@@ -1122,6 +1129,10 @@ enum KeyCommand {
 /// thread with a stack that is not the platform's default, and the next arm
 /// added does not have to think about it. Unix is unaffected: 8 MiB there
 /// already, and this asks for 16.
+/// The system allocator, counted against a limit inside a parse worker only.
+#[global_allocator]
+static ALLOCATOR: semlith::worker::Counting = semlith::worker::Counting;
+
 fn main() -> Result<()> {
     quiet_on_a_closed_pipe();
     let worker = std::thread::Builder::new()
@@ -1159,6 +1170,12 @@ fn cpu_cap_line(cap: &serde_json::Value) -> String {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Command::ParseWorker) {
+        std::process::exit(semlith::worker::worker_main());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        semlith::worker::enable(exe);
+    }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     match cli.command {
@@ -1257,6 +1274,14 @@ fn run() -> Result<()> {
                         "stale": stale,
                     },
                     "proof": proof,
+                    "parse_worker": semlith::doctor::crashed_files(&stores)
+                        .into_iter()
+                        .map(|(store, p)| serde_json::json!({
+                            "store": store,
+                            "path": semlith::plain(&p.path),
+                            "reason": p.reason,
+                        }))
+                        .collect::<Vec<_>>(),
                     "applied": applied
                         .iter()
                         .map(|r| match r {
@@ -1281,6 +1306,12 @@ fn run() -> Result<()> {
                     ),
                     (None, None) => {}
                 }
+                let (parsers_ok, parsers) = semlith::doctor::parse_worker_line(&stores);
+                println!(
+                    "  {:<4} {:<20} {parsers}",
+                    if parsers_ok { "ok  " } else { "WARN" },
+                    "parse worker"
+                );
                 if cloud.is_empty() {
                     println!(
                         "  {:<4} {:<20} not signed in; semlith makes no cloud connection",
@@ -1430,6 +1461,8 @@ fn run() -> Result<()> {
                 semlith::accel::SWITCH_NAMES
             ),
         },
+
+        Command::ParseWorker => unreachable!("answered before the match"),
 
         Command::EmbedWorker { lane, dir, adapter } => {
             std::process::exit(semlith::accel::worker_main(

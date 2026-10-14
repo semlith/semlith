@@ -98,6 +98,40 @@ impl std::fmt::Display for Applied {
     }
 }
 
+/// Every file a parser crashed on, in every store the caller has open, with
+/// the store it is refused in.
+pub fn crashed_files(stores: &[(String, PathBuf)]) -> Vec<(String, crate::worker::Poisoned)> {
+    stores
+        .iter()
+        .flat_map(|(name, dir)| {
+            crate::worker::refused_files(dir)
+                .into_iter()
+                .map(move |p| (name.clone(), p))
+        })
+        .collect()
+}
+
+/// The parse worker's line: where files are parsed, and what crashed one.
+pub fn parse_worker_line(stores: &[(String, PathBuf)]) -> (bool, String) {
+    let crashed = crashed_files(stores);
+    match crashed.first() {
+        None => (
+            true,
+            "files are parsed in a worker process; none has crashed a parser".to_string(),
+        ),
+        Some((store, first)) => (
+            false,
+            format!(
+                "{} file(s) crashed a parser and are refused, e.g. {} in {store} ({}); \
+                 `semlith refused accept <path> --as-is` tries one again",
+                crashed.len(),
+                crate::plain(&first.path),
+                first.reason
+            ),
+        ),
+    }
+}
+
 /// The mode bits that must be clear on anything semlith wrote.
 const OWNER_ONLY: u32 = 0o077;
 

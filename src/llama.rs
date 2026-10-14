@@ -518,6 +518,15 @@ fn watchdog(server: libc::pid_t) -> Option<libc::pid_t> {
 /// the worker exits, however it exits.
 #[cfg(windows)]
 fn kill_on_close(child: &std::process::Child) {
+    job(child, 0);
+}
+
+/// Put `child` in an anonymous job that kills it when this process's handle
+/// closes and, when `memory_limit` is not zero, caps the memory it may commit
+/// at that many bytes. A child that asks for more fails the allocation, which
+/// is how the parse worker's limit reaches the C half of a parser too.
+#[cfg(windows)]
+pub(crate) fn job(child: &std::process::Child, memory_limit: usize) {
     use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
 
@@ -549,6 +558,7 @@ fn kill_on_close(child: &std::process::Child) {
     const _: () = assert!(size_of::<Extended>() == 144);
     const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
     const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    const JOB_OBJECT_LIMIT_PROCESS_MEMORY: u32 = 0x0100;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -562,11 +572,17 @@ fn kill_on_close(child: &std::process::Child) {
         fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
     }
 
+    let memory = if memory_limit == 0 {
+        0
+    } else {
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY
+    };
     let info = Extended {
         basic: Basic {
-            limit_flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            limit_flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | memory,
             ..Default::default()
         },
+        process_memory_limit: memory_limit,
         ..Default::default()
     };
     // SAFETY: an anonymous job with default security; the limit structure is

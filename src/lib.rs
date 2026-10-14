@@ -78,6 +78,7 @@ pub mod trt;
 pub mod upgrade;
 pub mod usage;
 pub mod watch;
+pub mod worker;
 
 use anyhow::{Result, bail};
 use embed::Model;
@@ -1004,7 +1005,7 @@ impl FileOutcome {
 /// is indistinguishable from a run that lost them. Every branch that produces
 /// [`FileOutcome::Skipped`] names one of these, and `tests/index_failure.rs`
 /// fails if a `file` event ever carries `skipped` without a `why`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum SkipReason {
     /// Zero bytes. A generated `.component.scss` or a package's `__init__.py`.
     Empty,
@@ -2514,9 +2515,29 @@ impl Semlith {
                 }
                 continue;
             }
-            let text = match chunk::extract(&path, &bytes) {
-                Ok(text) => text,
-                Err(_) => {
+            // Read in the parse worker, as the run will: a file that crashes
+            // a parser here is a crashed row in the plan, not a dead scan.
+            let read = match worker::read(&path, &bytes, true) {
+                Ok(read) => read,
+                Err(worker::Stop::Crashed(_)) => {
+                    not(&mut plan, store::class::CRASHED, &path);
+                    continue;
+                }
+                Err(worker::Stop::Unavailable(_)) => {
+                    not(&mut plan, store::class::UNINDEXABLE, &path);
+                    continue;
+                }
+            };
+            let (text, symbols) = match read.text {
+                Ok(Ok((text, _))) => (
+                    text,
+                    read.graph
+                        .and_then(|g| g.ok())
+                        .flatten()
+                        .map(|e| e.symbols)
+                        .unwrap_or_default(),
+                ),
+                _ => {
                     not(&mut plan, store::class::UNINDEXABLE, &path);
                     continue;
                 }
@@ -2524,7 +2545,7 @@ impl Semlith {
             // Counted as the run will chunk it, symbols and all, so the run's
             // expected total starts where it will end.
             let count = |plan: &mut Plan, key: &str| {
-                let n = planned_chunks(&path, &text);
+                let n = planned_chunks(&path, &text, &symbols);
                 plan.chunks += n;
                 plan.counts.insert(key.to_string(), n);
             };
@@ -2559,7 +2580,7 @@ impl Semlith {
                     // the total, nor in the run's per-file counts, where a file
                     // kept out would hold the expected total up until the run
                     // reached it. An accepted one is estimated by its size.
-                    let n = planned_chunks(&path, &text);
+                    let n = planned_chunks(&path, &text, &symbols);
                     let live: Vec<keyscan::Match> =
                         found.into_iter().filter(|m| m.dummy.is_none()).collect();
                     let confidence = live.iter().map(|m| m.confidence).max();
@@ -2638,6 +2659,28 @@ impl Semlith {
             .as_ref()
             .map_or_else(unrecorded, |r| r.class.as_str())
             .to_string();
+        // A file a parser crashed on is accepted by trying it once more: the
+        // journal forgets it and the next pass reads it in a fresh worker. A
+        // second crash refuses it again. No acceptance is kept, because there
+        // is nothing to accept but the retry.
+        if class == store::class::CRASHED {
+            if mode != "as-is" {
+                anyhow::bail!("{key} crashed a parser; it can only be tried again (as-is)");
+            }
+            self.writing(|me| {
+                worker::clear(&me.dir, &key)?;
+                store::unrefuse(&me.db, &key)
+            })?;
+            return Ok(store::Acceptance {
+                path: key,
+                class,
+                mode: mode.to_string(),
+                fingerprints: Vec::new(),
+                confidence: None,
+                at: now(),
+                source: source.to_string(),
+            });
+        }
         if !(store::class::reviewable(&class) || class == store::class::DUMMY) {
             anyhow::bail!(
                 "{key} is not indexable ({}); accepting cannot change that",
@@ -2658,8 +2701,14 @@ impl Semlith {
                 let bytes = anyhow::Context::with_context(std::fs::read(&key), || {
                     format!("reading {key}")
                 })?;
-                let text = chunk::extract(Path::new(&key), &bytes)
-                    .map_err(|why| anyhow::anyhow!("{key}: {}", why.as_str()))?;
+                let text = match worker::read(Path::new(&key), &bytes, false)
+                    .map_err(|stop| anyhow::anyhow!("{key}: {}", stop.reason()))?
+                    .text
+                {
+                    Ok(Ok((text, _))) => text,
+                    Ok(Err(why)) => anyhow::bail!("{key}: {}", why.as_str()),
+                    Err(panic) => anyhow::bail!("{key}: {panic}"),
+                };
                 let found = keyscan::scan(&key, &text);
                 for m in found.iter().filter(|m| m.dummy.is_none()) {
                     prints.push(keyscan::fingerprint(&salt, &text, m));
@@ -3238,6 +3287,7 @@ impl Semlith {
             variants: accel::cache_variants(),
             lookups: Default::default(),
             hits: Default::default(),
+            journal: Some(worker::Journal::open(&self.dir)?),
         };
         let mut cached = CacheWrites::default();
         let mut clock = pipeline::WriterClock::start(walk_ms);
@@ -3821,6 +3871,39 @@ impl Semlith {
                     // failure. Before 0.28.0 the panic unwound the store's
                     // writer thread, the store stopped being kept current, and
                     // `/api/stores` went on saying it was watched.
+                    // A file that crashed a parser, now or on an earlier pass:
+                    // refused with the reason and kept out of the store until
+                    // its content changes or a person asks for one more try.
+                    // A version the store held before goes, because what the
+                    // store holds must be what the file says.
+                    pipeline::Prepared::Crashed { reason, file_bytes } => {
+                        report.bytes += file_bytes;
+                        self.tx_begin()?;
+                        if store::file_hash(&self.db, &key)?.is_some() {
+                            self.evict(&key)?;
+                        }
+                        store::refuse(
+                            &self.db,
+                            &key,
+                            store::class::CRASHED,
+                            &reason,
+                            &[],
+                            1,
+                            now(),
+                        )?;
+                        report
+                            .refused
+                            .push((path.display().to_string(), reason.clone()));
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &path,
+                            FileOutcome::Skipped,
+                            Some(reason),
+                        );
+                        continue;
+                    }
                     pipeline::Prepared::Failed { error, file_bytes } => {
                         report.bytes += file_bytes;
                         failed(&mut report, &path, &error);
@@ -3963,13 +4046,21 @@ impl Semlith {
                     (Some(redacted), _) => pipeline::take_ready(
                         &path,
                         &redacted,
+                        None,
                         &ctx,
                         None,
                         std::time::Instant::now(),
                     ),
                     (None, Some(ready)) => ready,
                     (None, None) => {
-                        pipeline::take_ready(&path, &text, &ctx, None, std::time::Instant::now())
+                        pipeline::take_ready(
+                            &path,
+                            &text,
+                            None,
+                            &ctx,
+                            None,
+                            std::time::Instant::now(),
+                        )
                     }
                 };
                 drop(text);
@@ -7075,14 +7166,8 @@ fn bytes_of(paths: &[PathBuf]) -> u64 {
 /// The chunks a file's text makes, cut where the run will cut it: at the
 /// symbols the parser finds, as `pipeline::take_ready` does. Without them a
 /// JSON or code file counted a fraction of what it wrote.
-fn planned_chunks(path: &Path, text: &str) -> u64 {
-    let symbols = contained(|| graph::extract(path, text))
-        .ok()
-        .and_then(|r| r.ok())
-        .flatten()
-        .map(|e| e.symbols)
-        .unwrap_or_default();
-    chunk::chunk_file(path, text, &symbols).len() as u64
+fn planned_chunks(path: &Path, text: &str, symbols: &[graph::Symbol]) -> u64 {
+    chunk::chunk_file(path, text, symbols).len() as u64
 }
 
 /// The chunks and images a list of files is expected to hold. See

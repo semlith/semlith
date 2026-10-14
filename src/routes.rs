@@ -5087,6 +5087,7 @@ fn decisions(state: &Arc<State>, request: &Request) -> Response {
                     (Some("redacted"), _) => ("redacted · indexed", "you"),
                     (Some(_), _) => ("accepted", "you"),
                     (None, crate::store::class::DUMMY) => ("accepted", "rules"),
+                    (None, crate::store::class::CRASHED) => ("parser crashed", "rules"),
                     (None, crate::store::class::CREDENTIAL | crate::store::class::CONTENT) => {
                         ("never indexed", "rules")
                     }
@@ -5099,6 +5100,7 @@ fn decisions(state: &Arc<State>, request: &Request) -> Response {
                     "by": by,
                     "at": row.last_seen,
                     "can_undo": by == "you",
+                    "can_retry": row.class == crate::store::class::CRASHED,
                     "class": row.class,
                 }));
             }

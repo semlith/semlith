@@ -77,7 +77,7 @@ pub fn confidence_rank(confidence: &str) -> usize {
 }
 
 /// A symbol found in a file, before it has an id.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Symbol {
     pub kind: String,
     pub name: String,
@@ -90,7 +90,7 @@ pub struct Symbol {
 ///
 /// `from` is the name of the symbol the reference sits inside — the file's
 /// module symbol when it sits at the top level.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Edge {
     pub from: String,
     pub to: String,
@@ -118,7 +118,7 @@ pub struct Edge {
 }
 
 /// What one file yielded.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Extraction {
     pub symbols: Vec<Symbol>,
     pub edges: Vec<Edge>,
@@ -712,6 +712,49 @@ struct Ref {
     hint: Option<String>,
 }
 
+/// The deepest nesting a block grammar is given. tree-sitter-md and
+/// tree-sitter-yaml keep a stack of open blocks that their external scanner
+/// serialises into tree-sitter's 1024-byte buffer, and past about 260 levels
+/// the C `assert` in `ts_parser__external_scanner_serialize` aborts the
+/// process — measured 2026-10-14 for nested blockquotes, nested lists, nested
+/// block sequences and `- - -` sequences alike. Half that is deeper than any
+/// real document nests; a file past it keeps its text and loses only its graph.
+pub const MAX_BLOCK_NESTING: usize = 128;
+
+/// Whether a file in a block grammar nests past [`MAX_BLOCK_NESTING`], counted
+/// line by line: each `>` and list marker opens a level, and so does every two
+/// columns of indentation in front of them.
+pub fn too_nested(lang: &str, text: &str) -> bool {
+    if !matches!(lang, "markdown" | "yaml") {
+        return false;
+    }
+    // Debug builds only: lets a test hand the real crashing shapes to the
+    // parse worker and watch it, not this cap, keep the process up.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("SEMLITH_NO_NESTING_CAP").is_some() {
+        return false;
+    }
+    text.lines().any(|line| {
+        let (mut depth, mut columns) = (0usize, 0usize);
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                ' ' => columns += 1,
+                '\t' => columns += 2,
+                '>' => depth += 1,
+                '-' | '*' | '+' if chars.peek().is_none_or(|n| *n == ' ' || *n == '\t') => {
+                    depth += 1
+                }
+                _ => break,
+            }
+            if depth + columns / 2 > MAX_BLOCK_NESTING {
+                return true;
+            }
+        }
+        false
+    })
+}
+
 /// Symbols and edges for one file.
 ///
 /// `None` when the extension carries no grammar. A file that fails to parse is
@@ -721,6 +764,9 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
     let Some(lang) = language_of(path) else {
         return Ok(None);
     };
+    if too_nested(lang, text) {
+        return Ok(None);
+    }
     let Some((language, tags)) = grammar(lang) else {
         return Ok(None);
     };
@@ -3597,6 +3643,29 @@ pub fn communities(edges: &[(String, String)]) -> Vec<Community> {
         .collect();
     out.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.label.cmp(&b.label)));
     out
+}
+
+#[cfg(test)]
+mod nesting_tests {
+    use super::*;
+
+    #[test]
+    fn the_four_crashing_shapes_are_too_nested_and_real_files_are_not() {
+        let d = 260;
+        let quotes = "> ".repeat(d) + "x\n";
+        let list: String = (0..d).map(|i| "  ".repeat(i) + "- a\n").collect();
+        let seq: String = (0..d).map(|i| "  ".repeat(i) + "-\n").collect();
+        let flat = "- ".repeat(d) + "x\n";
+        assert!(too_nested("markdown", &quotes));
+        assert!(too_nested("markdown", &list));
+        assert!(too_nested("yaml", &seq));
+        assert!(too_nested("yaml", &flat));
+        // The same shapes at a depth people write are left to the grammar.
+        let list: String = (0..40).map(|i| "  ".repeat(i) + "- a\n").collect();
+        assert!(!too_nested("markdown", &list));
+        assert!(!too_nested("markdown", "> a quote\n>> a reply\n- item\n  - sub\n"));
+        assert!(!too_nested("rust", &quotes), "only the block grammars are capped");
+    }
 }
 
 #[cfg(test)]
