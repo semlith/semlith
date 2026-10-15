@@ -1,0 +1,6 @@
+key: value
+list:
+  - a
+  - b
+nested:
+  k: v

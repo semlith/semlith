@@ -1290,6 +1290,35 @@ fn same(a: &str, b: &str) -> bool {
 /// connection is not idle. A connection that sent nothing before any of those is closed with no
 /// answer: it is a browser's spare, and bytes sent before a request are bytes
 /// the browser reads as the answer to the request it later puts there.
+/// The head parser over `bytes`, as a peer that sent them and closed: the
+/// fuzz target's way in (`fuzz/fuzz_targets/http_head.rs`). Through a real
+/// loopback connection, because [`read_head`] sets its deadlines on the
+/// socket; one listener for the whole run.
+#[doc(hidden)]
+pub fn fuzz_head(bytes: &[u8]) {
+    use std::io::Write;
+    static LISTENER: std::sync::OnceLock<std::net::TcpListener> = std::sync::OnceLock::new();
+    let listener = LISTENER
+        .get_or_init(|| std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port"));
+    let Ok(mut peer) = TcpStream::connect(listener.local_addr().expect("a bound port")) else {
+        return;
+    };
+    let _ = peer.write_all(bytes);
+    let _ = peer.shutdown(std::net::Shutdown::Write);
+    let Ok((accepted, _)) = listener.accept() else {
+        return;
+    };
+    let state = HeadState {
+        heard: AtomicBool::new(false),
+        evicted: AtomicBool::new(false),
+    };
+    let _ = read_head(
+        &mut BufReader::new(accepted),
+        std::time::Instant::now(),
+        &state,
+    );
+}
+
 fn read_head(
     reader: &mut BufReader<TcpStream>,
     accepted: std::time::Instant,

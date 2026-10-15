@@ -80,6 +80,16 @@ pub mod usage;
 pub mod watch;
 pub mod worker;
 
+/// Entry points for the fuzz targets in `fuzz/`, for parsers whose own
+/// signatures need more than bytes. Not an API.
+#[doc(hidden)]
+pub mod fuzzing {
+    /// See [`crate::http::fuzz_head`].
+    pub fn http_head(bytes: &[u8]) {
+        crate::http::fuzz_head(bytes)
+    }
+}
+
 use anyhow::{Result, bail};
 use embed::Model;
 use fastembed::TextEmbedding;
