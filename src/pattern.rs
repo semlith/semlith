@@ -31,6 +31,17 @@ pub const MAX_MATCHES: usize = 200;
 /// is on syntax trees built rather than on bytes read.
 pub const MAX_FILES: usize = 2000;
 
+/// How long one pattern or grep call may run before it stops and says it was
+/// cut short, as it does at [`MAX_MATCHES`] (audit S18). A query that has to
+/// walk a planted file node by node, or a grep over a store of very long
+/// lines, otherwise held its caller — an agent's MCP call, a portal request —
+/// for as long as it took.
+pub const TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How many in-progress matches tree-sitter keeps for one query at once; past
+/// it the oldest are dropped. Bounds the memory a pathological pattern costs.
+const IN_PROGRESS: u32 = 1024;
+
 /// One captured node.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Match {
@@ -105,8 +116,9 @@ pub fn run(
     let mut parsed = 0usize;
     let mut truncated = false;
     let mut skipped = 0usize;
+    let deadline = std::time::Instant::now() + TIME_BUDGET;
     for file in files.iter().take(MAX_FILES) {
-        if out.len() >= MAX_MATCHES {
+        if out.len() >= MAX_MATCHES || std::time::Instant::now() >= deadline {
             truncated = true;
             break;
         }
@@ -118,7 +130,17 @@ pub fn run(
         if crate::graph::too_nested(&language, &text) {
             continue;
         }
-        let Some(tree) = parser.parse(&text, None) else {
+        let mut expired = |_: &tree_sitter::ParseState| {
+            if std::time::Instant::now() >= deadline {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        };
+        let options = tree_sitter::ParseOptions::default().progress_callback(&mut expired);
+        let Some(tree) =
+            parser.parse_with_options(&mut |at, _| &text.as_bytes()[at..], None, Some(options))
+        else {
             // tree-sitter returns a tree for anything it can hold; `None` is a
             // parser that was cancelled or given a language it cannot use, and
             // neither is this file's fault.
@@ -127,7 +149,17 @@ pub fn run(
         parsed += 1;
 
         let mut cursor = QueryCursor::new();
-        let mut hits = cursor.matches(&query, tree.root_node(), text.as_bytes());
+        cursor.set_match_limit(IN_PROGRESS);
+        let mut stop = |_: &tree_sitter::QueryCursorState| {
+            if std::time::Instant::now() >= deadline {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        };
+        let options = tree_sitter::QueryCursorOptions::new().progress_callback(&mut stop);
+        let mut hits =
+            cursor.matches_with_options(&query, tree.root_node(), text.as_bytes(), options);
         while let Some(m) = hits.next() {
             for capture in m.captures() {
                 if out.len() >= MAX_MATCHES {
@@ -179,7 +211,7 @@ pub fn run(
 /// to find. A query that is not a valid regular expression is taken as
 /// literal text, because `Row {` is what someone typing a literal means.
 ///
-/// `files` counts files searched and `truncated` means [`MAX_MATCHES`] cut the
+/// `files` counts files searched and `truncated` means [`MAX_MATCHES`] or [`TIME_BUDGET`] cut the
 /// listing, as for a pattern; `offset` pages through it the same way.
 pub fn grep(
     db: &rusqlite::Connection,
@@ -195,13 +227,22 @@ pub fn grep(
     let mut searched = 0usize;
     let mut truncated = false;
     let mut skipped = 0usize;
+    let deadline = std::time::Instant::now() + TIME_BUDGET;
     'files: for file in &files {
+        if std::time::Instant::now() >= deadline {
+            truncated = true;
+            break;
+        }
         let Some(text) = file_text(db, &file.path)? else {
             continue;
         };
         searched += 1;
         let mut symbols = None;
         for (i, line) in text.lines().enumerate() {
+            if i % 4096 == 0 && std::time::Instant::now() >= deadline {
+                truncated = true;
+                break 'files;
+            }
             if !regex.is_match(line) {
                 continue;
             }
