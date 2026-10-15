@@ -355,8 +355,8 @@ Stores page report a store other users can read.
 The session token is in `daemon.json` and nowhere else on disk. A store kept
 outside the store home, such as a `.semlith` beside its corpus in a synced
 folder, has its `daemon.json` under `~/.semlith/run/` instead of beside it, and
-one an older daemon left there is removed. A daemon running as a service prints
-its portal URL without the token, because its output is a log file; `semlith
+one an older daemon left there is removed. A daemon running as the login service
+prints its portal URL without the token, because its output is a log; `semlith
 start` prints the whole URL of a running daemon.
 
 **The ledger chain is keyed.** Each store's retrieval ledger is hash-chained,

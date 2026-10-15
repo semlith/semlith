@@ -4543,12 +4543,14 @@ pub fn run(
 
     // stdout, not stderr: the token is in this URL, and stderr is the log the
     // operational criterion says never carries it. One line, once, so a
-    // terminal's scrollback holds exactly one copy. Under a service stdout is
-    // the log too — launchd appends it to `daemon.log`, systemd hands it to
-    // the journal — and before 0.41.0 every restart left a working token in a
-    // file other accounts could read (audit S14). There the URL goes without
-    // its token, and `semlith start` prints the whole one for a running daemon.
-    if stdout_is_a_log() {
+    // terminal's scrollback holds exactly one copy. Under the login service
+    // stdout is a log too — launchd appends it to `daemon.log`, systemd hands
+    // it to the journal — and before 0.41.0 every restart left a working
+    // token in a file other accounts could read (audit S14). There the URL
+    // goes without its token, and `semlith start` prints the whole one for a
+    // running daemon. A person or a script that sends stdout to a file of its
+    // own chose to keep the token there, and gets it.
+    if crate::service::running_as_service() {
         scrub_service_log();
         println!(
             "http://127.0.0.1:{}/ (token: run `semlith start` to print the portal URL)",
@@ -5801,23 +5803,6 @@ impl crate::mcp::Writer for Writer {
 }
 
 /// The URL the daemon prints, and the only place the token is shown.
-/// Whether stdout is a file or a socket — a service's log or journal — rather
-/// than a terminal or a pipe somebody is reading.
-fn stdout_is_a_log() -> bool {
-    #[cfg(unix)]
-    {
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: fstat on the process's own stdout into a zeroed struct.
-        if unsafe { libc::fstat(libc::STDOUT_FILENO, &mut stat) } != 0 {
-            return false;
-        }
-        let kind = stat.st_mode & libc::S_IFMT;
-        kind == libc::S_IFREG || kind == libc::S_IFSOCK
-    }
-    #[cfg(not(unix))]
-    false
-}
-
 /// Strip the session tokens a daemon before 0.41.0 left in the service log,
 /// and narrow the log to the owner. Best effort: a log it cannot rewrite is
 /// not a reason not to start.

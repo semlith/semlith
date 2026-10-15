@@ -741,7 +741,7 @@ verifying.
 | MCP | `semlith_search` takes `local: true`, the same. |
 | **Break: developer overrides** | `SEMLITH_ADD_ORIGIN`, `SEMLITH_PACK_*` and `SEMLITH_SERVICE_DIR` do nothing in a release build; build with `--features dev-overrides` to try a pack. `SEMLITH_ADD_ALLOW_PRIVATE` is unchanged. |
 | What `semlith add` refuses | A URL carrying credentials (`https://user:pass@…`), and NAT64, 6to4, IPv4-compatible and Teredo addresses carrying a private one. |
-| The service's output | A daemon whose stdout is a file prints its portal URL without the token. |
+| The service's output | A daemon the login service starts (`SEMLITH_SERVICE=1`, now set by the plist and the systemd unit) prints its portal URL without the token. |
 | Tool-written state | A store outside the store home keeps its `daemon.json` under `~/.semlith/run/<hash>.json`; 0.41.0 reads the old place too, for one release. A store gains `ledger.key` (`0600`) when it records its first retrieval, and a store outside the store home an `.integrity-checked` marker. |
 | Ledger | A row's `hash` written by 0.41.0 starts `k1:` and is keyed with `ledger.key`; earlier rows keep their formula and verify. A keyed row with no `ledger.key` beside the database is where `semlith ledger --verify` reports the break. |
 | File modes | Every file semlith creates is `0600` and every directory `0700`. |

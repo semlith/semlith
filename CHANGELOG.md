@@ -31,7 +31,7 @@ the way indexing has since 0.40.0, and cap the read.
 
 **The session token is never in a log file (S14).** Under launchd, every
 service start appended the portal URL with its token to `daemon.log`, which
-was world-readable. A daemon whose output is a file prints the URL without the
+was world-readable. A daemon the login service starts prints the URL without the
 token, an existing log is scrubbed of old ones on the next start, and the log
 is created `0600`. `semlith start` prints the whole URL of a running daemon.
 

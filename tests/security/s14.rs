@@ -1,4 +1,4 @@
-//! S14: a daemon whose stdout is a log file writes no session token there,
+//! S14: a daemon the login service runs writes no session token to its log,
 //! and a token an older daemon left in the service log is scrubbed.
 
 #[allow(unused_imports)]
@@ -6,7 +6,7 @@ use super::*;
 
 #[cfg(unix)]
 #[test]
-fn s14_a_daemon_logging_to_a_file_leaves_no_token_in_it() {
+fn s14_a_service_daemon_leaves_no_token_in_its_log() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     let logs = home.join(".semlith").join("logs");
@@ -26,7 +26,10 @@ fn s14_a_daemon_logging_to_a_file_leaves_no_token_in_it() {
     );
 
     let out = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+    // Started as the login service starts it: with the service's marker and
+    // its output appended to the log.
     let mut child = semlith(&home)
+        .env("SEMLITH_SERVICE", "1")
         .args(["start", "--port", "0"])
         .stdout(out)
         .stderr(Stdio::null())

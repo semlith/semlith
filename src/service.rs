@@ -26,6 +26,17 @@ use std::path::{Path, PathBuf};
 /// What this platform calls the service, in its own registry.
 pub const LABEL: &str = "com.semlith.daemon";
 
+/// Set in the environment of a daemon a service definition starts, so the
+/// daemon knows its output is a log rather than a terminal (audit S14).
+pub const SERVICE_ENV: &str = "SEMLITH_SERVICE";
+
+/// Whether this process was started by the login service: the marker above,
+/// or, for a launchd plist written before 0.41.0, launchd's own job label.
+pub fn running_as_service() -> bool {
+    std::env::var_os(SERVICE_ENV).is_some_and(|v| v == "1")
+        || std::env::var_os("XPC_SERVICE_NAME").is_some_and(|v| v == LABEL)
+}
+
 /// Whether the login service is installed, and where to look when it misbehaves.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Status {
@@ -231,6 +242,8 @@ mod platform {
              <key>RunAtLoad</key>\n  <true/>\n\
              <key>KeepAlive</key>\n  <true/>\n\
              <key>ProcessType</key>\n  <string>{process_type}</string>\n\
+             <key>EnvironmentVariables</key>\n  <dict>\n    \
+             <key>{SERVICE_ENV}</key>\n    <string>1</string>\n  </dict>\n\
              <key>StandardOutPath</key>\n  <string>{log}</string>\n\
              <key>StandardErrorPath</key>\n  <string>{log}</string>\n\
              </dict>\n\
@@ -361,6 +374,7 @@ mod platform {
              Type=simple\n\
              ExecStart={exe} start{port}\n\
              Restart=always\n\
+             Environment={SERVICE_ENV}=1\n\
              RestartSec=2\n\
              Nice=5\n\
              CPUWeight=50\n\
