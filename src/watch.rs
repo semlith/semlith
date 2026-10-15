@@ -278,7 +278,7 @@ pub fn run_held(
             waiting_events.retain(|path| {
                 !path.exists() || !stopped.iter().any(|root| path.starts_with(root))
             });
-            let paths = admissible(&roots, waiting_events, store.gitignore);
+            let paths = admissible(&roots, waiting_events, store.gitignore, |p| store.holds(p));
             if !paths.is_empty() && !(held.defer)(&paths) {
                 let started = Instant::now();
                 let report =
@@ -326,7 +326,7 @@ pub fn run_held(
         collect(&mut batch, first.paths);
         drain(&rx, &mut batch, debounce, &mut progress);
 
-        let paths = admissible(&roots, batch, store.gitignore);
+        let paths = admissible(&roots, batch, store.gitignore, |p| store.holds(p));
         if paths.is_empty() || (held.defer)(&paths) {
             continue;
         }
@@ -402,14 +402,25 @@ fn collect(batch: &mut BTreeSet<PathBuf>, paths: Vec<PathBuf>) {
 }
 
 /// Which of a batch's paths the indexer should be given: the ones the walk
-/// would yield, plus the ones that have gone from disk — a deletion has no
-/// walk entry, and is the other half of keeping a store current.
+/// would yield, plus the ones that have gone from disk that the store `holds`
+/// — a deletion has no walk entry, and is the other half of keeping a store
+/// current. A deletion of something the store never held is nothing to do:
+/// before 0.41.0 every one went to the indexer unfiltered, so the temp files
+/// npm, cargo and git create and delete under `node_modules`, `target` and
+/// `.git` were "indexed", recorded as refusals and, when one came back between
+/// this check and the read, read.
 ///
 /// ponytail: the walk runs once per batch rather than per path, and only when
 /// events fired. If it ever shows up in a profile, the upgrade is a
 /// `ignore::gitignore` matcher built once at startup — at the cost of two
 /// definitions of "which files count" that have to agree.
-fn admissible(roots: &[PathBuf], batch: BTreeSet<PathBuf>, gitignore: bool) -> Vec<PathBuf> {
+fn admissible(
+    roots: &[PathBuf],
+    mut batch: BTreeSet<PathBuf>,
+    gitignore: bool,
+    holds: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
+    batch.retain(|p| p.exists() || holds(p));
     let gone: Vec<PathBuf> = batch.iter().filter(|p| !p.exists()).cloned().collect();
     if batch.len() == gone.len() {
         return gone;
@@ -482,12 +493,28 @@ mod tests {
     #[test]
     fn a_batch_of_deletions_needs_no_walk() {
         let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("never-existed.md");
+        let missing = dir.path().join("gone.md");
         let batch: BTreeSet<PathBuf> = [missing.clone()].into_iter().collect();
 
         assert_eq!(
-            admissible(&[dir.path().to_path_buf()], batch, true),
+            admissible(&[dir.path().to_path_buf()], batch, true, |_| true),
             vec![missing]
+        );
+    }
+
+    /// A deletion the store never held is dropped: npm, cargo and git create
+    /// and delete temp files by the thousand under trees the walk never
+    /// enters, and each one used to reach the indexer as a refusal.
+    #[test]
+    fn a_deletion_the_store_never_held_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = dir.path().join("held.md");
+        let temp = dir.path().join("node_modules").join(".vite").join("dep.js");
+        let batch: BTreeSet<PathBuf> = [held.clone(), temp].into_iter().collect();
+
+        assert_eq!(
+            admissible(&[dir.path().to_path_buf()], batch, true, |p| p == held),
+            vec![held]
         );
     }
 
@@ -505,7 +532,7 @@ mod tests {
         let batch: BTreeSet<PathBuf> = [canonical(&index), canonical(&dir.path().join("real.md"))]
             .into_iter()
             .collect();
-        let admitted = admissible(&[dir.path().to_path_buf()], batch, true);
+        let admitted = admissible(&[dir.path().to_path_buf()], batch, true, |_| true);
 
         assert_eq!(admitted, vec![canonical(&dir.path().join("real.md"))]);
     }

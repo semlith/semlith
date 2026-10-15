@@ -1,0 +1,6 @@
+import os
+
+class A:
+    """Doc."""
+    def f(self, x):
+        return os.path.join(x)

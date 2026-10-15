@@ -41,6 +41,34 @@ use std::time::{Duration, Instant, SystemTime};
 /// "who is writing *this* store", which is exactly what the lock file is about.
 pub const DISCOVERY_FILE: &str = "daemon.json";
 
+/// Where a store's discovery file lives: beside the store when the store is
+/// under the semlith home, and under the home's `run/` otherwise (audit S24).
+/// The file holds the session token, and a `.semlith` beside a corpus can sit
+/// in a synced or shared folder that carried it off the machine.
+pub fn discovery_path(store_dir: &Path) -> PathBuf {
+    let Ok(home) = home::home_or_error() else {
+        return store_dir.join(DISCOVERY_FILE);
+    };
+    let canonical = crate::canonical(store_dir);
+    if canonical.starts_with(crate::canonical(&home)) {
+        return store_dir.join(DISCOVERY_FILE);
+    }
+    let key = blake3::hash(canonical.to_string_lossy().as_bytes()).to_hex();
+    home.join("run").join(format!("{}.json", &key[..32]))
+}
+
+/// Every place a discovery file for this store may be: where this release
+/// writes it, then where a daemon before 0.41.0 wrote it.
+// ponytail: the second place is read for one release; drop it in 0.42.0.
+pub fn discovery_paths(store_dir: &Path) -> Vec<PathBuf> {
+    let mut out = vec![discovery_path(store_dir)];
+    let legacy = store_dir.join(DISCOVERY_FILE);
+    if !out.contains(&legacy) {
+        out.push(legacy);
+    }
+    out
+}
+
 /// How many watcher events the Stores view can show. A ring, not a log: this
 /// is the "is it actually running" signal, and the last twenty answer it.
 const EVENT_HISTORY: usize = 20;
@@ -133,7 +161,14 @@ impl Discovery {
         if !home::Registry::load().ok()?.trusts(store_dir) {
             return None;
         }
-        let path = store_dir.join(DISCOVERY_FILE);
+        discovery_paths(store_dir)
+            .into_iter()
+            .filter(|p| p.exists())
+            .find_map(|p| Self::read_at(&p))
+    }
+
+    fn read_at(path: &Path) -> Option<Self> {
+        let path = path.to_path_buf();
         if worth_warning_about(&path) {
             eprintln!(
                 "semlith: ignoring {} — it is not a file this user wrote privately",
@@ -156,7 +191,16 @@ impl Discovery {
     }
 
     fn write(&self, store_dir: &Path) -> Result<()> {
-        let path = store_dir.join(DISCOVERY_FILE);
+        let path = discovery_path(store_dir);
+        // A file an older daemon left beside a store outside the home goes,
+        // token and all, the first time this one opens it.
+        let legacy = store_dir.join(DISCOVERY_FILE);
+        if legacy != path {
+            let _ = std::fs::remove_file(&legacy);
+        }
+        if let Some(dir) = path.parent() {
+            home::secure_dir(dir)?;
+        }
         // The mode is set as the file is created rather than afterwards. The
         // session token is in this file, and a file that is world-readable for
         // the microsecond between the two is a file that was world-readable —
@@ -181,7 +225,9 @@ impl Discovery {
     }
 
     fn remove(store_dir: &Path) {
-        let _ = std::fs::remove_file(store_dir.join(DISCOVERY_FILE));
+        for path in discovery_paths(store_dir) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -3949,8 +3995,7 @@ impl State {
         let report = Arc::clone(&self.report);
         let admission = Arc::clone(&self.admission);
         let writer = std::thread::spawn(move || {
-            let _lock = lock;
-            keep_writing(&watching, debounce, &*report, &admission);
+            keep_writing(lock, &watching, debounce, &*report, &admission);
         });
         let mut late = self.late_writers.lock().unwrap_or_else(|e| e.into_inner());
         late.retain(|handle| !handle.is_finished());
@@ -4447,8 +4492,7 @@ pub fn run(
         watchers.push(std::thread::spawn(move || {
             // Moved in so the lock's life is the thread's life, which is what
             // makes "the daemon is the writer" true rather than intended.
-            let _lock = lock;
-            keep_writing(&store, debounce, &*report, &admission);
+            keep_writing(lock, &store, debounce, &*report, &admission);
         }));
     }
 
@@ -4499,8 +4543,22 @@ pub fn run(
 
     // stdout, not stderr: the token is in this URL, and stderr is the log the
     // operational criterion says never carries it. One line, once, so a
-    // terminal's scrollback holds exactly one copy.
-    println!("{}", server.url());
+    // terminal's scrollback holds exactly one copy. Under the login service
+    // stdout is a log too — launchd appends it to `daemon.log`, systemd hands
+    // it to the journal — and before 0.41.0 every restart left a working
+    // token in a file other accounts could read (audit S14). There the URL
+    // goes without its token, and `semlith start` prints the whole one for a
+    // running daemon. A person or a script that sends stdout to a file of its
+    // own chose to keep the token there, and gets it.
+    if crate::service::running_as_service() {
+        scrub_service_log();
+        println!(
+            "http://127.0.0.1:{}/ (token: run `semlith start` to print the portal URL)",
+            server.port()
+        );
+    } else {
+        println!("{}", server.url());
+    }
     report("open the URL on stdout to reach the portal; Ctrl-C stops the daemon");
 
     Ok(state.clone()).and_then(|state| {
@@ -4564,15 +4622,41 @@ pub fn run(
 /// so `watching` goes false and the reason is on the store's feed; before
 /// 0.28.0 a panic skipped both, and `/api/stores` went on reporting a store
 /// nobody was watching as watched.
-fn keep_writing(
+///
+/// The store's lock is held here and dropped before `watching` goes false:
+/// a caller that waits on `watching` to rename or delete the store must find
+/// every handle closed, and on Windows the lock file still open refused both
+/// ("Access is denied"), which is one of the browser drive's flakes.
+fn keep_writing<L>(
+    lock: L,
     store: &Arc<Store>,
     debounce: Duration,
     report: &(dyn Fn(&str) + Send + Sync),
     admission: &Arc<Admission>,
 ) {
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        tend(store, debounce, &store.stop, report, admission)
-    }));
+    let mut retries = 0;
+    let outcome = loop {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tend(store, debounce, &store.stop, report, admission)
+        }));
+        // SQLite's "locking protocol" is a reader and the writer meeting in
+        // the WAL index while one of them recovers it, and the next attempt
+        // succeeds. A run's plan opens a reader beside a brand-new store's
+        // writer, and on Windows that killed the writer for good, leaving
+        // the run queued behind nothing.
+        if let Ok(Err(e)) = &outcome
+            && retries < 3
+            && !store.stop.load(Ordering::Relaxed)
+            && is_lock_protocol(e)
+        {
+            retries += 1;
+            report(&format!("{}: writer restarting after {e:#}", store.name));
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        break outcome;
+    };
+    drop(lock);
     let why = match outcome {
         Ok(Ok(())) => None,
         Ok(Err(e)) => Some(format!("{e:#}")),
@@ -4585,6 +4669,24 @@ fn keep_writing(
                 .unwrap_or_else(|| "no message".to_string())
         )),
     };
+    if let Some(why) = &why {
+        // Nothing will take these now: each waiting job is told why, and a
+        // run's card ends failed with the writer's reason rather than queued.
+        let waiting: Vec<Queued> = store
+            .queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
+        for queued in waiting {
+            let answer = serde_json::json!({
+                "event": "error",
+                "error": format!("the store's writer stopped: {why}"),
+            });
+            store.record(queued.run, &answer);
+            let _ = queued.report.send(answer);
+        }
+    }
     store.watching.store(false, Ordering::Relaxed);
     if let Some(why) = why {
         report(&format!("{}: watcher stopped: {why}", store.name));
@@ -4595,6 +4697,16 @@ fn keep_writing(
             .unwrap_or_else(|e| e.into_inner()) = Some(why);
     }
     changes::bump(changes::Domain::Stores);
+}
+
+/// Whether an error is SQLite's transient "locking protocol" (code 15).
+fn is_lock_protocol(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            == Some(rusqlite::ErrorCode::FileLockingProtocolFailed)
+    })
 }
 
 /// How long a writer keeps its embedding session with nothing to embed.
@@ -5691,6 +5803,43 @@ impl crate::mcp::Writer for Writer {
 }
 
 /// The URL the daemon prints, and the only place the token is shown.
+/// Strip the session tokens a daemon before 0.41.0 left in the service log,
+/// and narrow the log to the owner. Best effort: a log it cannot rewrite is
+/// not a reason not to start.
+fn scrub_service_log() {
+    let Ok(path) = crate::service::log_path() else {
+        return;
+    };
+    crate::home::tighten_file(&path);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if let Some(clean) = scrub_tokens(&text) {
+        let _ = std::fs::write(&path, clean);
+    }
+}
+
+/// `text` with every `?token=<value>` replaced, or `None` when there was none.
+fn scrub_tokens(text: &str) -> Option<String> {
+    const KEY: &str = "?token=";
+    if !text.contains(KEY) {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(KEY) {
+        out.push_str(&rest[..at + KEY.len()]);
+        out.push_str("<removed>");
+        rest = &rest[at + KEY.len()..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+            .unwrap_or(rest.len());
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
 pub fn url(state: &State) -> String {
     state.server.url()
 }
@@ -5725,6 +5874,16 @@ pub fn port_of(flag: Option<u16>) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_token_in_an_old_log_line_is_removed() {
+        let log = "semlith: up\nhttp://127.0.0.1:7365/?token=Ab3_x-9\nnext ?token=zz.\n";
+        assert_eq!(
+            scrub_tokens(log).unwrap(),
+            "semlith: up\nhttp://127.0.0.1:7365/?token=<removed>\nnext ?token=<removed>.\n"
+        );
+        assert_eq!(scrub_tokens("nothing here\n"), None);
+    }
 
     /// Six false privacy warnings on every `semlith mcp` start, one per store,
     /// naming six paths that do not exist.

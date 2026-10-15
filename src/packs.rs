@@ -66,18 +66,136 @@ impl Pack {
 /// the documented environment; it is how a pack is tried before it is
 /// published and pinned.
 fn override_for(name: &str) -> Option<PathBuf> {
-    std::env::var_os(format!("SEMLITH_PACK_{}", name.to_ascii_uppercase())).map(PathBuf::from)
+    // Compiled out of the release binary (audit S20): it loads libraries and
+    // runs a server from wherever it points, with no digest.
+    #[cfg(any(debug_assertions, feature = "dev-overrides"))]
+    {
+        std::env::var_os(format!("SEMLITH_PACK_{}", name.to_ascii_uppercase())).map(PathBuf::from)
+    }
+    #[cfg(not(any(debug_assertions, feature = "dev-overrides")))]
+    {
+        let _ = name;
+        None
+    }
 }
 
 const STAMP: &str = ".semlith-verified";
 
-/// The unpacked pack, if it is installed and was checked.
+/// The unpacked pack, if it is installed and is still what was checked.
+///
+/// The archive's digest is checked once, at the download. What is loaded is
+/// the unpacked files, so the stamp records each one's size, mtime and digest
+/// and every load compares them (audit S15): a library swapped in the cache
+/// after the check is a pack that is not installed, fetched again whole.
+/// Size and mtime on the hot path, the digest only when either moved.
 pub fn installed(cache: &Path, pack: &Pack) -> Option<PathBuf> {
     if let Some(dir) = override_for(pack.name) {
         return dir.exists().then_some(dir);
     }
     let dir = pack.dir(cache);
-    dir.join(STAMP).exists().then_some(dir)
+    let stamp = std::fs::read_to_string(dir.join(STAMP)).ok()?;
+    match serde_json::from_str::<Manifest>(&stamp) {
+        Ok(manifest) if manifest.version == pack.version && manifest.holds(&dir) => Some(dir),
+        Ok(_) => None,
+        // A stamp from before 0.41.0 is the version alone. The archive was
+        // checked when it was written; what is on disk now is recorded, and
+        // checked from here on.
+        // ponytail: trust on first use for pre-0.41.0 packs; re-fetch instead
+        // if a pack cache that old has to be distrusted.
+        Err(_) if stamp.trim() == pack.version => {
+            let manifest = Manifest::of(&dir, pack.version)?;
+            crate::home::write_private(&dir.join(STAMP), &serde_json::to_vec(&manifest).ok()?)
+                .ok()?;
+            Some(dir)
+        }
+        Err(_) => None,
+    }
+}
+
+/// Every unpacked file of a pack, as its stamp records it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Manifest {
+    version: String,
+    /// Relative path to `(size, mtime in ns, blake3)`.
+    files: std::collections::BTreeMap<String, (u64, i128, String)>,
+}
+
+impl Manifest {
+    fn of(dir: &Path, version: &str) -> Option<Self> {
+        let mut files = std::collections::BTreeMap::new();
+        for path in pack_files(dir) {
+            let rel = path
+                .strip_prefix(dir)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let (size, mtime) = fingerprint(&path)?;
+            files.insert(rel, (size, mtime, digest_of(&path)?));
+        }
+        Some(Self {
+            version: version.to_string(),
+            files,
+        })
+    }
+
+    /// Whether the directory holds exactly these files, unchanged.
+    fn holds(&self, dir: &Path) -> bool {
+        let on_disk = pack_files(dir);
+        on_disk.len() == self.files.len()
+            && on_disk.iter().all(|path| {
+                let Some(rel) = path.strip_prefix(dir).ok() else {
+                    return false;
+                };
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                let Some((size, mtime, digest)) = self.files.get(&rel) else {
+                    return false;
+                };
+                match fingerprint(path) {
+                    Some(now) if now == (*size, *mtime) => true,
+                    Some(_) => digest_of(path).is_some_and(|d| d == *digest),
+                    None => false,
+                }
+            })
+    }
+}
+
+/// Every regular file under a pack directory, its stamp and leftovers aside.
+fn pack_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        for entry in std::fs::read_dir(&at).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(path);
+            } else if path.file_name().is_some_and(|n| n != STAMP) {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn fingerprint(path: &Path) -> Option<(u64, i128)> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos() as i128;
+    Some((meta.len(), mtime))
+}
+
+fn digest_of(path: &Path) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = blake3::Hasher::new();
+    std::io::copy(&mut file, &mut hasher).ok()?;
+    Some(hasher.finalize().to_hex().to_string())
 }
 
 /// Fetch, check and unpack a pack, reporting progress in percent. A no-op
@@ -136,7 +254,9 @@ pub fn fetch(cache: &Path, pack: &Pack, progress: &mut dyn FnMut(u8)) -> Result<
         }
         let _ = std::fs::remove_file(&file);
     }
-    crate::home::write_private(&dir.join(STAMP), pack.version.as_bytes())?;
+    let manifest = Manifest::of(&dir, pack.version)
+        .with_context(|| format!("recording the {} pack's files", pack.name))?;
+    crate::home::write_private(&dir.join(STAMP), &serde_json::to_vec(&manifest)?)?;
     Ok(dir)
 }
 
@@ -360,6 +480,47 @@ const COREML_ASSETS: &[Asset] = &[Asset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audit S15: a pack's unpacked files are checked on every load, not only
+    /// the archive at download. A library swapped in the cache afterwards is a
+    /// pack that is not installed; a stamp from before 0.41.0 is upgraded.
+    #[test]
+    fn a_pack_file_changed_after_its_check_is_not_installed() {
+        let cache = tempfile::tempdir().unwrap();
+        let pack = Pack {
+            name: "testpack",
+            version: "1",
+            assets: &[],
+        };
+        let dir = pack.dir(cache.path());
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(dir.join("lib").join("libx.dylib"), b"genuine").unwrap();
+        // The pre-0.41.0 stamp: the version alone.
+        std::fs::write(dir.join(STAMP), "1").unwrap();
+        assert_eq!(installed(cache.path(), &pack), Some(dir.clone()));
+        assert!(
+            std::fs::read_to_string(dir.join(STAMP))
+                .unwrap()
+                .contains("libx.dylib"),
+            "the old stamp was not upgraded to a manifest"
+        );
+        assert_eq!(installed(cache.path(), &pack), Some(dir.clone()));
+
+        std::fs::write(dir.join("lib").join("libx.dylib"), b"swapped").unwrap();
+        assert_eq!(
+            installed(cache.path(), &pack),
+            None,
+            "a swapped library loaded"
+        );
+
+        std::fs::write(dir.join("lib").join("libx.dylib"), b"genuine").unwrap();
+        std::fs::write(dir.join("extra.dylib"), b"planted").unwrap();
+        assert_eq!(
+            installed(cache.path(), &pack),
+            None,
+            "a planted library loaded"
+        );
+    }
 
     #[test]
     fn an_archive_path_that_would_leave_the_pack_is_refused() {

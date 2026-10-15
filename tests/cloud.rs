@@ -1538,3 +1538,35 @@ fn replay_off_in_the_org_is_explained() {
         "said once: {err}"
     );
 }
+
+/// Audit S21: a search naming no store asks every connected org, and the
+/// local switch keeps one on this machine — over MCP, the portal's route and
+/// the command line alike. The same search without it does reach the host,
+/// so silence here is the switch and not a dead stub.
+#[test]
+fn a_local_search_asks_no_connected_org() {
+    let home = tempfile::tempdir().unwrap();
+    let host = connected(home.path());
+    let daemon = Daemon::start(home.path());
+    let before = host.to("/v1/orgs/acme/search").len();
+
+    daemon.tool(
+        "semlith_search",
+        json!({ "query": "order total", "local": true }),
+    );
+    daemon.json("/api/search?query=order%20total&local=1");
+    let cli = semlith(home.path(), &["search", "--local", "order total"]);
+    let _ = cli;
+    assert_eq!(
+        host.to("/v1/orgs/acme/search").len(),
+        before,
+        "a local search reached the connected org"
+    );
+
+    daemon.tool("semlith_search", json!({ "query": "order total" }));
+    assert_eq!(
+        host.to("/v1/orgs/acme/search").len(),
+        before + 1,
+        "a search naming no store did not ask the connected org"
+    );
+}

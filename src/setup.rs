@@ -565,10 +565,21 @@ fn fish_quote(raw: &str) -> String {
     format!("'{}'", raw.replace('\\', r"\\").replace('\'', r"\'"))
 }
 
-/// A PowerShell single-quoted string. Inside them the only special character
-/// is the single quote itself, which is written twice.
-fn powershell_quote(raw: &str) -> String {
-    format!("'{}'", raw.replace('\'', "''"))
+/// A PowerShell single-quoted string. Inside them the only special characters
+/// are the quotes, each written twice — and PowerShell takes the typographic
+/// single quotes U+2018-U+201B as quotes too, so a name holding one ended the
+/// string early (audit S17).
+pub(crate) fn powershell_quote(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('\'');
+    for c in raw.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
 }
 
 /// Windows has no rc file; the user `PATH` is a registry value, and PowerShell

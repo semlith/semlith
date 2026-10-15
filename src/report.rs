@@ -1288,11 +1288,16 @@ impl Report {
         out.push('\n');
         for block in &self.blocks {
             match block {
-                Block::Text { text } => out.push_str(&format!("\n{text}\n")),
+                Block::Text { text } => out.push_str(&format!("\n{}\n", md_text(text))),
                 Block::Facts { facts } => {
                     out.push('\n');
                     for (label, value, over) in facts {
-                        out.push_str(&format!("- **{label}:** {value} — {over}\n"));
+                        out.push_str(&format!(
+                            "- **{}:** {} — {}\n",
+                            md_cell(label),
+                            md_cell(value),
+                            md_cell(over)
+                        ));
                     }
                 }
                 Block::Table {
@@ -1315,7 +1320,8 @@ impl Report {
                             .join(" | ")
                     ));
                     for row in rows {
-                        out.push_str(&format!("| {} |\n", row.join(" | ")));
+                        let cells: Vec<String> = row.iter().map(|c| md_cell(c)).collect();
+                        out.push_str(&format!("| {} |\n", cells.join(" | ")));
                     }
                 }
             }
@@ -1328,13 +1334,7 @@ impl Report {
         // another, each named on its own line. A spreadsheet reads that; a
         // single flattened table would have to invent a column that means
         // "which table is this row from".
-        let quote = |v: &str| -> String {
-            if v.contains('"') || v.contains(',') || v.contains('\n') {
-                format!("\"{}\"", v.replace('"', "\"\""))
-            } else {
-                v.to_string()
-            }
-        };
+        let quote = |v: &str| csv_cell(v);
         let mut out = format!("{}\n", quote(&self.header().replace('\n', " ")));
         for block in &self.blocks {
             match block {
@@ -1457,9 +1457,70 @@ impl Report {
     }
 }
 
+/// One CSV cell. A cell a spreadsheet would read as a formula — one starting
+/// with `=`, `+`, `-`, `@`, a tab or a carriage return — gets a leading `'`, so
+/// an agent's query of `=HYPERLINK(...)` opens as the text it was (audit S16).
+/// A plain number keeps its sign: `-12` is a value, not a formula, and a lone
+/// `-` is a placeholder.
+fn csv_cell(v: &str) -> String {
+    let formula =
+        v.len() > 1 && v.starts_with(['=', '+', '-', '@', '\t', '\r']) && v.parse::<f64>().is_err();
+    let v = if formula {
+        format!("'{v}")
+    } else {
+        v.to_string()
+    };
+    if v.contains(['"', ',', '\n', '\r']) {
+        format!("\"{}\"", v.replace('"', "\"\""))
+    } else {
+        v
+    }
+}
+
+/// Prose from a report's own blocks, where an agent's query can appear: HTML
+/// is shown as text, never rendered by whoever previews the Markdown.
+fn md_text(v: &str) -> String {
+    v.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// One Markdown table cell or fact: [`md_text`], plus the pipe that would end
+/// the cell, the backtick that would open a code span, backslashes first so
+/// the escapes stay escapes, and a line break folded so the row stays one row.
+fn md_cell(v: &str) -> String {
+    md_text(&v.replace('\\', "\\\\"))
+        .replace('|', "\\|")
+        .replace('`', "\\`")
+        .replace("\r\n", " ")
+        .replace(['\n', '\r'], " ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_formula_cell_exports_as_text() {
+        assert_eq!(
+            csv_cell(r#"=HYPERLINK("u","x")"#),
+            r#""'=HYPERLINK(""u"",""x"")""#
+        );
+        assert_eq!(csv_cell("@SUM(A1)"), "'@SUM(A1)");
+        assert_eq!(csv_cell("\tcmd"), "'\tcmd");
+        assert_eq!(csv_cell("-12"), "-12");
+        assert_eq!(csv_cell("-"), "-");
+        assert_eq!(csv_cell("plain"), "plain");
+    }
+
+    #[test]
+    fn a_markdown_cell_cannot_end_the_cell_or_render_html() {
+        assert_eq!(
+            md_cell("<img src=x> a|b `c`\nd"),
+            "&lt;img src=x&gt; a\\|b \\`c\\` d"
+        );
+        assert_eq!(md_cell(r"a\|b"), r"a\\\|b");
+    }
 
     fn sample() -> Report {
         Report {

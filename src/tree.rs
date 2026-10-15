@@ -224,7 +224,9 @@ pub fn render(
     let root = first_path.and_then(|first| {
         roots
             .iter()
-            .filter(|r| first.starts_with(&crate::plain(&r.to_string_lossy())))
+            // By whole components: `/work/api-old` is not under `/work/api`
+            // (audit S24).
+            .filter(|r| Path::new(&first).starts_with(crate::plain(&r.to_string_lossy())))
             .max_by_key(|r| r.as_os_str().len())
             .cloned()
     });

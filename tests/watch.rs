@@ -768,3 +768,120 @@ fn index(store: &Path, corpus: &Path) {
 fn write(dir: &Path, name: &str, body: &str) {
     fs::write(dir.join(name), body).unwrap();
 }
+
+/// npm, cargo and git create and delete temp files by the thousand under
+/// trees the walk never enters. None of them is a decision for the owner:
+/// before 0.41.0 every deletion reached the indexer unfiltered and left a
+/// refusal row, and `node_modules/.bin/esbuild` sat on the review list.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn tool_churn_under_skipped_trees_leaves_no_refusal() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(corpus.path(), "package.json", "{}");
+    write(corpus.path(), "Cargo.toml", "[package]\nname = \"x\"\n");
+    write(
+        corpus.path(),
+        "notes.md",
+        "Sourdough needs flour and water.",
+    );
+    for dir in [
+        "node_modules/.vite",
+        "node_modules/.bin",
+        "dist",
+        "target/debug",
+        ".git",
+    ] {
+        fs::create_dir_all(corpus.path().join(dir)).unwrap();
+    }
+    index(store.path(), corpus.path());
+
+    let watcher = spawn(store.path(), corpus.path());
+    let temps = [
+        "node_modules/.vite/dep.js",
+        "node_modules/.bin/esbuild",
+        "dist/index.html",
+        "target/debug/build.d",
+        ".git/index.lock",
+    ];
+    // Written, then deleted once the watcher has had a batch to see them: the
+    // deletion is what used to reach the indexer, as a path it never held.
+    for rel in temps {
+        fs::write(corpus.path().join(rel), "temp").unwrap();
+    }
+    settle(DEBOUNCE);
+    for rel in temps {
+        fs::remove_file(corpus.path().join(rel)).unwrap();
+    }
+    settle(DEBOUNCE);
+    // A file that does count, written last: once it is held, every batch
+    // before it has been through the watcher.
+    write(corpus.path(), "last.md", "Mitochondria power the cell.");
+    assert!(
+        wait_until(store.path(), |p| holds(p, "last.md")),
+        "the watcher never caught up"
+    );
+    watcher.stop();
+
+    let s = Semlith::open(store.path(), None).unwrap();
+    let rows = semlith::store::refusals(s.db()).unwrap();
+    let leaked: Vec<&str> = rows
+        .iter()
+        .map(|r| r.path.as_str())
+        .filter(|p| {
+            ["node_modules", "dist", "target", ".git"]
+                .iter()
+                .any(|d| p.contains(&format!("/{d}/")) || p.contains(&format!("\\{d}\\")))
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "tool churn left refusal rows: {leaked:#?}"
+    );
+}
+
+/// A store carrying rows like that from 0.40.0 sheds them on its next full
+/// run, rather than keeping them on the review list for good.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_refusal_below_a_skipped_tree_is_pruned_by_a_full_run() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(corpus.path(), "package.json", "{}");
+    write(
+        corpus.path(),
+        "notes.md",
+        "Sourdough needs flour and water.",
+    );
+    fs::create_dir_all(corpus.path().join("node_modules/.bin")).unwrap();
+    write(
+        &corpus.path().join("node_modules/.bin"),
+        "esbuild",
+        "binary",
+    );
+    index(store.path(), corpus.path());
+
+    let stale = semlith::canonical(&corpus.path().join("node_modules/.bin/esbuild"));
+    {
+        let s = Semlith::open(store.path(), None).unwrap();
+        semlith::store::read_only(s.db(), false).unwrap();
+        semlith::store::refuse(
+            s.db(),
+            &stale.to_string_lossy(),
+            semlith::store::class::POLICY,
+            "over 8 MiB",
+            &[],
+            1,
+            0,
+        )
+        .unwrap();
+    }
+    index(store.path(), corpus.path());
+
+    let s = Semlith::open(store.path(), None).unwrap();
+    let rows = semlith::store::refusals(s.db()).unwrap();
+    assert!(
+        !rows.iter().any(|r| r.path == stale.to_string_lossy()),
+        "the stale row survived a full run: {rows:#?}"
+    );
+}

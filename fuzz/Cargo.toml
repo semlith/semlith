@@ -1,0 +1,81 @@
+[package]
+name = "semlith-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# A workspace of its own, so the root crate's manifest and lockfile are untouched.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# `dynamic-ort` links no ONNX Runtime at build time; no target embeds anything.
+semlith = { path = "..", default-features = false, features = ["dynamic-ort"] }
+# The decoder the parse worker's OP_IMAGE runs, with the root crate's features.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+
+[[bin]]
+name = "chunk_markdown"
+path = "fuzz_targets/chunk_markdown.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunk_code"
+path = "fuzz_targets/chunk_code.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zip_office"
+path = "fuzz_targets/zip_office.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pdf"
+path = "fuzz_targets/pdf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mail"
+path = "fuzz_targets/mail.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "notebook"
+path = "fuzz_targets/notebook.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "markup"
+path = "fuzz_targets/markup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "image"
+path = "fuzz_targets/image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_head"
+path = "fuzz_targets/http_head.rs"
+test = false
+doc = false
+bench = false

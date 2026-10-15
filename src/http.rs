@@ -1290,6 +1290,35 @@ fn same(a: &str, b: &str) -> bool {
 /// connection is not idle. A connection that sent nothing before any of those is closed with no
 /// answer: it is a browser's spare, and bytes sent before a request are bytes
 /// the browser reads as the answer to the request it later puts there.
+/// The head parser over `bytes`, as a peer that sent them and closed: the
+/// fuzz target's way in (`fuzz/fuzz_targets/http_head.rs`). Through a real
+/// loopback connection, because [`read_head`] sets its deadlines on the
+/// socket; one listener for the whole run.
+#[doc(hidden)]
+pub fn fuzz_head(bytes: &[u8]) {
+    use std::io::Write;
+    static LISTENER: std::sync::OnceLock<std::net::TcpListener> = std::sync::OnceLock::new();
+    let listener = LISTENER
+        .get_or_init(|| std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port"));
+    let Ok(mut peer) = TcpStream::connect(listener.local_addr().expect("a bound port")) else {
+        return;
+    };
+    let _ = peer.write_all(bytes);
+    let _ = peer.shutdown(std::net::Shutdown::Write);
+    let Ok((accepted, _)) = listener.accept() else {
+        return;
+    };
+    let state = HeadState {
+        heard: AtomicBool::new(false),
+        evicted: AtomicBool::new(false),
+    };
+    let _ = read_head(
+        &mut BufReader::new(accepted),
+        std::time::Instant::now(),
+        &state,
+    );
+}
+
 fn read_head(
     reader: &mut BufReader<TcpStream>,
     accepted: std::time::Instant,
@@ -1361,7 +1390,14 @@ fn read_head(
     let mut headers = BTreeMap::new();
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
-            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+            let name = name.trim().to_ascii_lowercase();
+            // A header every check reads once, sent twice, is two requests
+            // in one: the checks saw the last copy and a proxy in front might
+            // honour the first (audit S23). Refused, not resolved.
+            if SINGLE.contains(&name.as_str()) && headers.contains_key(&name) {
+                return Err(HeadRefused(400).into());
+            }
+            headers.insert(name, value.trim().to_string());
         }
     }
 
@@ -1550,18 +1586,34 @@ fn write_whole(stream: &mut TcpStream, response: Response) -> std::io::Result<()
     }
 }
 
+/// The headers a request may carry once.
+const SINGLE: &[&str] = &[
+    "host",
+    "origin",
+    "sec-fetch-site",
+    "content-type",
+    "content-length",
+    "semlith-token",
+    "authorization",
+];
+
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
         409 => "Conflict",
         431 => "Request Header Fields Too Large",
+        413 => "Content Too Large",
         500 => "Internal Server Error",
-        _ => "OK",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        // A status this table does not know is still not "OK" (audit S23).
+        _ => "Unknown",
     }
 }
 

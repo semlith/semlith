@@ -748,9 +748,8 @@ impl Sharded {
         if !self.shards.iter().any(|s| s.dirty) {
             return Ok(());
         }
-        crate::home::tighten_dir(&self.dir);
-        std::fs::create_dir_all(&self.dir)
-            .with_context(|| format!("creating {}", self.dir.display()))?;
+        // Created 0700, not narrowed before it exists (audit S24).
+        crate::home::secure_dir(&self.dir)?;
         for shard in &mut self.shards {
             if !shard.dirty {
                 continue;
@@ -1114,12 +1113,17 @@ impl Exact {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut out = std::io::BufWriter::new(
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)?,
-        );
+        // The raw vectors are the corpus's meaning in numbers: 0600 wherever
+        // the store lives (audit S24).
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(crate::home::FILE_MODE);
+        }
+        let mut out = std::io::BufWriter::new(options.open(&self.path)?);
+        crate::home::tighten_file(&self.path);
         use std::io::Write;
         for (slot, id) in ids.iter().enumerate() {
             out.write_all(&id.to_le_bytes())?;

@@ -2823,6 +2823,19 @@ function wizardScreen() {
       return go("welcome");
     }
     const r = run().find((x) => LIVE_RUN.has(x.status) && x.status !== "review");
+    // The wizard is left whatever the clean-up meets: one failed request used
+    // to reject this function and keep the page on #/new for good.
+    try {
+      await leaveCleanly(r);
+    } catch (e) {
+      toast(`Could not tidy up: ${e.message || e}`, "bad");
+    }
+    state.wz = clearWizard();
+    if (w.created && (store(w.created) || w.existing)) go("store", w.created, r ? "runs" : "overview");
+    else go(liveStores().length ? "home" : "welcome");
+  }
+
+  async function leaveCleanly(r) {
     if (w.created && !w.existing && !r && !(store(w.created) && store(w.created).files)) {
       const del = await ask({
         title: "Leave without indexing?",
@@ -2852,9 +2865,6 @@ function wizardScreen() {
         for (const s of scanRuns().filter((x) => x.status === "review" || x.status === "scanning")) await post("/api/index/control", { store: s.store, run: s.id, action: "stop" }).catch(() => {});
       }
     }
-    state.wz = clearWizard();
-    if (w.created && (store(w.created) || w.existing)) go("store", w.created, r ? "runs" : "overview");
-    else go(liveStores().length ? "home" : "welcome");
   }
 
   function paint() {
@@ -6802,6 +6812,9 @@ const sr = {
   whole: false,
   detail: null,
   scopeOpen: false,
+  // "This machine only": a search naming no store asks every connected org
+  // too, and this keeps one on this machine (audit S21).
+  local: false,
 };
 
 try {
@@ -6817,7 +6830,7 @@ const BUDGETS = [500, 1000, 1500, 3000, 6000];
 
 VIEWS.search = {
   fill: true,
-  needs: () => ["stores", "languages"],
+  needs: () => ["stores", "languages", "cloud"],
   live: [],
   render(route, holder) {
     if (state.pending.searchStore !== undefined) {
@@ -6959,6 +6972,9 @@ VIEWS.search = {
             ],
         langChip,
         pathChip,
+        sr.mode === "ranked" && data.cloud?.signed_in
+          ? btn({ class: "chip", "aria-pressed": String(sr.local), "data-tip": "Leave the connected cloud orgs out of this search", onclick: () => ((sr.local = !sr.local), repaint(), sr.query && runSearch()) }, "This machine only")
+          : null,
         el("span", { class: "spacer" }),
         sr.result && !sr.result.error ? el("span", { class: "row gap6 nowrap t-mono-sm" }, el("span", { class: "dot blue" }), resultMeta()) : null,
       ),
@@ -7052,6 +7068,7 @@ async function runSearch() {
       p.set("k", String(sr.k));
       p.set("format", "locate");
       p.set("max_tokens", String(sr.budget));
+      if (sr.local) p.set("local", "1");
       if (sr.prefer !== "either") p.set("prefer", sr.prefer);
       sr.result = await askMine(`/api/search?${p}`);
       // An identifier is answered by its definition first; every line that
@@ -9232,10 +9249,26 @@ function exportLedger(format) {
   if (format === "JSON") return download(`${name}.json`, JSON.stringify(list, null, 2), "application/json");
   const cell = (v) => (v === null || v === undefined ? "" : String(v));
   // A Markdown table cell: backslashes first, then the pipe that would end
-  // the cell, and a line break folded to a space so the row stays one row.
-  const mdCell = (v) => cell(v).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+  // the cell and the backtick that would open a code span, HTML shown as text
+  // rather than rendered by a previewer, and a line break folded to a space so
+  // the row stays one row. Same rules as report.rs's md_cell (audit S16).
+  const mdCell = (v) =>
+    cell(v)
+      .replace(/\\/g, "\\\\")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\|/g, "\\|")
+      .replace(/`/g, "\\`")
+      .replace(/\r?\n|\r/g, " ");
   if (format === "CSV") {
-    const esc = (v) => (/[",\n]/.test(cell(v)) ? `"${cell(v).replace(/"/g, '""')}"` : cell(v));
+    // A cell a spreadsheet would run as a formula gets a leading quote, bar a
+    // plain number; same rules as report.rs's csv_cell (audit S16).
+    const neutral = (v) => (v.length > 1 && /^[=+\-@\t\r]/.test(v) && !Number.isFinite(Number(v)) ? `'${v}` : v);
+    const esc = (v) => {
+      const s = neutral(cell(v));
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
     return download(`${name}.csv`, [cols.join(","), ...list.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n"), "text/csv");
   }
   const md = [`# Retrieval ledger — ${sessions ? "sessions" : "retrievals"}`, "", `Exported ${new Date().toString()} from this machine.`, "", `| ${cols.join(" | ")} |`, `| ${cols.map(() => "---").join(" | ")} |`, ...list.map((r) => `| ${cols.map((c) => mdCell(r[c])).join(" | ")} |`)].join("\n");
@@ -9602,7 +9635,7 @@ VIEWS.privacy = {
             el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Everything semlith ever fetches" }), meta(`${downloads.length + 2} things, each on your say-so`)),
             downloads.map((d) => el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: cap(plainWhat(d.what)) }), el("span", { class: "muted t-xs", text: `${d.source} · ${bytes(d.bytes)} · ${d.when}` })), pill(d.cached ? "on disk" : "never fetched", d.cached ? "green" : "grey", { dot: false }))),
             el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "A URL you add to a store" }), el("span", { class: "muted t-xs", text: "one https request for exactly that URL · only when you press Fetch" })), pill("on request", "grey", { dot: false })),
-            el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "Semlith Cloud" }), el("span", { class: "muted t-xs", text: P.cloud?.signed_in ? `${(P.cloud.orgs || []).map((o) => o.host_name).join(", ")} · a search naming a remote store, the ledger rows of the stores you sync, and what you push or send · never the token anywhere else` : "nothing, until you run semlith cloud login" })), pill(P.cloud?.signed_in ? "signed in" : "never contacted", P.cloud?.signed_in ? "blue" : "grey", { dot: false })),
+            el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "Semlith Cloud" }), el("span", { class: "muted t-xs", text: P.cloud?.signed_in ? `${(P.cloud.orgs || []).map((o) => o.host_name).join(", ")} · every search that names no store or a remote one (a search can be kept to this machine), the ledger rows of the stores you sync, and what you push or send · never the token anywhere else` : "nothing, until you run semlith cloud login" })), pill(P.cloud?.signed_in ? "signed in" : "never contacted", P.cloud?.signed_in ? "blue" : "grey", { dot: false })),
             el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "The release check and the price table" }), el("span", { class: "muted t-xs", text: "github.com and models.dev · only when you press the button in Settings or Reports" })), pill("on request", "grey", { dot: false })),
             outbound.recent && outbound.recent.length ? el("div", { class: "card-foot", text: `last ${outbound.recent.length}: ${outbound.recent.slice(0, 4).map((r) => `${clock(r.at)} ${r.what} → ${r.host}`).join(" · ")}` }) : null,
           ),
@@ -10074,7 +10107,7 @@ function lagWord(s) {
 function cloudFact(C) {
   if (!C || !C.signed_in) return ["Cloud", "not signed in", "no cloud call and no connection, until semlith cloud login"];
   const sync = (C.sync?.on || []).length;
-  return ["Cloud", (C.orgs || []).map((o) => o.org).join(", "), `${(C.orgs || []).map((o) => o.host_name).join(", ")} only · ledger sync on ${plural(sync, "store")} · searches naming a remote store go there`];
+  return ["Cloud", (C.orgs || []).map((o) => o.org).join(", "), `${(C.orgs || []).map((o) => o.host_name).join(", ")} only · ledger sync on ${plural(sync, "store")} · a search naming no store or a remote one goes there too, unless kept to this machine`];
 }
 
 function syncLine() {
