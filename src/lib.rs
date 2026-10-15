@@ -8529,7 +8529,7 @@ mod skipped_dir_tests {
         let named = root.join("node_modules");
         assert!(!under_skipped_dir(
             &named.join("pkg.json"),
-            Some(&[named.clone()])
+            Some(std::slice::from_ref(&named))
         ));
     }
 }
