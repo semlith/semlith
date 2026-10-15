@@ -724,6 +724,47 @@ pub const MAX_BLOCK_NESTING: usize = 128;
 /// Whether a file in a block grammar nests past [`MAX_BLOCK_NESTING`], counted
 /// line by line: each `>` and list marker opens a level, and so does every two
 /// columns of indentation in front of them.
+/// The text a grammar's C scanner is handed, for the grammars whose scanner
+/// calls a narrow `<ctype.h>` function on a full Unicode code point.
+///
+/// tree-sitter-md's block scanner runs `isdigit` on the character after a
+/// digit at a list-marker position (`scanner.c:740`), and tree-sitter-bash's on
+/// the character after `{` or `..` in a brace expansion (`scanner.c:1158,
+/// 1172`). glibc's `isdigit` indexes a table valid for -128..255 with no
+/// check, so a code point past U+00FF reads out of bounds and can fault: a
+/// 7-byte Markdown file did under the 0.41.0 fuzzers. Such a character, right
+/// after a character those scanners test, is replaced with as many `a` bytes as
+/// it has, so every byte offset and line stays the original's and names are
+/// still read from the original text. Borrowed when nothing needs replacing.
+pub fn ctype_safe<'a>(lang: &str, text: &'a str) -> std::borrow::Cow<'a, str> {
+    let triggers: fn(char) -> bool = match lang {
+        "markdown" => |c| c.is_ascii_digit(),
+        "bash" => |c| c.is_ascii_digit() || c == '{' || c == '.',
+        _ => return std::borrow::Cow::Borrowed(text),
+    };
+    let needs = |prev: Option<char>, c: char| (c as u32) > 0xFF && prev.is_some_and(triggers);
+    let mut prev = None;
+    if !text.chars().any(|c| {
+        let hit = needs(prev, c);
+        prev = Some(c);
+        hit
+    }) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut prev = None;
+    for c in text.chars() {
+        if needs(prev, c) {
+            out.extend(std::iter::repeat_n('a', c.len_utf8()));
+            prev = Some('a');
+        } else {
+            out.push(c);
+            prev = Some(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 pub fn too_nested(lang: &str, text: &str) -> bool {
     if !matches!(lang, "markdown" | "yaml") {
         return false;
@@ -793,8 +834,9 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         }
     };
     let options = tree_sitter::ParseOptions::default().progress_callback(&mut expired);
+    let parse = ctype_safe(lang, text);
     let parsed =
-        parser.parse_with_options(&mut |at, _| &text.as_bytes()[at..], None, Some(options));
+        parser.parse_with_options(&mut |at, _| &parse.as_bytes()[at..], None, Some(options));
     let Some(tree) = parsed else {
         return Ok(None);
     };
@@ -3782,6 +3824,38 @@ mod tests {
     }
 
     use super::*;
+
+    /// The fuzzer's SEGV and bash's twin: a character past U+00FF right after
+    /// a character a scanner tests with narrow `isdigit` is replaced, byte for
+    /// byte, and nothing else changes.
+    #[test]
+    fn a_wide_character_after_a_digit_is_kept_from_a_narrow_ctype_scanner() {
+        let md = " 1\u{5641A}\u{FFFD}";
+        let safe = ctype_safe("markdown", md);
+        assert_eq!(safe.len(), md.len());
+        assert_eq!(safe, " 1aaaa\u{FFFD}");
+        assert_eq!(
+            ctype_safe("bash", "echo {é..9} {\u{1F600}"),
+            "echo {é..9} {aaaa"
+        );
+        assert!(matches!(
+            ctype_safe("markdown", "1. café 2026 \u{1F600}"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            ctype_safe("rust", md),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // The graph of the original text, names read from the original.
+        let g = extract(Path::new("a.md"), "# 1\u{1F600} heading\n\nbody\n")
+            .unwrap()
+            .unwrap();
+        assert!(
+            g.symbols.iter().any(|s| s.name.contains('\u{1F600}')),
+            "{:?}",
+            g.symbols
+        );
+    }
 
     /// The fuzzer's crash: nesting carried on past NULs on one line.
     #[test]

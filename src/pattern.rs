@@ -208,8 +208,9 @@ pub(crate) fn captures(language: &str, source: &str, text: &str) -> Result<Vec<C
         }
     };
     let options = tree_sitter::ParseOptions::default().progress_callback(&mut expired);
+    let parse = crate::graph::ctype_safe(language, text);
     let Some(tree) =
-        parser.parse_with_options(&mut |at, _| &text.as_bytes()[at..], None, Some(options))
+        parser.parse_with_options(&mut |at, _| &parse.as_bytes()[at..], None, Some(options))
     else {
         return Ok(Vec::new());
     };
