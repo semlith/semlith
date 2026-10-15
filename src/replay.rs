@@ -287,6 +287,16 @@ pub fn read(dir: &Path, limit: usize) -> Result<Replay> {
 /// One transcript by its id, with every answer in it rather than the last
 /// [`KEEP`]: what `semlith cloud replay` sends when a member picks it.
 pub fn session(dir: &Path, id: &str) -> Result<Option<Session>> {
+    // A transcript's id is a UUID. Anything else is refused before it is
+    // joined to a path: `../../x` read any `.jsonl` on the disk (audit S23).
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!("{id:?} is not a session id");
+    }
     let Ok(projects) = std::fs::read_dir(dir) else {
         return Ok(None);
     };
@@ -412,6 +422,19 @@ fn read_tail(path: &Path, bytes: u64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_id_cannot_walk_out_of_its_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["../../x", "a/b", "", "..", "x\\y"] {
+            assert!(session(dir.path(), bad).is_err(), "{bad:?} was accepted");
+        }
+        assert!(
+            session(dir.path(), "6f1c2d3e-aaaa-4bbb-8ccc-0123456789ab")
+                .unwrap()
+                .is_none()
+        );
+    }
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()

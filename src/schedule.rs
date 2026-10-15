@@ -456,7 +456,26 @@ fn write_report(schedule: &Schedule, fleet: &crate::fleet::Fleet, now: i64) -> R
         extension(&schedule.format)
     );
     let path = schedule.dir.join(name);
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    // A new file, 0600, renamed into place: a name somebody planted as a
+    // symbolic link in a shared folder is replaced, not followed, and the
+    // report — query text included — is not left world-readable (audit S23).
+    let temp = schedule.dir.join(format!(".{}.part", std::process::id()));
+    let _ = std::fs::remove_file(&temp);
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(crate::home::FILE_MODE);
+        }
+        let mut file = options
+            .open(&temp)
+            .with_context(|| format!("writing {}", temp.display()))?;
+        std::io::Write::write_all(&mut file, body.as_ref())
+            .with_context(|| format!("writing {}", temp.display()))?;
+    }
+    std::fs::rename(&temp, &path).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
 }
 

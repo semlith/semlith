@@ -14,7 +14,7 @@
 use crate::embed::Model;
 use crate::filter::Filter;
 use crate::{Hit, Semlith, canonical, chunk, model_cache_dir};
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use fastembed::TextEmbedding;
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -1170,11 +1170,11 @@ impl Fleet {
                 .members
                 .iter()
                 .position(|m| m.label == *name)
-                .with_context(|| {
-                    format!(
+                .ok_or_else(|| {
+                    anyhow::Error::new(crate::NotFound(format!(
                         "no store called {name} is open; these are: {}",
                         self.labels().join(", ")
-                    )
+                    )))
                 })?,
             names => bail!(
                 "a write goes to one store, not {}: {}",
@@ -1214,10 +1214,11 @@ impl Fleet {
                             blamed.push(name.clone());
                         }
                     } else {
-                        bail!(
+                        return Err(crate::NotFound(format!(
                             "no store called {name} is open; these are: {}",
                             self.labels().join(", ")
-                        );
+                        ))
+                        .into());
                     }
                 }
             }

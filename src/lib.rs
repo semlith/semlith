@@ -80,6 +80,19 @@ pub mod usage;
 pub mod watch;
 pub mod worker;
 
+/// An error that means "no such thing": a store, a file, a run. A route
+/// answers it 404 rather than 500 (audit S23).
+#[derive(Debug)]
+pub struct NotFound(pub String);
+
+impl std::fmt::Display for NotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotFound {}
+
 /// Entry points for the fuzz targets in `fuzz/`, for parsers whose own
 /// signatures need more than bytes. Not an API.
 #[doc(hidden)]

@@ -1390,7 +1390,14 @@ fn read_head(
     let mut headers = BTreeMap::new();
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
-            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+            let name = name.trim().to_ascii_lowercase();
+            // A header every check reads once, sent twice, is two requests
+            // in one: the checks saw the last copy and a proxy in front might
+            // honour the first (audit S23). Refused, not resolved.
+            if SINGLE.contains(&name.as_str()) && headers.contains_key(&name) {
+                return Err(HeadRefused(400).into());
+            }
+            headers.insert(name, value.trim().to_string());
         }
     }
 
@@ -1579,18 +1586,34 @@ fn write_whole(stream: &mut TcpStream, response: Response) -> std::io::Result<()
     }
 }
 
+/// The headers a request may carry once.
+const SINGLE: &[&str] = &[
+    "host",
+    "origin",
+    "sec-fetch-site",
+    "content-type",
+    "content-length",
+    "semlith-token",
+    "authorization",
+];
+
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
         409 => "Conflict",
         431 => "Request Header Fields Too Large",
+        413 => "Content Too Large",
         500 => "Internal Server Error",
-        _ => "OK",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        // A status this table does not know is still not "OK" (audit S23).
+        _ => "Unknown",
     }
 }
 

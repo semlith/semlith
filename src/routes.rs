@@ -497,7 +497,7 @@ fn schedules(_state: &Arc<State>) -> Response {
         Ok(file) => Response::json(&serde_json::json!({ "schedules": file.schedules })),
         // A schedules file this binary cannot read is a report that will not be
         // written, not a reason for the page to fail to draw.
-        Err(e) => Response::error(500, &format!("{e:#}")),
+        Err(e) => error_response(&e),
     }
 }
 
@@ -515,7 +515,7 @@ fn schedule_write(state: &Arc<State>, request: &Request) -> Response {
 
     let mut file = match crate::schedule::Schedules::load() {
         Ok(file) => file,
-        Err(e) => return Response::error(500, &format!("{e:#}")),
+        Err(e) => return error_response(&e),
     };
 
     let answer = match action {
@@ -598,7 +598,7 @@ fn schedule_write(state: &Arc<State>, request: &Request) -> Response {
     };
 
     if let Err(e) = file.save() {
-        return Response::error(500, &format!("{e:#}"));
+        return error_response(&e);
     }
     // The timer is asleep on a condition variable until the next due time. It
     // would find this within a minute anyway — that ceiling exists for the CLI,
@@ -1074,7 +1074,7 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
     let only = (!only.is_empty()).then_some(only);
     let chosen = match fleet.selected(only.as_deref()) {
         Ok(c) => c,
-        Err(e) => return Response::error(500, &format!("{e:#}")),
+        Err(e) => return error_response(&e),
     };
     // Counted first, because how many rows each store has to be asked for
     // depends on it: a derived sort needs all of them.
@@ -1229,7 +1229,7 @@ fn brief_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
         prefer,
     ) {
         Ok(b) => b,
-        Err(e) => return Response::error(500, &format!("{e:#}")),
+        Err(e) => return error_response(&e),
     };
     let elapsed = started.elapsed();
 
@@ -1344,7 +1344,7 @@ fn search_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     } else {
         match fleet.matching_files(&filter) {
             Ok(n) => Some(n),
-            Err(e) => return Response::error(500, &format!("{e:#}")),
+            Err(e) => return error_response(&e),
         }
     };
     if selected == Some(0) {
@@ -1371,7 +1371,7 @@ fn search_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
         .min(FILE_OFFSET_MAX as usize);
     let found = match fleet.search_leaning(only.as_deref(), query, deep, &filter, prefer) {
         Ok(h) => h,
-        Err(e) => return Response::error(500, &format!("{e:#}")),
+        Err(e) => return error_response(&e),
     };
     let elapsed = started.elapsed();
     let mut hits: Vec<_> = found.into_iter().skip(offset as usize).take(k).collect();
@@ -1579,7 +1579,7 @@ fn airgap(request: &Request) -> Response {
     let mut saved = home::Settings::load();
     saved.airgap = Some(on);
     if let Err(e) = saved.save() {
-        return Response::error(500, &format!("{e:#}"));
+        return error_response(&e);
     }
     crate::add::set_runtime_airgap(on);
     Response::json(&json!({ "airgap": crate::add::airgap_state() }))
@@ -1628,7 +1628,7 @@ fn ledger_recording(request: &Request) -> Response {
     let mut saved = home::Settings::load();
     saved.ledger_paused = Some(!on);
     if let Err(e) = saved.save() {
-        return Response::error(500, &format!("{e:#}"));
+        return error_response(&e);
     }
     crate::ledger::set_paused(!on);
     Response::json(&json!({ "recording": crate::ledger::recording_state() }))
@@ -2506,7 +2506,7 @@ fn privacy_scan(state: &Arc<State>) -> Response {
                     }));
                 }
             }
-            Err(e) => return Response::error(500, &format!("{e:#}")),
+            Err(e) => return error_response(&e),
         }
     }
     let mut answer = json!({ "findings": findings });
@@ -2841,7 +2841,7 @@ fn agent_scope(request: &Request) -> Response {
     };
     match crate::home::set_agent_scope(write) {
         Ok(()) => Response::json(&json!({ "scope": if write { "write" } else { "read" } })),
-        Err(e) => Response::error(500, &format!("{e:#}")),
+        Err(e) => error_response(&e),
     }
 }
 
@@ -3050,7 +3050,7 @@ fn with_fleet(
         // The whole chain: the outermost message of a store that cannot be read
         // is four words, and the store, the path and the remedy are all below
         // it.
-        Err(e) => Response::error(500, &format!("{e:#}")),
+        Err(e) => error_response(&e),
     }
 }
 
@@ -3090,8 +3090,19 @@ fn answer_with(
             failures_beside(fleet, &mut value);
             Response::json(&value)
         }
-        Err(e) => Response::error(500, &format!("{e:#}")),
+        Err(e) => error_response(&e),
     }
+}
+
+/// An error's response: 404 for something that is not there, 500 otherwise
+/// (audit S23: a missing store answered 500).
+fn error_response(e: &anyhow::Error) -> Response {
+    let status = if e.chain().any(|c| c.is::<crate::NotFound>()) {
+        404
+    } else {
+        500
+    };
+    Response::error(status, &format!("{e:#}"))
 }
 
 /// The portal's read routes over a fleet the caller holds: Search (ranked,
@@ -3628,6 +3639,10 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(400, "missing kind");
     };
     let kind = kind.to_string();
+    // Bad input, said as such: an unknown kind answered 500 (audit S23).
+    if let Err(e) = crate::report::kind_of(&kind) {
+        return Response::error(400, &e.to_string());
+    }
     let format = request.query("format").unwrap_or("markdown").to_string();
     if !crate::report::ALL_FORMATS.contains(&format.as_str()) && format != "md" {
         return Response::error(
@@ -3747,7 +3762,7 @@ fn graph_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
         let only = (!only.is_empty()).then_some(only);
         let chosen = match fleet.selected(only.as_deref()) {
             Ok(c) => c,
-            Err(e) => return Response::error(500, &format!("{e:#}")),
+            Err(e) => return error_response(&e),
         };
         let picked: Vec<(String, PathBuf)> = chosen
             .iter()
@@ -3792,7 +3807,7 @@ fn graph_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
             }
             Response::json(&value)
         }
-        Err(e) => Response::error(500, &format!("{e:#}")),
+        Err(e) => error_response(&e),
     }
 }
 
@@ -3961,7 +3976,7 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     if add_roots && !scan_only {
         let home_dir = match home::user_home() {
             Ok(h) => crate::canonical(&h),
-            Err(e) => return Response::error(500, &format!("{e:#}")),
+            Err(e) => return error_response(&e),
         };
         let away: Vec<String> = paths
             .iter()
@@ -4457,7 +4472,7 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
         saved.vector_cache_mb = Some(n.min(65_536));
     }
     if let Err(e) = saved.save() {
-        return Response::error(500, &format!("{e:#}"));
+        return error_response(&e);
     }
 
     // Runs-at-once is the one of the three that means something to a queue
@@ -5260,7 +5275,7 @@ fn compact_store(state: &Arc<State>, request: &Request) -> Response {
         return match crate::Semlith::open_existing(&store.dir).and_then(|mut s| s.compact(&options))
         {
             Ok(report) => Response::json(&json!({ "store": store.name, "compact": report })),
-            Err(e) => Response::error(500, &format!("{e:#}")),
+            Err(e) => error_response(&e),
         };
     }
     let (run, progress) = match state.compact(&store, options) {
@@ -5406,7 +5421,7 @@ fn store_settings(state: &Arc<State>, request: &Request) -> Response {
     });
     let saved = match saved {
         Ok(s) => s,
-        Err(e) => return Response::error(500, &format!("{e:#}")),
+        Err(e) => return error_response(&e),
     };
     state.settings_changed(&store);
 

@@ -1110,11 +1110,7 @@ fn call_local(
                         paths.with_header(render_grep(
                             &found,
                             offset,
-                            args.get("max_tokens")
-                                .and_then(Value::as_u64)
-                                .map_or(DEFAULT_LOCATE_TOKENS, |v| v as usize)
-                                .max(200)
-                                * 4,
+                            max_tokens(&args) * 4,
                             &|p| paths.short(p),
                         ))
                     }
@@ -1127,11 +1123,7 @@ fn call_local(
                     .get("format")
                     .and_then(Value::as_str)
                     .is_some_and(|f| f.eq_ignore_ascii_case("excerpt"));
-                let max_tokens = args
-                    .get("max_tokens")
-                    .and_then(Value::as_u64)
-                    .map(|v| v as usize)
-                    .unwrap_or(DEFAULT_LOCATE_TOKENS);
+                let max_tokens = max_tokens(&args);
                 let asked = match args.get("prefer").and_then(Value::as_str) {
                     Some(raw) => match crate::Prefer::parse(raw) {
                         Ok(p) => Some(p),
@@ -1519,10 +1511,12 @@ fn call_local(
                 Err(e) => return Ok(tool_error(&e)),
             };
             let only = strings(&args, "store");
+            // Clamped like `k` and `depth` (audit S23): a limit of 10^18
+            // materialised every row of a large store into one answer.
             let limit = args
                 .get("limit")
                 .and_then(Value::as_u64)
-                .map(|n| n as usize)
+                .map(|n| n.min(MAX_FILE_LIMIT) as usize)
                 .unwrap_or(FILE_LIMIT)
                 .max(1);
             if args.get("tree").and_then(Value::as_bool).unwrap_or(false) {
@@ -1575,6 +1569,21 @@ fn call_local(
             let roots: Vec<PathBuf> = strings(&args, "path").iter().map(PathBuf::from).collect();
             if roots.is_empty() {
                 return Err((-32602, "missing required argument: path".into(), None));
+            }
+            // Before anything touches the disk: a path outside what an agent
+            // may index is refused in the same words whether or not it exists.
+            // `check_roots` said "No such file" for one and "Permission denied"
+            // for another, so any key could map the machine (audit S23).
+            let served: Vec<PathBuf> = stores
+                .each()
+                .flat_map(|(_, store)| crate::home::index_roots(store.dir()))
+                .collect();
+            if let Some(outside) = roots.iter().find(|r| !agent_may_reach(r, &served)) {
+                return Ok(tool_error(&format!(
+                    "refused: {} is outside what an agent may index — the home directory \
+                     and the roots of this machine's stores",
+                    outside.display()
+                )));
             }
             // Before a store is opened or made, so a path an agent got wrong
             // leaves nothing behind and is an error rather than a success with
@@ -2340,6 +2349,61 @@ fn strings(args: &Value, key: &str) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// An answer's `max_tokens`, clamped (audit S23): unbounded, `2^62` wrapped
+/// the grep budget to nothing once multiplied into bytes.
+fn max_tokens(args: &Value) -> usize {
+    args.get("max_tokens")
+        .and_then(Value::as_u64)
+        .map_or(DEFAULT_LOCATE_TOKENS as u64, |v| v.clamp(200, 200_000)) as usize
+}
+
+/// The most rows `semlith_files` lists in one answer, whatever `limit` says.
+const MAX_FILE_LIMIT: u64 = 10_000;
+
+/// Whether `path` lies under the home directory, a registered store's roots
+/// or the roots of a store this session serves (`served`), decided from its spelling alone: no `stat`, so the answer for a
+/// path outside says nothing about whether it exists. `.` and `..` are
+/// resolved lexically, and on macOS `/var` and `/private/var` are one place.
+fn agent_may_reach(path: &std::path::Path, served: &[std::path::PathBuf]) -> bool {
+    use std::path::{Component, PathBuf};
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => return false,
+        }
+    };
+    let mut plain = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            Component::ParentDir => {
+                plain.pop();
+            }
+            Component::CurDir => {}
+            other => plain.push(other),
+        }
+    }
+    let unaliased = |p: &std::path::Path| -> PathBuf {
+        p.strip_prefix("/private")
+            .map(|rest| std::path::Path::new("/").join(rest))
+            .unwrap_or_else(|_| p.to_path_buf())
+    };
+    let mut allowed: Vec<PathBuf> = Vec::new();
+    if let Ok(home) = crate::home::user_home() {
+        allowed.push(crate::canonical(&home));
+        allowed.push(home);
+    }
+    if let Ok(registry) = crate::home::Registry::load() {
+        allowed.extend(registry.stores.into_values().flat_map(|e| e.roots));
+    }
+    allowed.extend(served.iter().cloned());
+    let plain = unaliased(&plain);
+    allowed.iter().any(|root| {
+        plain.starts_with(unaliased(&crate::canonical(root))) || plain.starts_with(unaliased(root))
+    })
 }
 
 fn tool_error(message: &str) -> Value {
