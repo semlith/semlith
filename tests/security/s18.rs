@@ -24,6 +24,10 @@ fn planted(line: impl Fn(usize) -> String) -> String {
 #[test]
 #[ignore = "a timing: run in --release"]
 fn s18_a_planted_file_of_key_shapes_scans_in_seconds() {
+    if cfg!(debug_assertions) {
+        eprintln!("a timing of a release build; skipped in a debug one");
+        return;
+    }
     let text = planted(|i| {
         if i % 2 == 0 {
             format!("AKIA{i:016}\n")
@@ -42,6 +46,10 @@ fn s18_a_planted_file_of_key_shapes_scans_in_seconds() {
 #[test]
 #[ignore = "a timing: run in --release"]
 fn s18_a_planted_file_of_functions_graphs_in_seconds() {
+    if cfg!(debug_assertions) {
+        eprintln!("a timing of a release build; skipped in a debug one");
+        return;
+    }
     let text = planted(|i| format!("function f{i}(){{g{i}()}}\n"));
     let started = Instant::now();
     let graph = semlith::graph::extract(Path::new("gen.js"), &text);
