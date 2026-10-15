@@ -373,7 +373,11 @@ fn with_remotes(state: &Arc<State>, request: &Request) -> Option<Response> {
     let exact = request
         .query("exact")
         .is_some_and(|v| v == "1" || v == "true");
-    let merging = *tool == "semlith_search" && !exact;
+    // The portal's "This machine only" (audit S21).
+    let local_only = request
+        .query("local")
+        .is_some_and(|v| v == "1" || v == "true");
+    let merging = *tool == "semlith_search" && !exact && !local_only;
     let targets: Vec<(String, home::Remote)> = remotes
         .iter()
         .filter(|(r, _)| {

@@ -43,17 +43,24 @@ before any public disclosure.
 
 This decides what is and is not a vulnerability.
 
-- **Nothing is sent anywhere at query time.** Embedding and search run locally.
-  Every outbound request is one somebody asked for: model weights and
-  accelerator packs (each pinned by digest in [docs/models.md](docs/models.md)),
-  `semlith add <url>` (one request, public addresses only), `semlith upgrade`
-  (`https://github.com` only; a release binary cannot be pointed at another
-  origin), and Semlith Cloud after `semlith cloud login` (a token goes only to
-  the host it was stored with). At build time only, `cargo install` and source
-  builds download ONNX Runtime from `cdn.pyke.io` through the hash-pinning
-  `ort-sys` crate; the prebuilt Linux archives instead ship Microsoft's ONNX
-  Runtime release beside the binary, verified against the checksum GitHub
-  publishes. `--airgap` or `SEMLITH_AIRGAP=1` refuses every runtime download
+- **Nothing leaves the machine at query time unless a cloud org is
+  connected.** Embedding and search run locally. After `semlith cloud login`,
+  a search that names no store, or names a remote one, also asks every
+  connected org's stores and sends them the query and its filters; `--local`
+  on the command line, `local: true` over MCP and *This machine only* in the
+  portal keep one search here. Every other outbound request is one somebody
+  asked for: model weights and accelerator packs (each pinned by digest in
+  [docs/models.md](docs/models.md) and checked before they are loaded),
+  `semlith add <url>` (one request; public addresses only unless
+  `SEMLITH_ADD_ALLOW_PRIVATE=1` is set, which `semlith doctor` reports),
+  `semlith upgrade` (`https://github.com` only; a release binary cannot be
+  pointed at another origin, and the archive's signature is checked), and
+  Semlith Cloud (a token goes only to the host it was stored with). At build
+  time, `cargo install` and source builds download ONNX Runtime from
+  `cdn.pyke.io` through the hash-pinning `ort-sys` crate, and so do the macOS
+  and Windows release archives, which link it statically; the prebuilt Linux
+  archives instead ship Microsoft's ONNX Runtime release beside the binary,
+  verified against the checksum GitHub publishes. `--airgap` or `SEMLITH_AIRGAP=1` refuses every runtime download
   not already in the model cache. The full list is in
   [docs/security.md](docs/security.md#what-semlith-downloads-and-when).
 - **The store is not encrypted.** `store.db` holds the plain text of every chunk
@@ -121,11 +128,15 @@ This decides what is and is not a vulnerability.
 ## Out of scope
 
 - The store being readable by a local attacker who can already read your files.
-  semlith creates what it owns `0700`/`0600` and narrows anything looser on open
+  every file semlith creates is its user's alone (a `077` umask), and it
+  narrows anything looser on open
   (see [docs/security.md](docs/security.md#what-is-yours-alone-on-disk)), but
   that defends against accidents and a shared machine's defaults, not against
   someone who can read your home directory. The daemon's token is in the same
-  category.
+  category: it lives under the semlith home, never beside a store kept
+  elsewhere, and never in a log file. `/api/about` answers the daemon's pid,
+  binary path and store and model folders to whoever holds that token, by
+  design: it is the owner's own portal.
 - Another process on this machine using a token it obtained legitimately. The
   token guards against a web page and a stray process, not against a user who
   can read your home directory.

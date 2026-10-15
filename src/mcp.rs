@@ -695,6 +695,7 @@ fn all_tool_defs(open: &str) -> Value {
                     "k": { "type": "integer", "description": "Default 8." },
                     "path": { "type": "array", "items": { "type": "string" }, "description": "Globs; ! excludes." },
                     "exact": { "type": "boolean" },
+                    "local": { "type": "boolean" },
                     "store": { "type": "array", "items": { "type": "string" }, "description": store_arg }
                 },
                 "required": ["query"]
@@ -969,11 +970,14 @@ fn call_with_remotes(
         p
     };
     let exact = args.get("exact").and_then(Value::as_bool) == Some(true);
+    // A search naming no store asks every connected org too; `local: true`
+    // keeps it on this machine (audit S21).
+    let local_only = args.get("local").and_then(Value::as_bool) == Some(true);
     let targets: Vec<(String, crate::home::Remote)> = remotes
         .iter()
         .filter(|(r, _)| {
             if named.is_empty() {
-                name == "semlith_search"
+                name == "semlith_search" && !local_only
             } else {
                 remote_named.contains(r)
             }

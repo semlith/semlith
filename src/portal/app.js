@@ -6812,6 +6812,9 @@ const sr = {
   whole: false,
   detail: null,
   scopeOpen: false,
+  // "This machine only": a search naming no store asks every connected org
+  // too, and this keeps one on this machine (audit S21).
+  local: false,
 };
 
 try {
@@ -6827,7 +6830,7 @@ const BUDGETS = [500, 1000, 1500, 3000, 6000];
 
 VIEWS.search = {
   fill: true,
-  needs: () => ["stores", "languages"],
+  needs: () => ["stores", "languages", "cloud"],
   live: [],
   render(route, holder) {
     if (state.pending.searchStore !== undefined) {
@@ -6969,6 +6972,9 @@ VIEWS.search = {
             ],
         langChip,
         pathChip,
+        sr.mode === "ranked" && data.cloud?.signed_in
+          ? btn({ class: "chip", "aria-pressed": String(sr.local), "data-tip": "Leave the connected cloud orgs out of this search", onclick: () => ((sr.local = !sr.local), repaint(), sr.query && runSearch()) }, "This machine only")
+          : null,
         el("span", { class: "spacer" }),
         sr.result && !sr.result.error ? el("span", { class: "row gap6 nowrap t-mono-sm" }, el("span", { class: "dot blue" }), resultMeta()) : null,
       ),
@@ -7062,6 +7068,7 @@ async function runSearch() {
       p.set("k", String(sr.k));
       p.set("format", "locate");
       p.set("max_tokens", String(sr.budget));
+      if (sr.local) p.set("local", "1");
       if (sr.prefer !== "either") p.set("prefer", sr.prefer);
       sr.result = await askMine(`/api/search?${p}`);
       // An identifier is answered by its definition first; every line that
@@ -9628,7 +9635,7 @@ VIEWS.privacy = {
             el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Everything semlith ever fetches" }), meta(`${downloads.length + 2} things, each on your say-so`)),
             downloads.map((d) => el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: cap(plainWhat(d.what)) }), el("span", { class: "muted t-xs", text: `${d.source} · ${bytes(d.bytes)} · ${d.when}` })), pill(d.cached ? "on disk" : "never fetched", d.cached ? "green" : "grey", { dot: false }))),
             el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "A URL you add to a store" }), el("span", { class: "muted t-xs", text: "one https request for exactly that URL · only when you press Fetch" })), pill("on request", "grey", { dot: false })),
-            el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "Semlith Cloud" }), el("span", { class: "muted t-xs", text: P.cloud?.signed_in ? `${(P.cloud.orgs || []).map((o) => o.host_name).join(", ")} · a search naming a remote store, the ledger rows of the stores you sync, and what you push or send · never the token anywhere else` : "nothing, until you run semlith cloud login" })), pill(P.cloud?.signed_in ? "signed in" : "never contacted", P.cloud?.signed_in ? "blue" : "grey", { dot: false })),
+            el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "Semlith Cloud" }), el("span", { class: "muted t-xs", text: P.cloud?.signed_in ? `${(P.cloud.orgs || []).map((o) => o.host_name).join(", ")} · every search that names no store or a remote one (a search can be kept to this machine), the ledger rows of the stores you sync, and what you push or send · never the token anywhere else` : "nothing, until you run semlith cloud login" })), pill(P.cloud?.signed_in ? "signed in" : "never contacted", P.cloud?.signed_in ? "blue" : "grey", { dot: false })),
             el("div", { class: "dl-row" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: "The release check and the price table" }), el("span", { class: "muted t-xs", text: "github.com and models.dev · only when you press the button in Settings or Reports" })), pill("on request", "grey", { dot: false })),
             outbound.recent && outbound.recent.length ? el("div", { class: "card-foot", text: `last ${outbound.recent.length}: ${outbound.recent.slice(0, 4).map((r) => `${clock(r.at)} ${r.what} → ${r.host}`).join(" · ")}` }) : null,
           ),
@@ -10100,7 +10107,7 @@ function lagWord(s) {
 function cloudFact(C) {
   if (!C || !C.signed_in) return ["Cloud", "not signed in", "no cloud call and no connection, until semlith cloud login"];
   const sync = (C.sync?.on || []).length;
-  return ["Cloud", (C.orgs || []).map((o) => o.org).join(", "), `${(C.orgs || []).map((o) => o.host_name).join(", ")} only · ledger sync on ${plural(sync, "store")} · searches naming a remote store go there`];
+  return ["Cloud", (C.orgs || []).map((o) => o.org).join(", "), `${(C.orgs || []).map((o) => o.host_name).join(", ")} only · ledger sync on ${plural(sync, "store")} · a search naming no store or a remote one goes there too, unless kept to this machine`];
 }
 
 function syncLine() {

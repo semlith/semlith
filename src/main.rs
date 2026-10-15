@@ -283,6 +283,11 @@ enum Command {
         #[arg(long, default_value_t = 0, requires = "exact")]
         offset: usize,
 
+        /// Search this machine's stores only. Without it, a search that names
+        /// no store asks every connected cloud org as well.
+        #[arg(long)]
+        local: bool,
+
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -2021,6 +2026,7 @@ fn run() -> Result<()> {
             prefer,
             exact,
             offset,
+            local,
             json,
         } => {
             // Built before any store is opened, so an unknown language name
@@ -2029,7 +2035,10 @@ fn run() -> Result<()> {
             // Remote stores join a search the way they join MCP's: every one
             // when no `--store` narrowed it, else the ones named. A machine
             // that never connected one reads exactly as it always did.
-            let (targets, local_flags) = store_flags(&cli.store);
+            let (mut targets, local_flags) = store_flags(&cli.store);
+            if local {
+                targets.clear();
+            }
             if exact {
                 if !cli.store.is_empty() && !targets.is_empty() {
                     bail!(
