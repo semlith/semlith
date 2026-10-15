@@ -2342,6 +2342,19 @@ impl Semlith {
         let _ = self.db.execute_batch("COMMIT");
     }
 
+    /// Whether this store holds a file at `path`, a canonical path as the
+    /// watcher resolves one. An exact key lookup: it runs per deleted path in
+    /// a batch, which a `node_modules` reinstall makes thousands of.
+    pub(crate) fn holds(&self, path: &Path) -> bool {
+        self.db
+            .query_row(
+                "SELECT 1 FROM files WHERE path = ?1",
+                [path.to_string_lossy()],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
     /// The generated folders a person accepted, which the walk goes into.
     fn accepted_folders(&self) -> Vec<PathBuf> {
         store::acceptances(&self.db)
@@ -4552,9 +4565,23 @@ impl Semlith {
                     report.removed += 1;
                 }
             }
-            // A not-indexed row for something no longer on disk says nothing.
+            // A not-indexed row for something no longer on disk says nothing,
+            // and one below a directory the walk no longer enters — generated
+            // output, `.git`, a credential directory — is one no run would
+            // record today: before 0.41.0 the watcher let those through, and
+            // `node_modules/.bin/esbuild` sat on the review list for good.
+            let accepted = self.accepted_folders();
+            let roots: Option<Vec<PathBuf>> = boundary
+                .boundary
+                .roots
+                .as_ref()
+                .map(|roots| roots.iter().map(|r| canonical(r)).collect());
             for row in store::refusals(&self.db)? {
-                if !Path::new(&row.path).exists() {
+                let path = Path::new(&row.path);
+                if !path.exists()
+                    || (under_skipped_dir(path, roots.as_deref())
+                        && !accepted.iter().any(|a| path.starts_with(a)))
+                {
                     store::unrefuse(&self.db, &row.path)?;
                 }
             }
@@ -7154,6 +7181,20 @@ const ALWAYS: &[&str] = &[
     ".turbo",
     ".parcel-cache",
     ".yarn",
+    ".pnpm-store",
+    "jspm_packages",
+    "storybook-static",
+    // Framework and host build caches. Hidden, so the walk skips them unless
+    // a repository's ignore file whitelists dotfiles, which 0.19.0 honours.
+    ".astro",
+    ".vite",
+    ".output",
+    ".vercel",
+    ".netlify",
+    ".angular",
+    ".docusaurus",
+    ".expo",
+    ".wrangler",
     // Python
     "__pycache__",
     ".venv",
@@ -7204,14 +7245,39 @@ const GENERATED: &[(&str, &[&str])] = &[
             "pyproject.toml",
             "setup.py",
             "rollup.config.js",
+            "vite.config.js",
+            "vite.config.ts",
+            "vite.config.mjs",
+            "astro.config.mjs",
+            "astro.config.ts",
+            "deno.json",
         ],
     ),
-    ("out", &["package.json", "tsconfig.json"]),
+    (
+        "out",
+        &[
+            "package.json",
+            "tsconfig.json",
+            "next.config.js",
+            "next.config.mjs",
+            "next.config.ts",
+        ],
+    ),
     ("bin", &["*.csproj", "*.sln", "*.fsproj"]),
     ("obj", &["*.csproj", "*.sln", "*.fsproj"]),
     ("coverage", &["package.json", "pyproject.toml"]),
     ("Pods", &["Podfile"]),
 ];
+
+/// Whether `path` lies below a directory no walk enters — generated output,
+/// `.git`, a credential directory — between it and the root it is under. The
+/// root itself is not asked: a root somebody named is walked.
+fn under_skipped_dir(path: &Path, roots: Option<&[PathBuf]>) -> bool {
+    path.ancestors()
+        .skip(1)
+        .take_while(|a| roots.is_none_or(|roots| !roots.iter().any(|r| r == a)))
+        .any(|a| is_generated_dir(a) || filter::is_denied_dir(a))
+}
 
 /// Whether this directory is generated output rather than somebody's code.
 ///
@@ -8439,6 +8505,32 @@ mod tests {
         let d = std::env::temp_dir().join(format!("semlith-test-b-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+}
+
+#[cfg(test)]
+mod skipped_dir_tests {
+    use super::*;
+
+    #[test]
+    fn a_path_below_generated_output_or_git_is_under_a_skipped_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonical(dir.path());
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        let roots = [root.clone()];
+        let under = |rel: &str| under_skipped_dir(&root.join(rel), Some(&roots));
+        assert!(under("node_modules/.bin/esbuild"));
+        assert!(under("dist/assets/app.js"));
+        assert!(under(".git/index.lock"));
+        assert!(under("sub/.aws/notes.md"));
+        assert!(!under("src/dist.rs"));
+        assert!(!under("notes.md"));
+        // A root named node_modules was named on purpose: walked, not skipped.
+        let named = root.join("node_modules");
+        assert!(!under_skipped_dir(
+            &named.join("pkg.json"),
+            Some(&[named.clone()])
+        ));
     }
 }
 
