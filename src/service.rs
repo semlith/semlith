@@ -89,6 +89,19 @@ pub fn log_path() -> Result<PathBuf> {
     Ok(log)
 }
 
+/// A path as one word of a systemd `ExecStart=`: double-quoted, with the
+/// backslash and quote escaped and the `%` specifier and `$` expansion
+/// doubled, so a path with a space or either sign runs as itself.
+#[cfg(any(target_os = "linux", test))]
+fn systemd_quote(raw: &str) -> String {
+    let escaped = raw
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%")
+        .replace('$', "$$");
+    format!("\"{escaped}\"")
+}
+
 /// The binary a service definition should name.
 ///
 /// Resolved, never the bare command: a service manager starts a process with
@@ -283,10 +296,23 @@ mod platform {
     pub fn stale_definition() -> Option<String> {
         let path = unit_path().ok()?;
         let text = std::fs::read_to_string(&path).ok()?;
-        (!text.contains("CPUWeight=")).then(|| {
-            format!(
+        if !text.contains("CPUWeight=") {
+            return Some(format!(
                 "{} predates the daemon's lower scheduling weight (Nice, CPUWeight, IOWeight); \
                  run `semlith setup` (or `semlith start --service`) to rewrite it",
+                path.display()
+            ));
+        }
+        // Before 0.41.0 the unit ran the binary with no subcommand, which
+        // prints usage and exits: the service restarted forever and never
+        // served.
+        let starts = text
+            .lines()
+            .any(|l| l.starts_with("ExecStart=") && l.contains(" start"));
+        (!starts).then(|| {
+            format!(
+                "{} runs semlith without `start`, so the service never serves; run `semlith \
+                 setup` (or `semlith start --service`) to rewrite it",
                 path.display()
             )
         })
@@ -333,7 +359,7 @@ mod platform {
              \n\
              [Service]\n\
              Type=simple\n\
-             ExecStart={exe}{port}\n\
+             ExecStart={exe} start{port}\n\
              Restart=always\n\
              RestartSec=2\n\
              Nice=5\n\
@@ -342,7 +368,11 @@ mod platform {
              \n\
              [Install]\n\
              WantedBy=default.target\n",
-            exe = exe.display(),
+            // Quoted as systemd reads a command line (audit S17), and with
+            // `start`: without a subcommand the binary prints its usage and
+            // exits, so before 0.41.0 the unit restarted every two seconds and
+            // never served.
+            exe = systemd_quote(&exe.display().to_string()),
         );
         std::fs::write(&path, unit).with_context(|| format!("writing {}", path.display()))?;
 
@@ -417,7 +447,7 @@ mod platform {
         // first time the port is busy.
         let script = format!(
             "$ErrorActionPreference='Stop'; \
-             $action = New-ScheduledTaskAction -Execute '{exe}' -Argument 'start{port}'; \
+             $action = New-ScheduledTaskAction -Execute {exe} -Argument 'start{port}'; \
              $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME; \
              $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries \
              -DontStopIfGoingOnBatteries -Priority 5 -RestartCount 3 \
@@ -426,7 +456,8 @@ mod platform {
              Register-ScheduledTask -TaskName '{task}' -Action $action -Trigger $trigger \
              -Settings $settings -Force | Out-Null; \
              Start-ScheduledTask -TaskName '{task}'",
-            exe = exe.display(),
+            // Quoted for PowerShell, not pasted between quotes (audit S17).
+            exe = crate::setup::powershell_quote(&exe.display().to_string()),
             task = TASK,
         );
         powershell(&script).context("registering the logon task")?;
@@ -879,6 +910,18 @@ pub fn running_version() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_service_path_is_quoted_for_systemd_and_powershell() {
+        assert_eq!(
+            systemd_quote(r#"/home/a b/100%/$x"q"/semlith"#),
+            r#""/home/a b/100%%/$$x\"q\"/semlith""#
+        );
+        assert_eq!(
+            crate::setup::powershell_quote("C:/Users/O\u{2019}Brien/it's/semlith.exe"),
+            "'C:/Users/O\u{2019}\u{2019}Brien/it''s/semlith.exe'"
+        );
+    }
 
     /// F1: each mechanism's restart, as the exact argv. `enable --now` and
     /// `bootstrap` would leave the old daemon running.
