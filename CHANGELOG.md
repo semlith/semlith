@@ -110,14 +110,20 @@ each (`fuzz/`, `.github/workflows/fuzz.yml`).
 
 ### Fixed
 
-**Two parser inputs found by the new fuzzers.** A Markdown line of `>` runs
-separated by NUL bytes passed the 128-level nesting cap and aborted
-tree-sitter-md, the S01 abort by another route; indexing refused such a file
-in the parse worker, but `semlith_pattern` parses stored Markdown in the
-daemon. The cap now counts past control characters. A PDF whose page is its
-own `/Parent` sent pdf-extract round the chain forever, bounded only by the
-worker's deadline; such a page tree is now refused before it is read. Both
-inputs are kept as fuzz seeds.
+**Three parser inputs found by the new fuzzers.** A Markdown line of `>`
+runs separated by NUL bytes passed the 128-level nesting cap and aborted
+tree-sitter-md, the S01 abort by another route; the cap now counts past
+control characters. Seven bytes of Markdown, a digit at a list-marker position
+followed by a character past U+00FF, made tree-sitter-md's scanner call
+`isdigit` on the code point, which glibc answers from a table with no bounds
+check: an out-of-bounds read that faulted on Linux. tree-sitter-bash does the
+same after `{` or `..`. The text those two grammars parse now has such a
+character replaced byte for byte, so offsets, lines and names are unchanged. A
+PDF whose page is its own `/Parent` sent pdf-extract round the chain forever;
+such a page tree is now refused before it is read. Indexing met all three in
+the parse worker, which kept the daemon up; `semlith_pattern` parsed stored
+text in the daemon, and now parses it in the worker too. Every input is kept
+as a fuzz seed.
 
 **The review list no longer fills with build churn.** A watched tree's npm,
 cargo and git temp files under `node_modules`, `dist`, `target` and `.git`
