@@ -502,6 +502,10 @@ takes the question; under it are the scope (all stores or one), **+ language** a
 
 Before a search the page offers four example questions and your recent searches.
 
+With a cloud org connected, a Ranked search that names no store also asks the
+org's stores, and **This machine only** beside the filters keeps one search
+here, as `--local` and `local: true` do.
+
 ### How ranking works
 
 Every ranked query searches two lists over the same corpus. The **vector** search

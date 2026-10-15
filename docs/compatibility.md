@@ -728,6 +728,31 @@ From 0.37.0-rc.7:
 |---|---|
 | Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
+### 0.41.0
+
+The rest of the 0.39.0 audit. `FORMAT_VERSION` does not move: a store 0.41.0
+wrote opens under 0.40.0, which reads the keyed ledger rows below as not
+verifying.
+
+| Surface | Change |
+|---|---|
+| **Break: what is indexed** | Nothing inside a `.git`, `.ssh`, `.aws`, `.gnupg`, `.kube`, `.config/gh`, `.config/gcloud`, `.azure`, `.docker`, `Library/Keychains`, `.password-store` or `.local/share/keyrings` folder is indexed wherever it sits, whatever an ignore file whitelists. A store that held such files drops them on its next full run. Other whitelisted dotfiles are indexed as before. |
+| CLI | `semlith search --local` searches this machine's stores only. |
+| MCP | `semlith_search` takes `local: true`, the same. |
+| **Break: developer overrides** | `SEMLITH_ADD_ORIGIN`, `SEMLITH_PACK_*` and `SEMLITH_SERVICE_DIR` do nothing in a release build; build with `--features dev-overrides` to try a pack. `SEMLITH_ADD_ALLOW_PRIVATE` is unchanged. |
+| What `semlith add` refuses | A URL carrying credentials (`https://user:pass@…`), and NAT64, 6to4, IPv4-compatible and Teredo addresses carrying a private one. |
+| The service's output | A daemon whose stdout is a file prints its portal URL without the token. |
+| Tool-written state | A store outside the store home keeps its `daemon.json` under `~/.semlith/run/<hash>.json`; 0.41.0 reads the old place too, for one release. A store gains `ledger.key` (`0600`) when it records its first retrieval, and a store outside the store home an `.integrity-checked` marker. |
+| Ledger | A row's `hash` written by 0.41.0 starts `k1:` and is keyed with `ledger.key`; earlier rows keep their formula and verify. A keyed row with no `ledger.key` beside the database is where `semlith ledger --verify` reports the break. |
+| File modes | Every file semlith creates is `0600` and every directory `0700`. |
+| HTTP | A request repeating `Host`, `Origin`, `Sec-Fetch-Site`, `Content-Type`, `Content-Length`, `Semlith-Token` or `Authorization` gets 400. A missing store is 404 and an unknown report kind 400, where both were 500; a 403's reason is `Forbidden`. `/api/search` takes `local=1`. |
+| MCP numbers | `max_tokens` is clamped to 200 to 200,000 and `semlith_files`'s `limit` to 10,000. |
+| `semlith_index` over MCP | A path outside the home and the stores' roots is refused before it is looked at, with `refused: <path> is outside what an agent may index`. |
+| `semlith_pattern`, exact search | Stop after 10 s with `truncated`, as at 200 matches. |
+| Exports | A CSV cell a spreadsheet would read as a formula starts with `'`; Markdown escapes `<`, `>`, `&`, `|` and backticks. |
+| Release | crates.io releases are published through Trusted Publishing. |
+| Library | `read_regular`, `NotFound`, `fuzzing::http_head` and `filter::denied_dir`/`is_denied_dir` are public; `filter::Denied::Directory`'s reason no longer starts `under ~/`. |
+
 ### 0.40.0
 
 Security fixes from the audit of 0.39.0. `FORMAT_VERSION` does not move: a

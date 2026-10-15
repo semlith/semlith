@@ -68,7 +68,10 @@ token. Otherwise semlith opens the store directly, as it would with no file.
 **The store file is data, not a program.** SQLite can carry views and triggers
 that run when a database is read. Every connection opens with `trusted_schema`
 off and defensive mode on, and refuses writes until one of the three paths that
-write asks for permission.
+write asks for permission. From 0.41.0 a store outside the store home is also
+put through SQLite's `quick_check` the first time it is opened, before anything
+writes to it, and read with `cell_size_check` on; a store that fails is refused
+by name.
 
 **The weights are pinned.** Each model repository is fixed to a commit and each
 file verified against a SHA-256 recorded in the source and in
@@ -109,10 +112,17 @@ store's own directory when it is a `.semlith` beside its corpus, or under your
 home directory. `/etc`, another user's home, or a directory semlith was never
 told about is refused by name, with the rule that refused it.
 
-**Never a credential.** Whatever the boundary, no path under `~/.ssh`, `~/.aws`,
-`~/.gnupg`, `~/.kube`, `~/.config/gcloud`, `~/.azure`, `~/.docker`,
-`~/Library/Keychains`, `~/.password-store` or `~/.local/share/keyrings` is
-indexed, and neither is a file named `.env*`, `*.env`, `*.env.*`, `*.pem`,
+An agent's path outside those is refused before semlith looks at the disk, in
+the same words whether or not it exists, so the tool cannot be used to map the
+machine.
+
+**Never a credential.** Whatever the boundary, nothing inside a `.git`, `.ssh`,
+`.aws`, `.gnupg`, `.kube`, `.config/gcloud`, `.config/gh`, `.azure`, `.docker`,
+`Library/Keychains`, `.password-store` or `.local/share/keyrings` directory is
+indexed — wherever that directory sits, not only under your home (from 0.41.0),
+and whatever a repository's ignore file whitelists: `!.git/` in a `.gitignore`
+does not bring `.git/config` and the token in its remote into a store. Neither
+is a file named `.env*`, `*.env`, `*.env.*`, `*.pem`,
 `*.key`, `*.p12`, `*.pfx`, `*.jks`, `id_rsa*`, `id_ed25519*`, `*credentials*`,
 `*secret*`, `*.tfstate`, `*.kdbx`, `.npmrc`, `.netrc`, `.pypirc`, `.pgpass`,
 `.htpasswd`, `.boto`, `.s3cfg` or `*.ppk`. That is `filter::DENIED_NAMES` in
@@ -135,8 +145,15 @@ the person typing it owns the machine. `--include-secrets` says you meant it.
 
 **`semlith add` fetches from the public internet only.** Every hop is resolved
 and refused if it lands on loopback, an RFC 1918 range, link-local
-(`169.254.169.254` included), carrier-grade NAT or a unique local address.
-`SEMLITH_ADD_ALLOW_PRIVATE=1` opts back in for an intranet host.
+(`169.254.169.254` included), carrier-grade NAT or a unique local address, or on
+an IPv6 address carrying one of those (mapped, NAT64, 6to4) or a Teredo tunnel.
+From 0.41.0 the connection uses the addresses that were checked, so a name that
+answers differently the second time it is asked cannot slip past, and a URL with
+credentials in it is refused rather than sent or stored.
+`SEMLITH_ADD_ALLOW_PRIVATE=1` opts back in for an intranet host, and
+`semlith doctor` says when it is set. The other developer overrides
+(`SEMLITH_ADD_ORIGIN`, `SEMLITH_PACK_*`, `SEMLITH_SERVICE_DIR`) do nothing in a
+release build.
 
 **The key stays in one file.** `~/.semlith/agent.key`, mode `0600`. A client
 semlith registers launches `semlith mcp` as a subprocess, which reads the key
@@ -328,15 +345,39 @@ scan exists, and run `semlith scan` afterwards.
 
 `~/.semlith`, every store directory, the model cache and `~/.semlith/bin` are
 created `0700` and narrowed back to `0700` on every open if something loosened
-them. `store.db`, the vector shards, `registry.json`, `agent.key` and
-`daemon.json` are `0600`. Nothing is widened: a directory you set to `0500`
-stays `0500`. `semlith stats` and the Stores page report a store other users can
-read.
+them. From 0.41.0 every file and directory semlith creates is its user's alone
+by construction, through a `077` umask: `store.db` and SQLite's own WAL files,
+the vector shards, `exact.f32`, `index.lock`, logs, the parse journal,
+`registry.json`, `agent.key`, `daemon.json`, a scheduled report. Nothing is
+widened: a directory you set to `0500` stays `0500`. `semlith stats` and the
+Stores page report a store other users can read.
+
+The session token is in `daemon.json` and nowhere else on disk. A store kept
+outside the store home, such as a `.semlith` beside its corpus in a synced
+folder, has its `daemon.json` under `~/.semlith/run/` instead of beside it, and
+one an older daemon left there is removed. A daemon running as a service prints
+its portal URL without the token, because its output is a log file; `semlith
+start` prints the whole URL of a running daemon.
+
+**The ledger chain is keyed.** Each store's retrieval ledger is hash-chained,
+and from 0.41.0 the chain is keyed with a per-store key in `ledger.key` beside
+the database (`0600`). Someone who can rewrite `store.db` alone, or who has a
+copy of it, cannot recompute the chain after an edit. Rows written before stay
+verifiable under the old formula.
 
 ```sh
 stat -f '%Sp %N' ~/.semlith ~/.semlith/agent.key   # macOS
 stat -c '%A %n' ~/.semlith ~/.semlith/agent.key    # Linux
 ```
+
+## What leaves the machine when you search
+
+Nothing, until you connect a cloud org with `semlith cloud connect`. After that,
+a search that names no store, or names a remote one, also asks every connected
+org's stores, and sends them the query and its filters. `semlith search
+--local`, `local: true` on `semlith_search` and *This machine only* on the
+portal's Search page keep one search here. A tool other than search goes to an
+org only when it names one of its stores.
 
 ## What semlith downloads, and when
 
@@ -350,11 +391,12 @@ its source, size, when it happens and whether it is cached.
 |---|---|---|
 | The embedding model (~52 MB) | `huggingface.co` | the first index; `semlith setup` pre-fetches it |
 | The rescoring model | `huggingface.co` | `semlith setup`, beside the embedding model |
-| CLIP, vision and text (335 MB and 244 MB) | `huggingface.co` | the first image a store indexes; never at start |
+| CLIP, vision and text (335 MB and 244 MB) | `huggingface.co` | the first image a store indexes; never at start. Checked against its pinned digests before ONNX Runtime loads it |
 | The WebGPU plugin and the fp16 model | `files.pythonhosted.org`, `huggingface.co` | the first run with the GPU lane on and a hardware GPU found; never for a software renderer |
 | The CUDA pack (1.89 GB) | `github.com`, `files.pythonhosted.org` | Linux only, after `semlith accel on cuda` or the page's switch, which states the size first |
 | The Core ML pack (148 MB) | this repository's GitHub release | `semlith setup` on Apple silicon, or `semlith accel on ane` |
 | llama.cpp, TensorRT for RTX, OpenVINO | GitHub releases, `files.pythonhosted.org` | only when you turn on that experimental lane |
+| ONNX Runtime | `cdn.pyke.io` (pinned by `ort-sys`) | at build time, for `cargo install`, source builds and the macOS and Windows release archives, which link it in |
 | `semlith add <url>` | that URL | when you run it |
 | `semlith upgrade` | `github.com` | when you run it |
 | Semlith Cloud | the host you signed in to | only after `semlith cloud login` |
@@ -411,12 +453,26 @@ The Markdown and YAML grammars are also given at most 128 levels of nesting —
 both abort at about 260. A file nested deeper keeps its text in the store and
 has no outline.
 
+## Work a file can make semlith do
+
+One file costs seconds whatever it holds. Before 0.41.0 the secret scan and the
+symbol graph compared every match or definition with every other, so a planted
+8 MiB file of key-shaped strings or one-line functions was CPU-minutes per file;
+both are linear now, and the 8 MiB worst cases take under 5 seconds on an M1
+(`tests/security/s18.rs`). `semlith_pattern` and exact search stop after ten
+seconds and say they were cut short, as they do at 200 matches.
+
+An export cannot run anything. A CSV cell that a spreadsheet would read as a
+formula (`=`, `+`, `-`, `@`, a tab or a carriage return first) is prefixed with
+`'`, and a Markdown export shows an agent's query as text rather than as HTML.
+
 ## Reading what was indexed, later
 
 A file is opened once, without following a symbolic link (`O_NOFOLLOW`; a
 reparse point on Windows), without blocking on a FIFO, and checked to be a
-regular file on the open handle before a capped read. That holds for indexing
-and for `read`'s fallback, which serves a stale span's current lines: a stored
+regular file on the open handle before a capped read. That holds for indexing,
+the scan before a review, accepting a refused file, `semlith cloud push`, the
+portal's image view and `read`'s fallback, which serves a stale span's current lines: a stored
 path that no longer resolves to itself, or that the deny-list names, is not
 read, and the span says the file was replaced since it was indexed. Before
 0.40.0 a file swapped for a link to `~/.kube/config` after indexing was served
@@ -445,8 +501,32 @@ every store 0.14.0 and later wrote, ignores the trusted list, and reads a `0700`
 directory as its owner. It restores the cookie session and the unbounded index
 tool.
 
+## Proof that stays
+
+A rule that held once is not a rule that holds next release, so these run on
+every pull request:
+
+- `tests/security.rs`, one test per finding of the 2026-10-14 audit, each of
+  which failed on the release before its fix;
+- `cargo deny` (advisories, licences, sources; `deny.toml`) and `cargo audit`
+  with a freshly fetched advisory database, as required checks.
+
+And on a schedule, weekly and on demand: `cargo-fuzz` targets for the HTTP
+request head, the Markdown and code chunkers and every format reader (Office
+and OpenDocument, PDF, mail, notebooks, HTML and RTF, images), an hour each
+(`.github/workflows/fuzz.yml`). Releases go to crates.io through Trusted
+Publishing, so no long-lived crates.io token exists.
+
+### Controls by release
+
+| Release | Controls |
+|---|---|
+| 0.14.0 | header token, fetch-metadata check, trusted stores, pinned weights, index boundary, deny-list |
+| 0.40.0 | parse worker and poison journal, read-only agent keys, no global MCP lock, link-safe reads, signed releases, git without repository config, llama key off argv, config writes keep modes, refused secrets scrubbed, HTTP head deadlines |
+| 0.41.0 | `.git` and credential directories refused anywhere, token out of logs, digests checked before load, overrides out of release builds, quoting, linear scan and graph, bounded pattern and grep, `add` connects to the checked address, refused repeated headers, owner-only files, foreign-store check, keyed ledger, local-only search, export escaping, CI gate, fuzzing, Trusted Publishing |
+
 Every rule on this page except the content scan closes a finding from the
-security audit of 0.13.0, and each shipped with the test that would have caught
-it. `CHANGELOG.md` lists them by finding id;
+security audit of 0.13.0 or of 0.39.0, and each shipped with the test that would
+have caught it. `CHANGELOG.md` lists them by finding id;
 [compatibility.md](compatibility.md) records the four that broke something 0.13.0
 did, with the way back for each.
