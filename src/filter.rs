@@ -468,19 +468,24 @@ mod tests {
 
 // ---------------------------------------------------------------- the deny-list
 
-/// Directories under the home whose contents are credentials, and nothing else.
+/// Directories whose contents are credentials, and nothing else.
 ///
-/// Relative to the home directory, because that is where each of them lives and
-/// where an agent asked to "index my config" would find them. A deny-list is a
-/// blunt instrument and this one is deliberately short: every entry is a
-/// directory whose whole purpose is to hold secrets, so refusing it costs a user
-/// nothing they meant to index.
+/// Matched by whole path components wherever they appear, not only under the
+/// home (audit S12): a `.aws` copied into a project, a `.ssh` inside a synced
+/// folder and `~/.ssh` hold the same thing. A deny-list is a blunt instrument
+/// and this one is deliberately short: every entry is a directory whose whole
+/// purpose is to hold secrets, so refusing it costs a user nothing they meant
+/// to index. `.git` is here because its `config` carries a remote's token as
+/// readily as a `.netrc` does, and a repository's own ignore file whitelisting
+/// `!.git/` must not be how it reaches a store.
 pub const DENIED_DIRS: &[&str] = &[
+    ".git",
     ".ssh",
     ".aws",
     ".gnupg",
     ".kube",
     ".config/gcloud",
+    ".config/gh",
     ".azure",
     ".docker",
     "Library/Keychains",
@@ -550,8 +555,11 @@ impl Denied {
     /// path.
     pub fn reason(&self) -> String {
         match self {
+            Denied::Directory(".git") => "inside .git, git's own state, whose config can hold a \
+                 remote's token — semlith does not index it"
+                .to_string(),
             Denied::Directory(dir) => {
-                format!("under ~/{dir}, which holds credentials — semlith does not index it")
+                format!("inside {dir}, which holds credentials — semlith does not index it")
             }
             Denied::Name(pattern) => {
                 format!("matches {pattern}, which names a credential — semlith does not index it")
@@ -591,14 +599,14 @@ pub fn denied(path: &Path) -> Option<Denied> {
 /// home could not have changed. [`denied`] canonicalises for the callers that
 /// have a single path and no run around it.
 pub(crate) fn denied_against(path: &Path, home: Option<&Path>) -> Option<Denied> {
-    let Some(home) = home else {
+    if let Some(dir) = denied_dir(path) {
+        return Some(Denied::Directory(dir));
+    }
+    // The directory rules no longer need the home, but an unknown one still
+    // fails closed: whatever else keys off it (the scan, the boundary) has
+    // been told nothing it can check against.
+    if home.is_none() {
         return Some(Denied::NoHome);
-    };
-    let real = path;
-    for dir in DENIED_DIRS {
-        if real.starts_with(home.join(dir)) {
-            return Some(Denied::Directory(dir));
-        }
     }
 
     let name = path
@@ -614,6 +622,41 @@ pub(crate) fn denied_against(path: &Path, home: Option<&Path>) -> Option<Denied>
         return Some(Denied::Hidden);
     }
     None
+}
+
+/// The [`DENIED_DIRS`] entry this path lies inside, if any: its components
+/// matched as a run anywhere in the path, ASCII case-insensitively because
+/// the default file systems on macOS and Windows are.
+pub fn denied_dir(path: &Path) -> Option<&'static str> {
+    let parts = components(path);
+    DENIED_DIRS.iter().copied().find(|dir| {
+        let want: Vec<&str> = dir.split('/').collect();
+        parts.windows(want.len()).any(|w| same(w, &want))
+    })
+}
+
+/// Whether this directory is itself one of [`DENIED_DIRS`] — its last
+/// components are an entry. The walk prunes it there, so nothing under it is
+/// read, whatever an ignore file whitelists.
+pub fn is_denied_dir(path: &Path) -> bool {
+    let parts = components(path);
+    DENIED_DIRS.iter().any(|dir| {
+        let want: Vec<&str> = dir.split('/').collect();
+        parts.len() >= want.len() && same(&parts[parts.len() - want.len()..], &want)
+    })
+}
+
+fn components(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn same(have: &[String], want: &[&str]) -> bool {
+    have.iter().zip(want).all(|(h, w)| h.eq_ignore_ascii_case(w))
 }
 
 /// `*` against a name, with everything else literal.
@@ -773,14 +816,47 @@ mod deny_tests {
         );
         assert_eq!(
             denied_against(&home.join(".kube").join("config"), None),
-            Some(Denied::NoHome),
-            "the credential itself must not slip past either"
+            Some(Denied::Directory(".kube")),
+            "the credential itself must not slip past either, and is refused by its own rule"
         );
         let refusal = Denied::NoHome.reason();
         assert!(
             refusal.contains("home directory"),
             "the reason should say what semlith could not determine: {refusal}"
         );
+    }
+
+    /// Audit S12: a credential directory is one wherever it sits — copied
+    /// into a project, inside a synced folder — and `.git` is one too. Matched
+    /// by whole components, so `.github` and `.gitignore` are not.
+    #[test]
+    fn a_credential_directory_is_refused_wherever_it_sits() {
+        let home = Some(Path::new("/home/x"));
+        for (path, dir) in [
+            ("/work/api/.git/config", ".git"),
+            ("/work/api/.aws/credentials", ".aws"),
+            ("/home/x/.config/gh/hosts.yml", ".config/gh"),
+            ("/mnt/sync/backup/.SSH/id_ed25519.pub", ".ssh"),
+            ("/work/vendor/.config/gcloud/creds.db", ".config/gcloud"),
+        ] {
+            assert_eq!(
+                denied_against(Path::new(path), home),
+                Some(Denied::Directory(dir)),
+                "{path}"
+            );
+        }
+        for path in [
+            "/work/api/.github/workflows/ci.yml",
+            "/work/api/.gitignore",
+            "/work/api/src/git/config.rs",
+            "/work/api/config/gh/readme.md",
+        ] {
+            assert_eq!(denied_dir(Path::new(path)), None, "{path}");
+        }
+        assert!(is_denied_dir(Path::new("/work/api/.git")));
+        assert!(is_denied_dir(Path::new("/home/x/.config/gh")));
+        assert!(!is_denied_dir(Path::new("/home/x/.config")));
+        assert!(!is_denied_dir(Path::new("/work/api/.git/objects")));
     }
 
     /// Every name the widened list is supposed to cover, one row each.

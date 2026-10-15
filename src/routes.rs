@@ -2114,16 +2114,12 @@ fn image_file(state: &Arc<State>, request: &Request) -> Response {
 
     // Opened once, and everything decided from the open handle: what is read is
     // what was opened, whatever the name points at by the time it is read.
-    let Ok(file) = std::fs::File::open(&path) else {
-        // Indexed once and gone since: the row is real and the file is not.
+    // Without following a link or blocking on a FIFO (audit S13).
+    let Ok((file, meta)) = crate::open_regular(&path) else {
+        // Indexed once and gone since, or no longer a plain file: the row is
+        // real and the file is not.
         return Response::error(404, "the file is no longer on disk");
     };
-    let Ok(meta) = file.metadata() else {
-        return Response::error(404, "the file is no longer on disk");
-    };
-    if !meta.is_file() {
-        return Response::error(404, "no such image");
-    }
     if meta.len() > MAX_IMAGE_BYTES {
         return Response::error(413, "the image is larger than the portal will draw");
     }

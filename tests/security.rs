@@ -1,5 +1,5 @@
-//! One test per finding of the 2026-10-14 security audit (S01-S11), each
-//! written to fail on the v0.39.0 binary before its fix landed.
+//! One test per finding of the 2026-10-14 security audit, each written to fail
+//! before its fix landed: S01-S11 on the v0.39.0 binary, S12-S25 on v0.40.0.
 //!
 //! Every test drives the binary as a user or an agent would — the CLI, or a
 //! scratch daemon on port 0 with its own `HOME` and `SEMLITH_HOME` — so the
@@ -217,3 +217,9 @@ mod s09;
 mod s10;
 #[path = "security/s11.rs"]
 mod s11;
+#[path = "security/s16.rs"]
+mod s16;
+#[path = "security/s12.rs"]
+mod s12;
+#[path = "security/s13.rs"]
+mod s13;

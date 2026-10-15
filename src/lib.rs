@@ -2458,11 +2458,14 @@ impl Semlith {
                 }
                 continue;
             }
-            let Ok(meta) = std::fs::metadata(&path) else {
+            // Opened once without following a link, and read from that handle:
+            // a file swapped for a link or a FIFO since the walk is refused,
+            // not read (audit S13).
+            let Ok((file, meta)) = open_regular(&path) else {
                 not(&mut plan, store::class::UNINDEXABLE, &path);
                 continue;
             };
-            if !meta.is_file() || meta.len() == 0 {
+            if meta.len() == 0 {
                 not(&mut plan, store::class::UNINDEXABLE, &path);
                 continue;
             }
@@ -2492,7 +2495,7 @@ impl Semlith {
                 not(&mut plan, store::class::POLICY, &path);
                 continue;
             }
-            let Ok(bytes) = std::fs::read(&path) else {
+            let Ok(bytes) = read_capped(file, meta.len()) else {
                 not(&mut plan, store::class::UNINDEXABLE, &path);
                 continue;
             };
@@ -2703,9 +2706,10 @@ impl Semlith {
             let mut prints = Vec::new();
             let mut confidence = None;
             if class == store::class::CONTENT || class == store::class::DUMMY {
-                let bytes = anyhow::Context::with_context(std::fs::read(&key), || {
-                    format!("reading {key}")
-                })?;
+                let bytes = anyhow::Context::with_context(
+                    read_regular(Path::new(&key), u64::MAX - 1),
+                    || format!("reading {key}"),
+                )?;
                 let text = match worker::read(Path::new(&key), &bytes, false)
                     .map_err(|stop| anyhow::anyhow!("{key}: {}", stop.reason()))?
                     .text
@@ -6728,6 +6732,26 @@ pub fn open_regular(path: &Path) -> std::io::Result<(std::fs::File, std::fs::Met
     Ok((file, meta))
 }
 
+/// [`open_regular`], then at most `cap` of its bytes; more than that is a
+/// `FileTooLarge` error rather than a truncated file.
+pub fn read_regular(path: &Path, cap: u64) -> std::io::Result<Vec<u8>> {
+    let (file, _) = open_regular(path)?;
+    read_capped(file, cap)
+}
+
+fn read_capped(file: std::fs::File, cap: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("it is over {} MiB", cap >> 20),
+        ));
+    }
+    Ok(bytes)
+}
+
 /// `git -C dir` with everything a repository's own config could make it run
 /// switched off.
 ///
@@ -7267,14 +7291,19 @@ pub fn push_files(root: &Path, cap: u64) -> (Vec<PathBuf>, Vec<(PathBuf, String)
             refused.push((path, refusal.why));
             continue;
         }
-        let Ok(bytes) = std::fs::read(&path) else {
-            refused.push((path, "could not be read".to_string()));
-            continue;
+        // Capped as it is read, not after: a file swapped for a link to
+        // `/dev/zero` after the walk is refused at the open (audit S13).
+        let bytes = match read_regular(&path, cap) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::FileTooLarge => {
+                refused.push((path, format!("over {} MB", cap / (1 << 20))));
+                continue;
+            }
+            Err(_) => {
+                refused.push((path, "could not be read".to_string()));
+                continue;
+            }
         };
-        if bytes.len() as u64 > cap {
-            refused.push((path, format!("over {} MB", cap / (1 << 20))));
-            continue;
-        }
         let text = String::from_utf8_lossy(&bytes);
         if let Some(live) = keyscan::scan(&path.to_string_lossy(), &text)
             .into_iter()
@@ -7587,6 +7616,16 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf], gitignore: bool) -> Wal
                 let allowed = allowed.to_vec();
                 move |e| {
                     if e.file_name() == ".semlith" {
+                        return false;
+                    }
+                    // `.git` and the credential directories, wherever they sit
+                    // and whatever a whitelist in an ignore file says (audit
+                    // S12). Below the root only: a root named on purpose is
+                    // walked and its files refused one by one, with a reason.
+                    if e.depth() > 0
+                        && e.file_type().is_some_and(|t| t.is_dir())
+                        && filter::is_denied_dir(e.path())
+                    {
                         return false;
                     }
                     if e.file_type().is_some_and(|t| t.is_dir())
