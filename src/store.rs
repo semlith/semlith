@@ -322,6 +322,24 @@ fn open_once(path: &Path) -> Result<Connection> {
     add_columns(&db)?;
     check_format(&db)?;
     backfill_fts(&db)?;
+    // The keyword index's own secure delete: a removed row's terms leave the
+    // index's segments at once rather than at their next merge, so a file
+    // refused for a secret leaves no searchable term behind (S10). A setting
+    // the index keeps, written once; older binaries read it unchanged.
+    let set: bool = db
+        .query_row(
+            "SELECT 1 FROM chunks_fts_config WHERE k = 'secure-delete' AND v = 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !set {
+        db.execute(
+            "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('secure-delete', 1)",
+            [],
+        )?;
+    }
     // Everything above is the schema this binary needs in place before the
     // store is usable at all; from here the connection writes only when a
     // writer asks.
@@ -622,7 +640,7 @@ const FTS_BUILT: &str = "fts_built";
 /// never sees them. That is the whole reason `format_version` does not move —
 /// the same reasoning `docs/compatibility.md` records for the graph tables.
 fn add_columns(db: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 20] = [
+    const ADDITIONS: [(&str, &str, &str); 21] = [
         ("edges", "hint", "TEXT"),
         // 0.16.0: the line the reference was written on.
         ("edges", "line", "INTEGER"),
@@ -676,6 +694,10 @@ fn add_columns(db: &Connection) -> Result<()> {
         // "not counted": a format with no unit, or a file an older binary
         // wrote, which the next index pass counts without re-embedding it.
         ("files", "units", "INTEGER"),
+        // 0.40.0: the file's mtime in nanoseconds when it was read, which is
+        // what freshness compares now (see `Stamp::fresh`). NULL on a row an
+        // older binary wrote; an older binary ignores the column.
+        ("files", "read_mtime", "INTEGER"),
     ];
     for (table, column, kind) in ADDITIONS {
         if has_column(db, table, column)? {
@@ -1000,6 +1022,19 @@ pub fn all_hashes(db: &Connection) -> Result<std::collections::HashMap<String, S
 
 /// Drop a file and its chunks, returning the chunk ids so the caller can
 /// evict them from the vector index too.
+/// The ids of a file's chunks.
+pub fn chunk_ids_of(db: &Connection, path: &str) -> Result<Vec<u64>> {
+    let mut stmt = db.prepare_cached(
+        "SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.path = ?1",
+    )?;
+    let rows = stmt.query_map(params![path], |r| r.get::<_, i64>(0))?;
+    Ok(rows
+        .collect::<Result<Vec<i64>, _>>()?
+        .into_iter()
+        .map(|i| i as u64)
+        .collect())
+}
+
 pub fn delete_file(db: &Connection, path: &str, now: i64) -> Result<Vec<u64>> {
     retire_symbols(db, path, now)?;
     delete_file_unretired(db, path)
@@ -2943,7 +2978,7 @@ pub fn unfilled(db: &Connection, since: i64) -> Result<Vec<Unfilled>> {
                 COALESCE(query_id, '')
            FROM retrievals
           WHERE usage_source IS NULL AND at >= ?1 AND client NOT IN ('cli', 'portal')
-            AND COALESCE(tool, '') NOT IN ('raw-read', 'note')
+            AND COALESCE(tool, '') NOT IN ('raw-read', 'note', 'refused')
           ORDER BY at, id",
     )?;
     let rows = q.query_map(params![since], |r| {
@@ -3239,7 +3274,7 @@ pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
     let mut stmt = db.prepare(&format!(
         "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, hash,
                 query_id, {USAGE_COLUMNS}
-         FROM retrievals WHERE COALESCE(tool, '') != 'note' ORDER BY id DESC LIMIT ?1"
+         FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused') ORDER BY id DESC LIMIT ?1"
     ))?;
     let rows = stmt.query_map(params![limit as i64], |r| {
         Ok(Retrieval {
@@ -3284,7 +3319,7 @@ pub enum LedgerScope {
 pub fn ledger_keys(db: &Connection, store: &str, scope: LedgerScope) -> Result<Vec<String>> {
     let sql = match scope {
         LedgerScope::All => {
-            "SELECT DISTINCT query_id, id FROM retrievals WHERE COALESCE(tool, '') != 'note'"
+            "SELECT DISTINCT query_id, id FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused')"
         }
         LedgerScope::Credited => "SELECT DISTINCT query_id, id FROM retrievals WHERE hits > 0",
         LedgerScope::Estimated => {
@@ -3316,7 +3351,7 @@ pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)), COUNT(DISTINCT client),
                 COALESCE(SUM(excerpt_tokens), 0),
                 COALESCE(SUM(whole_file_tokens), 0) FROM retrievals
-         WHERE COALESCE(tool, '') != 'note'",
+         WHERE COALESCE(tool, '') NOT IN ('note', 'refused')",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?)
@@ -3369,7 +3404,7 @@ pub fn ledger_savings_since(db: &Connection, since: i64) -> Result<Savings> {
     )?;
     let total: i64 = db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE at >= ?1 AND COALESCE(tool, '') != 'note'",
+         WHERE at >= ?1 AND COALESCE(tool, '') NOT IN ('note', 'refused')",
         [since],
         |r| r.get(0),
     )?;
@@ -3439,7 +3474,7 @@ pub fn ledger_misses(db: &Connection) -> Result<Misses> {
     )?;
     let zero_hit: i64 = db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE hits = 0 AND (tool IS NULL OR tool NOT IN (?1, 'note'))",
+         WHERE hits = 0 AND (tool IS NULL OR tool NOT IN (?1, 'note', 'refused'))",
         params![crate::ledger::RAW_READ],
         |r| r.get(0),
     )?;
@@ -3464,7 +3499,7 @@ pub struct Misses {
 /// How many retrievals each client made, most first.
 pub fn ledger_clients(db: &Connection) -> Result<Vec<(String, i64)>> {
     let mut stmt = db.prepare(
-        "SELECT client, COUNT(*) FROM retrievals WHERE COALESCE(tool, '') != 'note'
+        "SELECT client, COUNT(*) FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused')
          GROUP BY client ORDER BY COUNT(*) DESC, client",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -3474,6 +3509,10 @@ pub fn ledger_clients(db: &Connection) -> Result<Vec<(String, i64)>> {
 /// The `tool` of a ledger note: a row the chain carries that is not a
 /// retrieval, and no total counts.
 pub const NOTE_TOOL: &str = "note";
+
+/// The `tool` of a call refused because the agent key is read-only; `query`
+/// names the tool. Not a retrieval, so no total counts it either.
+pub const REFUSED_TOOL: &str = "refused";
 
 /// The rows a note has re-anchored the chain after: their ids.
 fn acknowledged(db: &Connection) -> Result<std::collections::HashSet<i64>> {
@@ -3701,18 +3740,76 @@ pub fn symbols_in_files(
 pub fn file_stamps(
     db: &Connection,
     paths: &[String],
-) -> Result<std::collections::HashMap<String, (i64, i64)>> {
+) -> Result<std::collections::HashMap<String, Stamp>> {
     if paths.is_empty() {
         return Ok(Default::default());
     }
     let holes = vec!["?"; paths.len()].join(", ");
-    let sql = format!("SELECT path, bytes, indexed_at FROM files WHERE path IN ({holes})");
+    let sql =
+        format!("SELECT path, bytes, indexed_at, read_mtime FROM files WHERE path IN ({holes})");
     let mut stmt = db.prepare(&sql)?;
     let args = paths.iter().cloned().map(Value::Text);
     let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
-        Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?)))
+        Ok((
+            r.get::<_, String>(0)?,
+            Stamp {
+                bytes: r.get(1)?,
+                indexed_at: r.get(2)?,
+                read_mtime: r.get(3)?,
+            },
+        ))
     })?;
     Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
+}
+
+/// What a file looked like when it was read for the store, and the one rule
+/// every surface judges "edited since it was indexed" by.
+#[derive(Debug, Clone, Copy)]
+pub struct Stamp {
+    pub bytes: i64,
+    pub indexed_at: i64,
+    /// The file's modification time when it was read, in nanoseconds. `None`
+    /// on a row an older binary wrote.
+    pub read_mtime: Option<i64>,
+}
+
+/// A file's modification time in nanoseconds since the epoch.
+pub fn mtime_ns(meta: &std::fs::Metadata) -> Option<i64> {
+    meta.modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_nanos() as i64)
+}
+
+impl Stamp {
+    /// Whether the file on disk is still the one the store read.
+    ///
+    /// With the mtime the read saw, the two must be equal. Before 0.40.0 the
+    /// rule was "not modified after `indexed_at`", and `indexed_at` is when the
+    /// row was written, after the read: an edit that kept the size and landed
+    /// between the read and the write read as fresh, and the store's old text
+    /// was served as current. A row an older binary wrote keeps that rule.
+    pub fn fresh(&self, meta: &std::fs::Metadata) -> bool {
+        if meta.len() as i64 != self.bytes {
+            return false;
+        }
+        match self.read_mtime {
+            Some(ns) => mtime_ns(meta) == Some(ns),
+            None => meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .is_none_or(|d| d.as_secs() as i64 <= self.indexed_at),
+        }
+    }
+}
+
+/// Record the modification time a file's read saw. See [`Stamp::fresh`].
+pub fn set_read_mtime(db: &Connection, file_id: i64, read_mtime: Option<i64>) -> Result<()> {
+    db.prepare_cached("UPDATE files SET read_mtime = ?1 WHERE id = ?2")?
+        .execute(params![read_mtime, file_id])?;
+    Ok(())
 }
 
 /// The classes a not-indexed row falls into (2.3), and the dummy list.
@@ -3729,6 +3826,10 @@ pub mod class {
     pub const EXCLUDED: &str = "excluded";
     /// Indexed: every match was a declared test dummy.
     pub const DUMMY: &str = "dummy";
+    /// (f) a parser crashed, ran out of memory or out of time on it. The rule
+    /// is the reason. Not reviewable — there is nothing in it to review — but
+    /// accepting it tries it once more.
+    pub const CRASHED: &str = "crashed";
 
     /// Whether a person may accept a row of this class.
     pub fn reviewable(class: &str) -> bool {
@@ -3805,7 +3906,7 @@ pub fn refusals(db: &Connection) -> Result<Vec<Refused>> {
                 r.last_seen, a.mode
          FROM refusals r LEFT JOIN acceptances a ON a.path = r.path
          ORDER BY CASE r.class WHEN 'content' THEN 0 WHEN 'policy' THEN 1 WHEN 'credential' THEN 2
-                  WHEN 'dummy' THEN 3 WHEN 'unindexable' THEN 4 ELSE 5 END, r.path",
+                  WHEN 'crashed' THEN 3 WHEN 'dummy' THEN 4 WHEN 'unindexable' THEN 5 ELSE 6 END, r.path",
     )?;
     let rows = stmt.query_map([], |r| {
         let class: String = r.get(1)?;
@@ -4000,11 +4101,18 @@ pub fn delete_graph(db: &Connection, file_id: i64) -> Result<()> {
 /// as current as the file; it is the stamps that freshness is judged by that
 /// were behind. A row already current is not written, so an unchanged tree's
 /// pass writes nothing.
-pub fn heal_stamps(db: &Connection, path: &str, bytes: i64, mtime: i64, now: i64) -> Result<()> {
+pub fn heal_stamps(
+    db: &Connection,
+    path: &str,
+    bytes: i64,
+    mtime: i64,
+    read_mtime: Option<i64>,
+    now: i64,
+) -> Result<()> {
     db.execute(
-        "UPDATE files SET bytes = ?2, indexed_at = MAX(?3, ?4)
-         WHERE path = ?1 AND (bytes != ?2 OR indexed_at < ?3)",
-        params![path, bytes, mtime, now],
+        "UPDATE files SET bytes = ?2, indexed_at = MAX(?3, ?4), read_mtime = ?5
+         WHERE path = ?1 AND (bytes != ?2 OR indexed_at < ?3 OR read_mtime IS NOT ?5)",
+        params![path, bytes, mtime, now, read_mtime],
     )?;
     Ok(())
 }
@@ -4390,9 +4498,9 @@ pub fn corpus(db: &Connection, language_of: impl Fn(&str) -> String) -> Result<C
             // `micros`, which is what the column is called. Asking for `ms`
             // did not fail loudly — the row read errored and the fallback
             // reported a store that had never been queried.
-            "SELECT micros / 1000 FROM retrievals WHERE COALESCE(tool, '') != 'note'
+            "SELECT micros / 1000 FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused')
               ORDER BY micros LIMIT 1 OFFSET (SELECT COUNT(*) FROM retrievals
-              WHERE COALESCE(tool, '') != 'note') / 2",
+              WHERE COALESCE(tool, '') NOT IN ('note', 'refused')) / 2",
             [],
             |r| r.get(0),
         )
@@ -4474,7 +4582,7 @@ pub fn ledger_sessions(db: &Connection, limit: usize) -> Result<Vec<SessionRow>>
                     AND r2.client = retrievals.client AND r2.model IS NOT NULL
                   GROUP BY r2.model ORDER BY COUNT(*) DESC LIMIT 1)
          FROM retrievals
-         WHERE COALESCE(tool, '') != 'note'
+         WHERE COALESCE(tool, '') NOT IN ('note', 'refused')
          GROUP BY COALESCE(session, ''), client
          ORDER BY MAX(at) DESC
          LIMIT ?1",
@@ -4503,7 +4611,7 @@ pub fn ledger_sessions(db: &Connection, limit: usize) -> Result<Vec<SessionRow>>
 /// what this machine actually served rather than what it can serve.
 pub fn ledger_latency(db: &Connection) -> Result<(i64, i64)> {
     let mut stmt = db.prepare(
-        "SELECT micros FROM retrievals WHERE COALESCE(tool, '') != 'note' ORDER BY micros",
+        "SELECT micros FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused') ORDER BY micros",
     )?;
     let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
     let all: Vec<i64> = rows.collect::<rusqlite::Result<_>>()?;
@@ -4543,7 +4651,7 @@ pub fn ledger_zero_hit_queries_since(
 ) -> Result<Vec<(String, i64)>> {
     let mut stmt = db.prepare(
         "SELECT query, COUNT(*) AS n FROM retrievals WHERE hits = 0 AND at >= ?1
-           AND COALESCE(tool, '') != 'note'
+           AND COALESCE(tool, '') NOT IN ('note', 'refused')
          GROUP BY query ORDER BY n DESC, query LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {
@@ -4577,7 +4685,7 @@ pub struct RetrievalRow {
 pub fn ledger_retrievals(db: &Connection, since: i64, limit: usize) -> Result<Vec<RetrievalRow>> {
     let mut stmt = db.prepare(
         "SELECT at, client, COALESCE(tool, ''), query, hits, excerpt_tokens, whole_file_tokens
-         FROM retrievals WHERE at >= ?1 AND COALESCE(tool, '') != 'note'
+         FROM retrievals WHERE at >= ?1 AND COALESCE(tool, '') NOT IN ('note', 'refused')
          ORDER BY at DESC, id DESC LIMIT ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {

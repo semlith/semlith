@@ -113,6 +113,11 @@ pub fn run(
         let Some(text) = file_text(db, &file.path)? else {
             continue;
         };
+        // Past the nesting a block grammar survives, the file has no graph
+        // either; parsing it here would abort the daemon.
+        if crate::graph::too_nested(&language, &text) {
+            continue;
+        }
         let Some(tree) = parser.parse(&text, None) else {
             // tree-sitter returns a tree for anything it can hold; `None` is a
             // parser that was cancelled or given a language it cannot use, and

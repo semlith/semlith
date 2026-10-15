@@ -80,6 +80,29 @@ or can write to.
 The agent key opens `/mcp` and nothing else: it cannot rotate a token, adopt a
 store or start an upgrade. What it can read is bounded too.
 
+**Read-only unless you say otherwise.** From 0.40.0 the key carries a scope,
+kept in `~/.semlith/agent.scope`. `read`, the default and what every key from
+before 0.40.0 became on its first start, lets an agent call the tools that only
+read: search, brief, read, files, symbol, neighbors, impact, stats, languages,
+report, pattern, path and trace. `semlith_index`, `semlith_add` and
+`semlith_forget` answer a refusal that names how to grant them, and the refused
+call is a ledger row. The check is on the call, not the tool list: a client can
+call a tool it was never shown, and before 0.40.0 that was the whole of what
+kept a read agent from writing. The same rule holds over `/mcp`, through
+`semlith mcp` forwarding to the daemon, and in a `semlith mcp` running on its
+own. The portal holds the session token and keeps the owner's rights.
+
+```sh
+semlith key                  # prints the scope
+semlith key --scope write    # agents may index, add and forget too
+semlith key --scope read     # back to read-only
+```
+
+The portal's Agents page has the same switch (Agent key ▸ Allow writes) and
+`semlith doctor` prints the scope. An agent is steered by whatever it reads —
+a web page, an issue, a file in a repository — so grant `write` only to agents
+you trust with fetching URLs into a store and removing files from it.
+
 **Indexing happens inside a boundary.** `semlith_index` and the portal's index
 route accept a path only under the target store's registered roots, under the
 store's own directory when it is a `.semlith` beside its corpus, or under your
@@ -281,7 +304,11 @@ never wait, and the MCP reply says how many files await review.
 
 **A file today's rules refuse leaves the store on the next pass.** A path refused
 by the deny-list or by the content scan has its rows and vectors removed in the
-same run, and the refusal line says so. The file on disk is untouched.
+same run, and the refusal line says so. The file on disk is untouched. From
+0.40.0 everything derived from its text goes in that run too: the keyword
+index's terms (FTS5 secure delete), its full-precision vectors in `exact.f32`
+(zeroed), its entries in the vector cache, and the freed pages of the store's
+database (vacuumed before the run ends).
 
 **`semlith scan` checks a store indexed earlier.** It runs both halves over every
 file a store holds — the deny-list against the name, the content table against
@@ -332,11 +359,73 @@ its source, size, when it happens and whether it is cached.
 | `semlith upgrade` | `github.com` | when you run it |
 | Semlith Cloud | the host you signed in to | only after `semlith cloud login` |
 
+**Releases are signed.** From v0.40.0 every release archive and its
+`SHA256SUMS` carry an ed25519 signature made by the release workflow with the
+project's key (an OpenSSH `SSHSIG`, namespace `file`, beside each file as
+`.sig`). The public half is built into the binary — `semlith --version` prints
+its id, `SHA256:a5oJmrakIwDHEWTDWqWe51Ttt6m2tQ0dsGzIqyxDuxs` — and into
+`install.sh` and `install.ps1`. `semlith upgrade` verifies the signature before
+it writes or unpacks anything, and both installers verify it with
+`ssh-keygen -Y verify` before the checksum; a missing, unparseable, untrusted or
+wrong signature stops all three. A checksum from the same release only proves
+the archive is the one the release names; the signature proves who made the
+release. If the key ever changes, one release trusts both the old and the new
+key, so an older binary can still upgrade to it.
+
 `--airgap` refuses every download unless it is already in the model cache, and
 names what it refused. An accelerator lane runs in its own worker process, so a
 driver crash ends that worker and its lane, not the daemon. The llama.cpp server
 listens on `127.0.0.1` with a key only its worker holds, and dies with the
 worker.
+
+## A file that crashes a parser
+
+Every reader of a file's own bytes — the tree-sitter grammars, PDF, the Office
+and OpenDocument readers, mail, notebooks and an image decode check — runs in a
+parse worker: this same binary started again as `semlith __parse-worker`,
+spoken to over pipes, pooled so there is one per thread that parses. A worker
+has a deadline (30 seconds, and one more per MiB of input) and a memory limit
+(2 GiB of allocations, `SEMLITH_PARSE_MEMORY_MB` to change it; on Linux and
+Windows the operating system enforces it for C code too). Before 0.40.0 a
+606-byte Markdown file of nested blockquotes aborted the daemon through a C
+assertion in tree-sitter-md — tree-sitter-yaml has the same one — and under
+launchd or systemd the service then crash-looped for as long as the file sat in
+a watched folder.
+
+Now an abort, a stack overflow, running out of memory or out of time costs one
+worker. The file is refused with the reason (`parser crashed: SIGABRT`,
+`parser timed out after 30 s`, `parser ran past its memory limit`), listed by
+`semlith refused`, on the portal's Files ▸ Decisions as *parser crashed*, and by
+`semlith doctor`. Every store keeps a journal of what it handed a parser
+(`logs/parse-journal` in the store), so a refused version of a file is never
+parsed again, across restarts; a file that was mid-parse when the whole process
+died twice is refused the same way. Changing the file clears it, and *Try
+again* (or `semlith refused accept <path> --as-is`) gives it one more worker.
+
+Running out of time while making a file's outline costs the outline only: the
+text is read again on its own and indexed without one, as a parse that passes
+tree-sitter's own two-second limit always was. A file is refused for time only
+when its text cannot be read in time.
+
+The Markdown and YAML grammars are also given at most 128 levels of nesting —
+both abort at about 260. A file nested deeper keeps its text in the store and
+has no outline.
+
+## Reading what was indexed, later
+
+A file is opened once, without following a symbolic link (`O_NOFOLLOW`; a
+reparse point on Windows), without blocking on a FIFO, and checked to be a
+regular file on the open handle before a capped read. That holds for indexing
+and for `read`'s fallback, which serves a stale span's current lines: a stored
+path that no longer resolves to itself, or that the deny-list names, is not
+read, and the span says the file was replaced since it was indexed. Before
+0.40.0 a file swapped for a link to `~/.kube/config` after indexing was served
+to the agent that read it.
+
+A repository is untrusted the same way. Every `git` semlith runs ignores the
+system config and has `core.fsmonitor`, hooks, `gpg.program` and signature
+display switched off, so a `.git/config` that arrived with an archive cannot
+make indexing run a program.
 
 ## What is not covered
 
@@ -344,10 +433,12 @@ worker.
 indexed. The file modes above are the boundary semlith draws; encryption at rest
 is a separate decision semlith has not made.
 
-**The parsers run in this process.** An image past 64 million pixels is refused
-before a decoder allocates for it, a tree-sitter parse gives up after two
-seconds, and a file is read once through a capped reader — but a document you
-index is still parsed by code running as you. The parsers are not sandboxed.
+**The parse worker is not a sandbox.** It runs as you, with your files, and can
+open what you can. It bounds what a crashing or runaway parser costs; it does
+not stop a parser bug that reads or writes files. On macOS the memory limit
+covers Rust's allocations only, because Darwin does not enforce a lower
+`RLIMIT_AS`; the deadline bounds the rest. The embedding model and ONNX Runtime
+run in the daemon.
 
 **Downgrading below 0.14.0 gives back what was refused.** A 0.13.0 binary opens
 every store 0.14.0 and later wrote, ignores the trusted list, and reads a `0700`

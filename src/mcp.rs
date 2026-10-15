@@ -106,6 +106,41 @@ pub fn answer(
     ))
 }
 
+/// Answer a write tool's call without the fleet, when this process forwards
+/// writes to a writer. `None` for anything else, which the caller answers
+/// through [`answer`] under its fleet's lock.
+///
+/// The three write tools hand their work to the writer and wait on it — an
+/// index run, a fetch from the network. Before 0.40.0 the daemon held its MCP
+/// fleet's lock for all of that, so one slow `semlith_add` stalled every other
+/// agent's search, then the proxies' heartbeats, then the portal. They need
+/// nothing from the fleet, so they are answered here, outside it.
+pub fn answer_unlocked(writer: &dyn Writer, request: &Value, session: &Session) -> Option<Value> {
+    let id = request.get("id").cloned()?;
+    if request.get("method").and_then(Value::as_str) != Some("tools/call") {
+        return None;
+    }
+    let params = request.get("params").cloned().unwrap_or(json!({}));
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    // A refusal writes a ledger row, which needs a store: those go the locked
+    // way, and are quick.
+    if !session.writes || !matches!(name, "semlith_index" | "semlith_add" | "semlith_forget") {
+        return None;
+    }
+    let mut empty = Fleet::empty();
+    let mut session = session.clone();
+    Some(reply(
+        &id,
+        dispatch(
+            &mut empty,
+            Some(writer),
+            "tools/call",
+            &params,
+            &mut session,
+        ),
+    ))
+}
+
 /// Who is on the other end of this connection, and which conversation it is.
 ///
 /// The ledger is the reason this exists. Before 0.15.0 a retrieval by an agent
@@ -133,6 +168,10 @@ pub struct Session {
     /// started from a terminal would file every HTTP client under that
     /// terminal's app.
     pub host: Option<String>,
+    /// Whether this caller may call the tools that change a store. `false`
+    /// for an agent unless the owner granted its key the write scope; `true`
+    /// for the portal, which holds the session token.
+    pub writes: bool,
 }
 
 impl Session {
@@ -142,6 +181,7 @@ impl Session {
             version: String::new(),
             id: id.into(),
             host: None,
+            writes: false,
         }
     }
 
@@ -246,6 +286,8 @@ pub fn serve(
     // One connection is one conversation, so the id is made once here and every
     // row this client writes carries it.
     let mut session = Session::new(format!("stdio-{}", std::process::id()));
+    // An agent started this process, so the key's scope is what it may do.
+    session.writes = crate::home::agent_may_write();
     // This process is the stdio server, so the app that started it is the
     // client's host.
     session.host = crate::clientid::host().map(str::to_string);
@@ -440,7 +482,7 @@ fn without_stores(
         "ping" => Ok(json!({})),
 
         "tools/list" => {
-            let listed = json!({ "tools": tool_defs(labels) });
+            let listed = json!({ "tools": for_scope(tool_defs(labels), session.writes) });
             // Private, not public: the descriptions name the stores this
             // process was opened on, so the answer is this server's, not one
             // an intermediary may hand to another client.
@@ -562,6 +604,51 @@ fn tool_defs(open: &str) -> Value {
             .filter(|t| LISTED.contains(&t["name"].as_str().unwrap_or_default()))
             .cloned()
             .collect(),
+    )
+}
+
+/// The tools a read-scoped agent key may call: every tool that only reads.
+///
+/// An allowlist rather than a list of the writes, so a tool added later is
+/// refused to a read key until somebody decides it only reads.
+pub const READ_TOOLS: &[&str] = &[
+    "semlith_search",
+    "semlith_brief",
+    "semlith_read",
+    "semlith_files",
+    "semlith_symbol",
+    "semlith_neighbors",
+    "semlith_impact",
+    "semlith_stats",
+    "semlith_languages",
+    "semlith_report",
+    "semlith_pattern",
+    "semlith_path",
+    "semlith_trace",
+];
+
+/// `defs` with every tool a caller of this scope may not call taken out, so
+/// `SEMLITH_MCP_TOOLS=all` lists only what the key can use.
+fn for_scope(defs: Value, writes: bool) -> Value {
+    if writes {
+        return defs;
+    }
+    Value::Array(
+        defs.as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| READ_TOOLS.contains(&t["name"].as_str().unwrap_or_default()))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// What a read-scoped key is told when it calls a tool that changes a store.
+pub fn scope_refusal(tool: &str) -> String {
+    format!(
+        "{tool} changes the index, and this agent key is read-only. The owner can grant \
+         write in the portal (Agents > Agent key > Allow writes) or with \
+         `semlith key --scope write`."
     )
 }
 
@@ -828,6 +915,17 @@ fn call_tool(
     params: &Value,
     session: &Session,
 ) -> Result<Value, Fail> {
+    // The scope is checked against the call, not the listing: a client can
+    // call a tool it was never shown, and before 0.40.0 that was the whole of
+    // what kept a read agent from writing.
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    if !session.writes && !READ_TOOLS.contains(&name) {
+        crate::ledger::refusal(stores, &session.who(), name);
+        return Ok(json!({
+            "content": [{ "type": "text", "text": scope_refusal(name) }],
+            "isError": true,
+        }));
+    }
     // One registry read. Nobody who never connected a remote store goes any
     // further than this, so their answers are exactly what they were.
     let remotes = crate::cloud::remote_stores();
@@ -1126,7 +1224,9 @@ fn call_local(
                     (Some(name), None) => format!(" · {name}"),
                     _ => String::new(),
                 };
-                let state = if span.from_disk {
+                let state = if span.replaced {
+                    " · stale; file replaced since indexing (not a regular file now), not read"
+                } else if span.from_disk {
                     " · read from disk, not yet re-indexed"
                 } else if !span.fresh {
                     " · stale"
@@ -2209,7 +2309,7 @@ fn render_ends(ends: &[crate::store::EdgeEnd], shorten: &dyn Fn(&str) -> String)
 /// Overridable because clients disagree about how long a tool call may take,
 /// and the person who knows which client this is, is the one who wrote its
 /// configuration — not the model on the other end of the tool.
-fn index_budget() -> Duration {
+pub fn index_budget() -> Duration {
     match std::env::var("SEMLITH_MCP_INDEX_BUDGET") {
         Ok(v) => match v.trim().parse::<u64>() {
             Ok(seconds) => Duration::from_secs(seconds),

@@ -301,6 +301,7 @@ pub fn update() -> Result<Table> {
         bail!("{}", reason.replace("Upgrade on a connected machine and copy the binary across.", "Run `semlith prices update` on a connected machine and copy ~/.semlith/prices.json across."));
     }
     let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(std::time::Duration::from_secs(10)))
         .timeout_global(Some(std::time::Duration::from_secs(60)))
         .build()
         .new_agent();

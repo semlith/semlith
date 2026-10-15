@@ -341,7 +341,7 @@ pub fn set_always_load() -> Result<Option<(PathBuf, bool)>> {
     if text.ends_with('\n') {
         next.push('\n');
     }
-    std::fs::write(&path, next).with_context(|| format!("writing {}", path.display()))?;
+    clientfile::rewrite(&path, &next)?;
     Ok(Some((path, true)))
 }
 
@@ -633,7 +633,7 @@ pub fn install_rules() -> Result<Vec<PathBuf>> {
         if existing.is_some() {
             clientfile::back_up(&path)?;
         }
-        std::fs::write(&path, &next).with_context(|| format!("writing {}", path.display()))?;
+        clientfile::rewrite(&path, &next)?;
         written.push(path);
     }
     Ok(written)
@@ -669,12 +669,7 @@ fn write_json(path: &Path, next: &str, existed: bool) -> Result<()> {
     if existed {
         clientfile::back_up(path)?;
     }
-    // Through a neighbouring temporary file: a half-written settings file is a
-    // client that will not start.
-    let temp = path.with_extension("json.semlith-tmp");
-    std::fs::write(&temp, next).with_context(|| format!("writing {}", temp.display()))?;
-    std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
-    Ok(())
+    clientfile::rewrite(path, next)
 }
 
 #[cfg(test)]

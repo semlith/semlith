@@ -642,6 +642,10 @@ fn every_write_path_refuses_a_remote_store_with_the_reason() {
         assert_eq!(status, 400, "{route}: {text}");
         assert!(text.contains("is a remote store"), "{route}: {text}");
     }
+    // An agent key is read-only from 0.40.0; this is about the remote-store
+    // refusal a write-scoped key meets.
+    let (status, text) = daemon.api("POST", "/api/agents/scope", r#"{"write":true}"#);
+    assert_eq!(status, 200, "{text}");
     for (tool, args) in [
         (
             "semlith_index",

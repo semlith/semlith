@@ -343,6 +343,20 @@ jobs:
             "$PY" tests/drive/drive.py --out "drive-${{ matrix.os }}" \
               2>&1 | tee "drive-${{ matrix.os }}.log"
 
+          # S08: no key in plain text in any process's argv, which is what
+          # `ps` shows every account on the machine. Read while the drive's
+          # daemon is still up. The agent key starts `sml_`; `--api-key` is
+          # how a llama-server key used to be passed.
+          if [ "$RUNNER_OS" = Windows ]; then
+            powershell -NoProfile -Command \
+              'Get-CimInstance Win32_Process | ForEach-Object { $_.CommandLine }' > argv.txt
+          else
+            ps -eo args > argv.txt
+          fi
+          if grep -n -e 'sml_' -e '--api-key' argv.txt; then
+            echo "::error::a key is in a process's argv"; exit 1
+          fi
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:

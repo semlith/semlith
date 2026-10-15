@@ -388,6 +388,9 @@ pub struct Context {
     /// Cache lookups and hits the prepare stage made.
     pub lookups: AtomicU64,
     pub hits: AtomicU64,
+    /// The store's poison journal: every file a parser takes is between a
+    /// begin and an end line in it. `None` for a caller with no store.
+    pub journal: Option<crate::worker::Journal>,
 }
 
 /// One file, as far as it can be taken without the database.
@@ -398,6 +401,8 @@ pub enum Prepared {
     Unchanged {
         size: u64,
         mtime: i64,
+        /// The mtime in nanoseconds, from the open handle. See `store::Stamp`.
+        read_mtime: Option<i64>,
         file_bytes: u64,
     },
     /// Opened (or not) and found unusable before or while reading.
@@ -410,6 +415,7 @@ pub enum Prepared {
     Same {
         len: u64,
         mtime: Option<i64>,
+        read_mtime: Option<i64>,
         file_bytes: u64,
         /// The text and what the scan found, when the scan rules moved.
         rescan: Option<(String, Vec<keyscan::Match>)>,
@@ -424,6 +430,9 @@ pub enum Prepared {
         hash: String,
         file_bytes: u64,
     },
+    /// A parser crashed, ran out of memory or out of time on this version of
+    /// the file, now or on an earlier pass. Refused with the reason.
+    Crashed { reason: String, file_bytes: u64 },
     /// A reader or parser failed on this file's own content.
     Failed {
         error: anyhow::Error,
@@ -437,6 +446,9 @@ pub enum Prepared {
         len: u64,
         hash: String,
         file_bytes: u64,
+        /// The mtime in nanoseconds the read saw, taken from the handle before
+        /// the bytes were read. See `store::Stamp`.
+        read_mtime: Option<i64>,
         text: String,
         /// Pages, slides or cells, for a counted format.
         units: Option<i64>,
@@ -465,6 +477,20 @@ fn mtime_of(meta: &std::fs::Metadata) -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
+/// Run one parser call on a file between the journal's lines, when there is
+/// a journal.
+fn parse<T>(
+    ctx: &Context,
+    key: &str,
+    hash: &str,
+    call: impl FnOnce() -> Result<T, crate::worker::Stop>,
+) -> Result<T, crate::worker::Stop> {
+    match &ctx.journal {
+        Some(journal) => journal.around(key, hash, call),
+        None => call(),
+    }
+}
+
 /// Take one file as far as it goes without the database, in the order the
 /// writer used to: every early exit here is one the writer's loop had.
 pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) -> Prepared {
@@ -476,8 +502,10 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
     let _cap = crate::cpucap::slot();
     let started = Instant::now();
     let key = path.to_string_lossy();
-    let opened = std::fs::File::open(path);
-    let measured = opened.as_ref().ok().and_then(|f| f.metadata().ok());
+    // Opened once, without following a link, and checked on the handle: a
+    // file swapped for a link or a FIFO after the walk is refused, not read.
+    let opened = crate::open_regular(path);
+    let measured = opened.as_ref().ok().map(|(_, m)| m.clone());
     let file_bytes = crate::embeddable_bytes(measured.clone());
     if !ctx.rechunk
         && !ctx.rescan
@@ -492,6 +520,7 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
         return Prepared::Unchanged {
             size: *size,
             mtime: *mtime,
+            read_mtime: crate::store::mtime_ns(meta),
             file_bytes,
         };
     }
@@ -518,7 +547,7 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
             file_bytes,
         };
     }
-    let read = opened.and_then(|file| {
+    let read = opened.and_then(|(file, _)| {
         use std::io::Read;
         let mut bytes = Vec::new();
         file.take(cap + 1).read_to_end(&mut bytes).map(|_| bytes)
@@ -543,46 +572,62 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
         }
     };
     let hash = blake3::hash(&bytes).to_hex().to_string();
+    // Debug builds only: delete the named file the moment it has been read,
+    // which is the window a deletion has to land in to leave a ghost row.
+    #[cfg(debug_assertions)]
+    if std::env::var("SEMLITH_FAULT_DELETE").is_ok_and(|name| {
+        path.file_name()
+            .is_some_and(|n| n.to_string_lossy() == name)
+    }) {
+        let _ = std::fs::remove_file(path);
+    }
     let now = Clocks::tick(&ctx.clocks.read, started);
     let len = bytes.len() as u64;
+
+    // A version of the file a parser crashed on is not handed to one again.
+    if let Some(reason) = ctx.journal.as_ref().and_then(|j| j.refused(&key, &hash)) {
+        return Prepared::Crashed {
+            reason: reason.to_string(),
+            file_bytes,
+        };
+    }
 
     let same = !ctx.rechunk && ctx.hashes.get(key.as_ref()) == Some(&hash);
     if same {
         let is_image = image::is_image(path);
         let counting = ctx.uncounted.contains(key.as_ref());
-        let extracted = ((ctx.rescan && !ctx.allow_secrets && !is_image) || counting)
-            .then(|| {
-                crate::contained(|| chunk::extract_counted(path, &bytes))
-                    .ok()?
-                    .ok()
-            })
-            .flatten();
+        let scanning = ctx.rescan && !ctx.allow_secrets && !is_image;
+        let graphing = ctx.regraph && !is_image && graph::language_of(path).is_some();
+        let mut extracted = None;
+        let mut regraph = None;
+        if scanning || counting || graphing {
+            match parse(ctx, &key, &hash, || {
+                crate::worker::read(path, &bytes, graphing)
+            }) {
+                Err(crate::worker::Stop::Crashed(reason)) => {
+                    Clocks::tick(&ctx.clocks.extract, now);
+                    return Prepared::Crashed { reason, file_bytes };
+                }
+                Err(crate::worker::Stop::Unavailable(_)) => {}
+                Ok(read) => {
+                    regraph = read.graph.and_then(|g| g.ok()).flatten();
+                    extracted = read.text.ok().and_then(|t| t.ok());
+                }
+            }
+        }
         // A file that will not give a count still gets one, zero, so it is not
         // read again on every pass.
         let units = counting.then(|| extracted.as_ref().and_then(|(_, n)| *n).unwrap_or(0));
-        let rescan = extracted
-            .filter(|_| ctx.rescan && !ctx.allow_secrets && !is_image)
-            .map(|(text, _)| {
-                let found = keyscan::scan(&key, &text);
-                (text, found)
-            });
+        let rescan = extracted.filter(|_| scanning).map(|(text, _)| {
+            let found = keyscan::scan(&key, &text);
+            (text, found)
+        });
         let now = Clocks::tick(&ctx.clocks.extract, now);
-        let regraph = (ctx.regraph && !is_image && graph::language_of(path).is_some())
-            .then(|| {
-                let text = match &rescan {
-                    Some((text, _)) => Some(text.clone()),
-                    None => chunk::extract(path, &bytes).ok(),
-                }?;
-                crate::contained(|| graph::extract(path, &text))
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .flatten()
-            })
-            .flatten();
         Clocks::tick(&ctx.clocks.parse, now);
         return Prepared::Same {
             len,
             mtime: measured.as_ref().map(mtime_of),
+            read_mtime: measured.as_ref().and_then(crate::store::mtime_ns),
             file_bytes,
             rescan,
             regraph,
@@ -591,6 +636,15 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
     }
 
     if image::is_image(path) {
+        // A header that claims more pixels than the writer will decode is
+        // refused there, by size; only the rest are worth a decode here.
+        if image::too_large(&bytes).is_none()
+            && let Err(crate::worker::Stop::Crashed(reason)) =
+                parse(ctx, &key, &hash, || crate::worker::image(path, &bytes))
+        {
+            Clocks::tick(&ctx.clocks.extract, now);
+            return Prepared::Crashed { reason, file_bytes };
+        }
         return Prepared::Image {
             bytes,
             hash,
@@ -598,13 +652,29 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
         };
     }
 
-    let text = match crate::contained(|| {
-        crate::fault_panic(path);
-        chunk::extract_counted(path, &bytes)
-    }) {
-        Err(error) => {
+    // Text and graph in one round trip: the graph is wanted for every file
+    // the scan lets through, which is nearly every file.
+    let read = match parse(ctx, &key, &hash, || crate::worker::read(path, &bytes, true)) {
+        Ok(read) => read,
+        Err(crate::worker::Stop::Crashed(reason)) => {
             Clocks::tick(&ctx.clocks.extract, now);
-            return Prepared::Failed { error, file_bytes };
+            return Prepared::Crashed { reason, file_bytes };
+        }
+        Err(crate::worker::Stop::Unavailable(reason)) => {
+            Clocks::tick(&ctx.clocks.extract, now);
+            return Prepared::Failed {
+                error: anyhow::anyhow!(reason),
+                file_bytes,
+            };
+        }
+    };
+    let (text, units) = match read.text {
+        Err(panic) => {
+            Clocks::tick(&ctx.clocks.extract, now);
+            return Prepared::Failed {
+                error: anyhow::anyhow!(panic),
+                file_bytes,
+            };
         }
         Ok(Err(why)) => {
             Clocks::tick(&ctx.clocks.extract, now);
@@ -612,18 +682,19 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
         }
         Ok(Ok(extracted)) => extracted,
     };
-    let (text, units) = text;
+    let graph = read.graph;
     drop(bytes);
     let found = keyscan::scan(&key, &text);
     let now = Clocks::tick(&ctx.clocks.extract, now);
     // A live match needs the database to decide — an acceptance may let it
     // in, redacted — so the writer takes the file from here.
     let live = !ctx.allow_secrets && keyscan::refuses(&found);
-    let ready = (!live).then(|| take_ready(path, &text, ctx, cache, now));
+    let ready = (!live).then(|| take_ready(path, &text, graph, ctx, cache, now));
     Prepared::Text {
         len,
         hash,
         file_bytes,
+        read_mtime: measured.as_ref().and_then(crate::store::mtime_ns),
         text,
         units,
         found,
@@ -633,14 +704,24 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
 
 /// Parse, chunk and tokenise one file's decided text. Also the writer's own
 /// path for a file whose text only the database could decide.
+///
+/// `graph` is the extraction the parse worker made with the text, when it
+/// made one; otherwise the worker is asked for it now.
 pub fn take_ready(
     path: &Path,
     text: &str,
+    graph: Option<Result<Option<graph::Extraction>, String>>,
     ctx: &Context,
     cache: Option<&crate::cache::Cache>,
     since: Instant,
 ) -> anyhow::Result<Ready> {
-    let extraction = crate::contained(|| graph::extract(path, text)).and_then(|r| r)?;
+    let graph = match graph {
+        Some(graph) => graph,
+        None => {
+            crate::worker::graph(path, text).map_err(|stop| anyhow::anyhow!("{}", stop.reason()))?
+        }
+    };
+    let extraction = graph.map_err(|e| anyhow::anyhow!(e))?;
     let chunks = crate::contained(|| {
         chunk::chunk_file(
             path,

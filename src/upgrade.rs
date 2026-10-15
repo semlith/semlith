@@ -66,6 +66,31 @@ const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
 /// `SHA256SUMS` is one line per asset. A release has under ten.
 const MAX_SUMS: u64 = 64 * 1024;
 
+/// An ed25519 SSHSIG armours to about 300 bytes.
+const MAX_SIG: u64 = 16 * 1024;
+
+/// The public keys a release may be signed with, as `authorized_keys` lines.
+///
+/// `release.yml` signs `SHA256SUMS` and every archive with `ssh-keygen -Y sign
+/// -n file`. OpenSSH's format rather than minisign's because `ssh-keygen -Y
+/// verify` ships with macOS, Linux and Windows 10+, so `install.sh` and
+/// `install.ps1` check the same signature this command does without a tool the
+/// user has to fetch first. The same list is in both installers.
+///
+/// A rotation ships both keys for one release: add the new line here and in
+/// both installers, and publish that release still signed by the old key, so
+/// every binary and installer from it on trusts either. Switch the
+/// `SEMLITH_SIGNING_KEY` secret to the new key for the next release, and drop
+/// the old line in the release after. A binary that skipped the overlap
+/// release trusts only the old key and is told to reinstall.
+pub const SIGNING_KEYS: &[&str] = &[
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICMTHiHMzeSHzzc+8UDZHUzJcvb6XGUBb+TJdFes91xm semlith-release",
+];
+
+/// What `ssh-keygen -lf` prints for the current release key. Asserted against
+/// [`SIGNING_KEYS`] by a unit test, so the two cannot drift.
+pub const SIGNING_KEY_ID: &str = "SHA256:a5oJmrakIwDHEWTDWqWe51Ttt6m2tQ0dsGzIqyxDuxs";
+
 /// How long to wait for a connection, and for the whole download.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
@@ -137,8 +162,9 @@ pub fn check() -> Result<Check> {
     })
 }
 
-/// Download the release for this target, verify it against the release's
-/// `SHA256SUMS`, and put it where the running binary is. `tag` pins a version;
+/// Download the release for this target, verify the signature on the
+/// release's `SHA256SUMS` and the archive against it, and put it where the
+/// running binary is. `tag` pins a version;
 /// `None` takes the newest.
 pub fn apply(tag: Option<String>) -> Result<()> {
     if let Some(reason) = blocked() {
@@ -185,12 +211,28 @@ pub fn apply(tag: Option<String>) -> Result<()> {
     result
 }
 
-/// The download, the checksum and the rename, with the working directory
-/// cleaned up by the caller whichever way this ends.
+/// The download, the signature, the checksum and the rename, with the working
+/// directory cleaned up by the caller whichever way this ends.
 fn swap(base: &str, archive: &str, work: &Path, current: &Path, tag: &str) -> Result<()> {
     let bytes = get(&format!("{base}/{archive}"), MAX_ARCHIVE, true)?;
-    let sums = String::from_utf8(get(&format!("{base}/SHA256SUMS"), MAX_SUMS, false)?)
-        .context("SHA256SUMS was not text")?;
+    let sums = get(&format!("{base}/SHA256SUMS"), MAX_SUMS, false)?;
+
+    // A checksum fetched from the same release as the archive proves only
+    // that the two were uploaded together. The signature is what ties them to
+    // the project key baked into this binary, so it is checked before
+    // anything in SHA256SUMS is believed, and long before anything is written.
+    let sig = get(&format!("{base}/SHA256SUMS.sig"), MAX_SIG, false).with_context(|| {
+        format!(
+            "{tag} has no SHA256SUMS.sig, so it cannot be verified and nothing was replaced. \
+             Releases before v0.40.0 are unsigned; this semlith installs only releases \
+             signed by the semlith release key ({SIGNING_KEY_ID})"
+        )
+    })?;
+    let signer = verify_sshsig(&sums, &sig, &trusted_keys())
+        .context("the release signature did not verify, so nothing was replaced")?;
+    println!("signature verified: SHA256SUMS is signed by {signer}");
+
+    let sums = String::from_utf8(sums).context("SHA256SUMS was not text")?;
 
     let expected = sums
         .lines()
@@ -284,6 +326,153 @@ fn swap(base: &str, archive: &str, work: &Path, current: &Path, tag: &str) -> Re
         old.display()
     );
     Ok(())
+}
+
+/// The wire blobs of the keys a release may be signed with.
+///
+/// A debug build also trusts the one key `SEMLITH_EXTRA_RELEASE_KEY` names, so
+/// the tests can sign a fixture release; like `SEMLITH_RELEASES_ORIGIN` it does
+/// not exist in a release build, because anything that can add a trusted key
+/// can replace the binary.
+fn trusted_keys() -> Vec<Vec<u8>> {
+    #[allow(unused_mut)]
+    let mut lines: Vec<String> = SIGNING_KEYS.iter().map(|k| k.to_string()).collect();
+    #[cfg(debug_assertions)]
+    if let Ok(extra) = std::env::var("SEMLITH_EXTRA_RELEASE_KEY") {
+        lines.push(extra);
+    }
+    lines.iter().filter_map(|line| key_blob(line)).collect()
+}
+
+/// The wire blob of an `ssh-ed25519 <base64> [comment]` line.
+fn key_blob(line: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let mut parts = line.split_whitespace();
+    if parts.next()? != "ssh-ed25519" {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(parts.next()?)
+        .ok()
+}
+
+/// `SHA256:<unpadded base64>`, the id `ssh-keygen -l` prints for a key.
+fn key_id(blob: &[u8]) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(blob);
+    format!(
+        "SHA256:{}",
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest.as_slice())
+    )
+}
+
+/// Split `n` bytes off the front of `rest`.
+fn take<'a>(rest: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+    if rest.len() < n {
+        return None;
+    }
+    let (head, tail) = rest.split_at(n);
+    *rest = tail;
+    Some(head)
+}
+
+/// An SSH wire `string`: a big-endian u32 length, then that many bytes.
+fn string<'a>(rest: &mut &'a [u8]) -> Option<&'a [u8]> {
+    let len = u32::from_be_bytes(take(rest, 4)?.try_into().ok()?);
+    take(rest, len as usize)
+}
+
+/// The one field inside an ed25519 key or signature blob, which is
+/// `string "ssh-ed25519" || string <len bytes>` and nothing after.
+fn ed25519_field(mut blob: &[u8], len: usize) -> Option<&[u8]> {
+    if string(&mut blob)? != b"ssh-ed25519" {
+        return None;
+    }
+    let field = string(&mut blob)?;
+    (field.len() == len && blob.is_empty()).then_some(field)
+}
+
+/// Verify an armoured `ssh-keygen -Y sign -n file` signature over `message`
+/// against `trusted` key blobs, and return the signer's key id.
+///
+/// The format is OpenSSH's PROTOCOL.sshsig: the blob is `"SSHSIG"`, a u32
+/// version of 1, then the strings public key, namespace, reserved, hash
+/// algorithm and signature. What the key signed is not the message but
+/// `"SSHSIG" || string namespace || string reserved || string hash_alg ||
+/// string H(message)`, which is what binds a signature to its namespace: a
+/// `-n git` signature from the same key is not a release signature.
+fn verify_sshsig(message: &[u8], armoured: &[u8], trusted: &[Vec<u8>]) -> Result<String> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256, Sha512};
+
+    let malformed = || anyhow::anyhow!("SHA256SUMS.sig is not a well-formed SSH signature");
+    let body: String = std::str::from_utf8(armoured)
+        .ok()
+        .and_then(|t| t.trim().strip_prefix("-----BEGIN SSH SIGNATURE-----"))
+        .and_then(|t| t.strip_suffix("-----END SSH SIGNATURE-----"))
+        .ok_or_else(malformed)?
+        .split_whitespace()
+        .collect();
+    let blob = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .map_err(|_| malformed())?;
+
+    let mut rest = blob.as_slice();
+    if take(&mut rest, 6) != Some(b"SSHSIG".as_slice())
+        || take(&mut rest, 4) != Some([0, 0, 0, 1].as_slice())
+    {
+        return Err(malformed());
+    }
+    let public = string(&mut rest).ok_or_else(malformed)?;
+    let namespace = string(&mut rest).ok_or_else(malformed)?;
+    let reserved = string(&mut rest).ok_or_else(malformed)?;
+    let hash = string(&mut rest).ok_or_else(malformed)?;
+    let signature = string(&mut rest).ok_or_else(malformed)?;
+    if !rest.is_empty() {
+        return Err(malformed());
+    }
+
+    if namespace != b"file" {
+        bail!(
+            "SHA256SUMS.sig was made for namespace {:?}, not \"file\", so it is not a \
+             release signature",
+            String::from_utf8_lossy(namespace)
+        );
+    }
+    if !trusted.iter().any(|key| key.as_slice() == public) {
+        bail!(
+            "SHA256SUMS is signed by an untrusted key ({}), not the semlith release key \
+             ({SIGNING_KEY_ID}). If semlith has rotated its release key since this binary \
+             was built, reinstall with install.sh or install.ps1",
+            key_id(public)
+        );
+    }
+    let key = ed25519_field(public, 32).ok_or_else(malformed)?;
+    let signature = ed25519_field(signature, 64).ok_or_else(malformed)?;
+    let digest = match hash {
+        b"sha512" => Sha512::digest(message).to_vec(),
+        b"sha256" => Sha256::digest(message).to_vec(),
+        other => bail!(
+            "SHA256SUMS.sig uses hash {:?}, which an SSH signature may not",
+            String::from_utf8_lossy(other)
+        ),
+    };
+
+    let mut signed = b"SSHSIG".to_vec();
+    for field in [namespace, reserved, hash, digest.as_slice()] {
+        signed.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        signed.extend_from_slice(field);
+    }
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
+        .verify(&signed, signature)
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "the signature does not match SHA256SUMS: the file was changed after it \
+                 was signed"
+            )
+        })?;
+    Ok(key_id(public))
 }
 
 /// Unpack the release archive, in this process.
@@ -776,6 +965,82 @@ mod tests {
         assert_eq!(origin(), "https://github.com");
         assert!(!overridden());
         unsafe { std::env::remove_var("SEMLITH_RELEASES_ORIGIN") };
+    }
+
+    /// The id `semlith --version` will print is the id of the key that ships.
+    #[test]
+    fn the_signing_key_id_is_the_shipped_keys_fingerprint() {
+        assert_eq!(key_id(&key_blob(SIGNING_KEYS[0]).unwrap()), SIGNING_KEY_ID);
+    }
+
+    /// A signature made by `ssh-keygen -Y sign -n file` with a throwaway key,
+    /// once, so the parser is checked against OpenSSH's own output on every
+    /// run without needing ssh-keygen installed.
+    const VECTOR_KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKrKLCA4hwnLZ/jBh0rO4o6fQNdGPlfuSXzNvAinLzDC vector";
+    const VECTOR_MESSAGE: &[u8] = b"abc123  semlith-v9.9.9-x.tar.gz\n";
+    const VECTOR_SIG: &str = "-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgqsosIDiHCctn+MGHSs7ijp9A10
+Y+V+5JfM28CKcvMMIAAAAEZmlsZQAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gtZWQyNTUx
+OQAAAEBPVD44/75bMXbjPojadfnMt2QZclTsusuY/ZDdgnJhYZvGLg51cdXKFl8W5q+2gb
+SvryiS85k74I0alntQywcG
+-----END SSH SIGNATURE-----
+";
+
+    #[test]
+    fn an_openssh_signature_verifies_and_names_its_key() {
+        let trusted = vec![key_blob(VECTOR_KEY).unwrap()];
+        let id = verify_sshsig(VECTOR_MESSAGE, VECTOR_SIG.as_bytes(), &trusted).unwrap();
+        assert_eq!(id, "SHA256:HXLk6RetMrW9TMvxXn4n6NgMaT0iyNnWzK+Bnic8HFc");
+    }
+
+    #[test]
+    fn a_signature_fails_closed() {
+        let trusted = vec![key_blob(VECTOR_KEY).unwrap()];
+        let shipped = vec![key_blob(SIGNING_KEYS[0]).unwrap()];
+        let err = |message: &[u8], sig: &str, keys: &[Vec<u8>]| {
+            format!(
+                "{:#}",
+                verify_sshsig(message, sig.as_bytes(), keys).unwrap_err()
+            )
+        };
+
+        // One byte of the message changed.
+        assert!(
+            err(b"abc124  semlith-v9.9.9-x.tar.gz\n", VECTOR_SIG, &trusted)
+                .contains("does not match")
+        );
+        // A valid signature by a key this binary does not trust.
+        assert!(err(VECTOR_MESSAGE, VECTOR_SIG, &shipped).contains("untrusted key"));
+        // Not an SSH signature at all, or one cut short.
+        assert!(err(VECTOR_MESSAGE, "", &trusted).contains("well-formed"));
+        assert!(
+            err(
+                VECTOR_MESSAGE,
+                &VECTOR_SIG.replace("SvryiS85k74I0alntQywcG\n", ""),
+                &trusted
+            )
+            .contains("well-formed")
+        );
+        // The namespace is part of what was signed: relabelling a signature
+        // `file` -> `fild` changes the signed bytes, and "file" is required.
+        let relabelled = {
+            use base64::Engine;
+            let body: String = VECTOR_SIG
+                .lines()
+                .filter(|l| !l.starts_with("-----"))
+                .collect();
+            let mut blob = base64::engine::general_purpose::STANDARD
+                .decode(body)
+                .unwrap();
+            let at = blob.windows(4).position(|w| w == b"file").unwrap();
+            blob[at + 3] = b'd';
+            format!(
+                "-----BEGIN SSH SIGNATURE-----\n{}\n-----END SSH SIGNATURE-----\n",
+                base64::engine::general_purpose::STANDARD.encode(blob)
+            )
+        };
+        assert!(err(VECTOR_MESSAGE, &relabelled, &trusted).contains("namespace"));
     }
 
     #[test]

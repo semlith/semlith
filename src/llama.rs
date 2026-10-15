@@ -2,8 +2,9 @@
 //! granite as GGUF f16 on Metal (macOS) or Vulkan (Windows and Linux).
 //!
 //! The server is a child of the worker and nothing else reaches it: it
-//! listens on a loopback port the worker picked, takes a bearer key the
-//! worker drew from the OS random source and never wrote down, and has its
+//! listens on a loopback port it bound itself and named on its own stderr,
+//! takes a bearer key the worker drew from the OS random source, handed over
+//! in its environment rather than its argv and never wrote down, and has its
 //! web UI off. The worker hands it token ids verbatim — the run's own
 //! tokenizer already added granite's CLS and SEP — through `POST /embedding`,
 //! so llama.cpp's tokenizer never sees a chunk.
@@ -179,7 +180,8 @@ pub fn vectors_from(answer: &serde_json::Value, rows: usize) -> Result<Vec<Vec<f
 /// What the llama.cpp worker embeds with: a running server and how to reach
 /// it.
 pub struct Session {
-    server: Server,
+    /// Held for its drop, which kills the server.
+    _server: Server,
     agent: ureq::Agent,
     url: String,
     key: String,
@@ -224,13 +226,9 @@ impl Session {
         };
 
         let key = random_key()?;
-        // Picked here and released for the server to take: a port another
-        // process takes in between fails this start, and the lane's next
-        // start picks again.
-        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
-            .and_then(|listener| listener.local_addr())
-            .context("finding a free loopback port")?
-            .port();
+        // Port 0: the server binds whatever port the OS gives it and names it
+        // on its own stderr (see `wait_ready`). The key is not an argument:
+        // argv is what `ps` shows every account on the machine.
         let mut args: Vec<String> = vec![
             "--embeddings".into(),
             "--pooling".into(),
@@ -238,9 +236,7 @@ impl Session {
             "--host".into(),
             "127.0.0.1".into(),
             "--port".into(),
-            port.to_string(),
-            "--api-key".into(),
-            key.clone(),
+            "0".into(),
             "--no-webui".into(),
             "-m".into(),
             crate::plain(&model.display().to_string()),
@@ -256,13 +252,18 @@ impl Session {
         args.extend(placement);
         let mut child = std::process::Command::new(&server)
             .args(&args)
+            // llama-server reads `--api-key` from here too (b11146's
+            // `common/arg.cpp`). A process's environment is readable by its
+            // own user and root only.
+            .env("LLAMA_API_KEY", &key)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| anyhow::anyhow!("unavailable — llama-server would not start: {e}"))?;
         let tail = Tail::follow(child.stderr.take());
-        let server = Server::guard(child);
+        let mut server = Server::guard(child);
+        let port = wait_ready(&mut server, &tail)?;
 
         let agent: ureq::Agent = ureq::Agent::config_builder()
             // Loopback, never through a proxy the environment names: the
@@ -271,50 +272,13 @@ impl Session {
             .timeout_global(Some(Duration::from_secs(300)))
             .build()
             .into();
-        let url = format!("http://127.0.0.1:{port}");
-        let mut session = Self {
-            server,
+        Ok(Self {
+            _server: server,
             agent,
-            url,
+            url: format!("http://127.0.0.1:{port}"),
             key,
             device,
-        };
-        session.wait_ready(&tail)?;
-        Ok(session)
-    }
-
-    /// `/health` answers 503 while the model loads and 200 once it has. A
-    /// server that exits first is the lane being unavailable here — no
-    /// Vulkan loader, a driver that refuses, a model it cannot read — and
-    /// the reason is the end of what it printed.
-    fn wait_ready(&mut self, tail: &Tail) -> Result<()> {
-        let started = Instant::now();
-        loop {
-            if let Ok(Some(status)) = self.server.child.try_wait() {
-                bail!(
-                    "unavailable — llama-server exited ({status}) before it was ready: {}",
-                    tail.text()
-                );
-            }
-            let health = self
-                .agent
-                .get(format!("{}/health", self.url))
-                .config()
-                .timeout_global(Some(Duration::from_secs(2)))
-                .build()
-                .call();
-            if health.is_ok() {
-                return Ok(());
-            }
-            if started.elapsed() > READY_DEADLINE {
-                bail!(
-                    "unavailable — llama-server was not ready within {} s: {}",
-                    READY_DEADLINE.as_secs(),
-                    tail.text()
-                );
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        })
     }
 
     pub fn device(&self) -> String {
@@ -401,21 +365,69 @@ fn random_key() -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// The port the server bound, once it says it is listening — which
+/// llama-server does only after the model has loaded. A server that exits
+/// first is the lane being unavailable here — no Vulkan loader, a driver that
+/// refuses, a model it cannot read — and the reason is the end of what it
+/// printed.
+///
+/// The number comes over the child's own stderr, which nothing else can write
+/// to. Readiness used to be any 200 on `/health` at a port semlith had picked
+/// and released, so another local user who bound that port first got the
+/// "ready" session and every batch with the bearer key.
+fn wait_ready(server: &mut Server, tail: &Tail) -> Result<u16> {
+    let started = Instant::now();
+    loop {
+        if let Some(port) = tail.port() {
+            return Ok(port);
+        }
+        if let Ok(Some(status)) = server.child.try_wait() {
+            bail!(
+                "unavailable — llama-server exited ({status}) before it was ready: {}",
+                tail.text()
+            );
+        }
+        if started.elapsed() > READY_DEADLINE {
+            bail!(
+                "unavailable — llama-server was not ready within {} s: {}",
+                READY_DEADLINE.as_secs(),
+                tail.text()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The port in llama-server's `listening on http://127.0.0.1:<port>` line.
+fn listening_port(line: &str) -> Option<u16> {
+    let (_, rest) = line.split_once("listening on http://127.0.0.1:")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok().filter(|&port| port != 0)
+}
+
 /// The last lines the server printed, kept for the reason it gives when it
-/// fails to start. Reading its stderr also keeps a chatty server from
-/// blocking on a full pipe.
-struct Tail(Arc<Mutex<std::collections::VecDeque<String>>>);
+/// fails to start, and the port it said it listens on. Reading its stderr
+/// also keeps a chatty server from blocking on a full pipe.
+struct Tail {
+    lines: Arc<Mutex<std::collections::VecDeque<String>>>,
+    port: Arc<std::sync::OnceLock<u16>>,
+}
 
 impl Tail {
     fn follow(stderr: Option<std::process::ChildStderr>) -> Self {
         let lines = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let port = Arc::new(std::sync::OnceLock::new());
         if let Some(stderr) = stderr {
             let kept = Arc::clone(&lines);
+            let bound = Arc::clone(&port);
             std::thread::spawn(move || {
                 for line in std::io::BufReader::new(stderr)
                     .lines()
                     .map_while(|l| l.ok())
                 {
+                    if let Some(at) = listening_port(&line) {
+                        let _ = bound.set(at);
+                    }
                     let mut kept = kept.lock().unwrap_or_else(|e| e.into_inner());
                     if kept.len() == 8 {
                         kept.pop_front();
@@ -424,14 +436,18 @@ impl Tail {
                 }
             });
         }
-        Self(lines)
+        Self { lines, port }
+    }
+
+    fn port(&self) -> Option<u16> {
+        self.port.get().copied()
     }
 
     fn text(&self) -> String {
         // A moment for the reader to catch the last lines of a server that
         // just exited.
         std::thread::sleep(Duration::from_millis(200));
-        let lines = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let lines = self.lines.lock().unwrap_or_else(|e| e.into_inner());
         let text = lines
             .iter()
             .map(|l| clip(l))
@@ -518,6 +534,15 @@ fn watchdog(server: libc::pid_t) -> Option<libc::pid_t> {
 /// the worker exits, however it exits.
 #[cfg(windows)]
 fn kill_on_close(child: &std::process::Child) {
+    job(child, 0);
+}
+
+/// Put `child` in an anonymous job that kills it when this process's handle
+/// closes and, when `memory_limit` is not zero, caps the memory it may commit
+/// at that many bytes. A child that asks for more fails the allocation, which
+/// is how the parse worker's limit reaches the C half of a parser too.
+#[cfg(windows)]
+pub(crate) fn job(child: &std::process::Child, memory_limit: usize) {
     use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
 
@@ -549,6 +574,7 @@ fn kill_on_close(child: &std::process::Child) {
     const _: () = assert!(size_of::<Extended>() == 144);
     const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
     const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    const JOB_OBJECT_LIMIT_PROCESS_MEMORY: u32 = 0x0100;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -562,11 +588,17 @@ fn kill_on_close(child: &std::process::Child) {
         fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
     }
 
+    let memory = if memory_limit == 0 {
+        0
+    } else {
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY
+    };
     let info = Extended {
         basic: Basic {
-            limit_flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            limit_flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | memory,
             ..Default::default()
         },
+        process_memory_limit: memory_limit,
         ..Default::default()
     };
     // SAFETY: an anonymous job with default security; the limit structure is
@@ -588,5 +620,29 @@ fn kill_on_close(child: &std::process::Child) {
         {
             AssignProcessToJobObject(job, child.as_raw_handle().cast());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// S08: the port is read from the server's own line, and only from it.
+    #[test]
+    fn the_port_comes_from_the_listening_line() {
+        assert_eq!(
+            listening_port("srv  llama_server: listening on http://127.0.0.1:53211"),
+            Some(53211)
+        );
+        assert_eq!(
+            listening_port("main: listening on http://127.0.0.1:8080\r"),
+            Some(8080)
+        );
+        assert_eq!(listening_port("listening on http://127.0.0.1:0"), None);
+        assert_eq!(listening_port("listening on http://0.0.0.0:8080"), None);
+        assert_eq!(
+            listening_port("couldn't bind HTTP server socket, port: 8080"),
+            None
+        );
     }
 }

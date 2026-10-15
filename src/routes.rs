@@ -174,6 +174,7 @@ fn dispatch(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/airgap") => airgap(request),
         (_, true, "/api/login-item") => login_item(state, request),
         (_, true, "/api/agents/reveal") => reveal(state),
+        (_, true, "/api/agents/scope") => agent_scope(request),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
         // MCP over HTTP, on the path a client's configuration names. The
@@ -2831,6 +2832,23 @@ fn reveal(state: &Arc<State>) -> Response {
     Response::json(&json!({ "key": state.server.agent_key() }))
 }
 
+/// Settings › Agents' write switch: `{"write": true}` lets the agent key call
+/// index, add and forget. The session token is the owner; the key cannot
+/// reach this route.
+fn agent_scope(request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(write) = body.get("write").and_then(Value::as_bool) else {
+        return Response::error(400, "write must be true or false");
+    };
+    match crate::home::set_agent_scope(write) {
+        Ok(()) => Response::json(&json!({ "scope": if write { "write" } else { "read" } })),
+        Err(e) => Response::error(500, &format!("{e:#}")),
+    }
+}
+
 /// What the tool list costs a session, in tokens, and how that was counted.
 ///
 /// Once per session, before the agent has asked anything: it is the standing
@@ -2899,6 +2917,8 @@ fn agents(state: &Arc<State>) -> Response {
         // asked anything. A cost a user should be able to see rather than one
         // they would have to capture traffic to discover.
         "tool_list_bytes": crate::mcp::tool_list_bytes(),
+        // What the agent key may do: `read` unless the owner allowed writes.
+        "key_scope": if crate::home::agent_may_write() { "write" } else { "read" },
         // And in the unit an agent is billed in. Measured with a store's own
         // tokenizer where one is loaded, and labelled with which counter said
         // so -- the same two tiers the ledger uses, because a token count
@@ -5087,6 +5107,7 @@ fn decisions(state: &Arc<State>, request: &Request) -> Response {
                     (Some("redacted"), _) => ("redacted · indexed", "you"),
                     (Some(_), _) => ("accepted", "you"),
                     (None, crate::store::class::DUMMY) => ("accepted", "rules"),
+                    (None, crate::store::class::CRASHED) => ("parser crashed", "rules"),
                     (None, crate::store::class::CREDENTIAL | crate::store::class::CONTENT) => {
                         ("never indexed", "rules")
                     }
@@ -5099,6 +5120,7 @@ fn decisions(state: &Arc<State>, request: &Request) -> Response {
                     "by": by,
                     "at": row.last_seen,
                     "can_undo": by == "you",
+                    "can_retry": row.class == crate::store::class::CRASHED,
                     "class": row.class,
                 }));
             }
@@ -5639,6 +5661,32 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
         revision,
         method == "tools/call",
     );
+    // A notification is answered before any lock: it carries no id, needs no
+    // answer, and must never wait behind another agent's call.
+    if body.get("id").is_none() {
+        return Response::new(200, "application/json; charset=utf-8", Vec::new());
+    }
+
+    // The client named itself at `initialize` and never again, so the name the
+    // ledger records comes from what was noted then. The transport's session id
+    // is the conversation id, which is what it is for.
+    let mut mcp_session = crate::mcp::Session::new(session.clone());
+    // The proxy's header, never this daemon's own ancestry: the daemon is
+    // serving the request, not hosting the client.
+    mcp_session.host = host.map(str::to_string);
+    // The portal holds the session token and is the owner. An agent — over
+    // `/mcp` with the key, or through a stdio proxy — gets the key's scope.
+    mcp_session.writes = transport == "portal" || crate::home::agent_may_write();
+    if let Some((named, version)) = state.client_name(&session, transport) {
+        mcp_session.client = named;
+        mcp_session.version = version;
+    }
+    // Writes are handed to the writer without the fleet's lock (S02).
+    let writer = daemon::Writer(Arc::clone(state));
+    if let Some(value) = crate::mcp::answer_unlocked(&writer, &body, &mcp_session) {
+        return Response::json(&value);
+    }
+
     // A method that is about the server rather than about a corpus is answered
     // whether or not anything is indexed: an agent connecting to a fresh
     // install should be told which tools exist, not that the daemon is broken.
@@ -5652,7 +5700,6 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(409, &e.to_string());
     }
 
-    let writer = daemon::Writer(Arc::clone(state));
     let mut fleet = state.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner());
     let mut nothing = crate::fleet::Fleet::empty();
     let fleet = match fleet.as_mut() {
@@ -5661,17 +5708,6 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
         None => return Response::error(409, "this daemon has no store open"),
     };
 
-    // The client named itself at `initialize` and never again, so the name the
-    // ledger records comes from what was noted then. The transport's session id
-    // is the conversation id, which is what it is for.
-    let mut mcp_session = crate::mcp::Session::new(session.clone());
-    // The proxy's header, never this daemon's own ancestry: the daemon is
-    // serving the request, not hosting the client.
-    mcp_session.host = host.map(str::to_string);
-    if let Some((named, version)) = state.client_name(&session, transport) {
-        mcp_session.client = named;
-        mcp_session.version = version;
-    }
     let response = match crate::mcp::answer(fleet, Some(&writer), &body, &mut mcp_session) {
         Some(value) => Response::json(&value),
         // A notification. Answered with an empty 200 rather than an empty JSON

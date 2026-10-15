@@ -1,8 +1,11 @@
 <#
 .SYNOPSIS
     Install semlith from a GitHub release: download the Windows binary, verify
-    it against SHA256SUMS and its build provenance, install it into
-    ~\.semlith\bin and hand off to `semlith setup`.
+    the signature on SHA256SUMS, the binary against it and its build
+    provenance, install it into ~\.semlith\bin and hand off to
+    `semlith setup`. Needs ssh-keygen from OpenSSH 8.1 or later (the
+    OpenSSH Client feature of current Windows 10 and 11) to verify the
+    signature.
 
         irm https://raw.githubusercontent.com/semlith/semlith/main/install.ps1 | iex
 .DESCRIPTION
@@ -40,6 +43,15 @@ $repo = 'semlith/semlith'
 # One origin, with no way to be told another, as in install.sh: the clean
 # install workflow rewrites this line in a copy rather than setting a variable.
 $origin = 'https://github.com'
+# The keys a release may be signed with, one allowed_signers line each, the
+# same list as SIGNING_KEYS in src/upgrade.rs (key id
+# SHA256:a5oJmrakIwDHEWTDWqWe51Ttt6m2tQ0dsGzIqyxDuxs). A key rotation ships
+# both keys for one release: add the new key as a second entry here, in
+# install.sh and in upgrade.rs, publish that release still signed by the old
+# key, then sign with the new one and drop the old entry a release later.
+$signers = @(
+    'semlith-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICMTHiHMzeSHzzc+8UDZHUzJcvb6XGUBb+TJdFes91xm'
+)
 $arch = $env:PROCESSOR_ARCHITECTURE
 if ($arch -ne 'AMD64' -and $arch -ne 'ARM64') {
     throw "semlith has no prebuilt Windows binary for $arch."
@@ -79,11 +91,47 @@ New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
     $archivePath = Join-Path $tmp $archive
     $sumsPath = Join-Path $tmp 'SHA256SUMS'
+    $sigPath = Join-Path $tmp 'SHA256SUMS.sig'
 
     Write-Information "Downloading $archive" -InformationAction Continue
     Invoke-WebRequest -Uri "$base/$archive" -OutFile $archivePath @web
     Write-Information 'Downloading SHA256SUMS' -InformationAction Continue
     Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sumsPath @web
+    Write-Information 'Downloading SHA256SUMS.sig' -InformationAction Continue
+    try {
+        Invoke-WebRequest -Uri "$base/SHA256SUMS.sig" -OutFile $sigPath @web
+    }
+    catch {
+        throw "$tag has no SHA256SUMS.sig, so it cannot be verified. Releases before v0.40.0 are unsigned and this installer does not install them; nothing was installed"
+    }
+
+    # The signature proves SHA256SUMS came from whoever holds the semlith
+    # release key, which a stolen GitHub token does not give anyone. Checked
+    # with `ssh-keygen -Y verify` because current Windows 10 and 11 ship it, so
+    # there is no extra tool to fetch first. Releases before v0.40.0 are
+    # unsigned and this installer refuses them: that is the price of failing
+    # closed.
+    Write-Information 'Verifying signature' -InformationAction Continue
+    $sshKeygen = Get-Command ssh-keygen -ErrorAction SilentlyContinue
+    if (-not $sshKeygen) {
+        throw 'need ssh-keygen (OpenSSH 8.1 or later) to verify the release signature: add the OpenSSH Client under Settings > Apps > Optional features, or run: Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0; nothing was installed'
+    }
+    # Written without a byte-order mark and with LF endings, which is what
+    # ssh-keygen reads an allowed_signers file as.
+    $allowedPath = Join-Path $tmp 'allowed_signers'
+    [IO.File]::WriteAllText($allowedPath, (($signers -join "`n") + "`n"))
+    # The message goes to ssh-keygen's stdin as the file's own bytes.
+    # Start-Process redirects a file without re-encoding it; a PowerShell pipe
+    # would turn it into text first and the signature would not match.
+    $verifyOut = Join-Path $tmp 'verify.out'
+    $verifyErr = Join-Path $tmp 'verify.err'
+    $verifyArgs = @('-Y', 'verify', '-f', "`"$allowedPath`"", '-I', 'semlith-release', '-n', 'file', '-s', "`"$sigPath`"")
+    $verify = Start-Process -FilePath $sshKeygen.Source -ArgumentList $verifyArgs -RedirectStandardInput $sumsPath -RedirectStandardOutput $verifyOut -RedirectStandardError $verifyErr -NoNewWindow -Wait -PassThru
+    if ($verify.ExitCode -ne 0) {
+        Get-Content -Path $verifyOut, $verifyErr -ErrorAction SilentlyContinue | Write-Warning
+        throw 'signature check failed: SHA256SUMS is not signed by the semlith release key (ssh-keygen -Y needs OpenSSH 8.1 or later); nothing was installed'
+    }
+    Write-Information 'Signature verified: SHA256SUMS is signed by the semlith release key' -InformationAction Continue
 
     Write-Information 'Verifying checksum' -InformationAction Continue
     $pattern = '\s' + [regex]::Escape($archive) + '$'
@@ -97,11 +145,11 @@ try {
         throw "checksum mismatch: $archive hashes to $actual but SHA256SUMS says $expected; nothing was installed"
     }
 
-    # The checksum proves the archive matches SHA256SUMS, and both came from the
-    # same place. The attestation proves who built it: signed for the archive's
-    # digest by this repository's release workflow. gh is optional, so its
-    # absence is said rather than fatal; a gh that checks and does not confirm
-    # is fatal.
+    # The checksum proves the archive matches SHA256SUMS, and the signature
+    # that SHA256SUMS is the project's. The attestation proves who built it:
+    # signed for the archive's digest by this repository's release workflow.
+    # gh is optional, so its absence is said rather than fatal; a gh that
+    # checks and does not confirm is fatal.
     $manual = "To check it yourself: gh attestation verify $archive --repo $repo"
     # Attestations start with v0.36.0: an older tag has none to check.
     if ($tag -match '^v0\.([0-9]|[12][0-9]|3[0-5])\.') {

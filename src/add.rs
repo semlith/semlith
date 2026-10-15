@@ -369,7 +369,12 @@ fn get(url: &str) -> Result<(String, String, Vec<u8>)> {
     // Redirects are followed here rather than by the agent, because the check
     // that matters is per hop: an https URL that redirects to http is exactly
     // the case an agent's own redirect following would hide.
+    // Deadlines, as every outbound agent in semlith has: a server that accepts
+    // the connection and then drips a byte a minute held this call, and before
+    // 0.40.0 every other agent's call with it.
     let agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(std::time::Duration::from_secs(10)))
+        .timeout_global(Some(std::time::Duration::from_secs(60)))
         .max_redirects(0)
         .max_redirects_will_error(false)
         .http_status_as_error(false)
