@@ -41,6 +41,34 @@ use std::time::{Duration, Instant, SystemTime};
 /// "who is writing *this* store", which is exactly what the lock file is about.
 pub const DISCOVERY_FILE: &str = "daemon.json";
 
+/// Where a store's discovery file lives: beside the store when the store is
+/// under the semlith home, and under the home's `run/` otherwise (audit S24).
+/// The file holds the session token, and a `.semlith` beside a corpus can sit
+/// in a synced or shared folder that carried it off the machine.
+pub fn discovery_path(store_dir: &Path) -> PathBuf {
+    let Ok(home) = home::home_or_error() else {
+        return store_dir.join(DISCOVERY_FILE);
+    };
+    let canonical = crate::canonical(store_dir);
+    if canonical.starts_with(crate::canonical(&home)) {
+        return store_dir.join(DISCOVERY_FILE);
+    }
+    let key = blake3::hash(canonical.to_string_lossy().as_bytes()).to_hex();
+    home.join("run").join(format!("{}.json", &key[..32]))
+}
+
+/// Every place a discovery file for this store may be: where this release
+/// writes it, then where a daemon before 0.41.0 wrote it.
+// ponytail: the second place is read for one release; drop it in 0.42.0.
+pub fn discovery_paths(store_dir: &Path) -> Vec<PathBuf> {
+    let mut out = vec![discovery_path(store_dir)];
+    let legacy = store_dir.join(DISCOVERY_FILE);
+    if !out.contains(&legacy) {
+        out.push(legacy);
+    }
+    out
+}
+
 /// How many watcher events the Stores view can show. A ring, not a log: this
 /// is the "is it actually running" signal, and the last twenty answer it.
 const EVENT_HISTORY: usize = 20;
@@ -133,7 +161,14 @@ impl Discovery {
         if !home::Registry::load().ok()?.trusts(store_dir) {
             return None;
         }
-        let path = store_dir.join(DISCOVERY_FILE);
+        discovery_paths(store_dir)
+            .into_iter()
+            .filter(|p| p.exists())
+            .find_map(|p| Self::read_at(&p))
+    }
+
+    fn read_at(path: &Path) -> Option<Self> {
+        let path = path.to_path_buf();
         if worth_warning_about(&path) {
             eprintln!(
                 "semlith: ignoring {} — it is not a file this user wrote privately",
@@ -156,7 +191,16 @@ impl Discovery {
     }
 
     fn write(&self, store_dir: &Path) -> Result<()> {
-        let path = store_dir.join(DISCOVERY_FILE);
+        let path = discovery_path(store_dir);
+        // A file an older daemon left beside a store outside the home goes,
+        // token and all, the first time this one opens it.
+        let legacy = store_dir.join(DISCOVERY_FILE);
+        if legacy != path {
+            let _ = std::fs::remove_file(&legacy);
+        }
+        if let Some(dir) = path.parent() {
+            home::secure_dir(dir)?;
+        }
         // The mode is set as the file is created rather than afterwards. The
         // session token is in this file, and a file that is world-readable for
         // the microsecond between the two is a file that was world-readable —
@@ -181,7 +225,9 @@ impl Discovery {
     }
 
     fn remove(store_dir: &Path) {
-        let _ = std::fs::remove_file(store_dir.join(DISCOVERY_FILE));
+        for path in discovery_paths(store_dir) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 

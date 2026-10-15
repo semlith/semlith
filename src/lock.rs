@@ -51,13 +51,17 @@ impl StoreLock {
     /// Take the store's write lock, or explain who has it.
     pub fn acquire(dir: &Path) -> Result<Self> {
         let path = dir.join(LOCK_FILE);
-        let mut file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(crate::home::FILE_MODE);
+        }
+        let mut file = options
             .open(&path)
             .with_context(|| format!("opening {}", path.display()))?;
+        crate::home::tighten_file(&path);
 
         if file.try_lock().is_err() {
             // Whoever holds the lock wrote their identity into the file before
@@ -134,7 +138,9 @@ impl Drop for StoreLock {
 /// there would print a URL nothing listens on and exit 0 over a genuine
 /// conflict.
 fn daemon_holds(dir: &Path) -> bool {
-    dir.join(crate::daemon::DISCOVERY_FILE).exists()
+    crate::daemon::discovery_paths(dir)
+        .iter()
+        .any(|p| p.exists())
 }
 
 fn describe_holder() -> String {

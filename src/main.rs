@@ -1152,6 +1152,17 @@ enum KeyCommand {
 static ALLOCATOR: semlith::worker::Counting = semlith::worker::Counting;
 
 fn main() -> Result<()> {
+    // Everything semlith creates is its user's alone: a store, its logs and
+    // journal, SQLite's own WAL files, a report written on a schedule. One
+    // umask rather than a mode at each of the dozens of places a file is made,
+    // which the audit found missing at several (S24). A file that has to be
+    // executable or shared sets its mode explicitly, which a umask does not
+    // touch.
+    #[cfg(unix)]
+    // SAFETY: umask only sets the process's file-creation mask.
+    unsafe {
+        libc::umask(0o077);
+    }
     quiet_on_a_closed_pipe();
     let worker = std::thread::Builder::new()
         .name("semlith".into())

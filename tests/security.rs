@@ -233,3 +233,5 @@ mod s20;
 mod s22;
 #[path = "security/s23.rs"]
 mod s23;
+#[path = "security/s24.rs"]
+mod s24;

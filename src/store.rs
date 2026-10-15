@@ -304,6 +304,16 @@ fn transient(e: &anyhow::Error) -> bool {
 
 fn open_once(path: &Path) -> Result<Connection> {
     let db = Connection::open(path)?;
+    // A store this home did not create — a `.semlith` beside a corpus, which
+    // a clone or a sync can carry — is checked before anything below writes
+    // to it (audit S24): once, by SQLite's own quick check, and on every
+    // read by its cell-size check, so a crafted file is refused rather than
+    // parsed further.
+    if foreign(path) {
+        defensive(&db)?;
+        db.pragma_update(None, "cell_size_check", "ON")?;
+        check_once(&db, path)?;
+    }
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
     db.pragma_update(None, "foreign_keys", "ON")?;
@@ -332,6 +342,42 @@ fn open_once(path: &Path) -> Result<Connection> {
     // writer asks.
     read_only(&db, true)?;
     Ok(db)
+}
+
+/// Whether this store file lies outside the semlith home.
+fn foreign(path: &Path) -> bool {
+    match crate::home::home_or_error() {
+        Ok(home) => !crate::canonical(path).starts_with(crate::canonical(&home)),
+        Err(_) => true,
+    }
+}
+
+/// The marker a passed check leaves beside the store.
+const CHECKED: &str = ".integrity-checked";
+
+/// SQLite's quick check, the first time this store is opened here.
+// ponytail: once per store, not per open, as decided for 0.41.0; a store
+// replaced after its check is trusted on the marker. Hash the file into the
+// marker if that ever matters.
+fn check_once(db: &Connection, path: &Path) -> Result<()> {
+    let Some(dir) = path.parent() else {
+        return Ok(());
+    };
+    let marker = dir.join(CHECKED);
+    if marker.exists() {
+        return Ok(());
+    }
+    let verdict: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+    if verdict != "ok" {
+        anyhow::bail!(
+            "{} failed SQLite's integrity check ({verdict}), so semlith will not open it: \
+             it is damaged, or was made to attack whatever reads it. Index the corpus \
+             again into a new store.",
+            path.display()
+        );
+    }
+    let _ = crate::home::write_private(&marker, b"quick_check ok\n");
+    Ok(())
 }
 
 /// Treat the file as data rather than as a program.
@@ -2044,7 +2090,7 @@ pub fn symbols_scoped(
     let Some(p) = prefix else {
         return busiest_symbols(db, limit);
     };
-    let pattern = format!("*{}*", p.to_lowercase());
+    let pattern = format!("*{}*", p.to_ascii_lowercase());
     let sql = format!(
         "SELECT {SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
          WHERE lower(f.path) GLOB ?1 AND s.kind != 'module'
@@ -2872,8 +2918,12 @@ pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    let key = ledger_key(db, true);
     append_chained(db, |prev| {
-        let hash = chain_hash(prev, at, row);
+        let hash = match &key {
+            Some(key) => keyed_chain_hash(key, prev, at, row),
+            None => chain_hash(prev, at, row),
+        };
         db.execute(
             "INSERT INTO retrievals
              (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
@@ -3116,7 +3166,66 @@ pub fn usage_rows(db: &Connection, store: &str) -> Result<Vec<(String, String, R
 /// every row written before 0.15.0 and set on every row written since. There
 /// is no version column and no migration, and a store holding rows of both
 /// kinds walks end to end.
+/// The file beside a store's database holding its ledger key.
+const LEDGER_KEY: &str = "ledger.key";
+
+/// What a keyed row's hash starts with, so a verify knows which formula
+/// wrote it.
+const KEYED: &str = "k1:";
+
+/// This store's ledger key, made the first time a row is recorded when
+/// `create`. A file of its own, 0600, rather than a meta row: whoever can
+/// rewrite `store.db` could otherwise recompute every hash after an edit, and
+/// a copied or synced database travels without it (audit S24). `None` for an
+/// in-memory database or a key that cannot be read or made.
+fn ledger_key(db: &Connection, create: bool) -> Option<[u8; 32]> {
+    let file = Path::new(db.path().filter(|p| !p.is_empty())?)
+        .parent()?
+        .join(LEDGER_KEY);
+    if let Ok(bytes) = std::fs::read(&file) {
+        return bytes.try_into().ok();
+    }
+    if !create {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    getrandom::fill(&mut key).ok()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(crate::home::FILE_MODE);
+    }
+    match options.open(&file) {
+        Ok(mut out) => {
+            std::io::Write::write_all(&mut out, &key).ok()?;
+            Some(key)
+        }
+        // Another process made it first: use theirs.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::read(&file).ok()?.try_into().ok()
+        }
+        Err(_) => None,
+    }
+}
+
+/// [`chain_hash`]'s payload under the store's key, marked [`KEYED`].
+/// From 0.41.0; an older binary reads these rows as not verifying.
+fn keyed_chain_hash(key: &[u8; 32], prev: &str, at: i64, row: &NewRetrieval<'_>) -> String {
+    format!(
+        "{KEYED}{}",
+        blake3::keyed_hash(key, chain_payload(prev, at, row).as_bytes()).to_hex()
+    )
+}
+
 fn chain_hash(prev: &str, at: i64, row: &NewRetrieval<'_>) -> String {
+    blake3::hash(chain_payload(prev, at, row).as_bytes())
+        .to_hex()
+        .to_string()
+}
+
+fn chain_payload(prev: &str, at: i64, row: &NewRetrieval<'_>) -> String {
     let NewRetrieval {
         client,
         query,
@@ -3145,7 +3254,7 @@ fn chain_hash(prev: &str, at: i64, row: &NewRetrieval<'_>) -> String {
     // without breaking the chain, so the grouping of rows into retrievals is
     // not tamper-evident. What a retrieval *was* — who asked, what they asked,
     // how many hits, what it cost — is covered exactly as before.
-    blake3::hash(payload.as_bytes()).to_hex().to_string()
+    payload
 }
 
 /// Append a row in the shape 0.14.0 wrote, for the test that proves a store
@@ -3581,6 +3690,7 @@ pub fn ledger_rows(db: &Connection) -> Result<i64> {
 /// ([`ledger_note`]) is accepted as it stands, and the walk goes on from it.
 pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
     let acked = acknowledged(db)?;
+    let key = ledger_key(db, false);
     let mut stmt = db.prepare(
         "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
                 session, tool, stale_hits, tokenizer
@@ -3611,25 +3721,28 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
                 let session: String = r.get(10)?;
                 let stale: i64 = r.get(12)?;
                 let tokenizer: String = r.get(13)?;
-                chain_hash(
-                    &prev,
-                    at,
-                    &NewRetrieval {
-                        client_version: "",
-                        client: &client,
-                        session: &session,
-                        tool: &tool,
-                        query: &query,
-                        hits,
-                        micros,
-                        excerpt_tokens: excerpt,
-                        whole_file_tokens: whole,
-                        stale_hits: stale,
-                        tokenizer: &tokenizer,
-                        // Not covered by the hash; see `chain_hash`.
-                        query_id: "",
-                    },
-                )
+                let row = NewRetrieval {
+                    client_version: "",
+                    client: &client,
+                    session: &session,
+                    tool: &tool,
+                    query: &query,
+                    hits,
+                    micros,
+                    excerpt_tokens: excerpt,
+                    whole_file_tokens: whole,
+                    stale_hits: stale,
+                    tokenizer: &tokenizer,
+                    // Not covered by the hash; see `chain_hash`.
+                    query_id: "",
+                };
+                match (hash.starts_with(KEYED), &key) {
+                    (false, _) => chain_hash(&prev, at, &row),
+                    (true, Some(key)) => keyed_chain_hash(key, &prev, at, &row),
+                    // A keyed row with no key beside the database cannot be
+                    // verified, so it is the break.
+                    (true, None) => return Ok(Some(id)),
+                }
             }
             None => legacy_chain_hash(&prev, at, &client, &query, hits, micros, excerpt, whole),
         };
@@ -3673,7 +3786,7 @@ pub fn holds_path(db: &Connection, path: &str) -> Result<bool> {
     let canonical = crate::canonical(std::path::Path::new(path));
     let wanted = canonical
         .to_string_lossy()
-        .to_lowercase()
+        .to_ascii_lowercase()
         .replace('\\', "/");
     let sql = format!("SELECT 1 FROM files f WHERE {GLOB_PATH} = ?1 LIMIT 1");
     Ok(db

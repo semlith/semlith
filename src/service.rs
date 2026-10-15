@@ -878,7 +878,7 @@ pub fn last_started() -> Option<i64> {
         .stores
         .keys()
         .filter_map(|name| crate::home::Registry::dir_of(name).ok())
-        .filter_map(|dir| started_from(&dir.join(crate::daemon::DISCOVERY_FILE)))
+        .filter_map(|dir| started_from(&crate::daemon::discovery_path(&dir)))
         .max()
 }
 

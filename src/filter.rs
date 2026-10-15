@@ -257,7 +257,9 @@ fn anchor(pattern: &str) -> String {
     // well as a unix one. Translating the pattern to backslashes instead —
     // which is what this did — matched nothing whenever the store held a path
     // in any other form, and the store holds the verbatim form (#74).
-    let pattern = pattern.to_lowercase().replace('\\', "/");
+    // ASCII, as SQLite's `lower()` is: Unicode lowercasing turned an `É` in a
+    // `!` exclusion into an `é` the stored path never matched (audit S24).
+    let pattern = pattern.to_ascii_lowercase().replace('\\', "/");
     if is_absolute(&pattern) {
         pattern
     } else {

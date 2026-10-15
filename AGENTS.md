@@ -878,6 +878,9 @@ makes this set reviewable is being able to read the whole of it at once.
 | `watch::on_signal` | `libc::signal` | Installs and restores a handler that only stores into an `AtomicBool`, which is what an async-signal-safe handler may do. |
 | `main::quiet_on_a_closed_pipe` | `libc::signal` | Restores `SIGPIPE` to `SIG_DFL` — the disposition the process would have had if the Rust runtime had not changed it — once, at the top of `main`, before any thread is spawned and before anything is printed. unix only. |
 | `main`'s `--airgap` | `std::env::set_var` | Before any thread is spawned. |
+| `main`'s umask (0.41.0) | `libc::umask(0o077)` | Sets this process's file-creation mask, once, at the top of `main` before any thread is spawned; it takes and returns an integer. unix only. |
+| `daemon::stdout_is_a_log` (0.41.0) | `libc::fstat`, `mem::zeroed` | This process's own stdout descriptor and a zeroed live `stat` the call fills; only `st_mode` is read. unix only. |
+| `tests/security/s13.rs` | `libc::mkfifo` | A `CString` path inside the test's own temporary directory, outliving the call. unix only. |
 | `tests/system_reading.rs` (windows) | `GlobalMemoryStatusEx` | As `system::platform`: a zeroed `MEMORYSTATUSEX` with `dwLength` set to its own size. Windows only. |
 | `worker::Counting` | `GlobalAlloc` over `System` | Every call forwards the caller's own layout and pointer to `System` unchanged; the count only decides whether to call it, and a refused allocation returns null, the documented failure. The limit is non-zero only inside a parse worker. |
 | `worker::limit_memory` (Linux) | `libc::setrlimit(RLIMIT_AS)` | A live local `rlimit` read by the call. Lowers this process's own limit, once, before any request is read. Linux only. |
