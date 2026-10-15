@@ -298,18 +298,21 @@ fn transient(e: &anyhow::Error) -> bool {
         e.downcast_ref::<rusqlite::Error>(),
         Some(rusqlite::Error::SqliteFailure(f, _))
             if f.code == rusqlite::ErrorCode::DatabaseBusy
+                || f.code == rusqlite::ErrorCode::SchemaChanged
                 || f.extended_code == rusqlite::ffi::SQLITE_IOERR_SHORT_READ
     )
 }
 
 fn open_once(path: &Path) -> Result<Connection> {
+    // A store this process is creating is not one somebody else made.
+    let fresh = std::fs::metadata(path).map_or(true, |m| m.len() == 0);
     let db = Connection::open(path)?;
     // A store this home did not create — a `.semlith` beside a corpus, which
     // a clone or a sync can carry — is checked before anything below writes
     // to it (audit S24): once, by SQLite's own quick check, and on every
     // read by its cell-size check, so a crafted file is refused rather than
     // parsed further.
-    if foreign(path) {
+    if !fresh && foreign(path) {
         defensive(&db)?;
         db.pragma_update(None, "cell_size_check", "ON")?;
         check_once(&db, path)?;
