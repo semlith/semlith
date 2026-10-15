@@ -45,7 +45,7 @@ fn s14_a_service_daemon_leaves_no_token_in_its_log() {
             })
     };
     let ready = until(Duration::from_secs(60), || {
-        token().is_some() && std::fs::read_to_string(&log).is_ok_and(|t| t.contains("127.0.0.1:"))
+        token().is_some() && std::fs::read_to_string(&log).is_ok_and(|t| t.contains("(token: run"))
     });
     let token = token();
     let _ = child.kill();
