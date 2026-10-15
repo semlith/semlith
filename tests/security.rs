@@ -193,6 +193,8 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 
 // One module per finding, each in its own file, so findings land without
 // touching each other's tests.
+#[path = "security/pattern.rs"]
+mod pattern;
 #[path = "security/races.rs"]
 mod races;
 #[path = "security/s01.rs"]

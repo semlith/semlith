@@ -109,9 +109,6 @@ pub fn run(
     let scoped = filter.and_language(&language)?;
     let files = store::file_rows(db, scoped.groups(), store::FileSort::Path, false, i64::MAX)?;
 
-    let mut parser = Parser::new();
-    parser.set_language(&grammar)?;
-
     let mut out = Vec::new();
     let mut parsed = 0usize;
     let mut truncated = false;
@@ -125,68 +122,39 @@ pub fn run(
         let Some(text) = file_text(db, &file.path)? else {
             continue;
         };
-        // Past the nesting a block grammar survives, the file has no graph
-        // either; parsing it here would abort the daemon.
-        if crate::graph::too_nested(&language, &text) {
-            continue;
-        }
-        let mut expired = |_: &tree_sitter::ParseState| {
-            if std::time::Instant::now() >= deadline {
-                std::ops::ControlFlow::Break(())
-            } else {
-                std::ops::ControlFlow::Continue(())
-            }
-        };
-        let options = tree_sitter::ParseOptions::default().progress_callback(&mut expired);
-        let Some(tree) =
-            parser.parse_with_options(&mut |at, _| &text.as_bytes()[at..], None, Some(options))
-        else {
-            // tree-sitter returns a tree for anything it can hold; `None` is a
-            // parser that was cancelled or given a language it cannot use, and
-            // neither is this file's fault.
+        // In the parse worker, as indexing parses: a grammar's C code that
+        // aborts or reads out of bounds on a file costs one worker there, and
+        // here it was the daemon (cargo-fuzz chunk_markdown, 0.41.0). A file
+        // the worker could not finish is passed over, as an unparseable one
+        // always was.
+        let Ok(Ok(found)) = crate::worker::pattern(&language, source, &text) else {
             continue;
         };
         parsed += 1;
-
-        let mut cursor = QueryCursor::new();
-        cursor.set_match_limit(IN_PROGRESS);
-        let mut stop = |_: &tree_sitter::QueryCursorState| {
-            if std::time::Instant::now() >= deadline {
-                std::ops::ControlFlow::Break(())
-            } else {
-                std::ops::ControlFlow::Continue(())
+        for capture in found {
+            if out.len() >= MAX_MATCHES {
+                truncated = true;
+                break;
             }
-        };
-        let options = tree_sitter::QueryCursorOptions::new().progress_callback(&mut stop);
-        let mut hits =
-            cursor.matches_with_options(&query, tree.root_node(), text.as_bytes(), options);
-        while let Some(m) = hits.next() {
-            for capture in m.captures() {
-                if out.len() >= MAX_MATCHES {
-                    truncated = true;
-                    break;
-                }
-                // Skipped after the match is found, not before the file is
-                // read: the offset is into the match sequence, and a file
-                // holding forty matches contributes forty to it whether or not
-                // this call renders them.
-                if skipped < offset {
-                    skipped += 1;
-                    continue;
-                }
-                let node = capture.node;
-                out.push(Match {
-                    path: file.path.clone(),
-                    capture: names
-                        .get(capture.index as usize)
-                        .map(|n| n.to_string())
-                        .unwrap_or_default(),
-                    start_line: node.start_position().row as u32 + 1,
-                    end_line: node.end_position().row as u32 + 1,
-                    text: first_line(&text[node.byte_range()]),
-                    store: None,
-                });
+            // Skipped after the match is found, not before the file is read:
+            // the offset is into the match sequence, and a file holding forty
+            // matches contributes forty to it whether or not this call
+            // renders them.
+            if skipped < offset {
+                skipped += 1;
+                continue;
             }
+            out.push(Match {
+                path: file.path.clone(),
+                capture: names
+                    .get(capture.index as usize)
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
+                start_line: capture.start_row + 1,
+                end_line: capture.end_row + 1,
+                text: first_line(text.get(capture.start..capture.end).unwrap_or("")),
+                store: None,
+            });
         }
     }
     if files.len() > MAX_FILES {
@@ -200,6 +168,79 @@ pub fn run(
         truncated,
         skipped,
     })
+}
+
+/// One captured node of a pattern, as the parse worker reports it.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Capture {
+    pub index: u32,
+    pub start_row: u32,
+    pub end_row: u32,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// How many captures one file contributes at most.
+const PER_FILE: usize = 10_000;
+
+/// A pattern's captures in one file's text, in tree-sitter's order: what the
+/// parse worker runs for [`run`]. The parse and the query each stop at
+/// [`TIME_BUDGET`].
+pub(crate) fn captures(language: &str, source: &str, text: &str) -> Result<Vec<Capture>> {
+    let Some(grammar) = crate::graph::language_grammar(language) else {
+        bail!("no grammar for {language:?}");
+    };
+    // Past the nesting a block grammar survives, the file has no graph
+    // either, and the parse would abort.
+    if crate::graph::too_nested(language, text) {
+        return Ok(Vec::new());
+    }
+    let query = Query::new(&grammar, source)
+        .map_err(|e| anyhow::anyhow!("that is not a valid tree-sitter pattern: {e:?}"))?;
+    let mut parser = Parser::new();
+    parser.set_language(&grammar)?;
+    let deadline = std::time::Instant::now() + TIME_BUDGET;
+    let mut expired = |_: &tree_sitter::ParseState| {
+        if std::time::Instant::now() >= deadline {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
+    };
+    let options = tree_sitter::ParseOptions::default().progress_callback(&mut expired);
+    let Some(tree) =
+        parser.parse_with_options(&mut |at, _| &text.as_bytes()[at..], None, Some(options))
+    else {
+        return Ok(Vec::new());
+    };
+    let mut cursor = QueryCursor::new();
+    cursor.set_match_limit(IN_PROGRESS);
+    let mut stop = |_: &tree_sitter::QueryCursorState| {
+        if std::time::Instant::now() >= deadline {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
+    };
+    let options = tree_sitter::QueryCursorOptions::new().progress_callback(&mut stop);
+    let mut hits = cursor.matches_with_options(&query, tree.root_node(), text.as_bytes(), options);
+    let mut out = Vec::new();
+    while let Some(m) = hits.next() {
+        for capture in m.captures() {
+            if out.len() >= PER_FILE {
+                return Ok(out);
+            }
+            let node = capture.node;
+            out.push(Capture {
+                index: capture.index,
+                start_row: node.start_position().row as u32,
+                end_row: node.end_position().row as u32,
+                start: node.start_byte(),
+                end: node.end_byte(),
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// Every indexed line matching `source`, as `grep -E` would find it.
