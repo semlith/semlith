@@ -9232,10 +9232,26 @@ function exportLedger(format) {
   if (format === "JSON") return download(`${name}.json`, JSON.stringify(list, null, 2), "application/json");
   const cell = (v) => (v === null || v === undefined ? "" : String(v));
   // A Markdown table cell: backslashes first, then the pipe that would end
-  // the cell, and a line break folded to a space so the row stays one row.
-  const mdCell = (v) => cell(v).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+  // the cell and the backtick that would open a code span, HTML shown as text
+  // rather than rendered by a previewer, and a line break folded to a space so
+  // the row stays one row. Same rules as report.rs's md_cell (audit S16).
+  const mdCell = (v) =>
+    cell(v)
+      .replace(/\\/g, "\\\\")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\|/g, "\\|")
+      .replace(/`/g, "\\`")
+      .replace(/\r?\n|\r/g, " ");
   if (format === "CSV") {
-    const esc = (v) => (/[",\n]/.test(cell(v)) ? `"${cell(v).replace(/"/g, '""')}"` : cell(v));
+    // A cell a spreadsheet would run as a formula gets a leading quote, bar a
+    // plain number; same rules as report.rs's csv_cell (audit S16).
+    const neutral = (v) => (v.length > 1 && /^[=+\-@\t\r]/.test(v) && !Number.isFinite(Number(v)) ? `'${v}` : v);
+    const esc = (v) => {
+      const s = neutral(cell(v));
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
     return download(`${name}.csv`, [cols.join(","), ...list.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n"), "text/csv");
   }
   const md = [`# Retrieval ledger — ${sessions ? "sessions" : "retrievals"}`, "", `Exported ${new Date().toString()} from this machine.`, "", `| ${cols.join(" | ")} |`, `| ${cols.map(() => "---").join(" | ")} |`, ...list.map((r) => `| ${cols.map((c) => mdCell(r[c])).join(" | ")} |`)].join("\n");
