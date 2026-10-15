@@ -17,6 +17,11 @@ user=nocap
 port=7399
 sudo useradd -m "$user"
 sudo install -m 0755 "$bin" /usr/local/bin/semlith-under-test
+# A released Linux binary loads ONNX Runtime from beside itself; the copy
+# needs it there too, or a run against a published release (a dispatch with no
+# build) stops at its first embed.
+lib="$(dirname "$(readlink -f "$bin")")/libonnxruntime.so"
+if [ -f "$lib" ]; then sudo install -m 0644 "$lib" /usr/local/bin/libonnxruntime.so; fi
 # umask 077: Ubuntu's default 002 makes the model cache group-writable, and
 # semlith refuses to load weights from a directory others can write.
 as() { sudo -u "$user" -H env HOME="/home/$user" SEMLITH_NO_SERVICE=1 sh -c 'umask 077; exec "$@"' sh "$@"; }
