@@ -745,6 +745,11 @@ pub fn too_nested(lang: &str, text: &str) -> bool {
                 '-' | '*' | '+' if chars.peek().is_none_or(|n| *n == ' ' || *n == '\t') => {
                     depth += 1
                 }
+                // Not the end of the prefix: tree-sitter-md goes on nesting
+                // past a NUL or another control character, so a line of 100
+                // `>`, NULs, then 128 more aborted the parser while this
+                // counted 100 (cargo-fuzz chunk_markdown, 0.41.0).
+                c if c.is_control() => {}
                 _ => break,
             }
             if depth + columns / 2 > MAX_BLOCK_NESTING {
@@ -3777,6 +3782,14 @@ mod tests {
     }
 
     use super::*;
+
+    /// The fuzzer's crash: nesting carried on past NULs on one line.
+    #[test]
+    fn nesting_that_continues_past_a_control_character_is_too_deep() {
+        let line = format!("{}{}{}", ">".repeat(100), "\0".repeat(100), ">".repeat(130));
+        assert!(too_nested("markdown", &line));
+        assert!(!too_nested("markdown", &format!("{}\0text", ">".repeat(5))));
+    }
 
     /// The pairwise versions the sweeps replaced (audit S18), as the oracle.
     fn contained_pairwise(defs: &[Def]) -> Vec<bool> {

@@ -163,12 +163,40 @@ fn extract_pdf(bytes: &[u8]) -> Option<(String, i64)> {
         if doc.is_encrypted() {
             doc.decrypt("").ok()?;
         }
+        if !parents_end(&doc) {
+            return None;
+        }
         let pages = doc.get_pages().len() as i64;
         let mut text = String::new();
         pdf_extract::output_doc(&doc, &mut pdf_extract::PlainTextOutput::new(&mut text)).ok()?;
         Some((text, pages))
     })?;
     (!text.trim().is_empty()).then_some((text, pages))
+}
+
+/// Whether every page's `/Parent` chain ends. pdf-extract follows it to find
+/// inherited attributes with no guard, so a page that is its own parent spun
+/// forever (cargo-fuzz `pdf`, 0.41.0); the parse worker's deadline bounded it,
+/// at the cost of a worker per such file. A real page tree is a few levels
+/// deep, so a chain past 64 is refused as well as a cycle.
+fn parents_end(doc: &pdf_extract::Document) -> bool {
+    doc.get_pages().into_values().all(|page| {
+        let mut seen = std::collections::HashSet::new();
+        let mut at = page;
+        loop {
+            if !seen.insert(at) || seen.len() > 64 {
+                return false;
+            }
+            match doc
+                .get_dictionary(at)
+                .and_then(|d| d.get(b"Parent"))
+                .and_then(|p| p.as_reference())
+            {
+                Ok(parent) => at = parent,
+                Err(_) => return true,
+            }
+        }
+    })
 }
 
 /// Run an extractor so that a panic inside it is a skipped file rather than a
@@ -536,6 +564,18 @@ fn split_chars(s: &str, n: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fuzzer's hang: a page that names itself as its parent. Refused
+    /// as no text, at once, rather than handed to pdf-extract.
+    #[test]
+    fn a_pdf_whose_page_is_its_own_parent_is_refused_at_once() {
+        // fuzz/corpus/pdf/seed-hang-self-parent, inline because the crate is
+        // published without fuzz/.
+        let pdf: &[u8] = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 3 0 R /MediaBox [0 02  02000] /Contents 4 0 R /Resources <> /Font << /F1 5 0 R >> >> >>\nendobj\n4 0 obj\n<< /Length 41 >>\nstream\nBT /F\xd0\xdf\xce\xcd\xdf\xab\x99\xdf20 100 Td (Hello fuzz) Tj ET\nendstre\x9d\x92\xf5\x93ndobj\n5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvietca >>\nendobj\nxref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000240 00000 n \n0000000332 00000 n \ntrailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n402\n%%EOF\n";
+        let started = std::time::Instant::now();
+        assert_eq!(extract_pdf(pdf), None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
 
     #[test]
     fn chunks_cover_every_line_and_stay_under_budget() {
