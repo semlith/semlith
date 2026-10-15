@@ -601,6 +601,16 @@ struct Server {
     stdin: ChildStdin,
     stdout: std::io::BufReader<std::process::ChildStdout>,
     id: u64,
+    /// The scratch home the server runs under, when it made its own.
+    _home: Option<tempfile::TempDir>,
+}
+
+/// A semlith home whose agent key may write, as the tests that call write
+/// tools need since 0.40.0 made keys read-only by default. Its own, so a test
+/// never reads the developer's key scope, registry or cloud connection.
+fn writable_home(semlith_home: &Path) {
+    fs::create_dir_all(semlith_home).unwrap();
+    fs::write(semlith_home.join("agent.scope"), "write").unwrap();
 }
 
 impl Server {
@@ -613,7 +623,13 @@ impl Server {
     }
 
     fn spawn(stores: &[&Path], budget: Option<&str>) -> Self {
+        let home = tempfile::tempdir().unwrap();
+        writable_home(&home.path().join(".semlith"));
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_semlith"));
+        cmd.env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("SEMLITH_HOME", home.path().join(".semlith"))
+            .env("SEMLITH_MODEL_CACHE", model_cache());
         for store in stores {
             cmd.arg("--store").arg(store);
         }
@@ -634,6 +650,7 @@ impl Server {
             stdin,
             stdout,
             id: 0,
+            _home: Some(home),
         }
     }
 
@@ -794,6 +811,7 @@ fn the_index_tool_refuses_a_credential_and_a_path_outside_the_boundary() {
         "the command line did not apply the deny-list:\n{said}"
     );
 
+    writable_home(&home.path().join("semlith-home"));
     let mut server = Command::new(env!("CARGO_BIN_EXE_semlith"));
     server
         .arg("--store")
@@ -817,6 +835,7 @@ fn the_index_tool_refuses_a_credential_and_a_path_outside_the_boundary() {
         stdin,
         stdout,
         id: 0,
+        _home: None,
     };
     s.handshake();
 

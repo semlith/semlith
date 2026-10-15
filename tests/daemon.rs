@@ -75,6 +75,9 @@ fn sandbox(tag: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
     let work = dir.path().join("work");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&work).unwrap();
+    // The tests here drive the write tools as an agent would; since 0.40.0 a
+    // key may write only when its owner has said so.
+    std::fs::write(home.join("agent.scope"), "write").unwrap();
     (dir, home, work)
 }
 
@@ -406,7 +409,20 @@ fn the_token_and_the_host_check_guard_every_route() {
 fn a_thousand_refusals_do_not_grow_the_daemon() {
     let daemon = Daemon::start("flood", &[]);
 
-    let idle = daemon.rss().expect("the daemon's resident memory");
+    // Settled first: the daemon loads the embedding model in the background
+    // after it prints its URL, and that load is a hundred megabytes the
+    // refusals did not cause.
+    let mut idle = daemon.rss().expect("the daemon's resident memory");
+    let settling = std::time::Instant::now();
+    while settling.elapsed() < Duration::from_secs(90) {
+        std::thread::sleep(Duration::from_secs(2));
+        let now = daemon.rss().expect("the daemon's resident memory");
+        let moved = now.abs_diff(idle);
+        idle = now;
+        if moved < 1024 * 1024 {
+            break;
+        }
+    }
 
     // A megabyte of body on every one of them, declared and never sent: a
     // server that allocated before it refused would be holding a gigabyte.
@@ -1971,8 +1987,10 @@ fn the_index_boundary_holds_for_an_agents_index() {
         text.contains("somebody-elses"),
         "the refusal does not name the path:\n{text}"
     );
+    // Refused before the run since 0.41.0, so a path outside says nothing
+    // about whether it exists; before that, inside a run that indexed nothing.
     assert!(
-        text.starts_with("0 indexed"),
+        text.starts_with("0 indexed") || text.starts_with("refused:"),
         "a refused path was indexed anyway:\n{text}"
     );
 
