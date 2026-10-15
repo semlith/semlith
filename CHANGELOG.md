@@ -110,6 +110,15 @@ each (`fuzz/`, `.github/workflows/fuzz.yml`).
 
 ### Fixed
 
+**Two parser inputs found by the new fuzzers.** A Markdown line of `>` runs
+separated by NUL bytes passed the 128-level nesting cap and aborted
+tree-sitter-md, the S01 abort by another route; indexing refused such a file
+in the parse worker, but `semlith_pattern` parses stored Markdown in the
+daemon. The cap now counts past control characters. A PDF whose page is its
+own `/Parent` sent pdf-extract round the chain forever, bounded only by the
+worker's deadline; such a page tree is now refused before it is read. Both
+inputs are kept as fuzz seeds.
+
 **The review list no longer fills with build churn.** A watched tree's npm,
 cargo and git temp files under `node_modules`, `dist`, `target` and `.git`
 were created and deleted between events, and every deletion reached the
