@@ -180,6 +180,12 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 # not the default because a `cargo install semlith` built this way would have
 # no runtime at all and no tarball to have got one from.
 default = ["static-ort"]
+# The developer overrides (SEMLITH_ADD_ORIGIN, SEMLITH_PACK_*,
+# SEMLITH_SERVICE_DIR) are read in a debug build or with this feature, never in
+# the release binary: each one can point semlith at code or bytes nobody pinned
+# (audit S20). A pack trial built `--release` turns it on; the release workflow
+# never does.
+dev-overrides = []
 static-ort = ["fastembed/ort-download-binaries-rustls-tls"]
 dynamic-ort = ["fastembed/ort-load-dynamic"]
 

@@ -533,9 +533,16 @@ pub fn stale_definition() -> Option<String> {
 pub const SERVICE_DIR_ENV: &str = "SEMLITH_SERVICE_DIR";
 
 fn seam() -> Option<PathBuf> {
-    std::env::var_os(SERVICE_DIR_ENV)
-        .filter(|v| !v.is_empty())
-        .map(|dir| PathBuf::from(dir).join(format!("{LABEL}.service")))
+    // Compiled out of the release binary (audit S20): with it set, `start
+    // --service` reports a service installed that no service manager knows.
+    #[cfg(any(debug_assertions, feature = "dev-overrides"))]
+    {
+        std::env::var_os(SERVICE_DIR_ENV)
+            .filter(|v| !v.is_empty())
+            .map(|dir| PathBuf::from(dir).join(format!("{LABEL}.service")))
+    }
+    #[cfg(not(any(debug_assertions, feature = "dev-overrides")))]
+    None
 }
 
 fn seam_status(file: PathBuf) -> Status {

@@ -239,6 +239,7 @@ fn rewrite(url: &str) -> String {
 ///
 /// The same shape and the same reasoning as `SEMLITH_RELEASES_ORIGIN` in
 /// `upgrade.rs`, and like it, deliberately not in `docs/compatibility.md`.
+#[cfg(any(debug_assertions, feature = "dev-overrides"))]
 const HTTP_ORIGIN_ENV: &str = "SEMLITH_ADD_ORIGIN";
 
 /// HTTPS only, at every hop.
@@ -251,6 +252,10 @@ fn require_https(url: &str) -> Result<()> {
     if url.starts_with("https://") {
         return Ok(());
     }
+    // A test seam, compiled out of the release binary (audit S20): a plain
+    // http origin read from the environment is a downgrade a shell profile
+    // could make.
+    #[cfg(any(debug_assertions, feature = "dev-overrides"))]
     if let Some(origin) = std::env::var(HTTP_ORIGIN_ENV)
         .ok()
         .filter(|o| !o.is_empty())
