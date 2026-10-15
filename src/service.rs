@@ -26,6 +26,17 @@ use std::path::{Path, PathBuf};
 /// What this platform calls the service, in its own registry.
 pub const LABEL: &str = "com.semlith.daemon";
 
+/// Set in the environment of a daemon a service definition starts, so the
+/// daemon knows its output is a log rather than a terminal (audit S14).
+pub const SERVICE_ENV: &str = "SEMLITH_SERVICE";
+
+/// Whether this process was started by the login service: the marker above,
+/// or, for a launchd plist written before 0.41.0, launchd's own job label.
+pub fn running_as_service() -> bool {
+    std::env::var_os(SERVICE_ENV).is_some_and(|v| v == "1")
+        || std::env::var_os("XPC_SERVICE_NAME").is_some_and(|v| v == LABEL)
+}
+
 /// Whether the login service is installed, and where to look when it misbehaves.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Status {
@@ -80,7 +91,26 @@ pub fn log_path() -> Result<PathBuf> {
     let dir = crate::home::home_or_error()?.join("logs");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     crate::home::tighten_dir(&dir);
-    Ok(dir.join("daemon.log"))
+    let log = dir.join("daemon.log");
+    // Created here, 0600, rather than by launchd under its umask (audit S14).
+    if !log.exists() {
+        let _ = crate::home::write_private(&log, b"");
+    }
+    crate::home::tighten_file(&log);
+    Ok(log)
+}
+
+/// A path as one word of a systemd `ExecStart=`: double-quoted, with the
+/// backslash and quote escaped and the `%` specifier and `$` expansion
+/// doubled, so a path with a space or either sign runs as itself.
+#[cfg(any(target_os = "linux", test))]
+fn systemd_quote(raw: &str) -> String {
+    let escaped = raw
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%")
+        .replace('$', "$$");
+    format!("\"{escaped}\"")
 }
 
 /// The binary a service definition should name.
@@ -212,6 +242,8 @@ mod platform {
              <key>RunAtLoad</key>\n  <true/>\n\
              <key>KeepAlive</key>\n  <true/>\n\
              <key>ProcessType</key>\n  <string>{process_type}</string>\n\
+             <key>EnvironmentVariables</key>\n  <dict>\n    \
+             <key>{SERVICE_ENV}</key>\n    <string>1</string>\n  </dict>\n\
              <key>StandardOutPath</key>\n  <string>{log}</string>\n\
              <key>StandardErrorPath</key>\n  <string>{log}</string>\n\
              </dict>\n\
@@ -277,10 +309,23 @@ mod platform {
     pub fn stale_definition() -> Option<String> {
         let path = unit_path().ok()?;
         let text = std::fs::read_to_string(&path).ok()?;
-        (!text.contains("CPUWeight=")).then(|| {
-            format!(
+        if !text.contains("CPUWeight=") {
+            return Some(format!(
                 "{} predates the daemon's lower scheduling weight (Nice, CPUWeight, IOWeight); \
                  run `semlith setup` (or `semlith start --service`) to rewrite it",
+                path.display()
+            ));
+        }
+        // Before 0.41.0 the unit ran the binary with no subcommand, which
+        // prints usage and exits: the service restarted forever and never
+        // served.
+        let starts = text
+            .lines()
+            .any(|l| l.starts_with("ExecStart=") && l.contains(" start"));
+        (!starts).then(|| {
+            format!(
+                "{} runs semlith without `start`, so the service never serves; run `semlith \
+                 setup` (or `semlith start --service`) to rewrite it",
                 path.display()
             )
         })
@@ -327,8 +372,9 @@ mod platform {
              \n\
              [Service]\n\
              Type=simple\n\
-             ExecStart={exe}{port}\n\
+             ExecStart={exe} start{port}\n\
              Restart=always\n\
+             Environment={SERVICE_ENV}=1\n\
              RestartSec=2\n\
              Nice=5\n\
              CPUWeight=50\n\
@@ -336,7 +382,11 @@ mod platform {
              \n\
              [Install]\n\
              WantedBy=default.target\n",
-            exe = exe.display(),
+            // Quoted as systemd reads a command line (audit S17), and with
+            // `start`: without a subcommand the binary prints its usage and
+            // exits, so before 0.41.0 the unit restarted every two seconds and
+            // never served.
+            exe = systemd_quote(&exe.display().to_string()),
         );
         std::fs::write(&path, unit).with_context(|| format!("writing {}", path.display()))?;
 
@@ -411,7 +461,7 @@ mod platform {
         // first time the port is busy.
         let script = format!(
             "$ErrorActionPreference='Stop'; \
-             $action = New-ScheduledTaskAction -Execute '{exe}' -Argument 'start{port}'; \
+             $action = New-ScheduledTaskAction -Execute {exe} -Argument 'start{port}'; \
              $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME; \
              $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries \
              -DontStopIfGoingOnBatteries -Priority 5 -RestartCount 3 \
@@ -420,7 +470,8 @@ mod platform {
              Register-ScheduledTask -TaskName '{task}' -Action $action -Trigger $trigger \
              -Settings $settings -Force | Out-Null; \
              Start-ScheduledTask -TaskName '{task}'",
-            exe = exe.display(),
+            // Quoted for PowerShell, not pasted between quotes (audit S17).
+            exe = crate::setup::powershell_quote(&exe.display().to_string()),
             task = TASK,
         );
         powershell(&script).context("registering the logon task")?;
@@ -527,9 +578,16 @@ pub fn stale_definition() -> Option<String> {
 pub const SERVICE_DIR_ENV: &str = "SEMLITH_SERVICE_DIR";
 
 fn seam() -> Option<PathBuf> {
-    std::env::var_os(SERVICE_DIR_ENV)
-        .filter(|v| !v.is_empty())
-        .map(|dir| PathBuf::from(dir).join(format!("{LABEL}.service")))
+    // Compiled out of the release binary (audit S20): with it set, `start
+    // --service` reports a service installed that no service manager knows.
+    #[cfg(any(debug_assertions, feature = "dev-overrides"))]
+    {
+        std::env::var_os(SERVICE_DIR_ENV)
+            .filter(|v| !v.is_empty())
+            .map(|dir| PathBuf::from(dir).join(format!("{LABEL}.service")))
+    }
+    #[cfg(not(any(debug_assertions, feature = "dev-overrides")))]
+    None
 }
 
 fn seam_status(file: PathBuf) -> Status {
@@ -834,7 +892,7 @@ pub fn last_started() -> Option<i64> {
         .stores
         .keys()
         .filter_map(|name| crate::home::Registry::dir_of(name).ok())
-        .filter_map(|dir| started_from(&dir.join(crate::daemon::DISCOVERY_FILE)))
+        .filter_map(|dir| started_from(&crate::daemon::discovery_path(&dir)))
         .max()
 }
 
@@ -866,6 +924,18 @@ pub fn running_version() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_service_path_is_quoted_for_systemd_and_powershell() {
+        assert_eq!(
+            systemd_quote(r#"/home/a b/100%/$x"q"/semlith"#),
+            r#""/home/a b/100%%/$$x\"q\"/semlith""#
+        );
+        assert_eq!(
+            crate::setup::powershell_quote("C:/Users/O\u{2019}Brien/it's/semlith.exe"),
+            "'C:/Users/O\u{2019}\u{2019}Brien/it''s/semlith.exe'"
+        );
+    }
 
     /// F1: each mechanism's restart, as the exact argv. `enable --now` and
     /// `bootstrap` would leave the old daemon running.

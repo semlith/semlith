@@ -82,23 +82,31 @@ const MARKERS: [&str; 5] = ["EXAMPLE", "FAKE", "DUMMY", "PLACEHOLDER", "REDACTED
 pub fn scan(path: &str, text: &str) -> Vec<Match> {
     let (each, assignment, env) = filter::shapes();
     let mut found: Vec<Match> = Vec::new();
-    let overlaps = |found: &[Match], at: &std::ops::Range<usize>| {
-        found
-            .iter()
-            .any(|m| m.range.start < at.end && at.start < m.range.end)
+    // Every range taken so far, by start. They never overlap, so the one that
+    // starts last before a candidate ends is the only one that can overlap it:
+    // a lookup, where a scan of every earlier match made a file planted with
+    // matches quadratic (audit S18).
+    let mut taken: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    let overlaps = |taken: &std::collections::BTreeMap<usize, usize>,
+                    at: &std::ops::Range<usize>| {
+        taken
+            .range(..at.end)
+            .next_back()
+            .is_some_and(|(_, end)| *end > at.start)
     };
     for (index, regex) in each.iter().enumerate() {
         for m in regex.find_iter(text) {
             let mut range = m.range();
             // Table order decides a match two rows both claim: `sk-ant-` is an
             // `sk-` too, and the Anthropic row comes first.
-            if overlaps(&found, &range) {
+            if overlaps(&taken, &range) {
                 continue;
             }
             let shape = &SHAPES[index];
             if shape.provider == "pem" {
                 range = pem_block(text, range);
             }
+            taken.insert(range.start, range.end);
             found.push(judge(path, text, index, range));
         }
     }
@@ -110,15 +118,42 @@ pub fn scan(path: &str, text: &str) -> Vec<Match> {
                 continue;
             }
             let range = value.range();
-            if overlaps(&found, &range) {
+            if overlaps(&taken, &range) {
                 continue;
             }
+            taken.insert(range.start, range.end);
             found.push(judge_assignment(path, text, range));
         }
     }
     found.sort_by_key(|m| m.range.start);
+    // Line numbers in one pass over the text, in match order, rather than a
+    // count from the top of the file for every match.
+    let (mut line, mut at) = (1u32, 0usize);
+    for m in &mut found {
+        line += text.as_bytes()[at..m.range.start]
+            .iter()
+            .filter(|b| **b == b'\n')
+            .count() as u32;
+        at = m.range.start;
+        m.line = line;
+    }
     found
 }
+
+/// The start of a window of at most `bytes` ending at `at`, on a character
+/// boundary. The context checks look a few lines around a match, and on a
+/// file that is one enormous line "a few lines" was the whole file, read
+/// again for every match.
+fn window_start(text: &str, at: usize, bytes: usize) -> usize {
+    let mut start = at.saturating_sub(bytes);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    start
+}
+
+/// How far around a match its context is read.
+const CONTEXT_BYTES: usize = 16 * 1024;
 
 /// Whether a set of matches refuses its file: any one that is not a dummy.
 pub fn refuses(matches: &[Match]) -> bool {
@@ -528,7 +563,8 @@ fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) ->
         kind: shape.kind.to_string(),
         provider: shape.provider,
         label: shape.label,
-        line: filter::line_of(text, range.start),
+        // Set by `scan` once every match is in, in one pass.
+        line: 0,
         masked: mask(value, shape.prefix_len),
         dummy,
         confidence: score.clamp(0, 100) as u8,
@@ -561,7 +597,7 @@ fn judge_assignment(path: &str, text: &str, range: std::ops::Range<usize>) -> Ma
         kind: "a secret assigned to a key-like name".to_string(),
         provider: "generic",
         label: "secret",
-        line: filter::line_of(text, range.start),
+        line: 0,
         masked: mask(value, 0),
         dummy,
         confidence: score.clamp(0, 100) as u8,
@@ -791,7 +827,7 @@ fn location(path: &str, text: &str, at: usize, signals: &mut Vec<Signal>) -> i32
 
 /// Whether the forty lines above `at` open a test function.
 fn in_test_function(text: &str, at: usize) -> bool {
-    let before = &text[..at];
+    let before = &text[window_start(text, at, CONTEXT_BYTES)..at];
     let window: Vec<&str> = before.lines().rev().take(40).collect();
     window.iter().any(|l| {
         let t = l.trim_start();
@@ -805,9 +841,20 @@ fn in_test_function(text: &str, at: usize) -> bool {
 }
 
 /// Whether a 40-character AWS secret access key sits within five lines.
+///
+/// Read from a window around the match, not the whole file.
+/// ponytail: the window is 16 KiB each side, so a secret more than that away
+/// on very long lines is not seen; widen it if that ever matters.
 fn aws_secret_nearby(text: &str, range: std::ops::Range<usize>) -> bool {
-    let line = filter::line_of(text, range.start) as usize;
-    text.lines()
+    let from = window_start(text, range.start, CONTEXT_BYTES);
+    let mut to = (range.start + CONTEXT_BYTES).min(text.len());
+    while !text.is_char_boundary(to) {
+        to -= 1;
+    }
+    let window = &text[from..to];
+    let line = filter::line_of(window, range.start - from) as usize;
+    window
+        .lines()
         .enumerate()
         .filter(|(i, _)| i + 1 + 5 >= line && *i < line + 5)
         .any(|(_, l)| {
@@ -823,7 +870,10 @@ fn aws_secret_nearby(text: &str, range: std::ops::Range<usize>) -> bool {
 /// The whole PEM block from its BEGIN line: through the END line, or to the
 /// end of the base64 that follows when there is no END line.
 fn pem_block(text: &str, header: std::ops::Range<usize>) -> std::ops::Range<usize> {
-    let rest = &text[header.end..];
+    // Up to the next BEGIN at most: a file of headers with no END lines
+    // searched the whole rest of the file once per header (audit S18).
+    let all = &text[header.end..];
+    let rest = &all[..all.find("-----BEGIN").unwrap_or(all.len())];
     if let Some(end) = rest.find("-----END") {
         let tail = &rest[end..];
         let close = tail[8..]

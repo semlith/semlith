@@ -205,16 +205,17 @@ impl Clip {
                 crate::embed::link_runtime()?;
                 crate::embed::refuse_if_airgapped(VISION_REPO)?;
                 let cache = crate::model_cache_dir()?;
-                crate::embed::verify_cached(&cache, VISION_REPO, VISION_REVISION, VISION_FILES)?;
                 prefetch(&cache, VISION_REPO, VISION_FILES, quiet)?;
+                // Before ONNX Runtime opens a byte of it (audit S15): what the
+                // fetch just landed and what was cached are both checked here.
+                crate::embed::verify_cached(&cache, VISION_REPO, VISION_REVISION, VISION_FILES)?;
                 let options = ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)
                     .with_show_download_progress(!quiet)
                     .with_cache_dir(cache.clone());
                 let model = ImageEmbedding::try_new(options)
                     .map_err(|e| anyhow::anyhow!("loading {MODEL_NAME}'s vision encoder: {e}"))?;
-                // Again, now that fastembed has fetched: the check above covers
-                // a cache that was already there, and this one covers the
-                // download this call just made.
+                // Again, in case fastembed's own client fetched anything the
+                // prefetch did not: nothing it loads goes unchecked.
                 crate::embed::verify_cached(&cache, VISION_REPO, VISION_REVISION, VISION_FILES)?;
                 self.vision.insert(model)
             }
@@ -240,8 +241,8 @@ impl Clip {
                 crate::embed::link_runtime()?;
                 crate::embed::refuse_if_airgapped(TEXT_REPO)?;
                 let cache = crate::model_cache_dir()?;
-                crate::embed::verify_cached(&cache, TEXT_REPO, TEXT_REVISION, TEXT_FILES)?;
                 prefetch(&cache, TEXT_REPO, TEXT_FILES, quiet)?;
+                crate::embed::verify_cached(&cache, TEXT_REPO, TEXT_REVISION, TEXT_FILES)?;
                 let options = TextInitOptions::new(EmbeddingModel::ClipVitB32)
                     .with_show_download_progress(!quiet)
                     .with_intra_threads(crate::embed::embed_threads())

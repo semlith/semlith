@@ -58,6 +58,7 @@ const OP_READ: u8 = 1;
 const OP_READ_GRAPH: u8 = 2;
 const OP_GRAPH: u8 = 3;
 const OP_IMAGE: u8 = 4;
+const OP_PATTERN: u8 = 5;
 
 static EXE: OnceLock<PathBuf> = OnceLock::new();
 static IDLE: Mutex<Vec<Worker>> = Mutex::new(Vec::new());
@@ -139,6 +140,45 @@ pub fn graph(path: &Path, text: &str) -> Result<Result<Option<Extraction>, Strin
     }
     let (head, _) = call(OP_GRAPH, path, text.as_bytes())?;
     decode(&head)
+}
+
+/// A pattern's captures in one file's text, parsed and queried in a worker:
+/// the daemon parses stored text for `semlith_pattern`, and a grammar's crash
+/// there was the daemon's.
+pub fn pattern(
+    language: &str,
+    source: &str,
+    text: &str,
+) -> Result<Result<Vec<crate::pattern::Capture>, String>, Stop> {
+    let payload = [
+        language.as_bytes(),
+        b"\0",
+        source.as_bytes(),
+        b"\0",
+        text.as_bytes(),
+    ]
+    .concat();
+    if !enabled() {
+        return Ok(serve_pattern(&payload));
+    }
+    let (head, _) = call(OP_PATTERN, Path::new(language), &payload)?;
+    decode(&head)
+}
+
+fn serve_pattern(payload: &[u8]) -> Result<Vec<crate::pattern::Capture>, String> {
+    let mut parts = payload.splitn(3, |b| *b == 0);
+    let (Some(language), Some(source), Some(text)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return Err("a pattern request without its parts".into());
+    };
+    let (language, source) = (
+        String::from_utf8_lossy(language),
+        String::from_utf8_lossy(source),
+    );
+    let text = String::from_utf8_lossy(text);
+    crate::contained(|| crate::pattern::captures(&language, &source, &text))
+        .and_then(|r| r)
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// Whether an image's bytes decode, checked where a decoder's crash costs a
@@ -471,6 +511,10 @@ fn serve(op: u8, path: &Path, payload: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
             let text = String::from_utf8_lossy(&payload);
             let graph = serve_graph(path, &text);
             (serde_json::to_vec(&graph).unwrap_or_default(), Vec::new())
+        }
+        OP_PATTERN => {
+            let found = serve_pattern(&payload);
+            (serde_json::to_vec(&found).unwrap_or_default(), Vec::new())
         }
         OP_IMAGE => {
             let _ = crate::contained(|| ::image::load_from_memory(&payload).map(|_| ()));

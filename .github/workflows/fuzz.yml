@@ -1,0 +1,60 @@
+name: fuzz
+
+# Every parser that reads bytes somebody else wrote, run under libFuzzer once a
+# week and on demand. A crash fails its target's job and uploads the input that
+# caused it; nothing is filed, the red run is the report.
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target
+        default: "3600"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [http_head, chunk_markdown, chunk_code, zip_office, pdf, mail, notebook, markup, image]
+    env:
+      # A scheduled run has no inputs; it fuzzes for the default hour.
+      SECONDS_TO_FUZZ: ${{ inputs.seconds || '3600' }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: nightly
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: fuzz
+          key: fuzz
+
+      - run: cargo install cargo-fuzz --locked --version 0.13.2
+
+      - name: Fuzz
+        working-directory: fuzz
+        run: cargo +nightly fuzz run "$TARGET" -- -max_total_time="$SECONDS_TO_FUZZ"
+
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore

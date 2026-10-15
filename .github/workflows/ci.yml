@@ -88,8 +88,8 @@ jobs:
   # Every dependency checked against the RustSec advisory database, on every
   # push and pull request. A known vulnerability fails the build; an
   # unmaintained crate is a warning. Its own job so it answers in a minute,
-  # before the long ones. The full supply-chain gate (cargo deny, fuzzing,
-  # Trusted Publishing) follows in 0.41.0.
+  # before the long ones. No cache on purpose: `cargo audit` fetches the
+  # advisory database fresh on every run, so a new advisory fails the next push.
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -101,6 +101,22 @@ jobs:
       - run: cargo install cargo-audit --locked --version 0.22.2
 
       - run: cargo audit
+
+  # The rest of the supply-chain gate, from 0.41.0: every crate's licence
+  # against the allow list in deny.toml, every source against crates.io, and
+  # the advisories again with the two reviewed ignores written down beside
+  # their reasons. Duplicate versions are a warning, not a failure.
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - run: cargo install cargo-deny --locked --version 0.20.2
+
+      - run: cargo deny check
 
   # The minimum Rust version the crate declares, built. `rust-version` in
   # Cargo.toml is a promise to anybody on an older toolchain, and nothing ever

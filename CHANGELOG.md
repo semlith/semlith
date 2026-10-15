@@ -7,6 +7,146 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-10-15
+
+### Security
+
+From the security audit of 0.39.0 (2026-10-14): every Low and Info finding,
+S12 to S25, each closed with a test in `tests/security.rs` that failed on the
+v0.40.0 binary first where the finding can be tested from outside, and the
+gate that keeps them closed.
+
+**`.git` and credential folders stay out, wherever they are (S12).** A
+repository whose `.gitignore` said `!.git/` had `.git/config`, and the token
+in its remote, indexed. `.git`, `.ssh`, `.aws`, `.gnupg`, `.kube`,
+`.config/gh`, `.config/gcloud`, `.azure`, `.docker` and the other credential
+folders are now refused wherever they sit, not only under the home, and no
+ignore file can whitelist them back. Other dotfiles a `.gitignore` whitelists,
+such as `.github`, are indexed as before.
+
+**Every read of a file's bytes refuses a link (S13).** The scan before a
+review, accepting a refused file, `semlith cloud push` and the portal's image
+view still followed a symbolic link or blocked on a FIFO; they open the file
+the way indexing has since 0.40.0, and cap the read.
+
+**The session token is never in a log file (S14).** Under launchd, every
+service start appended the portal URL with its token to `daemon.log`, which
+was world-readable. A daemon the login service starts prints the URL without the
+token, an existing log is scrubbed of old ones on the next start, and the log
+is created `0600`. `semlith start` prints the whole URL of a running daemon.
+
+**Model files are checked before they are loaded (S15).** CLIP's files are
+verified against their pinned digests before ONNX Runtime opens them, and an
+installed accelerator pack's files are checked against the manifest recorded
+when it was unpacked on every load, so a library swapped in the cache is
+fetched again rather than loaded.
+
+**Exports cannot run anything (S16).** A CSV cell starting with `=`, `+`, `-`,
+`@`, a tab or a carriage return is prefixed with `'`, so an agent's query of
+`=HYPERLINK(...)` opens as text; a Markdown export escapes HTML, pipes and
+backticks. Reports and the portal's ledger export alike.
+
+**Paths are quoted for where they are written (S17).** The binary path in a
+hook command, a client's JSON or TOML, a shell registration command, the
+Windows logon task and the systemd unit is spelled for that context, so a home
+with a space, a quote or a `$` in it works; PowerShell's typographic quotes
+are escaped.
+
+**One file costs seconds, not CPU-minutes (S18).** The secret scan and the
+symbol graph were quadratic in the matches and definitions of a file; a planted
+8 MiB file now takes under 5 s for each. `semlith_pattern` and exact search
+stop after 10 s and say they were cut short.
+
+**Developer overrides are not in the release binary (S20).**
+`SEMLITH_ADD_ORIGIN`, `SEMLITH_PACK_*` and `SEMLITH_SERVICE_DIR` are read only
+by a debug build or one built with the `dev-overrides` feature.
+`SEMLITH_ADD_ALLOW_PRIVATE` stays, documented, and `doctor` reports it.
+
+**A search can stay on this machine, and the Privacy page says when it does
+not (S21).** A search naming no store asks every connected cloud org, which
+the Privacy page and SECURITY.md said happened only for a search naming a
+remote store. Both say so now, and `semlith search --local`, `local: true` on
+`semlith_search` and the Search page's *This machine only* keep one search
+here.
+
+**`add` connects to the address it checked (S22).** The private-address check
+resolved the name, and the connection resolved it again. The connection now
+uses the checked addresses; NAT64, 6to4, IPv4-compatible and Teredo addresses
+count as what they carry; a URL with credentials in it is refused; IPv6
+literals parse.
+
+**Small surface issues (S23).** A request repeating `Host`, `Origin`,
+`Sec-Fetch-Site`, `Content-Type`, `Content-Length`, `Semlith-Token` or
+`Authorization` is refused with 400. A missing store answers 404 and an unknown
+report kind 400, not 500, and a 403 says `Forbidden`. `semlith_index` refuses a
+path outside the home and the stores' roots before it looks at the disk, so its
+answer no longer says whether the path exists. `max_tokens` and `limit` are
+clamped. A replay session id is checked before it becomes a path, and a
+scheduled report is written new, `0600`, and renamed into place.
+
+**Store hygiene (S24).** Every file semlith creates is owner-only (a `077`
+umask), WAL files, `exact.f32`, `index.lock` and logs included. A store kept
+outside the store home has its `daemon.json` under `~/.semlith/run/`, and one
+an older daemon left beside it is removed. Such a store is put through SQLite's
+quick check the first time it is opened, before anything writes, and read with
+cell-size checks. The ledger's hash chain is keyed with a per-store
+`ledger.key`; rows written before verify under the old formula. Path filters
+lowercase in ASCII, as SQLite does, and the file tree matches roots by whole
+path components.
+
+**SECURITY.md says what is true (S25).** Its three inaccurate claims are
+corrected, the ONNX Runtime download is named for every build that makes it,
+and `/api/about`'s pid and paths are documented as the owner's.
+
+**The gate that stays (S19).** `cargo deny` (advisories, licences, sources)
+runs beside `cargo audit` on every push; `deny.toml` holds the licence list and
+the two unmaintained crates with no maintained replacement, dated. The release
+workflow passes the tag through the environment rather than into the script,
+native-smoke installs a pinned Claude Code without the API key in that step,
+and `install.sh`'s wget path refuses anything but https and sets a TLS floor.
+Releases go to crates.io through Trusted Publishing. `cargo-fuzz` targets for
+the HTTP head, the chunkers and every format reader run weekly for an hour
+each (`fuzz/`, `.github/workflows/fuzz.yml`).
+
+### Fixed
+
+**Three parser inputs found by the new fuzzers.** A Markdown line of `>`
+runs separated by NUL bytes passed the 128-level nesting cap and aborted
+tree-sitter-md, the S01 abort by another route; the cap now counts past
+control characters. Seven bytes of Markdown, a digit at a list-marker position
+followed by a character past U+00FF, made tree-sitter-md's scanner call
+`isdigit` on the code point, which glibc answers from a table with no bounds
+check: an out-of-bounds read that faulted on Linux. tree-sitter-bash does the
+same after `{` or `..`. The text those two grammars parse now has such a
+character replaced byte for byte, so offsets, lines and names are unchanged. A
+PDF whose page is its own `/Parent` sent pdf-extract round the chain forever;
+such a page tree is now refused before it is read. Indexing met all three in
+the parse worker, which kept the daemon up; `semlith_pattern` parsed stored
+text in the daemon, and now parses it in the worker too. Every input is kept
+as a fuzz seed.
+
+**The review list no longer fills with build churn.** A watched tree's npm,
+cargo and git temp files under `node_modules`, `dist`, `target` and `.git`
+were created and deleted between events, and every deletion reached the
+indexer, which recorded a refusal and could put a review card up, such as
+`node_modules/.bin/esbuild`. A deletion of something the store never held is
+dropped, a full run prunes refusals below folders the walk no longer enters,
+and the generated-folder list covers more build output (`.astro`, `.vite`,
+`.output`, `.vercel`, `.pnpm-store`, `storybook-static`, and `dist`, `build`
+and `out` beside a Vite, Astro or Next config).
+
+**The Linux login service serves.** The systemd unit ran the binary without
+`start`, so it printed its usage and restarted every two seconds; `doctor`
+names a unit written that way.
+
+**Renaming or deleting a store on Windows.** The writer released the store's
+lock after it said it had stopped, so a rename or delete that followed found
+the file open and failed. A run's plan opening a reader beside a new store's
+writer could stop the writer for good on SQLite's transient locking-protocol
+error; the writer retries it, and a writer that does stop fails the runs it
+leaves queued with its reason instead of leaving them queued. The new-store
+wizard leaves even when a clean-up request fails.
+
 ## [0.40.0] - 2026-10-15
 
 ### Security

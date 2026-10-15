@@ -436,14 +436,73 @@ fn resolve_binary_path() -> String {
     .replace('\\', "/")
 }
 
+/// `text` with the binary path in place of the placeholder, spelled the way
+/// each context needs it (audit S17). One raw substitution served about thirty
+/// places in four syntaxes: a JSON string, a TOML string, a shell word, a JSON
+/// object inside a single-quoted shell word, and a hook's command line that a
+/// shell runs. A path with a space, a quote, a `$` or a backslash broke some
+/// of them and, in the hook, split into a program and an argument.
+fn spell_binary(format: &str, text: &str, bin: &str) -> String {
+    let json = |raw: &str| {
+        let quoted = serde_json::to_string(raw).expect("a string serialises");
+        quoted[1..quoted.len() - 1].to_string()
+    };
+    match format {
+        "json" => text
+            .replace(
+                &format!("{BIN_PLACEHOLDER} hook"),
+                &format!("{} hook", json(&command_word(bin))),
+            )
+            .replace(BIN_PLACEHOLDER, &json(bin)),
+        "toml" => text.replace(
+            BIN_PLACEHOLDER,
+            &bin.replace('\\', "\\\\").replace('"', "\\\""),
+        ),
+        // `setup::argv` splits these, and a person may paste them into a
+        // shell: a single-quoted word means the same to both.
+        "sh" => text
+            .split_inclusive('\n')
+            .map(|line| {
+                if line.contains("'{") {
+                    // The JSON object inside single quotes.
+                    line.replace(BIN_PLACEHOLDER, &json(bin).replace('\'', r"'\''"))
+                } else if bin.contains(['"', '$', '`', '\\']) {
+                    line.replace(
+                        &format!("\"{BIN_PLACEHOLDER}\""),
+                        &crate::setup::posix_quote(bin),
+                    )
+                } else {
+                    line.replace(BIN_PLACEHOLDER, bin)
+                }
+            })
+            .collect(),
+        _ => text.replace(BIN_PLACEHOLDER, bin),
+    }
+}
+
+/// The binary as the first word of a command line a client hands to a shell:
+/// as it is when nothing in it is special, quoted otherwise. Double quotes on
+/// Windows, where `cmd` has no single quotes and a path cannot hold `"`.
+fn command_word(bin: &str) -> String {
+    if bin
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-+:@~".contains(c))
+    {
+        bin.to_string()
+    } else if cfg!(windows) {
+        format!("\"{bin}\"")
+    } else {
+        crate::setup::posix_quote(bin)
+    }
+}
+
 /// One parsed fence, with the binary path substituted for the placeholder
 /// `docs/clients.md` writes.
 fn stanza(info: Info, text: &str) -> Stanza {
+    let text = spell_binary(&info.format, text, binary_path());
     Stanza {
         format: info.format,
-        text: text
-            .replace(BIN_PLACEHOLDER, binary_path())
-            .replace(RULES_PLACEHOLDER, RULES.trim_end()),
+        text: text.replace(RULES_PLACEHOLDER, RULES.trim_end()),
         register: info.register,
         unregister: info.unregister,
         hook: info.hook,
@@ -841,6 +900,40 @@ mod tests {
                 binary_path()
             );
         }
+    }
+
+    /// Audit S17: a path with a space, a quote, a `$` or a backslash reaches
+    /// every context whole — the hook's command line, a JSON or TOML string,
+    /// a shell word and the JSON object inside one.
+    #[cfg(unix)]
+    #[test]
+    fn an_awkward_binary_path_is_spelled_for_each_context() {
+        let bin = r#"/home/a b/it's "$x"/semlith"#;
+        let hook = spell_binary("json", r#"{"command": "${SEMLITH_BIN} hook"}"#, bin);
+        let parsed: serde_json::Value = serde_json::from_str(&hook).unwrap();
+        let line = parsed["command"].as_str().unwrap();
+        let (program, args) = crate::setup::argv(line).unwrap();
+        assert_eq!((program.as_str(), args), (bin, vec!["hook".to_string()]));
+
+        let plain = spell_binary("json", r#"{"command": "${SEMLITH_BIN}"}"#, bin);
+        let parsed: serde_json::Value = serde_json::from_str(&plain).unwrap();
+        assert_eq!(parsed["command"], bin);
+
+        let toml = spell_binary("toml", "command = \"${SEMLITH_BIN}\"\n", bin);
+        assert_eq!(toml, "command = \"/home/a b/it's \\\"$x\\\"/semlith\"\n");
+
+        let sh = spell_binary("sh", "x mcp add semlith -- \"${SEMLITH_BIN}\" mcp\n", bin);
+        let (_, args) = crate::setup::argv(sh.trim_end()).unwrap();
+        assert!(args.iter().any(|a| a == bin), "{sh}");
+
+        let code = spell_binary(
+            "sh",
+            r#"code --add-mcp '{"name":"semlith","command":"${SEMLITH_BIN}","args":["mcp"]}'"#,
+            bin,
+        );
+        let (_, args) = crate::setup::argv(&code).unwrap();
+        let object: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
+        assert_eq!(object["command"], bin);
     }
 
     /// The resolved path is absolute and carries no `\\?\` prefix.

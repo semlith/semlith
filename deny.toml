@@ -1,0 +1,38 @@
+# cargo deny check: licences, advisories, bans and sources for every crate in
+# Cargo.lock. Run on every push and pull request by the `deny` job in ci.yml.
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "2026-10-15: paste is unmaintained, no vulnerability; pulled transitively via tokenizers, image and turbovec; no maintained replacement upstream" },
+    { id = "RUSTSEC-2026-0192", reason = "2026-10-15: ttf-parser is unmaintained, no vulnerability; pulled transitively via lopdf from pdf-extract; no maintained replacement upstream" },
+]
+
+[licenses]
+# The tree-sitter grammars in THIRD-PARTY-NOTICES are MIT, Apache-2.0 and
+# CC0-1.0, all below.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "CC0-1.0",
+    "BSL-1.0",
+    "NCSA",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

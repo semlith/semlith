@@ -225,8 +225,12 @@ fn a_search_and_a_graph_call_over_stdio_are_recorded_under_the_client_name() {
         "an agent's retrievals over stdio were recorded as nothing, which is the \
          defect this release exists to fix"
     );
+    // The name the client gave itself, and nothing else in front of it. A
+    // host found in the process's ancestry is added after it in brackets, and
+    // a test run from inside an agent has one.
     assert!(
-        rows.iter().all(|r| r.client == "harness"),
+        rows.iter()
+            .all(|r| r.client == "harness" || r.client.starts_with("harness (")),
         "the ledger records the name the client gave itself: {rows:?}"
     );
     assert!(

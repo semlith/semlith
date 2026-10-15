@@ -1,0 +1,3 @@
+export function f(a) { return g(a); }
+class C { m() {} }
+const K = 1;

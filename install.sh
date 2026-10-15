@@ -101,9 +101,19 @@ pick_tools() {
     }
     final_url() { curl --proto "$proto" --tlsv1.2 -fsSLI -o /dev/null -w '%{url_effective}' "$1"; }
   elif command -v wget >/dev/null 2>&1; then
-    fetch() { wget -q --show-progress -O "$2" "$1"; }
+    # GNU wget gets curl's floor: https only, TLS 1.2 or newer. busybox wget
+    # takes none of its long flags, so there every URL is checked by hand.
+    gnu=""
+    if wget --help 2>&1 | grep -q -- --https-only; then
+      gnu="--https-only --secure-protocol=TLSv1_2 --max-redirect=10"
+    fi
+    https() { case "$1" in https://*) ;; *) die "refusing $1: not https" ;; esac; }
+    # shellcheck disable=SC2086 # $gnu is a list of flags, split on purpose
+    fetch() { https "$1"; wget -q $gnu ${gnu:+--show-progress} -O "$2" "$1"; }
+    # shellcheck disable=SC2086
     final_url() {
-      wget -q -S --spider --max-redirect=10 "$1" 2>&1 |
+      https "$1"
+      wget -q -S --spider $gnu "$1" 2>&1 |
         sed -n 's/^[[:space:]]*Location:[[:space:]]*//p' | tail -n 1
     }
   else

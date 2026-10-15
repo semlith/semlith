@@ -724,6 +724,47 @@ pub const MAX_BLOCK_NESTING: usize = 128;
 /// Whether a file in a block grammar nests past [`MAX_BLOCK_NESTING`], counted
 /// line by line: each `>` and list marker opens a level, and so does every two
 /// columns of indentation in front of them.
+/// The text a grammar's C scanner is handed, for the grammars whose scanner
+/// calls a narrow `<ctype.h>` function on a full Unicode code point.
+///
+/// tree-sitter-md's block scanner runs `isdigit` on the character after a
+/// digit at a list-marker position (`scanner.c:740`), and tree-sitter-bash's on
+/// the character after `{` or `..` in a brace expansion (`scanner.c:1158,
+/// 1172`). glibc's `isdigit` indexes a table valid for -128..255 with no
+/// check, so a code point past U+00FF reads out of bounds and can fault: a
+/// 7-byte Markdown file did under the 0.41.0 fuzzers. Such a character, right
+/// after a character those scanners test, is replaced with as many `a` bytes as
+/// it has, so every byte offset and line stays the original's and names are
+/// still read from the original text. Borrowed when nothing needs replacing.
+pub fn ctype_safe<'a>(lang: &str, text: &'a str) -> std::borrow::Cow<'a, str> {
+    let triggers: fn(char) -> bool = match lang {
+        "markdown" => |c| c.is_ascii_digit(),
+        "bash" => |c| c.is_ascii_digit() || c == '{' || c == '.',
+        _ => return std::borrow::Cow::Borrowed(text),
+    };
+    let needs = |prev: Option<char>, c: char| (c as u32) > 0xFF && prev.is_some_and(triggers);
+    let mut prev = None;
+    if !text.chars().any(|c| {
+        let hit = needs(prev, c);
+        prev = Some(c);
+        hit
+    }) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut prev = None;
+    for c in text.chars() {
+        if needs(prev, c) {
+            out.extend(std::iter::repeat_n('a', c.len_utf8()));
+            prev = Some('a');
+        } else {
+            out.push(c);
+            prev = Some(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 pub fn too_nested(lang: &str, text: &str) -> bool {
     if !matches!(lang, "markdown" | "yaml") {
         return false;
@@ -745,6 +786,11 @@ pub fn too_nested(lang: &str, text: &str) -> bool {
                 '-' | '*' | '+' if chars.peek().is_none_or(|n| *n == ' ' || *n == '\t') => {
                     depth += 1
                 }
+                // Not the end of the prefix: tree-sitter-md goes on nesting
+                // past a NUL or another control character, so a line of 100
+                // `>`, NULs, then 128 more aborted the parser while this
+                // counted 100 (cargo-fuzz chunk_markdown, 0.41.0).
+                c if c.is_control() => {}
                 _ => break,
             }
             if depth + columns / 2 > MAX_BLOCK_NESTING {
@@ -788,8 +834,9 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         }
     };
     let options = tree_sitter::ParseOptions::default().progress_callback(&mut expired);
+    let parse = ctype_safe(lang, text);
     let parsed =
-        parser.parse_with_options(&mut |at, _| &text.as_bytes()[at..], None, Some(options));
+        parser.parse_with_options(&mut |at, _| &parse.as_bytes()[at..], None, Some(options));
     let Some(tree) = parsed else {
         return Ok(None);
     };
@@ -827,18 +874,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
     //
     // Same name *and* same kind is the condition, so a `mod x` containing an
     // `fn x`, or a Java class containing its own constructor, keeps both.
-    let contained: Vec<bool> = defs
-        .iter()
-        .map(|inner| {
-            defs.iter().any(|outer| {
-                outer.name == inner.name
-                    && outer.kind == inner.kind
-                    && (outer.start, outer.end) != (inner.start, inner.end)
-                    && outer.start <= inner.start
-                    && outer.end >= inner.end
-            })
-        })
-        .collect();
+    let contained = contained(&defs);
     let mut keep = contained.iter();
     defs.retain(|_| !keep.next().copied().unwrap_or(false));
 
@@ -852,8 +888,9 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
     }];
     let mut edges: Vec<Edge> = Vec::new();
 
+    let parents = enclosing_each(&defs);
     for (i, def) in defs.iter().enumerate() {
-        let parent = enclosing(&defs, i, def.start).map(|p| defs[p].name.clone());
+        let parent = parents[i].map(|p| defs[p].name.clone());
         // The owner outranks the enclosing definition: `Fleet::search_preferring`
         // is what the code calls it and what a qualified question asks for,
         // and `fleet::search_preferring` could be either of two methods.
@@ -908,8 +945,9 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         .flat_map(|r| import_names(&r.name))
         .collect();
 
-    for reference in &refs {
-        let enclosing = enclosing_def(&defs, reference.at);
+    let holders = innermost_at(&defs, refs.iter().map(|r| r.at), None);
+    for (reference, holder) in refs.iter().zip(holders) {
+        let enclosing = holder.map(|h| &defs[h]);
         let from = match enclosing {
             Some(def) => def.name.clone(),
             None => module.clone(),
@@ -1485,33 +1523,91 @@ fn declaration_shaped(kind: &str) -> bool {
     MARKERS.iter().any(|m| kind.contains(m))
 }
 
-/// The index of the innermost definition strictly enclosing `at`, skipping
-/// `self_index` so a definition is never its own parent.
-fn enclosing(defs: &[Def], self_index: usize, at: usize) -> Option<usize> {
-    let mut best: Option<usize> = None;
+// The three passes below answered by comparing every definition with every
+// other one, and every reference with every definition: a planted file of
+// 450,000 one-line functions was some 10^11 comparisons (audit S18). They are
+// sweeps now, with the same answers — `graph::tests` checks them against the
+// pairwise versions.
+
+/// For each definition, whether another one of the same name and kind covers
+/// it with a different range.
+fn contained(defs: &[Def]) -> Vec<bool> {
+    let mut out = vec![false; defs.len()];
+    let mut groups: std::collections::HashMap<(&str, &str), Vec<usize>> =
+        std::collections::HashMap::new();
     for (i, d) in defs.iter().enumerate() {
-        if i == self_index || d.start > at || d.end <= at {
-            continue;
-        }
-        if best.is_none_or(|b| d.end - d.start < defs[b].end - defs[b].start) {
-            best = Some(i);
+        groups.entry((&d.name, &d.kind)).or_default().push(i);
+    }
+    for mut group in groups.into_values() {
+        // By start, widest first: whatever could cover a definition sorts
+        // before it.
+        group.sort_by_key(|&i| (defs[i].start, std::cmp::Reverse(defs[i].end)));
+        let mut widest: Option<usize> = None;
+        let mut run = 0;
+        while run < group.len() {
+            let range = (defs[group[run]].start, defs[group[run]].end);
+            let mut next = run;
+            while next < group.len() && (defs[group[next]].start, defs[group[next]].end) == range {
+                next += 1;
+            }
+            // Only what sorted before this run: a definition with an equal
+            // range is the same definition tagged twice, not a cover.
+            let covered = widest.is_some_and(|end| end >= range.1);
+            for &i in &group[run..next] {
+                out[i] = covered;
+            }
+            widest = Some(widest.map_or(range.1, |end| end.max(range.1)));
+            run = next;
         }
     }
-    best
+    out
 }
 
-/// The innermost definition whose range holds `at`.
-fn enclosing_def(defs: &[Def], at: usize) -> Option<&Def> {
-    let mut best: Option<&Def> = None;
-    for d in defs {
-        if d.start > at || d.end <= at {
-            continue;
+/// For each position in `at`, the innermost definition whose range holds it:
+/// the narrowest, the earliest of equals, skipping `not` for the position at
+/// the same index when given. One sweep over the positions in order, holding
+/// the definitions open at each by width.
+fn innermost_at(
+    defs: &[Def],
+    at: impl Iterator<Item = usize>,
+    not: Option<&dyn Fn(usize) -> usize>,
+) -> Vec<Option<usize>> {
+    use std::cmp::Reverse;
+    use std::collections::{BTreeSet, BinaryHeap};
+    let at: Vec<usize> = at.collect();
+    let mut order: Vec<usize> = (0..at.len()).collect();
+    order.sort_by_key(|&q| at[q]);
+    let mut by_start: Vec<usize> = (0..defs.len()).collect();
+    by_start.sort_by_key(|&i| defs[i].start);
+    let mut open: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut ends: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
+    let mut next = 0;
+    let mut out = vec![None; at.len()];
+    for q in order {
+        let pos = at[q];
+        while next < by_start.len() && defs[by_start[next]].start <= pos {
+            let d = &defs[by_start[next]];
+            open.insert((d.end - d.start, by_start[next]));
+            ends.push(Reverse((d.end, by_start[next])));
+            next += 1;
         }
-        if best.is_none_or(|b| d.end - d.start < b.end - b.start) {
-            best = Some(d);
+        while let Some(Reverse((end, i))) = ends.peek().copied() {
+            if end > pos {
+                break;
+            }
+            ends.pop();
+            let d = &defs[i];
+            open.remove(&(d.end - d.start, i));
         }
+        let skip = not.map(|f| f(q));
+        out[q] = open.iter().map(|&(_, i)| i).find(|&i| Some(i) != skip);
     }
-    best
+    out
+}
+
+/// For each definition, the innermost other definition enclosing its start.
+fn enclosing_each(defs: &[Def]) -> Vec<Option<usize>> {
+    innermost_at(defs, defs.iter().map(|d| d.start), Some(&|q| q))
 }
 
 /// A file's own symbol: what top-level definitions hang off and where
@@ -3728,6 +3824,115 @@ mod tests {
     }
 
     use super::*;
+
+    /// The fuzzer's SEGV and bash's twin: a character past U+00FF right after
+    /// a character a scanner tests with narrow `isdigit` is replaced, byte for
+    /// byte, and nothing else changes.
+    #[test]
+    fn a_wide_character_after_a_digit_is_kept_from_a_narrow_ctype_scanner() {
+        let md = " 1\u{5641A}\u{FFFD}";
+        let safe = ctype_safe("markdown", md);
+        assert_eq!(safe.len(), md.len());
+        assert_eq!(safe, " 1aaaa\u{FFFD}");
+        assert_eq!(
+            ctype_safe("bash", "echo {é..9} {\u{1F600}"),
+            "echo {é..9} {aaaa"
+        );
+        assert!(matches!(
+            ctype_safe("markdown", "1. café 2026 \u{1F600}"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            ctype_safe("rust", md),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // The graph of the original text, names read from the original.
+        let g = extract(Path::new("a.md"), "# 1\u{1F600} heading\n\nbody\n")
+            .unwrap()
+            .unwrap();
+        assert!(
+            g.symbols.iter().any(|s| s.name.contains('\u{1F600}')),
+            "{:?}",
+            g.symbols
+        );
+    }
+
+    /// The fuzzer's crash: nesting carried on past NULs on one line.
+    #[test]
+    fn nesting_that_continues_past_a_control_character_is_too_deep() {
+        let line = format!("{}{}{}", ">".repeat(100), "\0".repeat(100), ">".repeat(130));
+        assert!(too_nested("markdown", &line));
+        assert!(!too_nested("markdown", &format!("{}\0text", ">".repeat(5))));
+    }
+
+    /// The pairwise versions the sweeps replaced (audit S18), as the oracle.
+    fn contained_pairwise(defs: &[Def]) -> Vec<bool> {
+        defs.iter()
+            .map(|inner| {
+                defs.iter().any(|outer| {
+                    outer.name == inner.name
+                        && outer.kind == inner.kind
+                        && (outer.start, outer.end) != (inner.start, inner.end)
+                        && outer.start <= inner.start
+                        && outer.end >= inner.end
+                })
+            })
+            .collect()
+    }
+
+    fn innermost_pairwise(defs: &[Def], skip: Option<usize>, at: usize) -> Option<usize> {
+        let mut best: Option<usize> = None;
+        for (i, d) in defs.iter().enumerate() {
+            if Some(i) == skip || d.start > at || d.end <= at {
+                continue;
+            }
+            if best.is_none_or(|b| d.end - d.start < defs[b].end - defs[b].start) {
+                best = Some(i);
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn the_sweeps_answer_what_the_pairwise_passes_did() {
+        // A small deterministic generator: nested, crossing, equal and
+        // duplicated ranges, a few shared names.
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n) as usize
+        };
+        for _ in 0..300 {
+            let count = 1 + next(40);
+            let defs: Vec<Def> = (0..count)
+                .map(|_| {
+                    let start = next(200);
+                    let end = start + 1 + next(80);
+                    Def {
+                        kind: ["function", "class"][next(2)].to_string(),
+                        name: ["a", "b", "c"][next(3)].to_string(),
+                        owner: None,
+                        start,
+                        end,
+                        start_line: 1,
+                        end_line: 1,
+                    }
+                })
+                .collect();
+            assert_eq!(contained(&defs), contained_pairwise(&defs));
+            let each = enclosing_each(&defs);
+            for (i, d) in defs.iter().enumerate() {
+                assert_eq!(each[i], innermost_pairwise(&defs, Some(i), d.start));
+            }
+            let at: Vec<usize> = (0..60).map(|_| next(300)).collect();
+            let got = innermost_at(&defs, at.iter().copied(), None);
+            for (q, pos) in at.iter().enumerate() {
+                assert_eq!(got[q], innermost_pairwise(&defs, None, *pos));
+            }
+        }
+    }
     use std::path::PathBuf;
 
     fn run(name: &str, src: &str) -> Extraction {
