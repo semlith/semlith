@@ -249,6 +249,22 @@ const HTTP_ORIGIN_ENV: &str = "SEMLITH_ADD_ORIGIN";
 /// for, and for a tool whose claim is that its behaviour is checkable, that is
 /// the wrong kind of helpful.
 fn require_https(url: &str) -> Result<()> {
+    // Credentials in a URL are refused rather than sent or stripped (audit
+    // S22): `semlith add` never authenticates, and a user:pass kept in the
+    // URL ended up in the stored path, where search results print it.
+    let authority = url.split_once("://").map_or("", |(_, rest)| {
+        rest.split(['/', '?', '#']).next().unwrap_or("")
+    });
+    if authority.contains('@') {
+        bail!(
+            "{} carries credentials; `semlith add` never sends any — download the \
+             file yourself and run `semlith index` on it",
+            url.split_once("://")
+                .map_or(url, |(scheme, _)| scheme)
+                .to_string()
+                + "://…"
+        );
+    }
     if url.starts_with("https://") {
         return Ok(());
     }
@@ -298,15 +314,23 @@ fn require_public(url: &str) -> Result<()> {
         bail!("{url} is not a URL semlith can resolve");
     };
     let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let (host, port) = match authority.rsplit_once(':') {
-        // An IPv6 literal is full of colons; the port is only after the bracket.
-        Some((h, p)) if !h.ends_with(']') && p.chars().all(|c| c.is_ascii_digit()) => (h, p),
-        _ => (authority, "443"),
+    // `[::1]:8443`, `[::1]`, `host:8443` or `host`. An IPv6 literal is full of
+    // colons, so its port is only what follows the closing bracket; before
+    // 0.41.0 every IPv6 literal failed to parse here (audit S22).
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(rest) => match rest.split_once(']') {
+            Some((h, tail)) => (h, tail.strip_prefix(':').unwrap_or("443")),
+            None => bail!("{url} has an unclosed IPv6 address"),
+        },
+        None => match authority.rsplit_once(':') {
+            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h, p),
+            _ => (authority, "443"),
+        },
     };
-    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let port: u16 = port.parse().unwrap_or(443);
 
     use std::net::ToSocketAddrs;
-    let resolved: Vec<std::net::SocketAddr> = format!("{host}:{port}")
+    let resolved: Vec<std::net::SocketAddr> = (host, port)
         .to_socket_addrs()
         .with_context(|| format!("resolving {host}"))?
         .collect();
@@ -360,11 +384,67 @@ fn is_public(ip: &std::net::IpAddr) -> bool {
                 || (v6.octets()[0] & 0xfe) == 0xfc
                 // Link-local, fe80::/10.
                 || (v6.octets()[0] == 0xfe && (v6.octets()[1] & 0xc0) == 0x80)
-                // An IPv4 address wearing an IPv6 hat is judged as the IPv4 one.
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| !is_public(&IpAddr::V4(v4))))
+                // An IPv4 address wearing an IPv6 hat is judged as the IPv4
+                // one: mapped (::ffff:0:0/96), compatible (::/96), NAT64
+                // (64:ff9b::/96, 64:ff9b:1::/48) and 6to4 (2002::/16), each
+                // of which a router or a translator turns back into it.
+                || embedded_v4(v6).is_some_and(|v4| !is_public(&IpAddr::V4(v4)))
+                // Teredo (2001::/32): the IPv4 server and client are in it
+                // obfuscated, and nothing honest is fetched over it.
+                || v6.segments()[..2] == [0x2001, 0])
         }
+    }
+}
+
+/// The IPv4 address an IPv6 one carries, for the forms that carry one.
+fn embedded_v4(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let o = v6.octets();
+    let s = v6.segments();
+    let last = std::net::Ipv4Addr::new(o[12], o[13], o[14], o[15]);
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return Some(v4);
+    }
+    if s[..6] == [0; 6] && !v6.is_loopback() && !v6.is_unspecified() {
+        return Some(last);
+    }
+    if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || s[..3] == [0x64, 0xff9b, 1] {
+        return Some(last);
+    }
+    if s[0] == 0x2002 {
+        return Some(std::net::Ipv4Addr::new(o[2], o[3], o[4], o[5]));
+    }
+    None
+}
+
+/// The connection's own resolver, refusing what [`require_public`] refuses.
+///
+/// The check above resolves the name and the connection resolved it again,
+/// so a name answering a public address first and a private one second
+/// passed the check and reached the private one (audit S22). Here the
+/// addresses the connection uses are the addresses checked; the certificate
+/// is still checked against the name, so TLS is unchanged.
+#[derive(Debug)]
+struct PublicOnly;
+
+impl ureq::unversioned::resolver::Resolver for PublicOnly {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> std::result::Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let addrs = ureq::unversioned::resolver::DefaultResolver::default()
+            .resolve(uri, config, timeout)?;
+        if !private_allowed()
+            && let Some(bad) = addrs.iter().find(|a| !is_public(&a.ip()))
+        {
+            return Err(ureq::Error::Io(std::io::Error::other(format!(
+                "{} resolves to {}, which is not on the public internet",
+                uri.host().unwrap_or("the host"),
+                bad.ip()
+            ))));
+        }
+        Ok(addrs)
     }
 }
 
@@ -377,14 +457,18 @@ fn get(url: &str) -> Result<(String, String, Vec<u8>)> {
     // Deadlines, as every outbound agent in semlith has: a server that accepts
     // the connection and then drips a byte a minute held this call, and before
     // 0.40.0 every other agent's call with it.
-    let agent = ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .timeout_connect(Some(std::time::Duration::from_secs(10)))
         .timeout_global(Some(std::time::Duration::from_secs(60)))
         .max_redirects(0)
         .max_redirects_will_error(false)
         .http_status_as_error(false)
-        .build()
-        .new_agent();
+        .build();
+    let agent = ureq::Agent::with_parts(
+        config,
+        ureq::unversioned::transport::DefaultConnector::default(),
+        PublicOnly,
+    );
 
     let mut current = url.to_string();
     require_public(&current)?;
@@ -666,6 +750,49 @@ fn register_root(store_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audit S22: an IPv4 address inside an IPv6 one is judged as itself, an
+    /// IPv6 literal parses, and credentials in a URL are refused.
+    #[test]
+    fn every_ipv6_spelling_of_a_private_address_is_refused() {
+        for private in [
+            "::ffff:127.0.0.1",
+            "::127.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b:1::a00:1",
+            "2002:c0a8:0101::1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            "fd00::1",
+            "fe80::1",
+            "::1",
+        ] {
+            let ip: std::net::IpAddr = private.parse().unwrap();
+            assert!(!is_public(&ip), "{private} passed as public");
+        }
+        for public in [
+            "2606:4700:4700::1111",
+            "64:ff9b::808:808",
+            "2002:0808:0808::1",
+        ] {
+            let ip: std::net::IpAddr = public.parse().unwrap();
+            assert!(is_public(&ip), "{public} refused as private");
+        }
+        assert!(require_https("https://user:pw@example.com/x").is_err());
+        assert!(require_https("https://example.com/a@b").is_ok());
+    }
+
+    #[test]
+    fn an_ipv6_literal_is_resolved_not_misparsed() {
+        if private_allowed() {
+            return;
+        }
+        let err = require_public("https://[::1]:8443/x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not on the public internet"), "{err}");
+        let err = require_public("https://[::1]/x").unwrap_err().to_string();
+        assert!(err.contains("not on the public internet"), "{err}");
+    }
 
     #[test]
     fn a_github_blob_link_is_rewritten_to_the_file_it_shows() {
