@@ -80,7 +80,13 @@ pub fn log_path() -> Result<PathBuf> {
     let dir = crate::home::home_or_error()?.join("logs");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     crate::home::tighten_dir(&dir);
-    Ok(dir.join("daemon.log"))
+    let log = dir.join("daemon.log");
+    // Created here, 0600, rather than by launchd under its umask (audit S14).
+    if !log.exists() {
+        let _ = crate::home::write_private(&log, b"");
+    }
+    crate::home::tighten_file(&log);
+    Ok(log)
 }
 
 /// The binary a service definition should name.

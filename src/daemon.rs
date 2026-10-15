@@ -4499,8 +4499,20 @@ pub fn run(
 
     // stdout, not stderr: the token is in this URL, and stderr is the log the
     // operational criterion says never carries it. One line, once, so a
-    // terminal's scrollback holds exactly one copy.
-    println!("{}", server.url());
+    // terminal's scrollback holds exactly one copy. Under a service stdout is
+    // the log too — launchd appends it to `daemon.log`, systemd hands it to
+    // the journal — and before 0.41.0 every restart left a working token in a
+    // file other accounts could read (audit S14). There the URL goes without
+    // its token, and `semlith start` prints the whole one for a running daemon.
+    if stdout_is_a_log() {
+        scrub_service_log();
+        println!(
+            "http://127.0.0.1:{}/ (token: run `semlith start` to print the portal URL)",
+            server.port()
+        );
+    } else {
+        println!("{}", server.url());
+    }
     report("open the URL on stdout to reach the portal; Ctrl-C stops the daemon");
 
     Ok(state.clone()).and_then(|state| {
@@ -5691,6 +5703,60 @@ impl crate::mcp::Writer for Writer {
 }
 
 /// The URL the daemon prints, and the only place the token is shown.
+/// Whether stdout is a file or a socket — a service's log or journal — rather
+/// than a terminal or a pipe somebody is reading.
+fn stdout_is_a_log() -> bool {
+    #[cfg(unix)]
+    {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: fstat on the process's own stdout into a zeroed struct.
+        if unsafe { libc::fstat(libc::STDOUT_FILENO, &mut stat) } != 0 {
+            return false;
+        }
+        let kind = stat.st_mode & libc::S_IFMT;
+        kind == libc::S_IFREG || kind == libc::S_IFSOCK
+    }
+    #[cfg(not(unix))]
+    false
+}
+
+/// Strip the session tokens a daemon before 0.41.0 left in the service log,
+/// and narrow the log to the owner. Best effort: a log it cannot rewrite is
+/// not a reason not to start.
+fn scrub_service_log() {
+    let Ok(path) = crate::service::log_path() else {
+        return;
+    };
+    crate::home::tighten_file(&path);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if let Some(clean) = scrub_tokens(&text) {
+        let _ = std::fs::write(&path, clean);
+    }
+}
+
+/// `text` with every `?token=<value>` replaced, or `None` when there was none.
+fn scrub_tokens(text: &str) -> Option<String> {
+    const KEY: &str = "?token=";
+    if !text.contains(KEY) {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(KEY) {
+        out.push_str(&rest[..at + KEY.len()]);
+        out.push_str("<removed>");
+        rest = &rest[at + KEY.len()..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+            .unwrap_or(rest.len());
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
 pub fn url(state: &State) -> String {
     state.server.url()
 }
@@ -5725,6 +5791,16 @@ pub fn port_of(flag: Option<u16>) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_token_in_an_old_log_line_is_removed() {
+        let log = "semlith: up\nhttp://127.0.0.1:7365/?token=Ab3_x-9\nnext ?token=zz.\n";
+        assert_eq!(
+            scrub_tokens(log).unwrap(),
+            "semlith: up\nhttp://127.0.0.1:7365/?token=<removed>\nnext ?token=<removed>.\n"
+        );
+        assert_eq!(scrub_tokens("nothing here\n"), None);
+    }
 
     /// Six false privacy warnings on every `semlith mcp` start, one per store,
     /// naming six paths that do not exist.
