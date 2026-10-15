@@ -251,13 +251,19 @@ jobs:
           name: smoke-${{ matrix.os }}
           path: smoke-${{ matrix.os }}.log
 
+      # An exact version, installed in a step that never sees the API key:
+      # npm install scripts run with the step's environment.
+      - name: Install Claude Code
+        if: inputs.hunt && always()
+        shell: bash
+        run: npm install -g @anthropic-ai/claude-code@2.1.300
+
       - name: Bug hunt
         if: inputs.hunt && always()
         shell: bash
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          npm install -g @anthropic-ai/claude-code
           claude -p "$(cat .github/hunt-prompt.md)" \
             --allowedTools "Bash,Read,Write,Glob,Grep" \
             --max-turns 80 \
