@@ -6103,19 +6103,31 @@ FETCH_SPY = r"""
 })()
 """
 
-#: Samples the run card every 50 ms: each status line it showed (and when),
-#: whether it was the start sequence's, and the Pipeline panel's height.
+#: Watches the run card: each status line it showed (and when), whether it
+#: was the start sequence's, and the Pipeline panel's height. The lines are
+#: recorded by a MutationObserver, stamped when the DOM changed: a 50 ms poll
+#: stamped them when its timer next ran, which on a busy runner was late for
+#: the first line after the wizard's big paint and made a 700 ms step read as
+#: 576 ms (rc4.2, 0.41.0 PR CI).
 PIPE_SAMPLER = r"""
 (() => {
   const seen = window.__pipe = {lines: [], heights: [], lanes: []};
   const real = window.__realSetInterval || window.setInterval;
-  seen.timer = real(() => {
+  const note = () => {
     const card = document.querySelector('.wz-body .run-card');
     if (!card) return;
     const st = card.querySelector('.pipe-status');
     const text = st ? st.textContent.trim() : '';
     const last = seen.lines[seen.lines.length - 1];
     if (!last || last[0] !== text) seen.lines.push([text, Date.now(), !!(st && st.classList.contains('starting'))]);
+  };
+  seen.observer = new MutationObserver(note);
+  seen.observer.observe(document.body, {childList: true, subtree: true, characterData: true});
+  seen.timer = real(() => {
+    note();
+    const card = document.querySelector('.wz-body .run-card');
+    if (!card) return;
+    const st = card.querySelector('.pipe-status');
     const pipe = card.querySelector('.pipe');
     if (pipe && !pipe.hidden && !st.classList.contains('starting') && card.querySelector('.pipe-row'))
       seen.heights.push(Math.round(pipe.getBoundingClientRect().height));
@@ -6307,10 +6319,17 @@ def _(d):
       window.__realSetInterval = window.__realSetInterval || window.setInterval.bind(window);
       window.setInterval = (fn, ms, ...a) => window.__realSetInterval(() => { if (!window.__hold) fn(); }, ms, ...a);
       const seen = window.__scan = {cur: [], heads: [], index: []};
-      seen.timer = window.__realSetInterval(() => {
+      // Stage changes stamped when the DOM changed, as PIPE_SAMPLER's lines
+      // are; a late poll tick shortened the first stage it saw.
+      const note = () => {
         const box = document.querySelector('.wz-body .stage-box.cur');
         const word = box ? box.getAttribute('data-stage') : (document.querySelector('.wz-body .stage-box') ? '' : 'gone');
         if (!seen.cur.length || seen.cur[seen.cur.length - 1][0] !== word) seen.cur.push([word, Date.now()]);
+      };
+      seen.observer = new MutationObserver(note);
+      seen.observer.observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'data-stage']});
+      seen.timer = window.__realSetInterval(() => {
+        note();
         if (document.querySelector('.wz-body .stage-box')) {
           seen.heads.push((document.querySelector('.wz-head .h') || {}).textContent);
           const row = [...document.querySelectorAll('.sum-row')].find(r => /INDEX/.test(r.innerText));
