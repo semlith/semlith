@@ -2823,6 +2823,19 @@ function wizardScreen() {
       return go("welcome");
     }
     const r = run().find((x) => LIVE_RUN.has(x.status) && x.status !== "review");
+    // The wizard is left whatever the clean-up meets: one failed request used
+    // to reject this function and keep the page on #/new for good.
+    try {
+      await leaveCleanly(r);
+    } catch (e) {
+      toast(`Could not tidy up: ${e.message || e}`, "bad");
+    }
+    state.wz = clearWizard();
+    if (w.created && (store(w.created) || w.existing)) go("store", w.created, r ? "runs" : "overview");
+    else go(liveStores().length ? "home" : "welcome");
+  }
+
+  async function leaveCleanly(r) {
     if (w.created && !w.existing && !r && !(store(w.created) && store(w.created).files)) {
       const del = await ask({
         title: "Leave without indexing?",
@@ -2852,9 +2865,6 @@ function wizardScreen() {
         for (const s of scanRuns().filter((x) => x.status === "review" || x.status === "scanning")) await post("/api/index/control", { store: s.store, run: s.id, action: "stop" }).catch(() => {});
       }
     }
-    state.wz = clearWizard();
-    if (w.created && (store(w.created) || w.existing)) go("store", w.created, r ? "runs" : "overview");
-    else go(liveStores().length ? "home" : "welcome");
   }
 
   function paint() {

@@ -35,6 +35,7 @@ import os
 import platform
 import re
 import sys
+import time
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -148,11 +149,14 @@ class Transcript:
         # A console that cannot encode a character (cp1252 on Windows, "↕")
         # gets it escaped; the transcript file keeps it as written. A check's
         # message must never stop the run.
+        # Flushed per line: through `tee` stdout is a pipe and block-buffered,
+        # which stamped every line of a CI log with the drive's last second
+        # and left nothing to say when a failing check ran.
         try:
-            print(text)
+            print(text, flush=True)
         except UnicodeEncodeError:
             encoding = getattr(sys.stdout, "encoding", None) or "ascii"
-            print(text.encode(encoding, "backslashreplace").decode(encoding, "replace"))
+            print(text.encode(encoding, "backslashreplace").decode(encoding, "replace"), flush=True)
         self.handle.write(text + "\n")
         self.handle.flush()
 
@@ -242,6 +246,8 @@ def main():
             issue = known.get(check_id)
             failure = None
             skipped = None
+            began = time.time()
+            errors_before = len(drive.page_errors)
             # Every check starts from the pages' defaults: page state and the
             # wizard now survive a reload (per viewer), so one check's filters
             # would otherwise be the next one's starting point.
@@ -290,6 +296,15 @@ def main():
                 transcript.line("FAIL     %-8s %s" % (check_id, title))
                 for line in failure.splitlines()[:25]:
                     transcript.line("         %s" % line)
+                transcript.line("         %s, after %.1f s" % (time.strftime("%H:%M:%S"), time.time() - began))
+                # What the page logged meanwhile: a request the browser failed
+                # to send is here and nowhere else.
+                try:
+                    drive._drain()
+                except Exception:
+                    pass
+                for line in drive.page_errors[errors_before:][-10:]:
+                    transcript.line("         page: %s" % line)
     finally:
         drive.stop()
         corpora.cleanup()

@@ -126,6 +126,12 @@ class Drive:
         self._socket = None
         self._next_id = 0
         self._events = []
+        # Every error the page logged, for the whole drive: `clear_console`
+        # empties `_events`, this never. The runner prints a failed check's
+        # share of it, because a request the browser could not even send
+        # (net::ERR_NO_BUFFER_SPACE on the Windows runner) never reaches the
+        # daemon's log and otherwise leaves only a timeout behind.
+        self.page_errors = []
 
     # ------------------------------------------------------------ lifecycle
 
@@ -240,8 +246,26 @@ class Drive:
                     )
                 return message.get("result", {})
             if "method" in message:
-                self._events.append(message)
+                self._event(message)
         raise ProtocolError("%s did not answer within %ds" % (method, timeout))
+
+    def _event(self, message):
+        self._events.append(message)
+        method = message.get("method")
+        params = message.get("params", {})
+        text = None
+        if method == "Log.entryAdded" and params.get("entry", {}).get("level") == "error":
+            entry = params["entry"]
+            text = "%s %s" % (entry.get("text", ""), entry.get("url") or "")
+        elif method == "Runtime.exceptionThrown":
+            details = params.get("exceptionDetails", {})
+            text = (details.get("exception") or {}).get("description") or details.get("text", "")
+        elif method == "Runtime.consoleAPICalled" and params.get("type") == "error":
+            text = " ".join(
+                str(arg.get("value", arg.get("description", ""))) for arg in params.get("args", [])
+            )
+        if text:
+            self.page_errors.append("%s %s" % (time.strftime("%H:%M:%S"), text.strip().splitlines()[0][:300]))
 
     def _drain(self, seconds=0.3):
         """Collect whatever events are already waiting on the socket.
@@ -257,7 +281,7 @@ class Drive:
             except Exception:
                 return
             if "method" in message:
-                self._events.append(message)
+                self._event(message)
 
     # --------------------------------------------------------------- driving
 

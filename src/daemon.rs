@@ -3949,8 +3949,7 @@ impl State {
         let report = Arc::clone(&self.report);
         let admission = Arc::clone(&self.admission);
         let writer = std::thread::spawn(move || {
-            let _lock = lock;
-            keep_writing(&watching, debounce, &*report, &admission);
+            keep_writing(lock, &watching, debounce, &*report, &admission);
         });
         let mut late = self.late_writers.lock().unwrap_or_else(|e| e.into_inner());
         late.retain(|handle| !handle.is_finished());
@@ -4447,8 +4446,7 @@ pub fn run(
         watchers.push(std::thread::spawn(move || {
             // Moved in so the lock's life is the thread's life, which is what
             // makes "the daemon is the writer" true rather than intended.
-            let _lock = lock;
-            keep_writing(&store, debounce, &*report, &admission);
+            keep_writing(lock, &store, debounce, &*report, &admission);
         }));
     }
 
@@ -4576,15 +4574,41 @@ pub fn run(
 /// so `watching` goes false and the reason is on the store's feed; before
 /// 0.28.0 a panic skipped both, and `/api/stores` went on reporting a store
 /// nobody was watching as watched.
-fn keep_writing(
+///
+/// The store's lock is held here and dropped before `watching` goes false:
+/// a caller that waits on `watching` to rename or delete the store must find
+/// every handle closed, and on Windows the lock file still open refused both
+/// ("Access is denied"), which is one of the browser drive's flakes.
+fn keep_writing<L>(
+    lock: L,
     store: &Arc<Store>,
     debounce: Duration,
     report: &(dyn Fn(&str) + Send + Sync),
     admission: &Arc<Admission>,
 ) {
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        tend(store, debounce, &store.stop, report, admission)
-    }));
+    let mut retries = 0;
+    let outcome = loop {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tend(store, debounce, &store.stop, report, admission)
+        }));
+        // SQLite's "locking protocol" is a reader and the writer meeting in
+        // the WAL index while one of them recovers it, and the next attempt
+        // succeeds. A run's plan opens a reader beside a brand-new store's
+        // writer, and on Windows that killed the writer for good, leaving
+        // the run queued behind nothing.
+        if let Ok(Err(e)) = &outcome
+            && retries < 3
+            && !store.stop.load(Ordering::Relaxed)
+            && is_lock_protocol(e)
+        {
+            retries += 1;
+            report(&format!("{}: writer restarting after {e:#}", store.name));
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        break outcome;
+    };
+    drop(lock);
     let why = match outcome {
         Ok(Ok(())) => None,
         Ok(Err(e)) => Some(format!("{e:#}")),
@@ -4597,6 +4621,24 @@ fn keep_writing(
                 .unwrap_or_else(|| "no message".to_string())
         )),
     };
+    if let Some(why) = &why {
+        // Nothing will take these now: each waiting job is told why, and a
+        // run's card ends failed with the writer's reason rather than queued.
+        let waiting: Vec<Queued> = store
+            .queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
+        for queued in waiting {
+            let answer = serde_json::json!({
+                "event": "error",
+                "error": format!("the store's writer stopped: {why}"),
+            });
+            store.record(queued.run, &answer);
+            let _ = queued.report.send(answer);
+        }
+    }
     store.watching.store(false, Ordering::Relaxed);
     if let Some(why) = why {
         report(&format!("{}: watcher stopped: {why}", store.name));
@@ -4607,6 +4649,16 @@ fn keep_writing(
             .unwrap_or_else(|e| e.into_inner()) = Some(why);
     }
     changes::bump(changes::Domain::Stores);
+}
+
+/// Whether an error is SQLite's transient "locking protocol" (code 15).
+fn is_lock_protocol(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            == Some(rusqlite::ErrorCode::FileLockingProtocolFailed)
+    })
 }
 
 /// How long a writer keeps its embedding session with nothing to embed.

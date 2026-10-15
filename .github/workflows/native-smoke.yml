@@ -337,6 +337,20 @@ jobs:
           # One line per connection in drive-daemon.log, so a transport fault
           # seen on one platform only (#181) leaves its trace behind.
           SEMLITH_HTTP_TRACE=1 semlith start --port 7466 > drive-daemon.log 2>&1 &
+          # Windows only: the drive's Windows flakes are page requests the
+          # browser could not send (net::ERR_NO_BUFFER_SPACE, WSAENOBUFS) and
+          # the daemon therefore never logged. Every request is a new loopback
+          # connection, so the TCP table every 5 s, against the dynamic port
+          # range, says whether that is port exhaustion or something else.
+          if [ "$RUNNER_OS" = Windows ]; then
+            netsh int ipv4 show dynamicport tcp > drive-tcp.log 2>&1
+            ( while :; do
+                echo "$(date -u +%H:%M:%S) $(netstat -an -p tcp | awk '$1 == "TCP" { n[$4]++ } END { for (s in n) printf "%s=%d ", s, n[s] }')"
+                sleep 5
+              done >> drive-tcp.log 2>&1 ) &
+            TCP_SAMPLER=$!
+            trap 'kill "$TCP_SAMPLER" 2>/dev/null' EXIT
+          fi
           for _ in $(seq 1 90); do
             grep -q 'token=' drive-daemon.log && break
             sleep 1
@@ -371,3 +385,4 @@ jobs:
             drive-${{ matrix.os }}.log
             drive-${{ matrix.os }}/
             drive-daemon.log
+            drive-tcp.log

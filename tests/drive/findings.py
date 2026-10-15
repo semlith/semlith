@@ -322,10 +322,20 @@ def wait_for_run(d, store_name, timeout=RUN_FINISHES, run_id=None):
 
     deadline = time.time() + timeout
     last = None
+    polls = 0
     while time.time() < deadline:
         last = look()
         if last and str(last.get("status", "")).lower() in TERMINAL:
             return last
+        # A run on a store whose writer has died stays queued for good (10.2
+        # on Windows: the writer stopped on SQLITE_PROTOCOL and the drive
+        # waited out all 240 s). Its reason is the diagnosis; say it now.
+        polls += 1
+        if last and polls % 10 == 0:
+            row = next((s for s in stores(d) if s.get("name") == last.get("store")), None)
+            if row and row.get("stopped_because"):
+                fail("%s cannot finish: the store's writer stopped (%s); last status %s"
+                     % (what, row["stopped_because"], last.get("status")))
         time.sleep(0.5)
     fail(
         "%s never finished within %ds (last status: %s, %s of %s files). Bounded "
