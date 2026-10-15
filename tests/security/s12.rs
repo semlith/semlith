@@ -32,16 +32,29 @@ fn s12_a_whitelist_cannot_reinclude_git_or_a_credential_directory() {
     std::fs::write(repo.join("src").join("main.rs"), "fn main() {}\n").unwrap();
 
     let out = run(&home, &["index", repo.to_str().unwrap()], &[]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let files = run(&home, &["files"], &[]);
     let files = String::from_utf8_lossy(&files.stdout).into_owned();
-    assert!(files.contains("main.rs"), "the repository was not indexed:\n{files}");
+    assert!(
+        files.contains("main.rs"),
+        "the repository was not indexed:\n{files}"
+    );
     assert!(
         files.contains("ci.yml"),
         "a whitelisted ordinary dotfile stopped being indexed:\n{files}"
     );
-    assert!(!files.contains("config"), "a file under .git was indexed:\n{files}");
-    assert!(!files.contains("notes.md"), "a file under .aws was indexed:\n{files}");
+    assert!(
+        !files.contains("config"),
+        "a file under .git was indexed:\n{files}"
+    );
+    assert!(
+        !files.contains("notes.md"),
+        "a file under .aws was indexed:\n{files}"
+    );
 }
 
 #[test]
@@ -57,12 +70,26 @@ fn s12_a_named_hidden_root_is_walked_without_its_credential_directories() {
         "github.com:\n  user: zqghmarker\n",
     )
     .unwrap();
-    std::fs::write(config.join("tool").join("settings.toml"), "theme = \"dark\"\n").unwrap();
+    std::fs::write(
+        config.join("tool").join("settings.toml"),
+        "theme = \"dark\"\n",
+    )
+    .unwrap();
 
     let out = run(&home, &["index", config.to_str().unwrap()], &[]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let files = run(&home, &["files"], &[]);
     let files = String::from_utf8_lossy(&files.stdout).into_owned();
-    assert!(files.contains("settings.toml"), "the named root was not walked:\n{files}");
-    assert!(!files.contains("hosts.yml"), "~/.config/gh was indexed:\n{files}");
+    assert!(
+        files.contains("settings.toml"),
+        "the named root was not walked:\n{files}"
+    );
+    assert!(
+        !files.contains("hosts.yml"),
+        "~/.config/gh was indexed:\n{files}"
+    );
 }

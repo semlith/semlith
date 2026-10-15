@@ -15,14 +15,23 @@ fn s13_reads_refuse_a_link_a_fifo_and_a_device_and_stop_at_the_cap() {
 
     let link = dir.path().join("link.md");
     std::os::unix::fs::symlink(&target, &link).unwrap();
-    assert!(semlith::read_regular(&link, 1 << 20).is_err(), "a link was followed");
+    assert!(
+        semlith::read_regular(&link, 1 << 20).is_err(),
+        "a link was followed"
+    );
 
     let fifo = dir.path().join("fifo.md");
     let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
     let started = Instant::now();
-    assert!(semlith::read_regular(&fifo, 1 << 20).is_err(), "a FIFO was read");
-    assert!(started.elapsed() < Duration::from_secs(5), "the read blocked on a FIFO");
+    assert!(
+        semlith::read_regular(&fifo, 1 << 20).is_err(),
+        "a FIFO was read"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the read blocked on a FIFO"
+    );
 
     assert!(
         semlith::read_regular(Path::new("/dev/zero"), 1 << 20).is_err(),

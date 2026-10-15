@@ -656,7 +656,9 @@ fn components(path: &Path) -> Vec<String> {
 }
 
 fn same(have: &[String], want: &[&str]) -> bool {
-    have.iter().zip(want).all(|(h, w)| h.eq_ignore_ascii_case(w))
+    have.iter()
+        .zip(want)
+        .all(|(h, w)| h.eq_ignore_ascii_case(w))
 }
 
 /// `*` against a name, with everything else literal.

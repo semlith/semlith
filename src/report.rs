@@ -1465,7 +1465,11 @@ impl Report {
 fn csv_cell(v: &str) -> String {
     let formula =
         v.len() > 1 && v.starts_with(['=', '+', '-', '@', '\t', '\r']) && v.parse::<f64>().is_err();
-    let v = if formula { format!("'{v}") } else { v.to_string() };
+    let v = if formula {
+        format!("'{v}")
+    } else {
+        v.to_string()
+    };
     if v.contains(['"', ',', '\n', '\r']) {
         format!("\"{}\"", v.replace('"', "\"\""))
     } else {
@@ -1476,7 +1480,9 @@ fn csv_cell(v: &str) -> String {
 /// Prose from a report's own blocks, where an agent's query can appear: HTML
 /// is shown as text, never rendered by whoever previews the Markdown.
 fn md_text(v: &str) -> String {
-    v.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    v.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// One Markdown table cell or fact: [`md_text`], plus the pipe that would end
@@ -1496,7 +1502,10 @@ mod tests {
 
     #[test]
     fn a_formula_cell_exports_as_text() {
-        assert_eq!(csv_cell(r#"=HYPERLINK("u","x")"#), r#""'=HYPERLINK(""u"",""x"")""#);
+        assert_eq!(
+            csv_cell(r#"=HYPERLINK("u","x")"#),
+            r#""'=HYPERLINK(""u"",""x"")""#
+        );
         assert_eq!(csv_cell("@SUM(A1)"), "'@SUM(A1)");
         assert_eq!(csv_cell("\tcmd"), "'\tcmd");
         assert_eq!(csv_cell("-12"), "-12");
@@ -1506,7 +1515,10 @@ mod tests {
 
     #[test]
     fn a_markdown_cell_cannot_end_the_cell_or_render_html() {
-        assert_eq!(md_cell("<img src=x> a|b `c`\nd"), "&lt;img src=x&gt; a\\|b \\`c\\` d");
+        assert_eq!(
+            md_cell("<img src=x> a|b `c`\nd"),
+            "&lt;img src=x&gt; a\\|b \\`c\\` d"
+        );
         assert_eq!(md_cell(r"a\|b"), r"a\\\|b");
     }
 
