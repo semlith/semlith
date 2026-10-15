@@ -322,24 +322,11 @@ fn open_once(path: &Path) -> Result<Connection> {
     add_columns(&db)?;
     check_format(&db)?;
     backfill_fts(&db)?;
-    // The keyword index's own secure delete: a removed row's terms leave the
-    // index's segments at once rather than at their next merge, so a file
-    // refused for a secret leaves no searchable term behind (S10). A setting
-    // the index keeps, written once; older binaries read it unchanged.
-    let set: bool = db
-        .query_row(
-            "SELECT 1 FROM chunks_fts_config WHERE k = 'secure-delete' AND v = 1",
-            [],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if !set {
-        db.execute(
-            "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('secure-delete', 1)",
-            [],
-        )?;
-    }
+    // The keyword index's own secure delete (S10), written once. Best effort
+    // here: a reader that opens a store while its writer is creating it must
+    // not fail on a setting it does not need, and the scrub that does need it
+    // sets it under the writer (`secure_delete_fts`).
+    let _ = secure_delete_fts(&db);
     // Everything above is the schema this binary needs in place before the
     // store is usable at all; from here the connection writes only when a
     // writer asks.
@@ -3890,6 +3877,28 @@ pub fn refuse(
            files = excluded.files, last_seen = excluded.last_seen",
         params![path, class, rule, json, confidence, files, now],
     )?;
+    Ok(())
+}
+
+/// Turn on FTS5's secure delete for `chunks_fts`, if it is not on: a removed
+/// row's terms then leave the index's segments at once rather than at their
+/// next merge, so a file refused for a secret leaves no searchable term
+/// behind. A setting the index keeps; older binaries read it unchanged.
+pub fn secure_delete_fts(db: &Connection) -> Result<()> {
+    let set = db
+        .query_row(
+            "SELECT 1 FROM chunks_fts_config WHERE k = 'secure-delete' AND v = 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !set {
+        db.execute(
+            "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('secure-delete', 1)",
+            [],
+        )?;
+    }
     Ok(())
 }
 

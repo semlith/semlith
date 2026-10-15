@@ -5356,6 +5356,7 @@ impl Semlith {
     fn evict_secret(&mut self, key: &str) -> Result<(usize, usize)> {
         let ids: Vec<u64> = store::chunk_ids_of(&self.db, key)?;
         let vectors: Vec<Vec<f32>> = ids.iter().filter_map(|id| self.exact.get(*id)).collect();
+        store::secure_delete_fts(&self.db)?;
         let evicted = self.evict(key)?;
         self.exact.zero(&ids)?;
         let mut caches: Vec<cache::Location> = cache::Location::machine().into_iter().collect();
