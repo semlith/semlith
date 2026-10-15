@@ -78,6 +78,7 @@ pub mod trt;
 pub mod upgrade;
 pub mod usage;
 pub mod watch;
+pub mod worker;
 
 use anyhow::{Result, bail};
 use embed::Model;
@@ -840,6 +841,11 @@ pub struct Span {
     /// was out of date. See [`Semlith::read_within`].
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub from_disk: bool,
+    /// The path is no longer the regular file that was indexed — a link, a
+    /// device, or moved under a linked folder — so its current bytes were
+    /// not read. The text is the store's last copy.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub replaced: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<String>,
 }
@@ -1004,7 +1010,7 @@ impl FileOutcome {
 /// is indistinguishable from a run that lost them. Every branch that produces
 /// [`FileOutcome::Skipped`] names one of these, and `tests/index_failure.rs`
 /// fails if a `file` event ever carries `skipped` without a `why`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum SkipReason {
     /// Zero bytes. A generated `.component.scss` or a package's `__init__.py`.
     Empty,
@@ -2514,9 +2520,29 @@ impl Semlith {
                 }
                 continue;
             }
-            let text = match chunk::extract(&path, &bytes) {
-                Ok(text) => text,
-                Err(_) => {
+            // Read in the parse worker, as the run will: a file that crashes
+            // a parser here is a crashed row in the plan, not a dead scan.
+            let read = match worker::read(&path, &bytes, true) {
+                Ok(read) => read,
+                Err(worker::Stop::Crashed(_)) => {
+                    not(&mut plan, store::class::CRASHED, &path);
+                    continue;
+                }
+                Err(worker::Stop::Unavailable(_)) => {
+                    not(&mut plan, store::class::UNINDEXABLE, &path);
+                    continue;
+                }
+            };
+            let (text, symbols) = match read.text {
+                Ok(Ok((text, _))) => (
+                    text,
+                    read.graph
+                        .and_then(|g| g.ok())
+                        .flatten()
+                        .map(|e| e.symbols)
+                        .unwrap_or_default(),
+                ),
+                _ => {
                     not(&mut plan, store::class::UNINDEXABLE, &path);
                     continue;
                 }
@@ -2524,7 +2550,7 @@ impl Semlith {
             // Counted as the run will chunk it, symbols and all, so the run's
             // expected total starts where it will end.
             let count = |plan: &mut Plan, key: &str| {
-                let n = planned_chunks(&path, &text);
+                let n = planned_chunks(&path, &text, &symbols);
                 plan.chunks += n;
                 plan.counts.insert(key.to_string(), n);
             };
@@ -2559,7 +2585,7 @@ impl Semlith {
                     // the total, nor in the run's per-file counts, where a file
                     // kept out would hold the expected total up until the run
                     // reached it. An accepted one is estimated by its size.
-                    let n = planned_chunks(&path, &text);
+                    let n = planned_chunks(&path, &text, &symbols);
                     let live: Vec<keyscan::Match> =
                         found.into_iter().filter(|m| m.dummy.is_none()).collect();
                     let confidence = live.iter().map(|m| m.confidence).max();
@@ -2638,6 +2664,28 @@ impl Semlith {
             .as_ref()
             .map_or_else(unrecorded, |r| r.class.as_str())
             .to_string();
+        // A file a parser crashed on is accepted by trying it once more: the
+        // journal forgets it and the next pass reads it in a fresh worker. A
+        // second crash refuses it again. No acceptance is kept, because there
+        // is nothing to accept but the retry.
+        if class == store::class::CRASHED {
+            if mode != "as-is" {
+                anyhow::bail!("{key} crashed a parser; it can only be tried again (as-is)");
+            }
+            self.writing(|me| {
+                worker::clear(&me.dir, &key)?;
+                store::unrefuse(&me.db, &key)
+            })?;
+            return Ok(store::Acceptance {
+                path: key,
+                class,
+                mode: mode.to_string(),
+                fingerprints: Vec::new(),
+                confidence: None,
+                at: now(),
+                source: source.to_string(),
+            });
+        }
         if !(store::class::reviewable(&class) || class == store::class::DUMMY) {
             anyhow::bail!(
                 "{key} is not indexable ({}); accepting cannot change that",
@@ -2658,8 +2706,14 @@ impl Semlith {
                 let bytes = anyhow::Context::with_context(std::fs::read(&key), || {
                     format!("reading {key}")
                 })?;
-                let text = chunk::extract(Path::new(&key), &bytes)
-                    .map_err(|why| anyhow::anyhow!("{key}: {}", why.as_str()))?;
+                let text = match worker::read(Path::new(&key), &bytes, false)
+                    .map_err(|stop| anyhow::anyhow!("{key}: {}", stop.reason()))?
+                    .text
+                {
+                    Ok(Ok((text, _))) => text,
+                    Ok(Err(why)) => anyhow::bail!("{key}: {}", why.as_str()),
+                    Err(panic) => anyhow::bail!("{key}: {panic}"),
+                };
                 let found = keyscan::scan(&key, &text);
                 for m in found.iter().filter(|m| m.dummy.is_none()) {
                     prints.push(keyscan::fingerprint(&salt, &text, m));
@@ -3014,7 +3068,7 @@ impl Semlith {
         // refusal about the file's own contents: see `Refusal`.
         let evicted = if refusal.credential {
             let key = path.to_string_lossy().into_owned();
-            let (chunks, images) = self.evict(&key)?;
+            let (chunks, images) = self.evict_secret(&key)?;
             chunks + images
         } else {
             0
@@ -3238,6 +3292,7 @@ impl Semlith {
             variants: accel::cache_variants(),
             lookups: Default::default(),
             hits: Default::default(),
+            journal: Some(worker::Journal::open(&self.dir)?),
         };
         let mut cached = CacheWrites::default();
         let mut clock = pipeline::WriterClock::start(walk_ms);
@@ -3559,6 +3614,7 @@ impl Semlith {
                 // same silent `skipped`, and a person looking at two thousand of
                 // them could not tell an empty `__init__.py` from a file the
                 // operating system would not open.
+                let read_mtime: Option<i64>;
                 let (hash, len, text, units, found, ready) = match prepared {
                     pipeline::Prepared::Refused(_) => unreachable!("handled above"),
                     // Taken by the scan phase a moment ago and unchanged since:
@@ -3567,11 +3623,12 @@ impl Semlith {
                     pipeline::Prepared::Unchanged {
                         size,
                         mtime,
+                        read_mtime,
                         file_bytes,
                     } => {
                         report.bytes += file_bytes;
                         self.tx_begin()?;
-                        store::heal_stamps(&self.db, &key, size as i64, mtime, now())?;
+                        store::heal_stamps(&self.db, &key, size as i64, mtime, read_mtime, now())?;
                         report.unchanged += 1;
                         say_file(
                             &mut on_file,
@@ -3628,6 +3685,7 @@ impl Semlith {
                     pipeline::Prepared::Same {
                         len,
                         mtime,
+                        read_mtime,
                         file_bytes,
                         rescan: rescanned,
                         regraph: regraphed,
@@ -3659,7 +3717,7 @@ impl Semlith {
                                 1,
                                 now(),
                             )?;
-                            let (gone, images) = self.evict(&key)?;
+                            let (gone, images) = self.evict_secret(&key)?;
                             report.removed += usize::from(gone + images > 0);
                             report
                                 .refused
@@ -3692,7 +3750,14 @@ impl Semlith {
                         // nothing is re-embedded, and the freshness rule itself
                         // stays as conservative as it was.
                         if let Some(mtime) = mtime {
-                            store::heal_stamps(&self.db, &key, len as i64, mtime, now())?;
+                            store::heal_stamps(
+                                &self.db,
+                                &key,
+                                len as i64,
+                                mtime,
+                                read_mtime,
+                                now(),
+                            )?;
                         }
                         report.unchanged += 1;
                         say_file(
@@ -3821,6 +3886,39 @@ impl Semlith {
                     // failure. Before 0.28.0 the panic unwound the store's
                     // writer thread, the store stopped being kept current, and
                     // `/api/stores` went on saying it was watched.
+                    // A file that crashed a parser, now or on an earlier pass:
+                    // refused with the reason and kept out of the store until
+                    // its content changes or a person asks for one more try.
+                    // A version the store held before goes, because what the
+                    // store holds must be what the file says.
+                    pipeline::Prepared::Crashed { reason, file_bytes } => {
+                        report.bytes += file_bytes;
+                        self.tx_begin()?;
+                        if store::file_hash(&self.db, &key)?.is_some() {
+                            self.evict(&key)?;
+                        }
+                        store::refuse(
+                            &self.db,
+                            &key,
+                            store::class::CRASHED,
+                            &reason,
+                            &[],
+                            1,
+                            now(),
+                        )?;
+                        report
+                            .refused
+                            .push((path.display().to_string(), reason.clone()));
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &path,
+                            FileOutcome::Skipped,
+                            Some(reason),
+                        );
+                        continue;
+                    }
                     pipeline::Prepared::Failed { error, file_bytes } => {
                         report.bytes += file_bytes;
                         failed(&mut report, &path, &error);
@@ -3857,12 +3955,14 @@ impl Semlith {
                         len,
                         hash,
                         file_bytes,
+                        read_mtime: seen,
                         text,
                         units,
                         found,
                         ready,
                     } => {
                         report.bytes += file_bytes;
+                        read_mtime = seen;
                         (hash, len, text, units, found, ready)
                     }
                 };
@@ -3927,7 +4027,7 @@ impl Semlith {
                             )?;
                             // A file that held no credential when it was indexed
                             // and holds one now leaves the store on this run.
-                            let (gone, images) = self.evict(&key)?;
+                            let (gone, images) = self.evict_secret(&key)?;
                             let evicted = gone + images;
                             report.removed += usize::from(evicted > 0);
                             let why = if evicted > 0 {
@@ -3963,14 +4063,20 @@ impl Semlith {
                     (Some(redacted), _) => pipeline::take_ready(
                         &path,
                         &redacted,
+                        None,
                         &ctx,
                         None,
                         std::time::Instant::now(),
                     ),
                     (None, Some(ready)) => ready,
-                    (None, None) => {
-                        pipeline::take_ready(&path, &text, &ctx, None, std::time::Instant::now())
-                    }
+                    (None, None) => pipeline::take_ready(
+                        &path,
+                        &text,
+                        None,
+                        &ctx,
+                        None,
+                        std::time::Instant::now(),
+                    ),
                 };
                 drop(text);
                 let pipeline::Ready {
@@ -4034,6 +4140,7 @@ impl Semlith {
 
                 let timed = std::time::Instant::now();
                 let file_id = store::insert_file(&self.db, &key, PENDING, len, now())?;
+                store::set_read_mtime(&self.db, file_id, read_mtime)?;
                 // Written down the moment it has a row, not when it is finished:
                 // a stop can now land inside a file, and the undo has to take the
                 // half-embedded file out along with the finished ones.
@@ -4396,6 +4503,23 @@ impl Semlith {
             let timed = std::time::Instant::now();
             let _ = cache.record(&fresh, &hits, report.cache_lookups as u64);
             self.write_parts.add("cache", timed);
+        }
+
+        // A file deleted after it was read and before its rows landed would
+        // stay in the store as a path that no longer exists: its delete event
+        // was seen while this run held the writer, against rows that did not
+        // exist yet. One `stat` per file this call wrote, and anything gone
+        // leaves now rather than at the next full sweep.
+        let mut ghosts = 0usize;
+        for key in &written {
+            if !Path::new(key).exists() {
+                let (chunks, images) = self.evict(key)?;
+                ghosts += usize::from(chunks + images > 0);
+            }
+        }
+        if ghosts > 0 {
+            report.removed += ghosts;
+            self.save()?;
         }
 
         // A stopped slice still commits what it embedded. Undoing is the
@@ -5223,6 +5347,29 @@ impl Semlith {
     /// because it is the whole of what it was asked to do.
     fn evict(&mut self, key: &str) -> Result<(usize, usize)> {
         self.evict_as(key, true)
+    }
+
+    /// [`Self::evict`] for a file refused for what it holds: everything derived
+    /// from its text goes now, not at the next full pass — the rows and the
+    /// keyword index's terms (scrubbed before the run ends), each chunk's
+    /// full-precision vector in `exact.f32`, and the vector cache's entries.
+    fn evict_secret(&mut self, key: &str) -> Result<(usize, usize)> {
+        let ids: Vec<u64> = store::chunk_ids_of(&self.db, key)?;
+        let vectors: Vec<Vec<f32>> = ids.iter().filter_map(|id| self.exact.get(*id)).collect();
+        store::secure_delete_fts(&self.db)?;
+        let evicted = self.evict(key)?;
+        self.exact.zero(&ids)?;
+        let mut caches: Vec<cache::Location> = cache::Location::machine().into_iter().collect();
+        if let Some(own) = &self.vector_cache {
+            caches.push(own.clone());
+        }
+        for at in caches {
+            if let Some(mut cache) = cache::Cache::open_in(&at) {
+                let _ = cache.forget_vectors(&vectors);
+            }
+        }
+        self.scrub |= evicted.0 + evicted.1 > 0;
+        Ok(evicted)
     }
 
     /// [`Self::evict`], keeping the file's definitions as history or not.
@@ -6158,6 +6305,7 @@ impl Semlith {
             symbol_kind: None,
             fresh: true,
             from_disk: false,
+            replaced: false,
             store: None,
         };
         self.name_enclosing_symbol(&mut span)?;
@@ -6179,9 +6327,31 @@ impl Semlith {
     /// chunks exists to prevent. A file whose bytes hash the same as the row
     /// is not re-read at all — its stamps are behind, not its text (1.4).
     fn read_from_disk(&self, span: &mut Span, start: u32, end: u32) -> Result<()> {
-        let Ok(bytes) = std::fs::read(&span.path) else {
+        // The stored path is canonical; one that no longer resolves to itself
+        // has a link in it now, and one the deny-list names is never read.
+        let at = Path::new(&span.path);
+        if canonical(at) != at || filter::denied(at).is_some_and(|d| d != filter::Denied::Hidden) {
+            span.replaced = at.exists();
             return Ok(());
+        }
+        let file = match open_regular(at) {
+            Ok((file, _)) => file,
+            Err(_) => {
+                span.replaced = at.symlink_metadata().is_ok();
+                return Ok(());
+            }
         };
+        let mut bytes = Vec::new();
+        {
+            use std::io::Read;
+            if file
+                .take(chunk::MAX_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
         if bytes.len() as u64 > chunk::MAX_FILE_BYTES {
             return Ok(());
         }
@@ -6232,20 +6402,10 @@ impl Semlith {
     /// was indexed. The same conservative rule search uses.
     fn mark_span_freshness(&self, span: &mut Span) -> Result<()> {
         let stamps = store::file_stamps(&self.db, std::slice::from_ref(&span.path))?;
-        let Some((bytes, indexed_at)) = stamps.get(&span.path) else {
+        let Some(stamp) = stamps.get(&span.path) else {
             return Ok(());
         };
-        span.fresh = match std::fs::metadata(&span.path) {
-            Ok(meta) => {
-                meta.len() as i64 == *bytes
-                    && meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .is_none_or(|d| d.as_secs() as i64 <= *indexed_at)
-            }
-            Err(_) => false,
-        };
+        span.fresh = std::fs::metadata(&span.path).is_ok_and(|meta| stamp.fresh(&meta));
         Ok(())
     }
 
@@ -6298,7 +6458,7 @@ impl Semlith {
         let stamps = store::file_stamps(&self.db, &paths)?;
         let mut fresh: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
         for path in &paths {
-            let Some((bytes, indexed_at)) = stamps.get(path) else {
+            let Some(stamp) = stamps.get(path) else {
                 // The store has no row for this path. It cannot be said to
                 // have changed, and claiming it had would be a warning about
                 // nothing.
@@ -6306,15 +6466,7 @@ impl Semlith {
                 continue;
             };
             let state = match std::fs::metadata(path) {
-                Ok(meta) => {
-                    let size_matches = meta.len() as i64 == *bytes;
-                    let unmodified = meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .is_none_or(|d| d.as_secs() as i64 <= *indexed_at);
-                    size_matches && unmodified
-                }
+                Ok(meta) => stamp.fresh(&meta),
                 // Gone or unreadable. The excerpt in hand is the only copy
                 // there is, and it is certainly not current.
                 Err(_) => false,
@@ -6519,6 +6671,89 @@ fn live_threads(known: usize) -> usize {
         0 => known,
         live => live,
     }
+}
+
+/// Open a file that should be a regular file at exactly this path, refusing
+/// anything that is not one by the time it is open.
+///
+/// The one way semlith opens a file's bytes to index or to serve. A path that
+/// was a file when it was walked can be a symbolic link, a FIFO or a device by
+/// the time it is read; `std::fs::read` follows the link and reads whatever it
+/// names, and before 0.40.0 the `read` fallback served `~/.kube/config` that
+/// way to an agent. So the last component is opened without following a link
+/// (`O_NOFOLLOW`; a reparse point is refused on Windows), without blocking on
+/// a FIFO, and the open handle — not the path — is checked to be a regular
+/// file. The caller caps what it reads from it.
+///
+/// ponytail: a directory above the file swapped for a link between the
+/// caller's check and this open is caught by the caller comparing
+/// [`canonical`] with the path, not by walking with `openat`; do that if a
+/// race inside one call matters.
+pub fn open_regular(path: &Path) -> std::io::Result<(std::fs::File, std::fs::Metadata)> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: open the link itself, never its target.
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path);
+    #[cfg(unix)]
+    let file = file.map_err(|e| {
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            std::io::Error::other("it is a symbolic link, not a file")
+        } else {
+            e
+        }
+    });
+    let file = file?;
+    let meta = file.metadata()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT
+        if meta.file_attributes() & 0x400 != 0 {
+            return Err(std::io::Error::other("it is a link, not a file"));
+        }
+    }
+    if !meta.is_file() {
+        return Err(std::io::Error::other("it is not a regular file"));
+    }
+    Ok((file, meta))
+}
+
+/// `git -C dir` with everything a repository's own config could make it run
+/// switched off.
+///
+/// semlith runs `git log` in every repository it indexes, and the repository
+/// is untrusted input like its files: an extracted archive or a synced folder
+/// can carry a `.git/config` whose `log.showSignature` and `gpg.program` make
+/// that `git log` run a program of its choosing, or whose `core.fsmonitor` and
+/// hooks do the same for other commands. Every invocation goes through here.
+pub fn git(dir: &Path) -> std::process::Command {
+    let (null, never) = if cfg!(windows) {
+        ("NUL", "NUL")
+    } else {
+        ("/dev/null", "/bin/false")
+    };
+    let mut cmd = std::process::Command::new("git");
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "core.fsmonitor=false"])
+        .arg("-c")
+        .arg(format!("core.hooksPath={null}"))
+        .arg("-c")
+        .arg(format!("gpg.program={never}"))
+        .args(["-c", "log.showSignature=false", "-c", "core.pager=cat"])
+        .stdin(std::process::Stdio::null());
+    cmd
 }
 
 pub fn canonical_calls() -> u64 {
@@ -7075,14 +7310,8 @@ fn bytes_of(paths: &[PathBuf]) -> u64 {
 /// The chunks a file's text makes, cut where the run will cut it: at the
 /// symbols the parser finds, as `pipeline::take_ready` does. Without them a
 /// JSON or code file counted a fraction of what it wrote.
-fn planned_chunks(path: &Path, text: &str) -> u64 {
-    let symbols = contained(|| graph::extract(path, text))
-        .ok()
-        .and_then(|r| r.ok())
-        .flatten()
-        .map(|e| e.symbols)
-        .unwrap_or_default();
-    chunk::chunk_file(path, text, &symbols).len() as u64
+fn planned_chunks(path: &Path, text: &str, symbols: &[graph::Symbol]) -> u64 {
+    chunk::chunk_file(path, text, symbols).len() as u64
 }
 
 /// The chunks and images a list of files is expected to hold. See
@@ -7160,11 +7389,10 @@ fn recent_head(
     let each = (HEAD_FILES / repos.len().max(1)).max(4);
     for root in repos {
         let mut taken = 0;
-        let Ok(log) = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&root)
+        let Ok(log) = git(&root)
             .args([
                 "log",
+                "--no-show-signature",
                 "-n",
                 "60",
                 "--name-only",
@@ -7273,10 +7501,15 @@ fn git_recency(paths: &[PathBuf]) -> std::collections::HashMap<PathBuf, i64> {
     }
     let mut out = std::collections::HashMap::new();
     for top in tops {
-        let Ok(log) = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&top)
-            .args(["log", "-n", COMMITS, "--name-only", "--format=%x00%ct"])
+        let Ok(log) = git(&top)
+            .args([
+                "log",
+                "--no-show-signature",
+                "-n",
+                COMMITS,
+                "--name-only",
+                "--format=%x00%ct",
+            ])
             .stderr(std::process::Stdio::null())
             .output()
         else {

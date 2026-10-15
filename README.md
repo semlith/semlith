@@ -98,11 +98,16 @@ ONNX Runtime no longer ships for it.
 
 The installer writes the binary to `~/.semlith/bin` (mode 700 on macOS and
 Linux) and, on Linux, `libonnxruntime.so` beside it. Nothing is written until
-the archive passes two checks: its SHA-256 against `SHA256SUMS`, and — when
-`gh` is on your `PATH` — its GitHub artifact attestation, signed by this
-repository's release workflow. Without `gh` it says provenance was not
-verified. curl is held to https and TLS 1.2+, and the script runs only once it
-has fully downloaded. Releases before v0.36.0 carry no attestations.
+the archive passes three checks: `SHA256SUMS` carries the project's ed25519
+signature, checked with `ssh-keygen -Y verify` (OpenSSH 8.1 or later, which
+macOS, current Linux distributions and Windows 10 and later have); the
+archive's SHA-256 matches it; and — when `gh` is on your `PATH` — its GitHub
+artifact attestation, signed by this repository's release workflow. A missing
+or wrong signature stops the install, and `semlith upgrade` holds a release to
+the same key, built into the binary; `semlith --version` names it. curl is held
+to https and TLS 1.2+, and the script runs only once it has fully downloaded.
+Releases before v0.40.0 are not signed, so these installers do not install
+them.
 
 To read the installer before running it:
 
@@ -119,6 +124,8 @@ read it, then `powershell -ExecutionPolicy Bypass -File install.ps1`.
 To verify an archive by hand:
 
 ```sh
+echo 'semlith-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICMTHiHMzeSHzzc+8UDZHUzJcvb6XGUBb+TJdFes91xm' > allowed_signers
+ssh-keygen -Y verify -f allowed_signers -I semlith-release -n file -s SHA256SUMS.sig < SHA256SUMS
 grep "  semlith-<tag>-<target>.tar.gz$" SHA256SUMS | shasum -a 256 -c
 gh attestation verify semlith-<tag>-<target>.tar.gz --repo semlith/semlith
 ```

@@ -95,19 +95,25 @@ This decides what is and is not a vulnerability.
 
 ## Known risk areas
 
-- **PDF parsing.** `pdf-extract` runs over whatever bytes are in the file.
-  Panics are caught so one malformed PDF cannot abort a run, but a crafted PDF
-  causing excessive memory or CPU use is plausible and worth reporting.
+- **Parsers.** Every reader of a file's bytes runs in a parse worker process
+  with a deadline and a memory limit, so a crash, a hang or a runaway
+  allocation costs one worker and the file is refused with the reason (see
+  [docs/security.md](docs/security.md#a-file-that-crashes-a-parser)). The
+  worker runs as you and is not a sandbox: a parser bug that reads or writes
+  files, or one that gets past the limits, is worth reporting.
 - **Untrusted corpora.** Indexing a directory you do not control runs parsers
-  over attacker-influenced bytes.
+  over attacker-influenced bytes, and `git` over its `.git/config` (with every
+  program-running setting switched off).
 - **Memory during indexing.** Embedding batches are bounded; an input that
   defeats those bounds and drives the process into swap is a bug.
 - **The hand-written HTTP server.** `src/http.rs` parses requests itself:
   request line, headers, the chunked response writer and the `Host` check. A
   request that gets past the token, the same-origin rule or the `Host` check, or
-  that wedges a worker thread, is worth reporting. Header and body sizes are
-  capped, a request has ten seconds to arrive in full, connections are capped
-  at 32, and a panicking route answers 500 without losing its worker.
+  that wedges a worker thread, is worth reporting. A request head has ten
+  seconds and 16 KiB to arrive (408 and 431 past them), it is read before a
+  worker is involved, idle connections are capped at eight per peer and 48 in
+  all, connections in service at 32, and a panicking route answers 500
+  without losing its worker.
 - **The directory-listing route.** The portal's folder picker lists directories
   under `$HOME`. It canonicalises before checking containment, so `..` and
   symlinks are resolved first; a path that escapes the check is a bug.

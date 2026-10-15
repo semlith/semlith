@@ -7,6 +7,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-15
+
+### Security
+
+From the security audit of 0.39.0 (2026-10-14): one High and eight Medium
+findings, each closed with a test in `tests/security.rs` that failed on the
+v0.39.0 binary first.
+
+**A file can no longer crash semlith (S01, High).** A 606-byte Markdown file
+of nested blockquotes aborted the process through a C assertion in
+tree-sitter-md's external scanner (`parser.c:409`, `length <= 1024`), which
+no `catch_unwind` can catch; tree-sitter-yaml has the same assertion, and
+nested lists and block sequences reach it too. Under launchd or systemd the
+daemon then crash-looped for as long as the file sat in a watched folder.
+Every reader of a file's own bytes - the grammars, PDF, Office, mail,
+notebooks, an image decode check - now runs in a parse worker,
+`semlith __parse-worker`, pooled, with a deadline and a memory limit. A crash
+costs one worker; the file is refused with the reason (new class `crashed`,
+in `semlith refused`, the portal's Decisions as *parser crashed* with *Try
+again*, and `doctor`), and a per-store poison journal keeps that version of
+the file refused across restarts. Markdown and YAML get at most 128 levels of
+nesting (both abort at about 260, measured), past which a file keeps its text
+and loses its outline.
+
+**Agent keys are read-only by default (S03).** `tools/call` answered tools
+`tools/list` hid, so any key could add, index and forget. A key now carries a
+scope: `read` (the default, and what every existing key becomes) may call
+only the read tools; write tools answer a refusal naming the fix and leave a
+ledger row. `semlith key --scope write`, or the Agents page's *Allow writes*,
+grants them. The same rule holds over `/mcp`, the stdio proxy and a local
+`semlith mcp`; the portal keeps the owner's rights.
+
+**One slow call no longer stalls every agent (S02).** `semlith_add`,
+`semlith_index` and `semlith_forget` held the daemon's MCP lock for as long as
+the writer took - a slow URL, a long run - and every other agent, then the
+proxies' heartbeats, then the portal waited behind it. They are answered
+outside that lock now, notifications before any lock, a forwarded index says
+after the index budget that its run goes on in the background, and the add
+and prices fetches have connect and overall deadlines.
+
+**read never serves what a link points at (S05, S13).** The stale-span
+fallback re-read a file with `std::fs::read`, so a file swapped for a symbolic
+link after indexing served its target. Files are opened once without
+following a link and without blocking on a FIFO, checked to be regular on the
+handle, and read through a cap, for indexing and for the fallback; a path that
+no longer resolves to itself is reported as replaced and not read.
+
+**cloud login opens only the host's own page (S04).** The server-sent
+`verification_uri_complete` went to `cmd /C start` on Windows and `open` /
+`xdg-open` elsewhere, unchecked. It is opened only when it is a plain URL on
+the configured host, printed otherwise, through `rundll32` on Windows, and
+every string the host sends is stripped of terminal control characters.
+
+**A repository's config runs nothing (S07).** `git log` obeyed the indexed
+repository's own `.git/config`, so `log.showSignature` and `gpg.program` could
+run a program. Every git call ignores the system config and switches off
+fsmonitor, hooks, gpg and signature display.
+
+**llama-server's key is off the command line (S08).** It was in argv, where
+`ps` shows it, and the port was picked, released and trusted on any `/health`
+200. The key goes through `LLAMA_API_KEY`, the server binds a port itself and
+is reached on the one its own startup line names, and native-smoke fails on a
+key in any process's command line.
+
+**Config rewrites keep modes and links (S09).** Rewriting a client config,
+hook, rules or shell rc file replaced a symbolic link with a file and reset a
+`0600` file to the umask default. One writer now writes through the link to
+its target, keeps the exact mode, and creates new files `0600`.
+
+**A refused secret leaves nothing behind (S10).** A file refused for a secret
+it held after it was indexed had its rows deleted, but its keyword terms, its
+`exact.f32` vectors and its vector-cache entries stayed. All three go in the
+same run, FTS5 runs with secure delete, and the store is vacuumed.
+
+**Releases are signed (S06).** `semlith upgrade` trusted a `SHA256SUMS`
+fetched from the same release as the archive, so whoever could replace release
+assets could replace both. Every archive and `SHA256SUMS` is now signed by the
+release workflow with the project's ed25519 key (OpenSSH `SSHSIG`, as a
+`.sig` beside each). `upgrade` verifies it with the key built into the binary
+before anything is written; `install.sh` and `install.ps1` verify it with
+`ssh-keygen -Y verify` before the checksum; all three fail closed. `semlith
+--version` names the key on a second line. **Break:** the new installers and
+`upgrade` cannot install v0.39.0 or earlier, which are unsigned.
+
+**Idle sockets no longer lock anyone out (S11).** Thirty-two connections that
+sent nothing filled every slot and the next request, the token holder's
+included, got 503. The request head is read on its connection's own thread,
+with a 10 s deadline and a 16 KiB cap (408, 431), and idle connections are
+capped at eight per address and 48 in all, the oldest silent one closed first.
+
+**cargo audit on every push.** A new CI job checks the dependency tree
+against the RustSec database. rustls moves to 0.23.46 for
+RUSTSEC-2026-0346 to 0349, published after the audit.
+
+### Fixed
+
+**Three index-time races.** A file deleted after its read and before its rows
+landed stayed in the store as a ghost path; it is evicted when the run ends.
+Stopping a run dropped every event queued behind it under its roots,
+deletions included; deletions are now applied. An edit that kept the size and
+landed between a file's read and its row's write read as fresh, because
+freshness compared the mtime with the insert time; the mtime the read saw is
+kept (`files.read_mtime`, additive) and must match.
+
+**Decisions shows a retried file's outcome without a reload.** The page
+refreshes the refusals when a run ends.
+
 ## [0.39.0] - 2026-10-13
 
 ### Changed
@@ -4909,7 +5016,9 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.38.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.40.0...HEAD
+[0.40.0]: https://github.com/semlith/semlith/compare/v0.39.0...v0.40.0
+[0.39.0]: https://github.com/semlith/semlith/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/semlith/semlith/compare/v0.37.0...v0.38.0
 [0.37.0]: https://github.com/semlith/semlith/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/semlith/semlith/compare/v0.35.0...v0.36.0

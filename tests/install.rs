@@ -4,8 +4,14 @@
 //! pipe with no test harness around it, and the failure mode that matters is
 //! the one where a truncated or tampered download still lands in `bin`. So the
 //! script is exercised end to end here against a fixture HTTP server on
-//! loopback: a real archive, a real `SHA256SUMS`, real `tar` and `shasum`, and
-//! the one bit flipped that must stop the install dead.
+//! loopback: a real archive, a real `SHA256SUMS` signed by a real
+//! `ssh-keygen -Y sign`, real `tar` and `shasum`, and the one bit flipped (or
+//! the signature missing, or made by another key) that must stop the install
+//! dead.
+//!
+//! The project's private key is not something a test holds, so each fixture
+//! signs with a throwaway key and the script copy trusts that key in place of
+//! the project's — the same one-line rewrite as the origin.
 //!
 //! Nothing here touches the network or GitHub — the tag below is deliberately
 //! not a release that exists, so a test that somehow escaped the fixture origin
@@ -117,6 +123,48 @@ fn serve(routes: HashMap<String, Vec<u8>>) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
+/// The release key `install.sh` ships with; the script copy swaps it out.
+const PROJECT_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICMTHiHMzeSHzzc+8UDZHUzJcvb6XGUBb+TJdFes91xm";
+
+/// How the fixture's SHA256SUMS is signed.
+#[derive(PartialEq)]
+enum Signed {
+    /// By the key the script copy trusts.
+    Trusted,
+    /// By a key the script copy does not trust.
+    Untrusted,
+    /// Not at all: no SHA256SUMS.sig, as every release before v0.40.0.
+    Missing,
+}
+
+/// Whether `ssh-keygen` can sign and verify. The installer refuses without it,
+/// so without it these tests have nothing to say and say that instead.
+fn have_ssh_keygen() -> bool {
+    let ok = Command::new("ssh-keygen")
+        .arg("-?")
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stderr).contains("-Y"));
+    if !ok {
+        eprintln!("skipped: ssh-keygen with -Y support is not installed");
+    }
+    ok
+}
+
+/// A throwaway ed25519 key: its path, and its `ssh-ed25519 <base64>` part.
+fn keygen(dir: &Path, name: &str) -> (PathBuf, String) {
+    let key = dir.join(name);
+    let out = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", name, "-f"])
+        .arg(&key)
+        .output()
+        .expect("run ssh-keygen");
+    assert!(out.status.success(), "ssh-keygen failed: {out:?}");
+    let public = fs::read_to_string(key.with_extension("pub")).expect("read the public key");
+    let public: Vec<&str> = public.split_whitespace().take(2).collect();
+    (key, public.join(" "))
+}
+
 /// A sandbox holding a release the script can install, plus the origin serving
 /// it. `corrupt` flips one character of the published digest.
 struct Release {
@@ -124,9 +172,11 @@ struct Release {
     home: PathBuf,
     semlith_home: PathBuf,
     origin: String,
+    /// The public key the script copy trusts in place of the project's.
+    trusted: String,
 }
 
-fn release(corrupt: bool) -> Release {
+fn release(corrupt: bool, signed: Signed) -> Release {
     let dir = tempfile::tempdir().expect("a temp dir");
     let root = dir.path();
     let name = format!("semlith-{TAG}-{}", target());
@@ -168,18 +218,42 @@ fn release(corrupt: bool) -> Release {
         digest.insert(0, if first == '0' { '1' } else { '0' });
     }
 
+    // GNU sha256sum format: digest, two spaces, file name.
+    let sums = root.join("SHA256SUMS");
+    fs::write(&sums, format!("{digest}  {archive_name}\n")).expect("write SHA256SUMS");
+    let (trusted_key, trusted) = keygen(root, "trusted");
+    let (other_key, _) = keygen(root, "other");
+
     let base = format!("/semlith/semlith/releases/download/{TAG}");
-    let routes = HashMap::from([
+    let mut routes = HashMap::from([
         (
             format!("{base}/{archive_name}"),
             fs::read(&archive).expect("read the archive back"),
         ),
         (
             format!("{base}/SHA256SUMS"),
-            // GNU sha256sum format: digest, two spaces, file name.
-            format!("{digest}  {archive_name}\n").into_bytes(),
+            fs::read(&sums).expect("read SHA256SUMS back"),
         ),
     ]);
+    if signed != Signed::Missing {
+        // Exactly the command release.yml runs.
+        let key = if signed == Signed::Trusted {
+            &trusted_key
+        } else {
+            &other_key
+        };
+        let out = Command::new("ssh-keygen")
+            .args(["-Y", "sign", "-n", "file", "-f"])
+            .arg(key)
+            .arg(&sums)
+            .output()
+            .expect("run ssh-keygen -Y sign");
+        assert!(out.status.success(), "ssh-keygen -Y sign failed: {out:?}");
+        routes.insert(
+            format!("{base}/SHA256SUMS.sig"),
+            fs::read(root.join("SHA256SUMS.sig")).expect("read the signature"),
+        );
+    }
 
     let home = root.join("home");
     let semlith_home = root.join("semlith-home");
@@ -189,30 +263,38 @@ fn release(corrupt: bool) -> Release {
         home,
         semlith_home,
         origin: serve(routes),
+        trusted,
     }
 }
 
-/// The shipped script with its one origin rewritten to the fixture's.
+/// The shipped script with its one origin rewritten to the fixture's, and its
+/// release key to the fixture's.
 ///
-/// The script takes no origin from the environment — a `curl … | sh` that read
+/// The script takes neither from the environment — a `curl … | sh` that read
 /// one would install whatever a hostile shell profile pointed it at — so the
 /// test edits a copy instead. Everything else about the copy is the shipped
 /// script, and the rewrite fails loudly if the line it is looking for moves.
-fn script_pointed_at(origin: &str, into: &Path) -> PathBuf {
+fn script_pointed_at(origin: &str, trusted: &str, into: &Path) -> PathBuf {
     let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh");
     let text = std::fs::read_to_string(&shipped).expect("reading install.sh");
     assert!(
         text.contains("origin=https://github.com"),
         "install.sh no longer pins one origin; this test rewrites that line"
     );
-    let redirected = text.replace("origin=https://github.com", &format!("origin={origin}"));
+    assert!(
+        text.contains(&format!("signers='semlith-release {PROJECT_KEY}'")),
+        "install.sh no longer trusts the project key on one line; this test rewrites it"
+    );
+    let redirected = text
+        .replace("origin=https://github.com", &format!("origin={origin}"))
+        .replace(PROJECT_KEY, trusted);
     let copy = into.join("install.sh");
     std::fs::write(&copy, redirected).expect("writing the redirected script");
     copy
 }
 
 fn install(release: &Release) -> std::process::Output {
-    let script = script_pointed_at(&release.origin, &release.home);
+    let script = script_pointed_at(&release.origin, &release.trusted, &release.home);
     Command::new("sh")
         .arg(&script)
         .env("SEMLITH_VERSION", TAG)
@@ -228,7 +310,10 @@ fn install(release: &Release) -> std::process::Output {
 
 #[test]
 fn installs_a_verified_release() {
-    let release = release(false);
+    if !have_ssh_keygen() {
+        return;
+    }
+    let release = release(false, Signed::Trusted);
     let out = install(&release);
     assert!(
         out.status.success(),
@@ -254,6 +339,11 @@ fn installs_a_verified_release() {
         printed.contains(MARKER),
         "the installed file is not the one from the archive; it printed {printed:?}"
     );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Signature verified:"),
+        "the install did not say it verified the signature:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }
 
 /// A binary that loads its runtime from beside itself is a binary the installer
@@ -261,7 +351,10 @@ fn installs_a_verified_release() {
 /// the failure would arrive on the first index rather than on the install.
 #[test]
 fn the_runtime_lands_beside_the_binary() {
-    let release = release(false);
+    if !have_ssh_keygen() {
+        return;
+    }
+    let release = release(false, Signed::Trusted);
     let out = install(&release);
     assert!(
         out.status.success(),
@@ -287,7 +380,10 @@ fn the_runtime_lands_beside_the_binary() {
 
 #[test]
 fn refuses_a_release_whose_checksum_does_not_match() {
-    let release = release(true);
+    if !have_ssh_keygen() {
+        return;
+    }
+    let release = release(true, Signed::Trusted);
     let out = install(&release);
     assert!(
         !out.status.success(),
@@ -313,4 +409,44 @@ fn refuses_a_release_whose_checksum_does_not_match() {
         "{} was created despite the checksum mismatch",
         bin.display()
     );
+}
+
+/// A refusal that names `why` and leaves nothing behind, not even the bin
+/// directory.
+fn refused(release: &Release, why: &str) {
+    let out = install(release);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "install.sh accepted it:\n{said}");
+    assert!(
+        said.contains(why),
+        "install.sh failed without saying {why:?}:\n{said}"
+    );
+    assert!(
+        !release.semlith_home.join("bin").exists(),
+        "the bin directory was created despite the refusal:\n{said}"
+    );
+}
+
+/// Every release before v0.40.0 looks like this, and so does one whose
+/// signature an attacker could not produce and simply left out.
+#[test]
+fn refuses_a_release_with_no_signature() {
+    if !have_ssh_keygen() {
+        return;
+    }
+    refused(&release(false, Signed::Missing), "has no SHA256SUMS.sig");
+}
+
+/// A SHA256SUMS rewritten to match a replaced archive and signed with the
+/// attacker's own key.
+#[test]
+fn refuses_a_release_signed_by_another_key() {
+    if !have_ssh_keygen() {
+        return;
+    }
+    refused(&release(false, Signed::Untrusted), "signature check failed");
 }

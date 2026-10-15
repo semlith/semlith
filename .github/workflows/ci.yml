@@ -85,6 +85,23 @@ jobs:
       # binary on all three operating systems whenever code changed, and a
       # second release link per OS bought nothing but minutes.
 
+  # Every dependency checked against the RustSec advisory database, on every
+  # push and pull request. A known vulnerability fails the build; an
+  # unmaintained crate is a warning. Its own job so it answers in a minute,
+  # before the long ones. The full supply-chain gate (cargo deny, fuzzing,
+  # Trusted Publishing) follows in 0.41.0.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - run: cargo install cargo-audit --locked --version 0.22.2
+
+      - run: cargo audit
+
   # The minimum Rust version the crate declares, built. `rust-version` in
   # Cargo.toml is a promise to anybody on an older toolchain, and nothing ever
   # checked it: every leg above is stable, so the declared floor could have
@@ -133,13 +150,15 @@ jobs:
       # binary — a real second responsibility rather than a few more lines.
       # Raised from 185 in 0.36.0 for the third: checking the archive's
       # GitHub attestation with gh, and saying when it could not.
+      # Raised from 235 to 275 in 0.40.0 for the release signature check:
+      # the trusted key list, the ssh-keygen verify and its refusals.
       - name: Line budget
         run: |
           for f in install.sh install.ps1; do
             lines=$(wc -l < "$f")
             echo "$f: $lines lines"
-            if [ "$lines" -ge 235 ]; then
-              echo "::error::$f is $lines lines; the budget is under 235"
+            if [ "$lines" -ge 275 ]; then
+              echo "::error::$f is $lines lines; the budget is under 275"
               exit 1
             fi
           done

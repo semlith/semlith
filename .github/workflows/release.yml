@@ -232,8 +232,43 @@ jobs:
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
 
-      # Every file the release publishes: the archives, SHA256SUMS and both
-      # installers. `gh attestation verify <file> --repo semlith/semlith` checks
+      # The checksums prove only that the files were uploaded together; anyone
+      # who can replace release assets can replace SHA256SUMS too. The
+      # signature ties them to the project key, which lives in this secret and
+      # nowhere a GitHub token reaches. `semlith upgrade` verifies
+      # SHA256SUMS.sig against the key compiled into it and both installers
+      # with `ssh-keygen -Y verify`, all failing closed, so a release without
+      # signatures could not be installed or upgraded to: no secret, no release.
+      # The secret is an unencrypted OpenSSH ed25519 private key (a passphrase
+      # would wait for a terminal that is not there).
+      - name: Sign
+        env:
+          SEMLITH_SIGNING_KEY: ${{ secrets.SEMLITH_SIGNING_KEY }}
+        run: |
+          if [ -z "$SEMLITH_SIGNING_KEY" ]; then
+            echo "::error::the SEMLITH_SIGNING_KEY secret is not set; an unsigned release cannot be installed or upgraded to"
+            exit 1
+          fi
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          chmod 600 "$key"
+          printf '%s\n' "$SEMLITH_SIGNING_KEY" > "$key"
+          cd dist
+          for file in SHA256SUMS *.tar.gz *.zip; do
+            ssh-keygen -Y sign -f "$key" -n file "$file"
+          done
+          # Verified against the keys the installers ship, so a secret holding
+          # the wrong key fails this job rather than every user's install.
+          grep -o "ssh-ed25519 [A-Za-z0-9+/=]*" ../install.sh \
+            | sed 's/^/semlith-release /' > "$RUNNER_TEMP/allowed_signers"
+          for file in SHA256SUMS *.tar.gz *.zip; do
+            ssh-keygen -Y verify -f "$RUNNER_TEMP/allowed_signers" -I semlith-release \
+              -n file -s "$file.sig" < "$file"
+          done
+          ls -l ./*.sig
+
+      # Every file the release publishes: the archives, SHA256SUMS, their
+      # signatures and both installers. `gh attestation verify <file> --repo semlith/semlith` checks
       # any of them, and the installers do exactly that for the archive.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -265,8 +300,12 @@ jobs:
           `semlith` on your `PATH`. Intel macOS has no prebuilt binary: ONNX
           Runtime no longer publishes x86_64 macOS builds.
 
-          Verify a download against `SHA256SUMS` before running it, and its
-          provenance with `gh attestation verify <file> --repo semlith/semlith`.
+          Verify a download against `SHA256SUMS` before running it, `SHA256SUMS`
+          against its signature (release key
+          `SHA256:a5oJmrakIwDHEWTDWqWe51Ttt6m2tQ0dsGzIqyxDuxs`) with
+          `echo "semlith-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICMTHiHMzeSHzzc+8UDZHUzJcvb6XGUBb+TJdFes91xm" > allowed_signers`
+          and `ssh-keygen -Y verify -f allowed_signers -I semlith-release -n file -s SHA256SUMS.sig < SHA256SUMS`,
+          and its provenance with `gh attestation verify <file> --repo semlith/semlith`.
           EOF
           } >> notes.md
           cat notes.md

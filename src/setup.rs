@@ -504,10 +504,7 @@ fn replace_block(rc: &Path, existing: &str, line: &str) -> Result<()> {
         &existing[end..]
     );
 
-    let temp = rc.with_extension("semlith-tmp");
-    std::fs::write(&temp, &next).with_context(|| format!("writing {}", temp.display()))?;
-    std::fs::rename(&temp, rc).with_context(|| format!("replacing {}", rc.display()))?;
-    Ok(())
+    crate::clientfile::rewrite(rc, &next)
 }
 
 fn path_line(bin: &Path) -> Result<String> {
@@ -1690,44 +1687,10 @@ pub fn recarry_key(previous: &str, fresh: &str) -> Vec<PathBuf> {
         if !text.contains(previous) {
             continue;
         }
-        // Written through a neighbouring temporary file: a half-written
-        // `settings.json` is a client that will not start, and this runs
-        // across a dozen of them.
-        let swapped = text.replace(previous, fresh);
-        let temp = path.with_extension(format!(
-            "{}semlith-tmp",
-            path.extension()
-                .map(|e| format!("{}.", e.to_string_lossy()))
-                .unwrap_or_default()
-        ));
-        // The temp file is created with the original's mode, not with the
-        // process umask. A config file somebody had locked down to 0600 came
-        // back as 0644 after a rotation, because the rename carried the new
-        // file's permissions with it — a rotation is meant to reduce what a
-        // credential is exposed to, not widen it. 0600 when the original's
-        // mode cannot be read, because guessing narrow is the safe direction.
-        #[cfg(unix)]
-        let mode = {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::metadata(&path)
-                .map(|m| m.permissions().mode() & 0o777)
-                .unwrap_or(0o600)
-        };
-        let written = (|| -> std::io::Result<()> {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(mode);
-            }
-            let mut file = options.open(&temp)?;
-            file.write_all(swapped.as_bytes())
-        })();
-        if written.is_ok() && std::fs::rename(&temp, &path).is_ok() {
+        // A rotation is meant to narrow what a credential is exposed to, so
+        // the file keeps its mode and its link (see `clientfile::rewrite`).
+        if crate::clientfile::rewrite(&path, &text.replace(previous, fresh)).is_ok() {
             done.push(path);
-        } else {
-            let _ = std::fs::remove_file(&temp);
         }
     }
     done

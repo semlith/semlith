@@ -1135,6 +1135,39 @@ impl Exact {
     /// id is not in it, or the file's ids are not ascending.
     pub fn get(&self, id: u64) -> Option<Vec<f32>> {
         let mut file = std::fs::File::open(&self.path).ok()?;
+        let at = self.find(&mut file, id)?;
+        self.read_at(&mut file, at).map(|(_, vector)| vector)
+    }
+
+    /// Overwrite the vectors stored for `ids` with zeros, keeping each record
+    /// and its id where it is.
+    ///
+    /// A deleted chunk's record otherwise stays until a full pass rewrites the
+    /// file, which is harmless for a chunk that was only replaced and is not
+    /// for one refused because it held a secret: its vector is derived from
+    /// that text. Zeros keep the file's layout and its binary search intact.
+    pub fn zero(&self, ids: &[u64]) -> Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        let Ok(mut file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.path)
+        else {
+            return Ok(());
+        };
+        let zeros = vec![0u8; self.dim * 4];
+        for id in ids {
+            if let Some(at) = self.find(&mut file, *id) {
+                file.seek(SeekFrom::Start(at * self.record_size() as u64 + 8))?;
+                file.write_all(&zeros)?;
+            }
+        }
+        file.sync_data()?;
+        Ok(())
+    }
+
+    /// The record number holding `id`, by binary search over the ascending ids.
+    fn find(&self, file: &mut std::fs::File, id: u64) -> Option<u64> {
         let size = self.record_size() as u64;
         let records = file.metadata().ok()?.len() / size;
         if records == 0 {
@@ -1143,9 +1176,9 @@ impl Exact {
         let (mut low, mut high) = (0u64, records - 1);
         while low <= high {
             let mid = low + (high - low) / 2;
-            let (found, vector) = self.read_at(&mut file, mid)?;
+            let (found, _) = self.read_at(file, mid)?;
             match found.cmp(&id) {
-                std::cmp::Ordering::Equal => return Some(vector),
+                std::cmp::Ordering::Equal => return Some(mid),
                 std::cmp::Ordering::Less => low = mid + 1,
                 std::cmp::Ordering::Greater => {
                     if mid == 0 {

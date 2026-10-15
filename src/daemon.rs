@@ -4283,6 +4283,18 @@ pub fn run(
     // do.
     let key = crate::home::agent_key()?;
     server.set_agent_key(&key);
+    // Keys from before 0.40.0 had no scope and could write. Said once, the
+    // first start that finds no scope file, and the file is written so the
+    // line is not repeated.
+    if let Ok(scope) = crate::home::agent_scope_path()
+        && !scope.exists()
+    {
+        let _ = crate::home::set_agent_scope(false);
+        report(
+            "agent key: read-only from 0.40.0 (search and read); `semlith key --scope write` \
+             lets agents index, add and forget",
+        );
+    }
     server.set_mcp_open(mcp_http);
     if mcp_http {
         report(&format!(
@@ -5528,12 +5540,28 @@ impl crate::mcp::Writer for Writer {
         // the writer has run it and answers with the summary, which is the
         // guarantee it has always had. The run is in the store's snapshot too,
         // so the portal shows an agent's index beside the page's own.
-        let (_run, progress) = self
+        let (run, progress) = self
             .0
             .index(&store, paths.to_vec())
             .map_err(|e| e.to_string())?;
         let mut last = None;
-        for event in progress {
+        // Bounded as the in-process path is: a client cuts a call off at its
+        // own timeout, so past the budget the agent is told the run goes on
+        // rather than being left waiting on a run of unknown length.
+        let deadline = std::time::Instant::now() + crate::mcp::index_budget();
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = match progress.recv_timeout(left) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Ok(format!(
+                        "Still indexing after {} s; the run (#{run}) continues in the \
+                         background. Call semlith_stats to see when it has finished.",
+                        crate::mcp::index_budget().as_secs()
+                    ));
+                }
+            };
             match event["event"].as_str() {
                 Some("error") => {
                     return Err(event["error"]

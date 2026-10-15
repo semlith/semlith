@@ -481,7 +481,8 @@ pub fn call(
 fn refusal(status: u16, body: &[u8]) -> Failure {
     let parsed: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     let error = &parsed["error"];
-    let text = |k: &str| error.get(k).and_then(Value::as_str).map(str::to_string);
+    // Every field here can end up on a terminal through `Failure`'s Display.
+    let text = |k: &str| error.get(k).and_then(Value::as_str).map(printable);
     Failure::Refused {
         status,
         code: text("code").unwrap_or_else(|| format!("http_{status}")),
@@ -525,22 +526,49 @@ fn machine_name() -> String {
         .unwrap_or_else(|| "this machine".to_string())
 }
 
+/// A string the host sent, safe to print: no escape or control characters,
+/// so a reply cannot retitle the terminal, clear it, or fake a line of
+/// semlith's own output.
+fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// `url` when it is safe to hand to the OS's opener: on the host this login
+/// runs against, and made only of characters no opener or shell reads as
+/// anything but a URL. The host picks the page, so without this a hostile one
+/// could open any local app or path (`open /System/Applications/…`), or on
+/// Windows run a command through the `&` that `cmd /C start` used to parse.
+fn openable<'a>(host: &str, url: &'a str) -> Option<&'a str> {
+    let safe = url
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-._~:/?=#[]".contains(&b));
+    (safe && url.starts_with(&format!("{host}/"))).then_some(url)
+}
+
 /// Open `url` in the browser, when a person is at a terminal to see it.
 fn open_browser(url: &str) {
     use std::io::IsTerminal;
+    // `rundll32 url.dll,FileProtocolHandler` takes the URL as one argument to
+    // the default handler; `cmd /C start` parsed it as a command line.
+    let (program, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("open", &[])
+    } else if cfg!(windows) {
+        ("rundll32", &["url.dll,FileProtocolHandler"])
+    } else {
+        ("xdg-open", &[])
+    };
+    // Debug builds only: a test on Windows cannot give this process a
+    // terminal, so it names a file that records what would have been opened.
+    #[cfg(debug_assertions)]
+    if let Some(log) = std::env::var_os("SEMLITH_TEST_OPENED") {
+        let _ = std::fs::write(log, format!("{program} {} {url}\n", args.join(" ")));
+        return;
+    }
     if !std::io::stdout().is_terminal() {
         return;
     }
-    let mut command = if cfg!(target_os = "macos") {
-        std::process::Command::new("open")
-    } else if cfg!(windows) {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", ""]);
-        c
-    } else {
-        std::process::Command::new("xdg-open")
-    };
-    let _ = command
+    let _ = std::process::Command::new(program)
+        .args(args)
         .arg(url)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -565,7 +593,7 @@ pub fn login(
                 );
             }
             let who = call(&host, Some(token), "GET", "/v1/whoami", Send::default())?.json()?;
-            let slug = who["org"]["slug"].as_str().unwrap_or_default().to_string();
+            let slug = printable(who["org"]["slug"].as_str().unwrap_or_default());
             if slug.is_empty() {
                 bail!(
                     "{} did not say which org this token belongs to",
@@ -622,9 +650,10 @@ fn device_flow(
         .as_str()
         .unwrap_or_default()
         .to_string();
-    let code = asked["user_code"].as_str().unwrap_or_default();
-    let page = asked["verification_uri"].as_str().unwrap_or_default();
-    let complete = asked["verification_uri_complete"].as_str().unwrap_or(page);
+    let code = printable(asked["user_code"].as_str().unwrap_or_default());
+    let code = code.as_str();
+    let page = printable(asked["verification_uri"].as_str().unwrap_or_default());
+    let complete = printable(asked["verification_uri_complete"].as_str().unwrap_or(&page));
     if device.is_empty() || code.is_empty() {
         bail!("{} did not hand out a device code", host_name(host));
     }
@@ -635,7 +664,13 @@ fn device_flow(
         org.map(|o| format!(", then approve {o}"))
             .unwrap_or_default()
     ));
-    open_browser(complete);
+    match openable(host, &complete) {
+        Some(url) => open_browser(url),
+        None => say(&format!(
+            "Not opening {complete} in the browser: it is not a page on {}.",
+            host_name(host)
+        )),
+    }
     let deadline = std::time::Instant::now() + Duration::from_secs(expires);
     loop {
         std::thread::sleep(Duration::from_secs(interval));
@@ -658,7 +693,7 @@ fn device_flow(
             Ok(reply) => {
                 let got = reply.json()?;
                 let token = got["token"].as_str().unwrap_or_default().to_string();
-                let slug = got["org"].as_str().unwrap_or_default().to_string();
+                let slug = printable(got["org"].as_str().unwrap_or_default());
                 if !token.starts_with(TOKEN_PREFIX) || slug.is_empty() {
                     bail!("{} approved the code but sent no token", host_name(host));
                 }
@@ -1591,9 +1626,7 @@ pub fn push(
 
 /// The commit a working tree is at, when it is a git checkout.
 fn git_head(dir: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = crate::git(dir)
         .args(["rev-parse", "HEAD"])
         .stderr(std::process::Stdio::null())
         .output()
@@ -2073,6 +2106,33 @@ mod stub;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S04: only a page on the login's own host, in plain URL characters,
+    /// is handed to the OS's opener.
+    #[test]
+    fn only_a_plain_page_on_the_host_is_opened() {
+        let host = "https://cloud.semlith.com";
+        let good = "https://cloud.semlith.com/cli?code=WDJB-MJHT";
+        assert_eq!(openable(host, good), Some(good));
+        for planted in [
+            "/System/Applications/Calculator.app",
+            "file:///etc/passwd",
+            "https://cloud.semlith.com.evil.example/cli",
+            "https://evil.example/cli?code=A",
+            "https://cloud.semlith.com/cli?code=A&calc",
+            "https://cloud.semlith.com/cli?code=A|calc",
+            "https://cloud.semlith.com/cli?code=%41",
+            "https://cloud.semlith.com/cli code",
+            "https://cloud.semlith.com/cli\"x",
+            "https://cloud.semlith.com",
+        ] {
+            assert_eq!(openable(host, planted), None, "{planted}");
+        }
+        assert_eq!(
+            printable("a\u{1b}]0;x\u{7}b\u{1b}[2J\r\n\u{9b}c"),
+            "a]0;xb[2Jc"
+        );
+    }
 
     fn local(score: f32, path: &str) -> crate::Hit {
         RemoteHit {
