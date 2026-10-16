@@ -1694,6 +1694,7 @@ fn run() -> Result<()> {
                 // estimate is one where a line per file is the noise the estimate
                 // is trying to cut through.
                 let mut spoke = Instant::now();
+                let mut recent = std::collections::VecDeque::new();
                 let report = store.index_paths(roots, |path, p| {
                     if quiet {
                         return;
@@ -1730,7 +1731,7 @@ fn run() -> Result<()> {
                     }
                     if spoke.elapsed() >= PROGRESS_INTERVAL {
                         spoke = Instant::now();
-                        eprintln!("    {}", predict(p, started.elapsed()));
+                        eprintln!("    {}", predict(p, started.elapsed(), &mut recent));
                     }
                 })?;
 
@@ -4290,9 +4291,27 @@ const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2)
 /// Where the run is, how fast it is going, and how much longer it has: the
 /// engine's own share done and time left ([`semlith::progress`]), the same
 /// figures the portal shows.
-fn predict(p: semlith::IndexProgress, elapsed: std::time::Duration) -> String {
+/// How far back the printed rate looks, in seconds.
+const RATE_WINDOW: f32 = 20.0;
+
+/// One progress line. `recent` is the caller's `(seconds, chunks)` readings,
+/// so the rate printed is the last twenty seconds', not chunks over the whole
+/// run: cobra printed 3 chunks/s rising to 13 while the lane ran at ~75 once
+/// it had started, because the lane's wait was in the denominator.
+fn predict(
+    p: semlith::IndexProgress,
+    elapsed: std::time::Duration,
+    recent: &mut std::collections::VecDeque<(f32, u64)>,
+) -> String {
     let secs = elapsed.as_secs_f32().max(0.001);
-    let rate = p.chunks as f32 / secs;
+    recent.push_back((secs, p.chunks as u64));
+    while recent.len() > 2 && recent.front().is_some_and(|(t, _)| secs - t > RATE_WINDOW) {
+        recent.pop_front();
+    }
+    let rate = match (recent.front(), recent.back()) {
+        (Some((t0, c0)), Some((t1, c1))) if t1 > t0 => (c1.saturating_sub(*c0)) as f32 / (t1 - t0),
+        _ => p.chunks as f32 / secs,
+    };
     let images = if p.images_total > 0 {
         format!(", {}/{} images", p.images, p.images_total)
     } else {

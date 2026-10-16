@@ -873,6 +873,16 @@ impl RunState {
             .saturating_sub(held)
     }
 
+    /// How long the run's work has taken: its clock less its wait in the
+    /// queue. The wizard submits a run at the scan, so the minutes a person
+    /// spends on the Review and Index pages were on the clock: ripgrep took
+    /// 41 s by its stages and its history and the card said "done in 1m 31s".
+    /// Every surface — the card, the history, the log's events — reads this.
+    fn work_time(&self) -> Duration {
+        self.elapsed()
+            .saturating_sub(Duration::from_millis(self.queued_ms.unwrap_or(0)))
+    }
+
     /// Bytes per second from the first batch to the last, once there were two.
     fn embed_rate(&self) -> Option<f64> {
         let (t0, _, b0) = self.first_sample?;
@@ -1927,7 +1937,7 @@ impl Store {
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .find(|run| run.id == id)
-            .map(|run| run.elapsed().as_millis() as u64)
+            .map(|run| run.work_time().as_millis() as u64)
             .unwrap_or(0)
     }
 
@@ -2029,7 +2039,8 @@ impl Store {
             "started_at": run.started,
             "finished_at": run.finished,
             "queued_ms": run.queued_ms,
-            "elapsed_ms": run.elapsed().as_millis() as u64,
+            // The work's own time; `queued_ms` is the wait before it.
+            "elapsed_ms": run.work_time().as_millis() as u64,
             // Null until the rate has settled, and whenever the run is not
             // running: the card says `estimating…` rather than guessing.
             "eta_ms": run.eta_ms(),

@@ -186,6 +186,9 @@ pub fn estimate(path: &Path, bytes: u64, planned: Option<u64>) -> (u64, bool) {
 /// How much a shown time left may move in ten seconds, either way.
 const STEP: f64 = 1.25;
 
+/// The smallest figure, in seconds, a rise is capped from.
+const RISE_FLOOR: f64 = 10.0;
+
 /// How long the rate is averaged over, in seconds. A mixed corpus changes
 /// pace every minute or so (a stretch of images, a dense log, a slice's drain);
 /// thirty seconds followed each turn and read it as the whole run's pace.
@@ -312,7 +315,11 @@ impl Eta {
                 } else {
                     let counted = (shown - dt).max(0.0);
                     let f = STEP.powf(dt / 10.0);
-                    raw.clamp(counted / f, counted.max(1.0) * f)
+                    // The rise is capped from at least RISE_FLOOR, not from
+                    // the figure: a figure that had counted down to a second
+                    // could otherwise climb only 2 % a tick, and read "~1s
+                    // left" for half a minute of work after a stall.
+                    raw.clamp(counted / f, counted.max(RISE_FLOOR) * f)
                 }
             }
             None => raw,
@@ -488,6 +495,36 @@ mod tests {
         let (_, last) = *shown.last().unwrap();
         let truth = (expected - 599.0 * 100.0) / 100.0;
         assert!((last - truth).abs() / truth < 0.05, "{last} vs {truth}");
+    }
+
+    /// A run that slows near the end: the figure had counted down to about a
+    /// second and could then rise only 4.6 % per tick, so cobra printed
+    /// "~1s left" for 35 s and again with 28 s to go. Once the measured rate
+    /// says more than ten seconds remain, the figure never reads under five.
+    #[test]
+    fn the_figure_recovers_when_the_rate_falls() {
+        // cobra's shape: the lane is busy elsewhere, nothing moves for 35 s
+        // while the clock runs, then the work goes at a fraction of the prior.
+        let mut eta = Eta::with_prior(Some(100.0));
+        let total = 2_000.0;
+        let mut done = 0.0;
+        for s in 0..120 {
+            let t = s as f64;
+            done = if s <= 35 {
+                0.0
+            } else {
+                (done + 13.0_f64).min(total)
+            };
+            eta.observe(t, done);
+            let remaining = total - done;
+            if let Some((ms, _)) = eta.left(t, remaining, false) {
+                let at_rate = remaining / eta.rate().unwrap();
+                assert!(
+                    at_rate <= 10.0 || ms >= 5_000,
+                    "at {t} s: {ms} ms shown, {at_rate:.1} s left at the measured rate"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1779,7 +1779,7 @@ function runLeftMs(run) {
   if (truthRun(run)) return run.eta_ms ?? null;
   const done = runPct(run) / 100;
   if (done < 0.05 || !run.elapsed_ms) return run.eta_ms ?? null;
-  return Math.round((run.elapsed_ms - (run.queued_ms || 0)) * (1 - done) / done);
+  return Math.round(run.elapsed_ms * (1 - done) / done);
 }
 
 /** "about 12 min", the way an estimate is said: never to the second. */
@@ -6661,7 +6661,8 @@ function runLine(h) {
     const total = (f) => (f ? f.database + f.exact + f.vectors : 0);
     return `${bytes(total(c.before))} → ${bytes(total(c.after))}`;
   }
-  const ms = h.elapsed_ms ? h.elapsed_ms - (h.queued_ms || 0) : h.started && h.finished ? (h.finished - h.started) * 1000 : 0;
+  // `elapsed_ms` is the work's own time from 0.42.0; the queue is apart.
+  const ms = h.elapsed_ms ? h.elapsed_ms : h.started && h.finished ? (h.finished - h.started) * 1000 : 0;
   // History keeps whole seconds; a run inside one second says so rather than
   // claiming a time it did not measure.
   const took = ms ? ` · took ${spellTook(ms)}` : h.finished || h.finished_at ? " · took under a second" : "";
