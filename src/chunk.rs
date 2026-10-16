@@ -107,6 +107,9 @@ pub fn extract_counted(
             if is_binary(bytes) {
                 return Err(SkipReason::Binary);
             }
+            if let Some(share) = not_text(bytes) {
+                return Err(SkipReason::NotText(share));
+            }
             let text = String::from_utf8_lossy(bytes).into_owned();
             let units = match other {
                 Some("csv") => Some(formats::delimited_cells(&text, ',')),
@@ -214,6 +217,35 @@ fn guard<T>(extract: impl FnOnce() -> Option<T>) -> Option<T> {
 fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|&b| b == 0)
 }
+
+/// The share, in percent, of the first 8 KiB that is neither valid UTF-8 nor
+/// a printable character, when it is more than [`NOT_TEXT_PERCENT`].
+///
+/// The NUL rule is git's, and compressed data need not hold a NUL: ripgrep's
+/// `tests/data/sherlock.br` (Brotli, 180 bytes) became one chunk of U+FFFD
+/// while its seven siblings were refused. Random bytes are about half
+/// invalid; Latin-1 prose, the encoding a user is likeliest to rely on, stays
+/// well under a fifth even when every word is accented, so it is still read.
+fn not_text(bytes: &[u8]) -> Option<u8> {
+    let sample = &bytes[..bytes.len().min(8192)];
+    if sample.is_empty() {
+        return None;
+    }
+    let mut bad = 0usize;
+    for chunk in sample.utf8_chunks() {
+        bad += chunk.invalid().len();
+        bad += chunk
+            .valid()
+            .bytes()
+            .filter(|b| (*b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r' | 0x0c)) || *b == 0x7f)
+            .count();
+    }
+    let share = bad * 100 / sample.len();
+    (share > NOT_TEXT_PERCENT).then_some(share as u8)
+}
+
+/// Above this share of unreadable bytes a file is not text.
+const NOT_TEXT_PERCENT: usize = 30;
 
 /// Split text into line-aligned chunks of at most [`MAX_CHARS`] characters.
 ///
@@ -621,6 +653,20 @@ mod tests {
     fn binary_is_detected() {
         assert!(is_binary(b"abc\0def"));
         assert!(!is_binary(b"fn main() {}"));
+        // Compressed bytes with no NUL in them are not text (audit F05);
+        // Latin-1 prose, accents and all, still is.
+        let brotli: Vec<u8> = (0..180u32)
+            .map(|i| ((i * 151 + 7) % 255 + 1) as u8)
+            .collect();
+        assert!(!brotli.contains(&0));
+        assert!(not_text(&brotli).is_some(), "{:?}", not_text(&brotli));
+        let latin1: Vec<u8> = "Le café était très agréable, à côté du théâtre élégant. "
+            .repeat(20)
+            .chars()
+            .map(|c| c as u32 as u8)
+            .collect();
+        assert_eq!(not_text(&latin1), None);
+        assert_eq!(not_text("Grüße, 東京, naïve résumé".as_bytes()), None);
     }
 
     /// A forced cut is what Markdown takes, and it does end a chunk wherever it

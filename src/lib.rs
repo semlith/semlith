@@ -1057,6 +1057,9 @@ pub enum SkipReason {
     /// An archive format (a `.docx`, an EPUB) that decompresses past
     /// [`crate::formats::MAX_ARCHIVE_TEXT`]: left out as a zip bomb would be.
     ArchiveTooLarge,
+    /// Bytes with no NUL that are still not text: this percentage of the
+    /// first 8 KiB is invalid UTF-8 or control characters (a Brotli file).
+    NotText(u8),
 }
 
 impl SkipReason {
@@ -1076,6 +1079,9 @@ impl SkipReason {
                 "decompresses past {} MiB, left out as a zip bomb would be",
                 crate::formats::MAX_ARCHIVE_TEXT / (1024 * 1024)
             ),
+            Self::NotText(share) => {
+                format!("binary: {share} % of its first 8 KiB is not valid UTF-8 text")
+            }
         }
     }
 
@@ -1101,6 +1107,7 @@ impl SkipReason {
             Self::NotDecodableImage => "not a decodable image",
             Self::Encrypted => "encrypted",
             Self::ArchiveTooLarge => "archive too large",
+            Self::NotText(_) => "binary",
         }
     }
 }
