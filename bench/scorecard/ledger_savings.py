@@ -26,19 +26,30 @@ def store_report(store, window):
     raw = sh([SEMLITH, "report", "savings", "--store", store, "--format", "json", "--window", window]).stdout
     doc = json.loads(raw)
     out = {"store": os.path.basename(store)}
-    for block in doc["blocks"]:
-        if block["block"] == "text" and block["text"].startswith("Over "):
-            m = re.search(r"Over ([\d ]+) recorded retrievals, ([\d ]+) of which are credited \((\d+)% coverage, (\w+)\)",
-                          block["text"])
+
+    def figures():
+        # semlith.report/2: KPIs and facts are typed figures with a label.
+        for kpi in doc.get("kpis", []):
+            yield kpi
+        for block in doc.get("blocks", []):
+            for fact in block.get("facts", []) or []:
+                yield fact
+
+    for fig in figures():
+        if fig.get("label") == "Coverage":
+            m = re.search(r"([\d,]+) of ([\d,]+) agent queries", fig.get("over", ""))
             if m:
-                out.update(retrievals=number(m.group(1)), credited=number(m.group(2)), tier=m.group(4))
+                out.update(credited=number(m.group(1)), retrievals=number(m.group(2)))
+        elif fig.get("label") == "Tier":
+            out["tier"] = fig.get("value")
+        elif fig.get("label") == "Refunds":
+            out["refunds"] = int(fig.get("value") or 0)
+    for block in doc.get("blocks", []):
         for row in block.get("rows", []) or []:
-            if row[0] == "Whole files not read":
-                out["whole_tokens"] = number(row[1])
-            elif row[0] == "Excerpts read instead":
-                out["excerpt_tokens"] = number(row[1])
-            elif row[0] == "Refunds":
-                out["refunds"] = number(row[1])
+            if row and row[0] == "Whole files not read":
+                out["whole_tokens"] = int(row[1])
+            elif row and row[0] == "Excerpts read instead":
+                out["excerpt_tokens"] = int(row[1])
     return out
 
 
