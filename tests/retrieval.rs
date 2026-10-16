@@ -468,7 +468,8 @@ fn the_retrieval_metrics_are_measured() {
     }
 
     let tool_list = semlith::mcp::tool_list_bytes();
-    let tool_tokens = tool_list.div_ceil(4);
+    // The same count the Agents page prints (0.42.0): one function.
+    let tool_tokens = semlith::mcp::tool_list_tokens() as usize;
     let summary = Summary::of(reports);
     // Measured before the table is drawn, because its row goes in that table.
     let image = score_the_image_class(&fixtures, runs);

@@ -2990,28 +2990,16 @@ pub fn tool_catalog(seen: &mut std::collections::BTreeMap<String, Vec<i64>>) -> 
         .collect()
 }
 
-/// What the tool list costs a session, in tokens, counted by `counter`.
+/// What the tool list costs a session, in tokens: its bytes over four.
 ///
-/// Once per session, before the agent has asked anything: it is the standing
-/// charge for having semlith connected at all, and a user should be able to
-/// read it rather than capture traffic to discover it.
-pub fn tool_list_tokens(counter: &crate::ledger::Counter) -> i64 {
-    // The listed tools only: their bytes are what `tool_list_bytes` counts,
-    // and a ratio of sixteen tools' prose to eight tools' bytes is neither.
-    let listed = listed_names();
-    let text = tool_list()
-        .into_iter()
-        .filter(|(name, _)| listed.contains(name))
-        .map(|(name, about)| format!("{name} {about}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let count = counter.count(&text);
-    // The whole payload, not only the prose: the schemas are what an agent is
-    // sent. The prose is what a tokenizer can be run over honestly, so the
-    // count is scaled by the payload's share of it rather than estimated twice.
-    let bytes = tool_list_bytes() as i64;
-    let prose = text.len().max(1) as i64;
-    count * bytes / prose
+/// One count, the one the gate in `tests/retrieval.rs` asserts and the Agents
+/// page prints. Until 0.42.0 the page ran the store's tokenizer over the
+/// tools' prose and scaled it to the payload (765) while the gate counted
+/// bytes (659 < 675), so the docs' claim and the page disagreed by a sixth.
+/// Neither is the agent's own tokenizer, which no local count can be; four
+/// bytes a token is the stated rule, and it is said to be one.
+pub fn tool_list_tokens() -> i64 {
+    (tool_list_bytes() as i64 + 3) / 4
 }
 
 #[cfg(test)]

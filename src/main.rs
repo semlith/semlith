@@ -2461,6 +2461,23 @@ fn run() -> Result<()> {
                 table.fetched,
                 table.models.len()
             );
+            // With no model named, the table itself: it printed its header
+            // line and nothing under it.
+            if model.is_none() {
+                println!(
+                    "{:<52} {:>10} {:>10} {:>11}",
+                    "model", "input $/M", "output $/M", "cache rd $/M"
+                );
+                for (key, price) in &table.models {
+                    let r = &price.rates;
+                    println!(
+                        "{key:<52} {:>10} {:>10} {:>11}",
+                        r.input,
+                        r.output,
+                        r.cache_read.map_or("—".to_string(), |v| v.to_string()),
+                    );
+                }
+            }
             if let (Some(name), Some(priced)) = (model, priced) {
                 match priced {
                     Some((key, price)) => {
@@ -3326,7 +3343,37 @@ fn run() -> Result<()> {
             match action {
                 None => {
                     let listing: serde_json::Value = match &upstream {
-                        Some(daemon) => serde_json::from_str(&daemon.get("/api/refused")?)?,
+                        Some(daemon) => {
+                            // The stores named, by the labels the daemon uses
+                            // for them; every store when none was named.
+                            let path = if cli.store.is_empty() {
+                                "/api/refused".to_string()
+                            } else {
+                                let named = read_fleet(&cli.store, &cwd, true)?;
+                                let labels = named.labels();
+                                let query: Vec<String> = labels
+                                    .iter()
+                                    .map(|l| {
+                                        let encoded: String = l
+                                            .bytes()
+                                            .map(|b| match b {
+                                                b'A'..=b'Z'
+                                                | b'a'..=b'z'
+                                                | b'0'..=b'9'
+                                                | b'-'
+                                                | b'_'
+                                                | b'.'
+                                                | b'~' => (b as char).to_string(),
+                                                _ => format!("%{b:02X}"),
+                                            })
+                                            .collect();
+                                        format!("store={encoded}")
+                                    })
+                                    .collect();
+                                format!("/api/refused?{}", query.join("&"))
+                            };
+                            serde_json::from_str(&daemon.get(&path)?)?
+                        }
                         None => {
                             let fleet = read_fleet(&cli.store, &cwd, true)?;
                             let mut stores = Vec::new();

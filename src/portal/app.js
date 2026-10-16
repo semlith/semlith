@@ -400,6 +400,14 @@ function perSecond(value) {
 }
 
 /** The tail of a path, for a store root in a narrow column. */
+// Where this daemon keeps its stores, as the page prints it. The daemon's own
+// answer, not `~/.semlith`: SEMLITH_HOME moves it, and the page used to name
+// the default while the store landed somewhere else.
+function semHome() {
+  const h = data.about?.store_home;
+  return h && !String(h).startsWith("unresolved") ? tilde(h) : "~/.semlith";
+}
+
 function tilde(path, home) {
   const p = String(path || "");
   const h = home || state.home;
@@ -2350,8 +2358,15 @@ function connectedCount() {
   return (data.agents?.connections || []).length;
 }
 
+// A client counts as registered only when its registration reaches this
+// daemon: one that names another binary or home is "cannot reach semlith"
+// in Needs attention, and must not also tick "Connect an agent" (F08).
+function cannotReach(c) {
+  return !!(c.registered && (c.repair || c.why || c.fault));
+}
+
 function registeredClients() {
-  return (data.agents?.doctor || []).filter((c) => c.registered);
+  return (data.agents?.doctor || []).filter((c) => c.registered && !cannotReach(c));
 }
 
 /** The ledger's state, in the word the daemon card uses. */
@@ -2399,7 +2414,7 @@ function welcomeScreen() {
             "div",
             { class: "col gap6" },
             el("div", { class: "welcome-h", text: "Give your agents a memory of your code, kept on this machine." }),
-            el("div", { class: "welcome-lead", text: "Semlith reads your folders once, keeps a searchable index under ~/.semlith, and answers every agent over one local endpoint. Your first store takes a few minutes." }),
+            el("div", { class: "welcome-lead", text: `Semlith reads your folders once, keeps a searchable index under ${semHome()}, and answers every agent over one local endpoint. Your first store takes a few minutes.` }),
           ),
           el(
             "div",
@@ -2726,7 +2741,9 @@ function wizardScreen() {
     const items = held.flatMap((r) => (r.plan.review || []).map((it) => ({ ...it, store: r.store, risk: riskOf(it) })));
     const notIndexed = {};
     const paths = {};
+    const why = {};
     for (const r of held) {
+      Object.assign(why, r.plan.not_indexed_why || {});
       for (const [cls, count] of Object.entries(r.plan.not_indexed || {})) notIndexed[cls] = (notIndexed[cls] || 0) + count;
       for (const [cls, list] of Object.entries(r.plan.not_indexed_paths || {})) paths[cls] = (paths[cls] || []).concat(list);
       if (r.plan.credential && r.plan.credential.length) paths.credential = (paths.credential || []).concat(r.plan.credential);
@@ -2742,6 +2759,7 @@ function wizardScreen() {
     const chunks = held.length && held.every((r) => r.plan.chunks != null) ? held.reduce((a, r) => a + r.plan.chunks, 0) + decided.filter((d) => w.decisions[d.path] !== "out").reduce((a, d) => a + (d.chunks || 0), 0) : null;
     const images = held.reduce((a, r) => a + (r.plan.images || 0), 0);
     return {
+      why,
       held,
       items,
       undecided: items.length - decided.length,
@@ -2815,7 +2833,7 @@ function wizardScreen() {
         ? ["Use lowercase letters, digits and dashes — for example research-notes.", "bad"]
         : taken
           ? [`“${nm}” is already a store on this machine. Pick another name.`, "bad"]
-          : [`Available · kept at ~/.semlith/stores/${nm}`, "ok"];
+          : [`Available · kept at ${semHome()}/stores/${nm}`, "ok"];
     return { nm, ok, msg };
   }
 
@@ -3415,7 +3433,7 @@ function wizardScreen() {
         type = "folder";
       } catch (e) {
         if (/outside the home/.test(e.message)) {
-          toast(`${p} is outside your home folder, which the portal may not read`, true);
+          toast(`${p} is outside your home folder, which the portal may not read. From a terminal, semlith index ${p} indexes it.`, true);
           continue;
         }
       }
@@ -3904,7 +3922,7 @@ function wizardScreen() {
             ? el(
                 "div",
                 { class: "group-paths" },
-                g.paths.length ? g.paths.slice(0, 50).map((p) => pathSpan(rel(p), "", p)) : el("span", { text: "The list is written when the run ends; the count is the scan's." }),
+                g.paths.length ? g.paths.slice(0, 50).map((p) => (P.why && P.why[p] ? el("span", { class: "row gap6 min0" }, pathSpan(rel(p), "", p), el("span", { class: "muted t-xs nowrap", text: P.why[p] })) : pathSpan(rel(p), "", p))) : el("span", { text: "The list is written when the run ends; the count is the scan's." }),
                 g.count > g.paths.length && g.paths.length ? el("span", { text: `…and ${n(g.count - g.paths.length)} more` }) : null,
               )
             : null,
@@ -4379,7 +4397,7 @@ function wizardScreen() {
       spin = w.busy;
       label = w.busy ? (w.created ? "Saving…" : "Creating…") : w.created ? (w.created === ns.nm ? "Continue" : "Rename and continue") : "Create store";
       on = ns.ok && !w.busy;
-      hint = ns.ok ? `Creates an empty store at ~/.semlith/stores/${ns.nm}` : "Pick a name to continue";
+      hint = ns.ok ? `Creates an empty store at ${semHome()}/stores/${ns.nm}` : "Pick a name to continue";
       nextFn = createOrRename;
     } else if (step === 2) {
       const k = w.sources.length;
@@ -5342,7 +5360,7 @@ function attentionItems() {
   const reclaim = stores.filter((s) => reclaimable(s) > 1024 * 1024);
   if (reclaim.length) out.push({ tone: "blue", title: `${bytes(reclaim.reduce((a, s) => a + reclaimable(s), 0))} reclaimable in ${plural(reclaim.length, "store")}`, sub: reclaim.map((s) => s.name).join(", "), label: "Compact", onclick: () => compactStores(reclaim.map((s) => s.name)) });
   if (data.agents && !registeredClients().length && !connectedCount()) out.push({ tone: "amber", title: "No agent is connected yet", sub: "Register the clients found on this machine in one step", label: "Connect", onclick: () => go("agents", "add") });
-  const broken = (data.agents?.doctor || []).filter((c) => c.registered && (c.repair || c.why || (c.disabled_in || []).length));
+  const broken = (data.agents?.doctor || []).filter((c) => cannotReach(c) || (c.registered && (c.disabled_in || []).length));
   if (broken.length) out.push({ tone: "grey", title: `${broken[0].name}${broken.length > 1 ? ` and ${broken.length - 1} more` : ""} cannot reach semlith`, sub: broken[0].why || broken[0].repair || "registered but switched off in some folders", label: "Details", onclick: () => go("agents", "health") });
   const finished = (data.runs?.runs || []).filter((r) => r.status === "done" && r.finished_at && Date.now() / 1000 - r.finished_at < 3600 && r.kind !== "catch-up" && !state.dismissed.has(r.id));
   for (const r of finished.slice(0, 2))
@@ -8657,7 +8675,7 @@ function agConnected(a) {
     el(
       "div",
       { class: "stack" },
-      el("div", { class: "card pad" }, el("span", { class: "eyebrow", text: "What the tool list costs" }), el("span", { class: "mono t-b big18", text: `${n(a.tool_list_tokens)} tokens` }), el("span", { class: "muted t-xs", text: `per session, read once before the agent asks anything · ${plural((a.tools || []).filter((t) => t.listed !== false).length, "tool")} listed · ${n(a.tool_list_bytes)} bytes · counted ${a.tool_list_tier === "tokenizer" ? "by the model's tokenizer" : `as ${a.tool_list_tier}`}` })),
+      el("div", { class: "card pad" }, el("span", { class: "eyebrow", text: "What the tool list costs" }), el("span", { class: "mono t-b big18", text: `${n(a.tool_list_tokens)} tokens` }), el("span", { class: "muted t-xs", text: `per session, read once before the agent asks anything · ${plural((a.tools || []).filter((t) => t.listed !== false).length, "tool")} listed · ${n(a.tool_list_bytes)} bytes · counted as bytes ÷ 4, the figure the release gate asserts` })),
       el("div", { class: "card pad" }, el("span", { class: "card-t", text: "After you register a client" }), el("span", { class: "muted t-sm pretty", text: "Restart it. Ask it something about your code — “use semlith to find where X happens”. The call lands in the Ledger with what it was sent." }), lnk("Open the ledger →", () => go("ledger"))),
     ),
   );
@@ -8762,7 +8780,7 @@ function agTools(a) {
   return el(
     "div",
     { class: "card" },
-    el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "What an agent can call" }), meta(`${listed} of ${plural(all.length, "tool")} offered to agents · ${n(a.tool_list_bytes)} bytes · ${n(a.tool_list_tokens)} tokens per session, counted ${a.tool_list_tier === "tokenizer" ? "by the model" : `as ${a.tool_list_tier || "an estimate"}`}`)),
+    el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "What an agent can call" }), meta(`${listed} of ${plural(all.length, "tool")} offered to agents · ${n(a.tool_list_bytes)} bytes · ${n(a.tool_list_tokens)} tokens per session, counted as bytes ÷ 4`)),
     el(
       "div",
       { class: "tw" },
@@ -9026,7 +9044,7 @@ VIEWS.ledger = {
           ["semlith start --no-ledger", "Run without recording, for this session only"],
         ].map(([c, tipText]) => btn({ class: "cmdchip", "data-tip": tipText, onclick: () => copy(c) }, c, icon(I.copy, 11, { w: 2 }))),
         el("span", { class: "spacer" }),
-        el("span", { class: "t-mono-sm", text: "~/.semlith/stores/<name>/store.db · table retrievals" }),
+        el("span", { class: "t-mono-sm", text: `${semHome()}/stores/<name>/store.db · table retrievals` }),
       ),
     );
     // The chain and retention foot.
@@ -9587,7 +9605,7 @@ VIEWS.privacy = {
       ["Watch every interface but loopback while you search. Nothing should appear.", "sudo tcpdump -i any -n 'not host 127.0.0.1 and not host ::1'"],
       ["Arm the refusal: anything that would reach the network exits instead, naming it.", "semlith start --airgap"],
       ["Or pull the cable. The portal loads and searches with no network at all.", "networksetup -setairportpower en0 off"],
-      ["See the ledger for what it is: one local table.", "sqlite3 ~/.semlith/stores/<name>/store.db 'select * from retrievals'"],
+      ["See the ledger for what it is: one local table.", `sqlite3 ${semHome()}/stores/<name>/store.db 'select * from retrievals'`],
     ];
     const nDone = verifyCmds.filter((_, i) => pvUi.done[i]).length;
     return el(
@@ -10110,11 +10128,14 @@ async function loadCloudStatus(force) {
   repaint();
 }
 
+// When the cloud last looked at the source, not how far behind the branch the
+// index is; floored, as `cloud::lag` floors it.
 function lagWord(s) {
-  if (s === null || s === undefined) return "no lag known";
-  if (s < 120) return `${s} s behind`;
-  if (s < 7200) return `${Math.round(s / 60)} min behind`;
-  return `${Math.round(s / 3600)} h behind`;
+  if (s === null || s === undefined) return "not checked yet";
+  if (s < 120) return `checked ${s} s ago`;
+  if (s < 7200) return `checked ${Math.floor(s / 60)} min ago`;
+  if (s < 172800) return `checked ${Math.floor(s / 3600)} h ago`;
+  return `checked ${Math.floor(s / 86400)} d ago`;
 }
 
 function cloudFact(C) {
@@ -10158,7 +10179,7 @@ function seCloudOff() {
       "div",
       { class: "card-b" },
       [
-        ["semlith cloud login <org>", "Approve a code in the browser. The org token is kept in ~/.semlith/cloud.json and sent to that host only."],
+        ["semlith cloud login <org>", `Approve a code in the browser. The org token is kept in ${semHome()}/cloud.json and sent to that host only.`],
         ["semlith cloud connect <org>", "Adds the org's stores beside the local ones, with a remote badge. Nothing in them is written from here."],
       ].map(([c, note]) => el("div", { class: "col gap4" }, copyField(c), el("span", { class: "muted t-xs", text: note }))),
     ),

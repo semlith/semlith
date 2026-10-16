@@ -157,7 +157,7 @@ fn dispatch(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/refused") if request.query("decisions") == Some("1") => {
             decisions(state, request)
         }
-        (true, _, "/api/refused") => refused(state),
+        (true, _, "/api/refused") => refused(state, request),
         (true, _, "/api/decisions") => decisions(state, request),
 
         (_, true, "/api/index") => index(state, request),
@@ -2304,7 +2304,7 @@ fn privacy(state: &Arc<State>) -> Response {
         // when. The GPU components are fetched only when a hardware GPU was
         // found with the GPU lane on, and the CUDA pack only after an explicit
         // turn-on; `--airgap` refuses all of them unless they were pre-seeded.
-        "downloads": downloads(&cache),
+        "downloads": downloads(&cache, &open_stores(state)),
         // What this machine sends Semlith Cloud, if it signed in: the Privacy
         // page's Cloud row reads it.
         "cloud": crate::cloud::local_view(),
@@ -2312,10 +2312,46 @@ fn privacy(state: &Arc<State>) -> Response {
 }
 
 /// The downloads the Privacy page lists, each with whether it is here already.
-fn downloads(cache: &Path) -> Value {
+fn downloads(cache: &Path, stores: &[(String, PathBuf)]) -> Value {
     let webgpu =
         crate::accel::component_dir(cache, &format!("webgpu-{}", crate::gpu::WEBGPU_VERSION));
-    json!([
+    // And every file `semlith add` fetched, from where, which is on disk
+    // because a person asked for it: the page listed the binary's own
+    // downloads only, so a 2.2 MB PDF fetched from arxiv.org was absent.
+    let mut fetched = Vec::new();
+    for (name, dir) in stores {
+        let root = crate::add::downloads_dir(dir);
+        let mut stack = vec![root.clone()];
+        while let Some(at) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&at) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = entry.metadata() else { continue };
+                if meta.is_dir() {
+                    stack.push(path);
+                } else if fetched.len() < 1_000 {
+                    let rel = path.strip_prefix(&root).unwrap_or(&path);
+                    let host = rel
+                        .components()
+                        .next()
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    fetched.push(json!({
+                        "what": crate::plain(&rel.display().to_string()),
+                        "source": host,
+                        "bytes": meta.len(),
+                        "when": format!("fetched by semlith add into {name}"),
+                        "cached": true,
+                        "store": name,
+                        "path": crate::plain(&path.display().to_string()),
+                    }));
+                }
+            }
+        }
+    }
+    let mut out = json!([
         {
             "what": "the embedding model (granite-embedding-small-english-r2, int8)",
             "source": "huggingface.co",
@@ -2337,7 +2373,11 @@ fn downloads(cache: &Path) -> Value {
             "when": "only after CUDA is turned on, on Linux",
             "cached": crate::cuda::pack_installed(cache).is_some(),
         },
-    ])
+    ]);
+    if let Some(list) = out.as_array_mut() {
+        list.extend(fetched);
+    }
+    out
 }
 
 /// Every rule 0.14.0 added, and the daemon's own check of it.
@@ -2866,14 +2906,8 @@ fn agent_scope(request: &Request) -> Response {
 /// Once per session, before the agent has asked anything: it is the standing
 /// charge for having semlith connected at all, and a user should be able to
 /// read it rather than capture traffic to discover it.
-fn tool_list_tokens(state: &Arc<State>) -> (i64, &'static str) {
-    let guard = state.fleet.lock().ok();
-    let counter = guard
-        .as_ref()
-        .and_then(|f| f.as_ref())
-        .map(|f| f.counter())
-        .unwrap_or(crate::ledger::Counter::Chars4);
-    (crate::mcp::tool_list_tokens(&counter), counter.label())
+fn tool_list_tokens(_state: &Arc<State>) -> (i64, &'static str) {
+    (crate::mcp::tool_list_tokens(), crate::ledger::CHARS4)
 }
 
 /// The live connections, one row per app and transport. Every Claude Code
@@ -4911,11 +4945,17 @@ fn upgrade(request: &Request) -> Response {
 /// Per store, because a decision about a file is a decision in one store.
 /// Values are never here: a content row carries its masked matches, their
 /// confidence and the signals behind it.
-fn refused(state: &Arc<State>) -> Response {
+fn refused(state: &Arc<State>, request: &Request) -> Response {
+    // `?store=` narrows to the stores named, which is how `semlith refused
+    // --store X` asks: it used to list every store whenever a daemon ran.
+    let only = request.query_all("store");
     with_fleet(state, json!({ "stores": [] }), move |fleet| {
         let mut stores = Vec::new();
         let (mut total, mut review) = (0usize, 0usize);
         for (label, store) in fleet.each() {
+            if !only.is_empty() && !only.iter().any(|o| o == label) {
+                continue;
+            }
             let rows = crate::store::refusals(store.db())?;
             let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
             let mut accepted: std::collections::BTreeMap<String, usize> = Default::default();

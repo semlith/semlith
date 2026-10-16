@@ -756,13 +756,20 @@ pub fn status(entry: &Entry) -> Result<(Value, Option<String>), Failure> {
     Ok((reply.json()?, reply.version))
 }
 
-/// Seconds behind, as a person reads it.
+/// How long ago the cloud last checked a source, as a person reads it.
+///
+/// The host's `behind_seconds` is the age of its last look at the source —
+/// now less the later of indexed and checked — not how far the index trails
+/// the branch: a source indexed at the branch's head read "14 h behind". So
+/// it is said as what it is. Floored, and the portal's `lagWord` floors the
+/// same way, so the two never differ by an hour.
 pub fn lag(seconds: Option<i64>) -> String {
     match seconds {
-        None => "no lag known".to_string(),
-        Some(s) if s < 120 => format!("{s} s behind"),
-        Some(s) if s < 7200 => format!("{} min behind", s / 60),
-        Some(s) => format!("{} h behind", s / 3600),
+        None => "not checked yet".to_string(),
+        Some(s) if s < 120 => format!("checked {s} s ago"),
+        Some(s) if s < 7200 => format!("checked {} min ago", s / 60),
+        Some(s) if s < 172_800 => format!("checked {} h ago", s / 3600),
+        Some(s) => format!("checked {} d ago", s / 86_400),
     }
 }
 
@@ -2175,7 +2182,7 @@ mod tests {
         assert_eq!(merged[1].store.as_deref(), Some("notes"));
         assert_eq!(
             merged[0].store.as_deref(),
-            Some("acme/platform (remote · acme · a41c9e2 · 38 s behind)")
+            Some("acme/platform (remote · acme · a41c9e2 · checked 38 s ago)")
         );
     }
 

@@ -1051,6 +1051,12 @@ pub enum SkipReason {
     NoText,
     /// An image whose header no decoder recognised.
     NotDecodableImage,
+    /// A password-protected document: there is no text to read without the
+    /// password, which is a different fact from a document with no text.
+    Encrypted,
+    /// An archive format (a `.docx`, an EPUB) that decompresses past
+    /// [`crate::formats::MAX_ARCHIVE_TEXT`]: left out as a zip bomb would be.
+    ArchiveTooLarge,
 }
 
 impl SkipReason {
@@ -1065,6 +1071,11 @@ impl SkipReason {
             Self::Binary => "binary".to_string(),
             Self::NoText => "no text in this document".to_string(),
             Self::NotDecodableImage => "not a decodable image".to_string(),
+            Self::Encrypted => "encrypted: no text without its password".to_string(),
+            Self::ArchiveTooLarge => format!(
+                "decompresses past {} MiB, left out as a zip bomb would be",
+                crate::formats::MAX_ARCHIVE_TEXT / (1024 * 1024)
+            ),
         }
     }
 
@@ -1088,6 +1099,8 @@ impl SkipReason {
             Self::Binary => "binary",
             Self::NoText => "no text in this document",
             Self::NotDecodableImage => "not a decodable image",
+            Self::Encrypted => "encrypted",
+            Self::ArchiveTooLarge => "archive too large",
         }
     }
 }
@@ -1564,6 +1577,9 @@ pub struct Plan {
     /// can list what was left out rather than only count it.
     #[serde(serialize_with = "serialize_plain_lists")]
     pub not_indexed_paths: std::collections::BTreeMap<String, Vec<String>>,
+    /// Why a listed file has no text, by path, where the reader could say: a
+    /// zip bomb and an encrypted `.docx` read "no text layer" in Review.
+    pub not_indexed_why: std::collections::BTreeMap<String, String>,
     /// What a person could accept, one entry each.
     pub review: Vec<Review>,
     /// Credential files: listed, never offered.
@@ -2581,7 +2597,11 @@ impl Semlith {
                         .map(|e| e.symbols)
                         .unwrap_or_default(),
                 ),
-                _ => {
+                other => {
+                    if let Ok(Err(why)) = &other {
+                        plan.not_indexed_why
+                            .insert(crate::plain(&path.to_string_lossy()), why.as_str());
+                    }
                     not(&mut plan, store::class::UNINDEXABLE, &path);
                     continue;
                 }
@@ -7101,6 +7121,9 @@ pub fn check_roots(roots: &[PathBuf]) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) 
 /// The file of gitignore patterns a store honours on top of `.gitignore`.
 pub const IGNORE_FILE: &str = ".semlithignore";
 
+/// The rule a dotfile the walk skipped is listed under.
+pub const HIDDEN_RULE: &str = "hidden file or folder";
+
 /// Walk `roots`, honouring `.gitignore` and skipping hidden files. Returns
 /// canonical paths so the same file reached two ways is one entry.
 /// Which path a walk error is about.
@@ -7801,6 +7824,21 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf], gitignore: bool) -> Wal
                     )
                 {
                     credentials.push(key(&entry.file_name()));
+                    continue;
+                }
+                // Any other dotfile the hidden rule stepped over is said too,
+                // a folder once: ripgrep's `.gitignore`, `.ignore`,
+                // `.nvim.lua` and `.cargo/` were skipped with nothing on the
+                // Review step saying so (224 + 7 shown of 236). A whitelisted
+                // one the walk yielded is not; `.git` is the repository's
+                // own bookkeeping, not a file of it.
+                let yielded_here = if kind.is_dir() {
+                    walked_dirs.contains(&path)
+                } else {
+                    yielded.contains(&path)
+                };
+                if !yielded_here && name != ".git" && (kind.is_file() || kind.is_dir()) {
+                    excluded.push((key(&entry.file_name()), HIDDEN_RULE.to_string()));
                 }
                 continue;
             }
@@ -7873,6 +7911,38 @@ fn semlithignore_for(dir: &Path) -> Option<ignore::gitignore::Gitignore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every dotfile the hidden rule skipped is listed, so the Review step
+    /// accounts for every file on disk; `.git` and a whitelisted one are not.
+    #[test]
+    fn a_skipped_dotfile_is_listed_not_silent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join(".cargo/config.toml"), "x").unwrap();
+        std::fs::write(root.join(".nvim.lua"), "x").unwrap();
+        std::fs::write(root.join(".ignore"), "!/.github/\n").unwrap();
+        std::fs::create_dir_all(root.join(".github")).unwrap();
+        std::fs::write(root.join(".github/ci.yml"), "x").unwrap();
+        std::fs::write(root.join("src/a.rs"), "fn a() {}").unwrap();
+        let walked = walk_allowing(std::slice::from_ref(&root), &[], true);
+        let hidden: Vec<String> = walked
+            .excluded
+            .iter()
+            .filter(|(_, rule)| rule == HIDDEN_RULE)
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(hidden.contains(&".cargo".to_string()), "{hidden:?}");
+        assert!(hidden.contains(&".nvim.lua".to_string()), "{hidden:?}");
+        assert!(hidden.contains(&".ignore".to_string()), "{hidden:?}");
+        assert!(!hidden.contains(&".git".to_string()), "{hidden:?}");
+        assert!(
+            !hidden.contains(&".github".to_string()),
+            "a whitelisted folder: {hidden:?}"
+        );
+    }
 
     fn def(start: u32, end: u32, name: &str) -> (u32, u32, String, String) {
         (start, end, name.to_string(), "function".to_string())

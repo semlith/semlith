@@ -100,10 +100,9 @@ pub fn extract_counted(
     match ext.as_deref() {
         Some("pdf") => extract_pdf(bytes)
             .map(|(text, pages)| (text, Some(pages)))
-            .ok_or(SkipReason::NoText),
-        Some(ext) if formats::handles(ext) => {
-            guard(|| formats::extract_counted(ext, bytes)).ok_or(SkipReason::NoText)
-        }
+            .ok_or_else(|| formats::why_no_text("pdf", bytes)),
+        Some(ext) if formats::handles(ext) => guard(|| formats::extract_counted(ext, bytes))
+            .ok_or_else(|| formats::why_no_text(ext, bytes)),
         other => {
             if is_binary(bytes) {
                 return Err(SkipReason::Binary);
