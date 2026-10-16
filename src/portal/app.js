@@ -9167,7 +9167,7 @@ function ledgerRetrievals(list) {
       { key: "tool", label: "Tool", cls: "ms", sort: (r) => r.tool, render: (r) => r.tool },
       { key: "hits", label: "Hits", cls: "m r", sort: (r) => r.hits, render: (r) => n(r.hits) },
       { key: "sent", label: "Sent", cls: "m r", sort: (r) => r.excerpt_tokens, render: (r) => `${n(r.excerpt_tokens)} tok` },
-      { key: "tier", label: "Tier", cls: "ms nowrap", sort: (r) => r.tier, render: (r) => el("span", { "data-tip": `excerpt counted by ${r.tier.split(" · ")[0]}; whole file counted from its ${r.tier.split(" · ")[1]}${r.basis === "bytes" ? " (rows before 0.42.0)" : ""}`, text: r.tier }) },
+      { key: "tier", label: "Tier", cls: "ms nowrap", sort: (r) => r.tier, render: (r) => el("span", { "data-tip": `excerpt counted by ${r.tier.split(" · ")[0]}; whole file counted from its ${r.tier.split(" · ")[1]}${r.basis === "bytes" ? " (a row an older semlith wrote)" : ""}`, text: r.tier }) },
       { key: "ms", label: "ms", cls: "ms r", sort: (r) => r.ms, render: (r) => n(r.ms) },
     ],
   });
@@ -9259,7 +9259,7 @@ function plainWhat(what) {
 function countedWords(c) {
   if (!c) return "store tokenizer";
   const ex = { model: "excerpt by the store tokenizer", chars4: "excerpt at 4 chars a token", mixed: "excerpt counted two ways" }[c.excerpt] || "";
-  const wh = { text: "whole files as their text", bytes: "whole files as bytes ÷ 4", mixed: "whole files two ways (bytes before 0.42.0)" }[c.whole] || "";
+  const wh = { text: "whole files as their text", bytes: "whole files as bytes ÷ 4", mixed: "whole files two ways (older rows by their bytes)" }[c.whole] || "";
   return [ex, wh].filter(Boolean).join(" · ");
 }
 
@@ -9298,7 +9298,7 @@ async function exportLedger(format) {
     const neutral = (v) => (v.length > 1 && /^[=+\-@\t\r]/.test(v) && !Number.isFinite(Number(v)) ? `'${v}` : v);
     const esc = (v) => {
       const s = neutral(cell(v));
-      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      return (/[",\n\r]/).test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
     return download(`${name}.csv`, [cols.join(","), ...list.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n"), "text/csv");
   }
@@ -10209,7 +10209,7 @@ function seCloudOff() {
       "div",
       { class: "card-b" },
       [
-        ["semlith cloud login <org>", `Approve a code in the browser. The org token is kept in ${semHome()}/cloud.json and sent to that host only.`],
+        ["semlith cloud login <org>", "Approve a code in the browser. The org token is kept in " + semHome() + "/cloud.json and sent to that host only."],
         ["semlith cloud connect <org>", "Adds the org's stores beside the local ones, with a remote badge. Nothing in them is written from here."],
       ].map(([c, note]) => el("div", { class: "col gap4" }, copyField(c), el("span", { class: "muted t-xs", text: note }))),
     ),

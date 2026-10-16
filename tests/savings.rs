@@ -32,7 +32,7 @@ const SURFACES: &[(&str, &str, &str)] = &[
         "src/portal/app.js",
         "savings.net_tokens",
     ),
-    ("`semlith ledger`", "src/main.rs", "savings.net"),
+    ("`semlith ledger`", "src/main.rs", "n(f.net_tokens)"),
 ];
 
 fn source(path: &str) -> &'static str {
