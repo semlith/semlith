@@ -97,7 +97,7 @@ fn every_report_generates_in_every_format_and_the_cli_matches() {
     let fleet = Fleet::open(&dirs).unwrap();
     for (kind, title) in semlith::report::KINDS {
         for format in semlith::report::FORMATS {
-            let generated = semlith::report::generate(&fleet, kind, "Sonnet 5")
+            let generated = semlith::report::generate(&fleet, kind, semlith::report::DEFAULT_MODEL)
                 .unwrap()
                 .render(format)
                 .unwrap();

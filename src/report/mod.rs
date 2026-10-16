@@ -873,11 +873,11 @@ impl Ctx<'_> {
         }
         if self.narrowed {
             for (label, _) in self.scope {
-                out.push_str(&format!(" --scope {label}"));
+                out.push_str(&format!(" --scope {}", shell_word(label)));
             }
         }
         if kind == "savings" {
-            out.push_str(&format!(" --model {}", self.model));
+            out.push_str(&format!(" --model {}", shell_word(&self.model)));
         }
         if self.options.redact && matches!(kind, "access" | "gaps") {
             out.push_str(" --redact");
@@ -886,6 +886,21 @@ impl Ctx<'_> {
             out.push_str(" --excerpts");
         }
         out
+    }
+}
+
+/// A word as a shell reads it back: bare when it is plain, single-quoted when
+/// it is not (`Sonnet 5`, a store label with a space), so the recompute
+/// command pastes and runs.
+fn shell_word(word: &str) -> String {
+    if !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.:/@+".contains(c))
+    {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
     }
 }
 
