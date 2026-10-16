@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Many agents, one consistent store.** Forwarded MCP calls take a free
+  reader from a pool of two to four (half the cores) instead of queueing
+  behind one lock, and every reader shares one copy of each store's vector
+  index, one query session and one counting tokenizer: four agents searching
+  one store took 88.7 ms at once against 243.3 ms one after another, and the
+  daemon's resident memory did not grow (397 MB before, 381 MB after).
+- **A run is answered from before it until it commits.** A run over files a
+  store already holds pins every reader's SQLite snapshot before its first
+  write and releases it when the run commits or is undone, so search, exact,
+  symbol, neighbors, impact and read answer from one committed generation;
+  on 0.41.0 one exact search answered 86 files old and 64 new. A first import
+  stays progressive. The WAL keeps the run's pages until the commit.
+- **MCP 2026-07-28 clients are named.** Claude Code 2.1.299 sends no
+  `initialize` and no session: its name and version are read from
+  `params._meta` on every request (the User-Agent when that is absent), and a
+  stateless client's conversation is one client, version and transport until
+  it has been quiet for 30 minutes, not one shared "anonymous" session.
+  `server/discover` answers on a daemon with no store open.
+- **Chain v2.** Rows written from 0.42.0 hash `query_id`, the client's version
+  and the whole-file basis as well, seal the usage and sync columns when they
+  are filled, and record a keyed head, so rewriting every query id or deleting
+  the newest row fails `--verify` (both verified on 0.41.0). v1 and 0.14.0 rows
+  keep verifying. A binary older than 0.42.0 reports the first v2 row as the
+  break.
+- **The watcher wakes the embedding lanes on the first change**, before the
+  change is debounced, and keeps them loaded for ten minutes after the last
+  one, so a save is not charged the Neural Engine worker's cold start.
+
+### Changed
+
+- **Break, 2026-10-16: the whole-file side of a saving is what reading the
+  file costs.** A PDF, an Office or OpenDocument file, an EPUB, mail, a
+  notebook or HTML is counted as the text the store holds for it, by the same
+  counter as the excerpt; an image holds no text and is counted as none; plain
+  text keeps its bytes over four. An arXiv PDF of 2,215,244 bytes and 45,849
+  characters had been credited 553,811 tokens. Rows already written keep their
+  numbers; `retrievals.whole_basis` says `text` on every row from 0.42.0, and
+  the Ledger's Tier column says which basis a row used. Published savings for
+  document stores fall.
+- **One aggregation behind every figure.** `ledger::figures` is what
+  `/api/ledger`, the Ledger page, Home, the store cards, `semlith ledger`,
+  `semlith stats`, the reports and `semlith_report` print. Refunds, notes,
+  refusals and accept or revoke rows are no query, no coverage, no zero hit
+  and no gap; a search several stores answered is one retrieval; clients are
+  the union; sessions are conversations, not conversations times stores; net
+  tokens are summed without a clamp; p50 and p95 are over retrievals that
+  measured work (the audit's report said 724 ms where the rows said ~67 ms).
+  The portal's and the CLI's own retrievals are recorded and kept out of the
+  agents' saving.
+- `semlith_read`, `semlith_pattern`, `semlith_impact` and `semlith_trace` are
+  recorded with what they returned, from MCP, the CLI and the portal; a graph
+  answer is one row, in the store that answered.
+- The tool-list cost is one count, bytes over four: the gate in
+  `tests/retrieval.rs` and the Agents page print the same number.
+
+### Fixed
+
+- Clocks: a row is printed with the UTC offset in force when it was written,
+  `semlith ledger` prints the date on rows older than today, and the portal
+  pairs the local date with the local time (an IST row at 03:00 on 10-10 read
+  "10-09 03:00").
+- A run's card, history and log events give the work's own time, not the time
+  the wizard sat on its Review page (41 s of work read "done in 1m 31s"); a
+  time left that had counted down to a second rises again when the rate falls;
+  the CLI prints the last twenty seconds' chunks/s.
+- `cloud status` and the portal say when the cloud last checked a source
+  ("checked 14 h ago"), floored the same way, never "behind" for an index at
+  the branch head.
+- `semlith refused --store X` lists X only with a daemon running;
+  `semlith prices` lists its table.
+- The portal prints the daemon's real store home, the Privacy page lists files
+  `semlith add` fetched, a registration that cannot reach this daemon is not
+  counted as registered, Review lists every dotfile the hidden rule skipped,
+  and an encrypted document or an archive past the 32 MiB budget says so
+  rather than "no text layer".
+- A file whose first 8 KiB is mostly invalid UTF-8 or control characters is
+  refused as binary with the share in its reason (ripgrep's `sherlock.br`, a
+  Brotli file with no NUL, became one chunk of U+FFFD). Latin-1 prose is still
+  read.
+
 ### Fixed
 
 From the graph ground-truth pass of the 2026-10-14 audit (G1-G11 and the gaps

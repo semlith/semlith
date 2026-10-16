@@ -185,7 +185,9 @@ for changes** on, re-indexed when saved.
 - **Browse folders** — a picker confined to your home, multi-select, showing which
   folders other stores already read.
 - **Paste a path** — one per line; quotes are stripped, `file://` URLs decoded,
-  `~` expanded.
+  `~` expanded. The portal reads only inside your home folder; a path outside it
+  is refused with the command that indexes it from a terminal, `semlith index
+  <path>`, which has no such limit.
 - **Add a URL** — one https request for exactly that URL (a page, a PDF, a file
   on GitHub) when the run starts; no crawling, no credentials, kept in the
   store's own downloads folder. Refused under airgap.
@@ -215,8 +217,12 @@ and **Undo** reverses the last decision. Every decision is logged per file as
 yours. An agent can never make one: the route refuses any caller that is not a
 person on this page.
 
-**Left out automatically** groups what needs no decision: ignored files, build
-output, lockfiles, oversize files, files with no text, and credential files.
+**Left out automatically** groups what needs no decision: ignored files and
+hidden files (every dotfile and dot-folder the hidden rule skipped, named, so the
+counts add up to the files on disk), build output, lockfiles, oversize files,
+files with no text — each saying why where the reader can tell: binary, not
+UTF-8 text, encrypted, or an archive past the 32 MiB budget — and credential
+files.
 Credential files — keys, tokens, `.env` — are never offered, even with your
 agreement. Undecided files stay out; decisions can be changed later on the store's
 Review tab.
@@ -691,12 +697,16 @@ not.
 
 ### Connected
 
-Clients talking to the daemon now: the name from the MCP handshake (or, for the
-stdio proxy, the app that launched it), state, version, transport, queries and the
-last one. Several windows of one client are one row with their sessions counted.
-**What the tool list costs** shows the tool list's size in tokens and bytes — paid
-once per session before the agent asks anything — measured from what the daemon
-serves now. With nothing connected, the tab says how to get a first client: register
+Clients talking to the daemon now: the name the client gives — at the MCP
+handshake, or on every request for a client on MCP 2026-07-28, which has no
+handshake (its User-Agent when it gives neither; for the stdio proxy, the app that
+launched it) — state, version, transport, queries and the last one. Several windows
+of one client are one row with their sessions counted. A stateless client's
+conversation is one client, version and transport until it has been quiet for 30
+minutes. **What the tool list costs** shows the tool list's size in bytes and in
+tokens at four bytes a token — the same count the release gate asserts — paid once
+per session before the agent asks anything, measured from what the daemon serves
+now. With nothing connected, the tab says how to get a first client: register
 it, then restart it.
 
 ### Add a client
@@ -746,12 +756,16 @@ does not verify, a banner offers **Re-verify**; a repair appends one note row sa
 where it broke and verifies from there — no row is edited or removed.
 `semlith ledger --verify` is the same walk.
 
+Every figure on the page is one aggregation over the rows (`ledger::figures`), the
+same one `semlith ledger`, the store cards and every report print, so a figure here
+can be recomputed from the rows and from any other surface.
+
 | Figure | Counts |
 |---|---|
-| Queries recorded | Retrievals, and how many clients ran them. |
-| Fewer tokens | Whole-file tokens over excerpt tokens, with coverage and tier. |
-| Net tokens not read | Whole-file less excerpt, over rows with a hit. |
-| Zero-hit | Share and count of queries the corpus could not answer. |
+| Queries recorded | Agent retrievals — a search several stores answered is one — and how many clients ran them; the portal's and the CLI's own searches are listed beside it and not counted. |
+| Fewer tokens | Whole-file tokens over excerpt tokens, over retrievals that found something, with coverage and tier. |
+| Net tokens not read | Whole-file less excerpt, over the same retrievals, summed as they are. |
+| Zero-hit | Share and count of retrievals nothing answered. |
 
 - **Coverage** — the share of retrievals the saving is computed over; a retrieval
   that found nothing counts in the denominator.
@@ -759,16 +773,27 @@ where it broke and verifies from there — no row is edited or removed.
   tokenizer, `modelled` when any was estimated at four characters per token.
 - **Refunds** — files an agent read whole anyway: measured on clients with the
   steering hook, a floor elsewhere. A refund is an agent not reaching for semlith; a
-  zero hit is semlith not reaching the answer.
+  zero hit is semlith not reaching the answer. A refund is never a query, never in
+  coverage, the saving, the zero hits or the gaps.
+- **Latency** — p50 and p95 over retrievals that measured work, one figure each.
 
-The ratio never counts a failure as a success or a row twice; the whole-file side
-is the files' size on disk at four characters per token.
+The ratio never counts a failure as a success or a row twice. The whole-file side
+is what reading the file would cost: for a PDF, an Office or OpenDocument file, an
+EPUB, mail, a notebook or HTML, the text the store holds for it counted like the
+excerpt; for plain text, its bytes at four a token; for an image, nothing. Rows
+written before 0.42.0 counted every file by its bytes and keep their numbers; the
+Retrievals tab's **Tier** column says which way each row was counted
+(`tokenizer · text`, `chars÷4 · bytes`). The chain from 0.42.0 also covers each
+row's query id, version and basis, and its usage once filled, and records its head,
+so a rewritten id or a deleted newest row fails the verify.
 
 **What agents read, against reading whole files** draws the two totals; **By
 client** draws a bar per client that filters the tables below. Three tabs:
 **Sessions** (one row per conversation: client, model, reads, net tokens, and
 **Saved** at that model's input price), **Retrievals** (one row per query: when,
-query, hits, what was sent, tier; filter by store, client, tier, **Zero-hit only**)
+client, store, tool, query, hits, what was sent, tier; filter by store, client,
+**Zero-hit only**; its export carries every row, tool, session, version, tier and
+stale hits, not only the newest the page loaded)
 and **Session replay** (what an agent did after each answer — sufficed, missed, or
 followed by a whole-file read — read from local agent session logs). Tables sort,
 page, and export to Markdown, CSV and JSON.
@@ -954,7 +979,9 @@ and whether it is cached: the embedding model (once, on the first run), the WebG
 plugin and fp16 model, the CUDA pack (only after its lane is turned on), a URL you
 add (one request, when you press Fetch), Semlith Cloud (nothing until you sign in),
 and the release check and price table (github.com and models.dev, only when you
-press the button). Airgap refuses all of them unless already cached.
+press the button). Below them, every file `semlith add` has fetched into a store's
+`downloads/` folder, with the host it came from and its size. Airgap refuses all of
+them unless already cached.
 
 **What the stores already hold** runs today's refusal rules backwards: **Check
 now** applies the deny-list to each file's name and the credential shapes to its

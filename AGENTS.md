@@ -39,7 +39,7 @@ makes. It runs a fixed set of 107 questions with ground-truth spans from
 `tests/fixtures/retrieval/questions.yaml` — identifier-shaped, concept-shaped and
 multi-hop — and prints hit@1, hit@3, hit@8, bytes per answer, and from 0.23.0 calls and tokens per answered question for
 `brief` against the search-then-read path. It asserts two things: the wrong-yes
-count for `path` is zero, and `tools/list` costs under 675 tokens — from 0.36.0
+count for `path` is zero, and `tools/list` costs under 675 tokens (`mcp::tool_list_tokens`, bytes over four — the figure the Agents page prints too) — from 0.36.0
 eight listed tools (`mcp::LISTED`; clients offer agents only listed tools,
 so the other eight are the CLI's and portal's unless `SEMLITH_MCP_TOOLS=all`), 2 633 bytes, where sixteen were 7 330 and
 cost an Opus request 3 073 tokens against 1 323 now, measured; every array
@@ -621,7 +621,12 @@ Module responsibilities:
   `store::ledger_break` finds an edited or deleted row — and the chain is
   versioned *by the row*: `tool` is NULL on every pre-0.15.0 row and set on every
   row since, which is what picks the formula, so a store holding both kinds
-  verifies end to end. Recording and `semlith ledger` are free on every tier,
+  verifies end to end. From 0.42.0 `retrievals.chain = 2` marks chain v2, which
+  also covers `query_id`, the client's version and the whole-file basis; the
+  late columns (usage, `synced_at`) are covered by `seal`, rewritten by
+  `store::reseal` whenever they are written; and the newest v2 row is recorded
+  as a MACed head in meta, so a cut tail fails. v1 rows after the head are an
+  older binary's (a rollback) and allowed; an empty table verifies. Recording and `semlith ledger` are free on every tier,
   permanently; do not put either behind a key.
 - **On by default is the whole point, and the principle that makes it all right
   is narrower than the one it replaced.** 0.12.0 said a local tool that starts
@@ -634,11 +639,54 @@ Module responsibilities:
   script that passes it fails at parse time; `--no-ledger` stops a session and
   `SEMLITH_LEDGER=0` stops a machine. Do not reintroduce an off-by-default.
 - **Both sides of a ratio are counted on the same instrument.** The store's own
-  embedding tokenizer counts excerpt and whole-file tokens — the same
-  `tokenizer.json`, the same cache, the same pinned digest. Four characters per
-  token survives only as the fallback for a session that never loaded a model, and
+  embedding tokenizer counts excerpt tokens — the same `tokenizer.json`, the
+  same cache, the same pinned digest. Four characters per token survives only
+  as the fallback for a session that never loaded a model, and
   `retrievals.tokenizer` records which counted the row, so rows counted two
-  different ways are never summed.
+  different ways are never summed. The whole-file side is what reading the
+  file would cost an agent (`ledger::whole_of`, 0.42.0): a format a reader
+  extracts (PDF, Office, OpenDocument, EPUB, mail, notebooks, HTML) is the text
+  the store holds for it, counted by the same counter as the excerpt; an image
+  holds no text and counts none; plain text is its bytes over four. Never the
+  bytes of an extracted file — a 2.2 MB PDF of 45,849 characters was credited
+  553,811 tokens that way. `retrievals.whole_basis` says which rule a row used.
+- **Every figure comes from `ledger::figures`.** The Ledger page, Home, the
+  store cards, `/api/ledger`, `semlith ledger`, `stats`, the five reports and
+  `semlith_report` render that one function over the rows; none of them adds
+  anything up itself. A retrieval is a row whose tool is not a refund
+  (`raw-read`), a note, a refusal, or an accept or revoke
+  (`ledger::is_retrieval`); a row from `cli` or `portal` is a person's and is
+  kept out of the agents' figures (`ledger::is_human`); rows sharing a
+  `query_id` are one retrieval, counted once in the totals and once in each
+  store's share. A per-store SQL reader that survives takes
+  `store::AGENT_RETRIEVAL`, the same rule as SQL. Net is summed, never clamped;
+  latency is one figure per retrieval that measured work.
+- **A client is named on every request, not only at `initialize`.** MCP
+  2026-07-28 carries `clientInfo` in `params._meta` and no session, so
+  `mcp::client_info` reads either place and the User-Agent stands in when both
+  are absent (it may only confirm a name `clientid` knows). A stateless
+  client's conversation is `State::conversation`: one client, version and
+  transport until 30 minutes of quiet. It is the one place to replace if a
+  revision defines a conversation id.
+- **The daemon's readers share, and a run is answered from before it.**
+  Forwarded MCP calls take a reader from `State::mcp_fleet`, a pool of two to
+  four fleets all opened before the first writer starts; every reader fleet
+  calls `share_vectors`, so one `index::Vectors` per store and generation is
+  held process-wide (`index::shared`, weakly), as are the query session and
+  the counting tokenizer. The writer keeps its own index: it moves under a run.
+  A run over files a store already holds calls `hold_readers` before its first
+  write: every reader's connection opens a read transaction
+  (`store::pin_snapshot`) and answers from the store as it was until `release`
+  ends the run and the pin with it (`Fleet::reconcile`, run before and after
+  every reader call too). A first import is not pinned (keyword answers while
+  it embeds). A pinned connection must not write: `store::record_counted`,
+  `fill_usage` and `mark_synced` go through a connection of their own
+  (`beside`). A reader opened during a run (a store joining mid-run) starts on
+  the run's writes so far; a pin unreleased for six hours is dropped.
+- **Bytes are text only when they read as text.** `chunk::is_binary` is git's
+  NUL rule; `chunk::not_text` refuses a file whose first 8 KiB is over 30 %
+  invalid UTF-8 or control characters, with the share in its reason. Latin-1
+  prose stays well under it and is read.
 - **`mcp::tool_names` is the one tool list.** `routes::agents` reads it rather
   than repeating it, because two hand-written copies is how a tool ends up served
   by the server and invisible in the portal.
