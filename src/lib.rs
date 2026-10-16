@@ -134,6 +134,12 @@ pub(crate) const UNSORTED_ENV: &str = "SEMLITH_UNSORTED";
 /// The meta row counting a store's chunks per vector variant.
 const VARIANTS_KEY: &str = "variants";
 
+/// The meta row naming how this store's markup files were last swept:
+/// `raw` (as written) or `extracted` (the text a browser shows). Absent on a
+/// store written before 0.42.0, which extracted every one. An additive row, so
+/// `FORMAT_VERSION` does not move: an older binary reads raw markup as text.
+const MARKUP_KEY: &str = "markup";
+
 /// Embedding sessions writers hold in this process, for `/api/about`.
 static SESSIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -3328,6 +3334,21 @@ impl Semlith {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0)
             < GRAPH_RULES;
+        // How this store keeps markup (0.42.0, F13): as written, unless the
+        // store says it holds docs or leans to them. A store whose markup
+        // files were last swept the other way — every store written before
+        // 0.42.0, which stripped them, and has no row — re-reads them on this
+        // pass, and only them: their bytes have not changed, the rule has.
+        let markup_extracted = {
+            let settings = crate::home::store_settings(&self.dir);
+            settings.kind == "docs" || settings.lean == "docs"
+        };
+        let markup_rule = if markup_extracted { "extracted" } else { "raw" };
+        let markup_moved = store::get_meta(&self.db, MARKUP_KEY)?
+            .as_deref()
+            .unwrap_or("extracted")
+            != markup_rule;
+        let downloads = add::downloads_dir(&self.dir);
         let prehashed = std::mem::take(&mut self.prehashed);
         let run_started = std::time::Instant::now();
 
@@ -3450,7 +3471,16 @@ impl Semlith {
             hashes: if self.force {
                 Default::default()
             } else {
-                store::all_hashes(&self.db)?
+                let mut hashes = store::all_hashes(&self.db)?;
+                // A file with no recorded hash is read, extracted and chunked
+                // again, which is the whole of the markup upgrade.
+                if markup_moved {
+                    hashes.retain(|path, _| {
+                        let path = Path::new(path);
+                        !chunk::is_markup(path) || path.starts_with(&downloads)
+                    });
+                }
+                hashes
             },
             uncounted: store::uncounted(&self.db)?,
             over_cap: store::acceptances(&self.db)?
@@ -4138,7 +4168,19 @@ impl Semlith {
                     } => {
                         report.bytes += file_bytes;
                         read_mtime = seen;
-                        (hash, len, text, units, found, ready)
+                        // The prepare stage reads markup as written. A docs
+                        // store, and a page `semlith add` fetched, keep the
+                        // text a browser shows instead: scanned again, and
+                        // parsed and chunked below from that text.
+                        if chunk::is_markup(&path)
+                            && (markup_extracted || path.starts_with(&downloads))
+                        {
+                            let text = chunk::markup_text(&text);
+                            let found = keyscan::scan(&key, &text);
+                            (hash, len, text, units, found, None)
+                        } else {
+                            (hash, len, text, units, found, ready)
+                        }
                     }
                 };
                 let file_bytes = report.bytes - bytes_before;
@@ -4748,6 +4790,9 @@ impl Semlith {
             }
             if regraph {
                 store::set_meta(&self.db, "graph_rules", &GRAPH_RULES.to_string())?;
+            }
+            if markup_moved {
+                store::set_meta(&self.db, MARKUP_KEY, markup_rule)?;
             }
         }
 

@@ -67,6 +67,34 @@ pub fn extract(path: &Path, bytes: &[u8]) -> Result<String, crate::SkipReason> {
     extract_counted(path, bytes).map(|(text, _)| text)
 }
 
+/// Markup a reader would strip to the text a browser shows, and which every
+/// store except a docs store keeps as written (0.42.0).
+///
+/// Only these two, because only these two were ever stripped:
+/// `formats::handles` is the whole of what is extracted, and of
+/// `filter::LANGUAGES` only `html`'s row (`htm`, `html`) is in it. `vue` and
+/// `svelte` (rows of their own there), and `xhtml`, `jinja`, `j2`, `hbs`,
+/// `mustache`, `erb`, `ejs`, `liquid`, `twig` and `njk` (in no row) were
+/// always read as plain text, so they were byte-exact already. A flask Jinja
+/// template is named `.html`, which is the whole of the 2026-10-14 audit's
+/// F13: `read create.html:8-12` printed text that is not in the file and an
+/// exact search found 7 of grep's 9 lines.
+pub const MARKUP: &[&str] = &["html", "htm"];
+
+/// Whether `path` is of an extension in [`MARKUP`].
+pub fn is_markup(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| MARKUP.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// A markup file's text as a browser shows it, line for line with the
+/// source: the reading a docs store keeps.
+pub fn markup_text(text: &str) -> String {
+    guard(|| formats::extract_counted("html", text.as_bytes()).map(|(text, _)| text))
+        .unwrap_or_else(|| text.to_string())
+}
+
 /// Extensions whose files have units `Inside the index` counts: PDF pages,
 /// slides, spreadsheet cells, notebook cells. A stored file of one of these
 /// with no count yet is read again for its count by the next index pass.
@@ -101,8 +129,13 @@ pub fn extract_counted(
         Some("pdf") => extract_pdf(bytes)
             .map(|(text, pages)| (text, Some(pages)))
             .ok_or_else(|| formats::why_no_text("pdf", bytes)),
-        Some(ext) if formats::handles(ext) => guard(|| formats::extract_counted(ext, bytes))
-            .ok_or_else(|| formats::why_no_text(ext, bytes)),
+        // Markup is read as written (0.42.0) and goes down the plain-text arm
+        // below; a docs store takes the tag-stripped reading in the writer
+        // instead, through [`markup_text`].
+        Some(ext) if formats::handles(ext) && !MARKUP.contains(&ext) => {
+            guard(|| formats::extract_counted(ext, bytes))
+                .ok_or_else(|| formats::why_no_text(ext, bytes))
+        }
         other => {
             if is_binary(bytes) {
                 return Err(SkipReason::Binary);
@@ -680,6 +713,23 @@ fn split_chars(s: &str, n: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Markup is read as written, byte for byte, and the browser's reading
+    /// is still one call away for the stores that keep it (F13).
+    #[test]
+    fn markup_is_read_as_written() {
+        let page = "{% block content %}\n  <form method=\"post\">\n    \
+                    <input name=\"title\" value=\"{{ request.form['title'] }}\">\n  </form>\n";
+        for name in ["create.html", "page.HTM"] {
+            let text = extract(Path::new(name), page.as_bytes()).unwrap();
+            assert_eq!(text, page, "{name}");
+            assert!(is_markup(Path::new(name)));
+        }
+        assert!(!is_markup(Path::new("app.vue")));
+        let stripped = markup_text(page);
+        assert!(!stripped.contains("<form"), "{stripped:?}");
+        assert_eq!(stripped.lines().count(), page.lines().count());
+    }
 
     /// The fuzzer's hang: a page that names itself as its parent. Refused
     /// as no text, at once, rather than handed to pdf-extract.

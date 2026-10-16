@@ -284,7 +284,15 @@ fn html_text(source: &str) -> String {
         rest = &rest[skipped..];
     }
     out.push_str(rest);
+    // A line the markup emptied is empty, not the indentation it was written
+    // with: page.html came out as runs of space-only lines that a read printed
+    // and an excerpt spent tokens on (0.42.0). Each keeps its place, because
+    // the line map above is what every `file:line` stands on.
     decode_entities(&out)
+        .split('\n')
+        .map(|line| if line.trim().is_empty() { "" } else { line })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// How far to the end of `needle`, or to the end of the input when a document
@@ -1783,6 +1791,28 @@ mod tests {
         let line = text.lines().position(|l| l.contains("Wombats")).unwrap() + 1;
         let source_line = page.lines().position(|l| l.contains("Wombats")).unwrap() + 1;
         assert_eq!(line, source_line, "line numbers drifted:\n{text}");
+    }
+
+    /// A line the markup emptied comes out empty, not as the indentation it
+    /// was written with, and in its own place: page.html read as runs of
+    /// space-only lines (0.42.0).
+    #[test]
+    fn a_line_the_markup_emptied_is_empty_and_keeps_its_place() {
+        let page = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/page.html"),
+        )
+        .unwrap();
+        let text = html(&page).unwrap();
+        let source = String::from_utf8_lossy(&page);
+        assert_eq!(text.lines().count(), source.lines().count(), "{text:?}");
+        for (n, line) in text.lines().enumerate() {
+            assert!(
+                line.is_empty() || !line.trim().is_empty(),
+                "line {} is only whitespace: {line:?}",
+                n + 1
+            );
+        }
+        assert!(text.contains("The wombat migration corridor"), "{text:?}");
     }
 
     /// A `<` that no tag name follows is text, as a browser reads it. The
