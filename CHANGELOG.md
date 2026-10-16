@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+From the graph ground-truth pass of the 2026-10-14 audit (G1-G11 and the gaps
+list), each with a test on a cut-down copy of the file the audit read.
+
+**No call edge claims a call that does not exist (G1).** ripgrep's
+`.build_parallel().run(||` was "resolved" to the free function `main::run`
+because that `run` sat in the calling file, which gave `path files_parallel
+search_parallel` a two-hop chain and `trace` a "supporting fact" at main.rs:301;
+`clone`, `clear` and `unwrap` resolved to unrelated methods. A call through a
+receiver is now marked in `edges.hint` (a leading `.`), is never settled on a
+free function or a module, and is settled at all only on a method of the
+receiver's stated type (a declared Rust binding or field, or `self`'s class).
+A receiver nothing types leaves the edge `ambiguous`, so path and trace do not
+cross it. A call never means a module either (`mod search;` beside `fn search`
+tied every `search(...)`), a module path such as `flask.Flask` outranks the
+calling file's namesake unless it names that file, and a folder the caller and
+the candidate share names neither (72 of flask's `flask.Flask(...)` calls were
+settled on a test's subclass).
+
+**Missed callers and mislabelled edges (G2, G3, G8).** `crate::search_parallel(...)`
+(and `self::`, `super::`) calls are captured; helpers.py's `make_response`
+calling `current_app.make_response(args)` is no longer dropped as recursion. A
+file's `defines` edges stay on the file's module when a function shares its
+name (`main.rs`, `fn main`), and a structural edge reads "defined on line N",
+never "call at line N". `neighbors` keeps an unsettled caller `ambiguous`, as
+`impact` does, instead of rewording it `inferred`.
+
+**Python owners and alias spans (G4, G5).** A top-level class is owned by its
+module, never by a neighbouring import alias (`BaseResponse::Flask`,
+`t::Config`, `ft::Blueprint`), and an alias row is its import line
+(`__init__.py:2`, not `1-40` for a 39-line file). A Go `const ( ... )` block
+gives each name its own line too, rather than the whole block qualified by a
+sibling.
+
+**Setext Markdown headings (G6).** A line underlined with `===` or `---` is a
+heading for the chunk cuts, the heading path and the graph: ripgrep's
+CHANGELOG has 42 heading symbols with spans inside the file (they were all
+`1-1871`), and `files --tree` prints "42 headings" for a document instead of
+"0 symbols".
+
+**`symbol` counts and orders (G7, G9, G10, G11).** "N definitions of this name"
+is the real total and says how many are shown (`run -k 3`: "52 definitions of
+this name, 3 shown"); code definitions are listed before headings, keys and
+selectors, so `symbol run` leads with ripgrep's six Rust `run`s, not twenty YAML
+`run:` keys. Several names at once give the rows each name gives alone,
+headings included, and name the ones with no definition. In `--json` an edge
+end has one `kind` (the edge's) and the symbol's kind as `symbol_kind`.
+
+**"Called and not found" is code the corpus does not hold.** The language's
+builtins and standard library (Go, Rust, Python, JavaScript, TypeScript) and
+relative imports are left out: cobra's list was `Errorf` 198, `len`, `append`,
+`os`. `store::builtin_targets` counts what was left out.
+
+### Changed
+
+**The settled share drops, and that is the honest number.** Untyped method
+calls are ambiguous now rather than guessed, so `semlith stats` and the health
+report settle fewer call edges: ripgrep 36 % to 31 % (resolved 1,827 to 1,652,
+ambiguous 3,917 to 4,283), flask 64 % to 39 % (resolved 758 to 289, ambiguous
+672 to 1,166), cobra 85 % to 88 %. Stores keep their pre-0.42.0 hints, without
+the receiver mark, until their files are re-indexed.
+
 ## [0.41.0] - 2026-10-15
 
 ### Security

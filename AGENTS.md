@@ -454,11 +454,37 @@ Module responsibilities:
   added by the `ALTER TABLE` in `store::add_columns` that runs on open — which is
   why `FORMAT_VERSION` does not move. The ranking that reads it prefers, in order:
   the calling file's own definition, a definition whose file the hint names, one in
-  a file the caller imports, then a unique definition in the corpus. An edge the
+  a file the caller imports, then a unique definition in the corpus — except that a
+  module path (`store::edges_out`, Python's `flask.Flask` with `import flask`)
+  outranks the calling file unless it names the calling file, since 0.42.0. A
+  directory the caller and the candidate both sit in names nothing: the
+  checkout's own folder is often called after the package. An edge the
   syntax tree already settled stays `extracted` and is not re-ranked: a fact
   outranks a ranking. Rust's supplement must not emit the path segment of a scoped
   call as a second `calls` edge — `store::edges_out()` is a call to `edges_out`,
   not to `store`.
+- **A call through a receiver never resolves to a free function (0.42.0).** A
+  method call's hint starts with `graph::RECEIVER` (`.`): `.HiArgs`, `.Flask`
+  (`self`'s class), or `.` alone. `store::through_receiver` settles such an edge
+  only on a method owned by the receiver's stated type; everything else is
+  `ambiguous` among the methods of the name, free functions left out. The
+  calling-file tier is exactly what made `.build_parallel().run(||` in
+  ripgrep's main.rs "resolve" to `main::run`, so it must not apply to a
+  receiver. No type checker: an untyped receiver stays ambiguous, it is not
+  guessed. Rust and Python mark receivers; a Python object the file imports as
+  a module stays a module path. `coverage_by_language`'s census reads the mark
+  the same way, which is why the settled share dropped in 0.42.0.
+- **A module's edges leave from the module.** `Edge::from_module` says an edge
+  sits at the top level, and `store::write_extraction` gives it the module's
+  id even when a definition shares the file's name (`main.rs`, `fn main`).
+- **Markdown headings come from `chunk::headings`.** One scanner, ATX and setext,
+  gives the chunk cuts, the heading path and the graph's heading symbols, so a
+  section is the same section to all three; tree-sitter-md's sections open only
+  at ATX headings and are not used for spans.
+- **"Called and not found" leaves the language's own out.** `graph::is_builtin`
+  is the table (Go, Rust, Python, JavaScript, TypeScript); `store::
+  unresolved_targets` applies it and `store::builtin_targets` counts what it
+  left out.
 - **Traversal is bounded and reads one hop at a time.** No `petgraph`, no
   in-memory whole-graph structure: `graph::neighbours` and
   `graph::shortest_path` walk the indexed `edges(src)`/`edges(dst)` columns

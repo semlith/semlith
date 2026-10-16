@@ -640,8 +640,25 @@ call; one whose file the hint names; one in a file the calling file imports; and
 failing those, the only definition of the name in the corpus. A remaining tie is
 broken by the number of directories each candidate shares with the caller, so a
 call in `src/mcp.rs` means `src/fleet.rs` and not a fixture copy; a tie nothing
-places stays a tie. A call to the same name on a receiver of another type is not
-dropped as recursion.
+places stays a tie. A module path (`store::edges_out`, `flask.Flask` where the
+file does `import flask`) outranks the calling file's own namesake unless it
+names the calling file, and a directory the caller and the candidate share is
+not read as named by the hint. A call to the same name through anything but the caller's
+own class — another receiver, a module path — is not dropped as recursion.
+
+**A call through a receiver never means a free function.** `x.run()`,
+`self.flush()` and Python's `app.render()` store their hint with a leading `.`
+(`.HiArgs`, `.Flask`, or `.` alone when nothing names the receiver), and such an
+edge is settled only on a method whose owner is the receiver's stated type —
+the type a Rust binding or field declares, or `self`'s class. The calling file,
+the hint as a file name and the imports place a bare call, and say nothing about
+which type a receiver is, so a receiver nothing typed leaves the edge
+`ambiguous` among the methods of that name; free functions are left out of the
+candidates. A Python object the file imports as a module (`import json`) is a
+module path, not a receiver, and a lower-case Python receiver that names the
+file of exactly one free function settles on it. There is no type checker: an
+untyped receiver stays ambiguous rather than guessed. Stores indexed before
+0.42.0 carry hints without the mark until their files are re-indexed.
 
 **Confidence has four values, two stored.** `extracted` and `inferred` are
 written at extraction time; `resolved` (one survivor) and `ambiguous` (several,

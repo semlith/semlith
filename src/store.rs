@@ -1385,13 +1385,25 @@ fn coverage_by_language_uncached(db: &Connection) -> Result<Vec<LanguageCoverage
     // Counted per file, whether the extractor settled the edge, and how many
     // definitions its target has -- none, one or several, which is all the
     // row needs, so the count stops at two.
+    //
+    // A call through a receiver (`edges.hint` starting `.`) settles only on a
+    // method of the receiver's stated type, as `store::through_receiver`
+    // decides, so for one of those `typed` counts the definitions owned by
+    // that type: one settles it, anything else is ambiguous. `-1` is any
+    // other edge.
     let mut stmt = db.prepare(
         "SELECT s.file_id, e.confidence = 'extracted',
                 (SELECT COUNT(*) FROM (SELECT 1 FROM symbols d WHERE d.name = e.dst LIMIT 2)) AS defs,
+                CASE WHEN substr(e.hint, 1, 1) = '.' THEN
+                  CASE WHEN substr(e.hint, 2, 1) BETWEEN 'A' AND 'Z' THEN
+                    (SELECT COUNT(*) FROM (SELECT 1 FROM symbols d WHERE d.name = e.dst
+                       AND d.qualified = substr(e.hint, 2) || '::' || e.dst LIMIT 2))
+                  ELSE 0 END
+                ELSE -1 END AS typed,
                 COUNT(*)
          FROM edges e JOIN symbols s ON s.id = e.src
          WHERE e.kind = 'calls'
-         GROUP BY s.file_id, 2, defs",
+         GROUP BY s.file_id, 2, defs, typed",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -1399,13 +1411,21 @@ fn coverage_by_language_uncached(db: &Connection) -> Result<Vec<LanguageCoverage
             r.get::<_, bool>(1)?,
             r.get::<_, i64>(2)?,
             r.get::<_, i64>(3)?,
+            r.get::<_, i64>(4)?,
         ))
     })?;
     for row in rows {
-        let (file, extracted, definitions, count) = row?;
+        let (file, extracted, definitions, typed, count) = row?;
         let count = usize::try_from(count).unwrap_or(0);
         let entry = by_language.entry(lang(file)).or_default();
-        if extracted {
+        if typed >= 0 {
+            match (definitions, typed) {
+                (0, _) => entry.unresolved += count,
+                (_, 1) if extracted => entry.extracted += count,
+                (_, 1) => entry.resolved += count,
+                _ => entry.ambiguous += count,
+            }
+        } else if extracted {
             entry.extracted += count;
         } else {
             match definitions {
@@ -1975,9 +1995,13 @@ pub struct SymbolRow {
 }
 
 /// One end of a traversal: the symbol reached, and the edge that reached it.
+///
+/// Serialised flat, as the symbol's fields beside the edge's, with the
+/// symbol's kind as `symbol_kind`: both were `kind`, so `symbol --json` printed
+/// the key twice and a parser kept the edge's (2026-10-14 audit, G7).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EdgeEnd {
-    #[serde(flatten)]
+    #[serde(flatten, serialize_with = "reached_symbol")]
     pub symbol: SymbolRow,
     pub kind: String,
     pub confidence: String,
@@ -2017,6 +2041,26 @@ pub struct EdgeEnd {
     /// `None` when the name has one definition or the call did not settle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub means: Option<String>,
+}
+
+/// A [`SymbolRow`] inside an [`EdgeEnd`]: every field, `kind` as `symbol_kind`.
+fn reached_symbol<S: serde::Serializer>(row: &SymbolRow, s: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+    let mut map = s.serialize_map(None)?;
+    map.serialize_entry("id", &row.id)?;
+    map.serialize_entry("path", &crate::plain(&row.path))?;
+    map.serialize_entry("symbol_kind", &row.kind)?;
+    map.serialize_entry("name", &row.name)?;
+    map.serialize_entry("qualified", &row.qualified)?;
+    map.serialize_entry("start_line", &row.start_line)?;
+    map.serialize_entry("end_line", &row.end_line)?;
+    if let Some(chunk) = row.chunk_id {
+        map.serialize_entry("chunk_id", &chunk)?;
+    }
+    if let Some(store) = &row.store {
+        map.serialize_entry("store", store)?;
+    }
+    map.end()
 }
 
 const SYMBOL_COLUMNS: &str =
@@ -2075,6 +2119,75 @@ pub fn insert_edge(
     Ok(())
 }
 
+/// Write one file's extraction: its symbols, then its edges by source name.
+///
+/// `spans` are the file's chunks as `(start_line, end_line, chunk_id)`, so each
+/// symbol points at the chunk its first line sits in. Returns `(symbols,
+/// edges)` written. The one writer `index_set` and the graph tests share, so a
+/// test of what a file yields is a test of what the store holds.
+pub fn write_extraction(
+    db: &Connection,
+    extraction: &crate::graph::Extraction,
+    file_id: i64,
+    spans: &[(u32, u32, i64)],
+) -> Result<(usize, usize)> {
+    // Name to id, for the edges below. A file may define the same name
+    // twice — two `new` methods on two types — and the first wins, because
+    // an edge out of this file names its source by name and nothing here
+    // can tell them apart either.
+    let mut ids: std::collections::HashMap<&str, (i64, bool)> = std::collections::HashMap::new();
+    // The file's own symbol, which an edge marked `from_module` leaves from
+    // even when a definition shares its name.
+    let mut module_id: Option<i64> = None;
+    for symbol in &extraction.symbols {
+        let chunk_id = spans
+            .iter()
+            .find(|(start, end, _)| symbol.start_line >= *start && symbol.start_line <= *end)
+            .map(|(_, _, id)| *id);
+        let id = insert_symbol(db, file_id, chunk_id, symbol)?;
+        // A definition outranks the file's module symbol of the same name:
+        // `fn brief` in `brief.rs` is where its calls come from, and giving
+        // them to the module put every caller of it at line 1.
+        let module = symbol.kind == "module";
+        if module && module_id.is_none() {
+            module_id = Some(id);
+        }
+        match ids.get(symbol.name.as_str()) {
+            None => {
+                ids.insert(symbol.name.as_str(), (id, module));
+            }
+            Some((_, true)) if !module => {
+                ids.insert(symbol.name.as_str(), (id, false));
+            }
+            _ => {}
+        }
+    }
+    let ids: std::collections::HashMap<&str, i64> =
+        ids.into_iter().map(|(k, (id, _))| (k, id)).collect();
+
+    let mut written = 0;
+    for edge in &extraction.edges {
+        let src = match module_id {
+            Some(id) if edge.from_module => id,
+            _ => match ids.get(edge.from.as_str()) {
+                Some(id) => *id,
+                None => continue,
+            },
+        };
+        insert_edge(
+            db,
+            src,
+            &edge.to,
+            &edge.kind,
+            &edge.confidence,
+            edge.hint.as_deref(),
+            edge.line,
+        )?;
+        written += 1;
+    }
+    Ok((extraction.symbols.len(), written))
+}
+
 /// Every definition of `name`, across the whole store.
 ///
 /// Exact match, not a glob: `semlith symbol acquire` asking about `acquire` and
@@ -2088,6 +2201,30 @@ pub fn symbols_named(db: &Connection, name: &str, limit: usize) -> Result<Vec<Sy
     let mut stmt = db.prepare(&sql)?;
     let rows = stmt.query_map(params![name, limit as i64], symbol_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// [`symbols_named`] with code first — definitions before the headings, keys
+/// and selectors that share the name — and how many there are in all.
+pub fn symbols_named_counted(
+    db: &Connection,
+    name: &str,
+    limit: usize,
+) -> Result<(Vec<SymbolRow>, usize)> {
+    let navigational = crate::graph::not_navigational("s.kind");
+    let sql = format!(
+        "SELECT {SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE s.name = ?1 ORDER BY NOT ({navigational}), f.path, s.start_line LIMIT ?2"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = stmt.query_map(params![name, limit], symbol_row)?;
+    let rows = rows.collect::<Result<Vec<_>, _>>()?;
+    let total: i64 = db.query_row(
+        "SELECT COUNT(*) FROM symbols WHERE name = ?1",
+        [name],
+        |r| r.get(0),
+    )?;
+    Ok((rows, total as usize))
 }
 
 /// Symbols to draw for a scope, newest-defined first within each file.
@@ -2244,7 +2381,8 @@ pub fn edge_counts(db: &Connection, name: &str) -> Result<(usize, usize)> {
     let (out_total, out_sure): (i64, i64) = db.query_row(
         &format!(
             "SELECT COUNT(*), COALESCE(SUM(e.confidence = 'extracted' OR
-                 (SELECT COUNT(*) FROM (SELECT 1 FROM symbols h WHERE h.name = e.dst AND {navigational} LIMIT 2)) = 1), 0)
+                 (substr(COALESCE(e.hint, ''), 1, 1) != '.' AND
+                  (SELECT COUNT(*) FROM (SELECT 1 FROM symbols h WHERE h.name = e.dst AND {navigational} LIMIT 2)) = 1)), 0)
              FROM edges e JOIN symbols src ON src.id = e.src
              WHERE src.name = ?1
                AND EXISTS (SELECT 1 FROM symbols h WHERE h.name = e.dst AND {navigational})"
@@ -2395,43 +2533,56 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
 
     let mut out = Vec::new();
     for key in order {
-        let candidates = groups.remove(&key).unwrap_or_default();
-        let (src_path, _, _, hint) = &key;
-        let definitions = candidates.len();
-
-        if definitions == 1 {
-            // Nothing to choose between. Whatever the syntax tree said stands,
-            // and a bare name that matches exactly one definition in the store
-            // is as resolved as the corpus can make it.
-            let row = candidates.into_iter().next().expect("one candidate");
-            let confidence = if row.confidence == crate::graph::EXTRACTED {
-                crate::graph::EXTRACTED
-            } else {
-                crate::graph::RESOLVED
-            };
-            out.push(EdgeEnd {
-                symbol: row.symbol,
-                kind: row.kind,
-                confidence: confidence.to_string(),
-                definitions,
-                from_path: Some(row.src_path),
-                from_line: Some(row.src_line),
-                line: row.line,
-                means: None,
+        let mut candidates = groups.remove(&key).unwrap_or_default();
+        let (src_path, _, kind, hint) = &key;
+        // A call never means a module, unless nothing else has the name (see
+        // `choose_for`), and an unsettled call does not list one either.
+        if kind == "calls"
+            && candidates.iter().any(|c| c.symbol.kind == "module")
+            && candidates.iter().any(|c| c.symbol.kind != "module")
+        {
+            candidates.retain(|c| c.symbol.kind != "module");
+        }
+        // A structural edge names a definition in its own file, on the line
+        // the edge records; anything elsewhere with that name is not it.
+        if structural(kind) {
+            candidates.retain(|c| {
+                c.symbol.path == c.src_path && c.line.is_none_or(|l| l == c.symbol.start_line)
             });
+            for row in candidates {
+                out.push(EdgeEnd {
+                    symbol: row.symbol,
+                    kind: row.kind,
+                    confidence: row.confidence,
+                    definitions: 1,
+                    from_path: Some(row.src_path),
+                    from_line: Some(row.src_line),
+                    line: row.line,
+                    means: None,
+                });
+            }
             continue;
         }
+        let definitions = candidates.len();
 
-        let picked = {
-            let rows: Vec<&SymbolRow> = candidates.iter().map(|c| &c.symbol).collect();
-            choose(db, &rows, src_path, hint.as_deref(), &mut imports)?
+        let rows: Vec<&SymbolRow> = candidates.iter().map(|c| &c.symbol).collect();
+        let (picked, settled) =
+            choose_for(db, kind, &rows, src_path, hint.as_deref(), &mut imports)?;
+        // A receiver's edge that did not settle lists only what a method call
+        // can mean; any other unsettled edge lists every candidate, as before.
+        let receiver = hint
+            .as_deref()
+            .is_some_and(|h| h.starts_with(crate::graph::RECEIVER));
+        let listed = if settled || receiver {
+            picked.iter().filter(|p| **p).count()
+        } else {
+            definitions
         };
-        let settled = picked.iter().filter(|p| **p).count() == 1;
         for (row, keep) in candidates.into_iter().zip(&picked) {
-            if settled && !*keep {
+            if (settled || receiver) && !*keep {
                 continue;
             }
-            let confidence = if row.confidence == crate::graph::EXTRACTED && settled {
+            let confidence = if settled && row.confidence == crate::graph::EXTRACTED {
                 crate::graph::EXTRACTED
             } else if settled {
                 crate::graph::RESOLVED
@@ -2442,7 +2593,7 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
                 symbol: row.symbol,
                 kind: row.kind,
                 confidence: confidence.to_string(),
-                definitions,
+                definitions: if settled { definitions } else { listed },
                 from_path: Some(row.src_path),
                 from_line: Some(row.src_line),
                 line: row.line,
@@ -2453,10 +2604,43 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
     Ok(out)
 }
 
-/// Which of `candidates` an edge written in `src_path` with `hint` means.
+/// Whether an edge kind says where a definition sits rather than what it uses.
+fn structural(kind: &str) -> bool {
+    matches!(kind, "defines" | "contains")
+}
+
+/// [`choose`] for an edge of `kind`. A call never means a module: ripgrep's
+/// main.rs declares `mod search;` beside `fn search`, and the module made the
+/// bare call `search(&args, mode)` a tie. Modules are candidates only when
+/// nothing else answers to the name.
+fn choose_for(
+    db: &Connection,
+    kind: &str,
+    candidates: &[&SymbolRow],
+    src_path: &str,
+    hint: Option<&str>,
+    imports: &mut std::collections::HashMap<String, Vec<String>>,
+) -> Result<(Vec<bool>, bool)> {
+    let module = |c: &&SymbolRow| c.kind == "module";
+    if kind != "calls" || !candidates.iter().any(module) || candidates.iter().all(module) {
+        return choose(db, candidates, src_path, hint, imports);
+    }
+    let callable: Vec<&SymbolRow> = candidates.iter().filter(|c| !module(c)).copied().collect();
+    let (picked, settled) = choose(db, &callable, src_path, hint, imports)?;
+    let mut picked = picked.into_iter();
+    let keep = candidates
+        .iter()
+        .map(|c| !module(c) && picked.next().unwrap_or(false))
+        .collect();
+    Ok((keep, settled))
+}
+
+/// Which of `candidates` an edge written in `src_path` with `hint` means, and
+/// whether that settled it.
 ///
 /// Every candidate at the best rank is kept, so one `true` is a settled edge
-/// and several are an ambiguous one. The imports of the calling file are read
+/// and several are an ambiguous one — except through a receiver, which
+/// [`through_receiver`] decides. The imports of the calling file are read
 /// only when the first pass left more than one and something unplaced, and
 /// cached in `imports` across calls.
 ///
@@ -2471,7 +2655,13 @@ fn choose(
     src_path: &str,
     hint: Option<&str>,
     imports: &mut std::collections::HashMap<String, Vec<String>>,
-) -> Result<Vec<bool>> {
+) -> Result<(Vec<bool>, bool)> {
+    if let Some(lead) = hint.and_then(|h| h.strip_prefix(crate::graph::RECEIVER)) {
+        return Ok(through_receiver(candidates, src_path, lead));
+    }
+    if candidates.len() == 1 {
+        return Ok((vec![true], true));
+    }
     let mut ranks: Vec<u8> = candidates
         .iter()
         .map(|c| rank(c, src_path, hint, &[]))
@@ -2505,7 +2695,84 @@ fn choose(
             *k = *k && *n == nearest;
         }
     }
-    Ok(keep)
+    let settled = keep.iter().filter(|k| **k).count() == 1;
+    Ok((keep, settled))
+}
+
+/// Whether a definition is a function no receiver can reach: not a method,
+/// and not owned by a type (`main::run`, Python's `helpers::make_response`,
+/// a function in `mod tests`). A method's owner is a type, upper case first.
+fn free_function(c: &SymbolRow) -> bool {
+    c.kind == "function"
+        && owner_of(&c.qualified).is_none_or(|o| !o.chars().next().is_some_and(char::is_uppercase))
+}
+
+/// What a call through a receiver (`x.run()`, `self.flush()`) means.
+///
+/// Never a free function: `.build_parallel().run(||` in ripgrep's main.rs was
+/// settled on `main::run` because that `run` sat in the calling file, which put
+/// a false two-hop chain into `path` (2026-10-14 audit, G1). It settles only
+/// on a method of the receiver's stated type — the ranking signals that place
+/// a bare call, the calling file and its imports, say nothing about which type
+/// a receiver is — and a receiver nothing typed leaves the edge ambiguous
+/// among the methods of that name. Typing it is a type checker's job, which
+/// semlith is not. One exception, for Python only, where `x.f()` is also how a
+/// module's function is called: a lower-case receiver naming the file of
+/// exactly one free function, as `views.render()` names `views.py`.
+fn through_receiver(candidates: &[&SymbolRow], src_path: &str, lead: &str) -> (Vec<bool>, bool) {
+    // What a receiver can call: a method, or a function a type owns. With
+    // none in the store the call leaves the corpus, and the edge lists what
+    // shares the name, never a module (`searcher.search()` is not search.rs).
+    let method = |c: &SymbolRow| c.kind == "method" || (c.kind == "function" && !free_function(c));
+    let methods: Vec<bool> = candidates.iter().map(|c| method(c)).collect();
+    let callable: Vec<bool> = candidates.iter().map(|c| c.kind != "module").collect();
+    let pool = if methods.contains(&true) {
+        methods
+    } else if callable.contains(&true) {
+        callable
+    } else {
+        vec![true; candidates.len()]
+    };
+    let upper = lead.chars().next().is_some_and(char::is_uppercase);
+    let python = |p: &str| p.ends_with(".py") || p.ends_with(".pyi");
+    if python(src_path) && !lead.is_empty() && !upper {
+        let module: Vec<bool> = candidates
+            .iter()
+            .map(|c| free_function(c) && names_file(lead, &c.path, src_path))
+            .collect();
+        if module.iter().filter(|m| **m).count() == 1 {
+            return (module, true);
+        }
+    }
+    if upper {
+        let mut typed: Vec<bool> = candidates
+            .iter()
+            .zip(&pool)
+            .map(|(c, p)| *p && method(c) && owner_of(&c.qualified) == Some(lead))
+            .collect();
+        if typed.iter().filter(|t| **t).count() > 1 {
+            let near: Vec<usize> = candidates
+                .iter()
+                .map(|c| shared_directories(&c.path, src_path))
+                .collect();
+            let nearest = near
+                .iter()
+                .zip(&typed)
+                .filter(|(_, t)| **t)
+                .map(|(n, _)| *n)
+                .max()
+                .unwrap_or(0);
+            for (t, n) in typed.iter_mut().zip(&near) {
+                *t = *t && *n == nearest;
+            }
+        }
+        match typed.iter().filter(|t| **t).count() {
+            1 => return (typed, true),
+            0 => {}
+            _ => return (typed, false),
+        }
+    }
+    (pool, false)
 }
 
 /// How many leading directories two paths share.
@@ -2549,7 +2816,8 @@ pub fn owner_of(qualified: &str) -> Option<&str> {
 ///    hint that reads as a type (upper case first) counts here: a variable
 ///    named `fleet` is a lead about a file, and tier 2 reads it as one.
 /// 1. The same file as the call. A file that defines a name and calls it means
-///    its own.
+///    its own — unless the call went through a module path that names
+///    another file.
 /// 2. A file the hint names. `store::edges_out` in the presence of
 ///    `src/store.rs` is not a coincidence.
 /// 3. A file the calling file imports. Weaker than the hint because an import
@@ -2561,15 +2829,27 @@ fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[St
         return 0;
     }
     let candidate = candidate.path.as_str();
-    if candidate == src_path {
+    // A module path (`flask.Flask`, `index::read`) names where the target
+    // is, so the calling file's own namesake wins only when the path names
+    // the calling file: in flask's test_config.py, `flask.Flask(...)` was
+    // settled on a test's subclass defined a few lines up.
+    let path_hint = hint.filter(|h| {
+        !h.starts_with(crate::graph::RECEIVER) && !h.chars().next().is_some_and(char::is_uppercase)
+    });
+    let names_caller = |h: &str| {
+        std::path::Path::new(src_path)
+            .file_stem()
+            .is_some_and(|stem| stem == h)
+    };
+    if candidate == src_path && path_hint.is_none_or(names_caller) {
         return 1;
     }
-    if hint.is_some_and(|h| names_file(h, candidate)) {
+    if hint.is_some_and(|h| names_file(h, candidate, src_path)) {
         return 2;
     }
     if imports.iter().any(|i| {
         i.split(['/', '.', ':', '\\'])
-            .any(|segment| !segment.is_empty() && names_file(segment, candidate))
+            .any(|segment| !segment.is_empty() && names_file(segment, candidate, src_path))
     }) {
         return 3;
     }
@@ -2586,19 +2866,24 @@ fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[St
 }
 
 /// Whether `word` names the file at `path` — its stem, or one of its
-/// directories.
+/// directories below the ones it shares with `from`, the calling file.
 ///
 /// `store` names `src/store.rs` and `src/store/mod.rs` alike, which is the
 /// point: a module is a file or a directory depending on how the author felt
-/// that day, and a hint knows neither.
-fn names_file(word: &str, path: &str) -> bool {
+/// that day, and a hint knows neither. A directory both files sit in names
+/// nothing: flask's tests call `flask.Flask(...)`, the repository's own folder
+/// is called `flask`, and every candidate under it — a test's subclass of
+/// `Flask` included — read as named by the hint, so the nearest won as
+/// "extracted" (72 such edges in the 2026-10-14 audit's flask store).
+fn names_file(word: &str, path: &str, from: &str) -> bool {
     let path = std::path::Path::new(path);
     if path.file_stem().is_some_and(|stem| stem == word) {
         return true;
     }
+    let shared = shared_directories(&path.to_string_lossy(), from);
     path.parent()
         .into_iter()
-        .flat_map(|parent| parent.components())
+        .flat_map(|parent| parent.components().skip(shared))
         .any(|component| component.as_os_str() == word)
 }
 
@@ -2794,10 +3079,42 @@ pub fn edges_in_resolved(db: &Connection, name: &str, kinds: &[String]) -> Resul
     let mut imports = std::collections::HashMap::new();
     let mut out = Vec::with_capacity(rows.len());
     for (caller, kind, stored, line, hint) in rows {
-        let picked = if refs.len() > 1 {
-            choose(db, &refs, &caller.path, hint.as_deref(), &mut imports)?
+        // A structural edge is the file saying where its own definition sits:
+        // nothing to rank, and nothing in another file it could mean. Ranked,
+        // a YAML `steps` holding its `run:` key read as maybe containing one
+        // of ripgrep's Rust `run`s.
+        if structural(&kind) {
+            let means: Vec<i64> = definitions
+                .iter()
+                .filter(|d| d.path == caller.path && line.is_none_or(|l| l == d.start_line))
+                .map(|d| d.id)
+                .collect();
+            out.push(Incoming {
+                end: EdgeEnd {
+                    symbol: caller,
+                    kind,
+                    confidence: stored,
+                    definitions: definitions.len(),
+                    from_path: None,
+                    from_line: None,
+                    line,
+                    means: None,
+                },
+                means,
+            });
+            continue;
+        }
+        let (picked, settled) = if refs.is_empty() {
+            (Vec::new(), false)
         } else {
-            vec![true; refs.len()]
+            choose_for(
+                db,
+                &kind,
+                &refs,
+                &caller.path,
+                hint.as_deref(),
+                &mut imports,
+            )?
         };
         let means: Vec<i64> = definitions
             .iter()
@@ -2805,13 +3122,16 @@ pub fn edges_in_resolved(db: &Connection, name: &str, kinds: &[String]) -> Resul
             .filter(|(_, p)| **p)
             .map(|(d, _)| d.id)
             .collect();
-        let confidence = match means.len() {
-            1 if stored == crate::graph::EXTRACTED => crate::graph::EXTRACTED,
-            1 => crate::graph::RESOLVED,
+        let confidence = if means.is_empty() {
             // No definition at all: an edge to a name the store holds only as
             // a heading or a key. Kept as stored so nothing is invented.
-            0 => stored.as_str(),
-            _ => crate::graph::AMBIGUOUS,
+            stored.as_str()
+        } else if settled && stored == crate::graph::EXTRACTED {
+            crate::graph::EXTRACTED
+        } else if settled {
+            crate::graph::RESOLVED
+        } else {
+            crate::graph::AMBIGUOUS
         }
         .to_string();
         out.push(Incoming {
@@ -5382,33 +5702,80 @@ pub fn where_defined(db: &Connection, names: &[String]) -> Result<Vec<(String, S
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Call targets no definition in this store satisfies, commonest first.
+/// Call targets no definition in this store satisfies, commonest first, and
+/// how many distinct ones there are.
 ///
 /// The names a reader has to recognise as "outside this corpus" before they
-/// read an absent edge as a missing call. Counted rather than listed in full:
-/// on a store that indexes application code every standard-library call is
-/// one of these, and the list is long and uninteresting past the first few.
+/// read an absent edge as a missing call. Counted rather than listed in full.
+/// The language's own builtins and standard library are left out
+/// ([`crate::graph::is_builtin`]) — cobra's list was `Errorf` 198 times,
+/// `len`, `append` and `os` (2026-10-14 audit) — and [`builtin_targets`]
+/// counts what was left out, so a report can say so.
 pub fn unresolved_targets(db: &Connection, limit: usize) -> Result<(Vec<(String, i64)>, i64)> {
-    // One pass, and one existence test per distinct target rather than per
-    // edge; the top list and the count come from the same rows. Two passes of
-    // a per-edge test were most of the Index health report on the 879k-chunk
-    // corpus. Cached per store until its graph changes, as the report is
-    // asked for again and again while it is being read.
-    let mut all = cached_by_graph(db, "unresolved", || {
-        let target = crate::graph::not_navigational("d.kind");
-        let mut stmt = db.prepare(&format!(
-            "WITH t AS (SELECT dst, COUNT(*) AS n FROM edges
-                        WHERE kind IN ('calls', 'imports') GROUP BY dst)
-             SELECT dst, n FROM t
-             WHERE NOT EXISTS (SELECT 1 FROM symbols d WHERE d.name = t.dst AND {target})"
-        ))?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    })?;
+    let (mut all, _) = outside_targets(db)?;
     let distinct = all.len() as i64;
     all.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     all.truncate(limit);
     Ok((all, distinct))
+}
+
+/// How many distinct call and import targets with no definition here are the
+/// language's own builtins or standard library, and so are not in
+/// [`unresolved_targets`].
+pub fn builtin_targets(db: &Connection) -> Result<i64> {
+    Ok(outside_targets(db)?.1)
+}
+
+/// Targets nothing here defines, as `(name, edges)` outside the builtins, and
+/// the count of distinct names that were builtins only.
+fn outside_targets(db: &Connection) -> Result<(Vec<(String, i64)>, i64)> {
+    // One existence test per distinct target rather than per edge, then the
+    // per-file rows of only those targets, because whether a name is a
+    // builtin depends on the calling file's language and the edge's hint.
+    // Cached per store until its graph changes, as the report is asked for
+    // again and again while it is being read.
+    cached_by_graph(db, "unresolved", || {
+        let target = crate::graph::not_navigational("d.kind");
+        let mut stmt = db.prepare(&format!(
+            "WITH t AS (SELECT dst FROM edges WHERE kind IN ('calls', 'imports') GROUP BY dst),
+                  u AS (SELECT dst FROM t
+                        WHERE NOT EXISTS (SELECT 1 FROM symbols d WHERE d.name = t.dst AND {target}))
+             SELECT e.dst, e.kind, e.hint, f.path, COUNT(*)
+             FROM u JOIN edges e ON e.dst = u.dst
+             JOIN symbols s ON s.id = e.src JOIN files f ON f.id = s.file_id
+             WHERE e.kind IN ('calls', 'imports')
+             GROUP BY e.dst, e.kind, e.hint, s.file_id"
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut language: std::collections::HashMap<String, &'static str> =
+            std::collections::HashMap::new();
+        let mut kept: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut builtin: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for row in rows {
+            let (name, kind, hint, path, n) = row?;
+            let lang = *language.entry(path).or_insert_with_key(|p| {
+                crate::graph::language_of(std::path::Path::new(p)).unwrap_or("")
+            });
+            if kind == "imports" && crate::graph::is_relative_import(lang, &name) {
+                continue;
+            }
+            if crate::graph::is_builtin(lang, &name, &kind, hint.as_deref()) {
+                builtin.insert(name);
+            } else {
+                *kept.entry(name).or_insert(0) += n;
+            }
+        }
+        builtin.retain(|name| !kept.contains_key(name));
+        Ok((kept.into_iter().collect::<Vec<_>>(), builtin.len() as i64))
+    })
 }
 
 /// A figure computed over a whole store's graph, kept until the graph's
@@ -5773,12 +6140,28 @@ mod tests {
         assert_eq!(out[0].symbol.path, "src/store/mod.rs");
     }
 
-    /// The calling file's own definition wins over one the hint names. A file
-    /// that defines a name and calls it means its own.
+    /// A module path outranks the calling file's own namesake: `store::callee()`
+    /// in caller.rs is store.rs's `callee`, whatever caller.rs defines. Until
+    /// 0.42.0 the calling file won, which in flask's test_config.py settled
+    /// `flask.Flask(...)` on a test's own subclass (2026-10-14 audit). A
+    /// call with no path, or a path naming the calling file, still means its
+    /// own.
     #[test]
-    fn the_calling_file_outranks_the_hint() {
+    fn a_module_path_outranks_the_calling_file() {
         let db = many_definitions(&["src/caller.rs", "src/store.rs"]);
         call(&db, Some("store"));
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].symbol.path, "src/store.rs");
+
+        let db = many_definitions(&["src/caller.rs", "src/store.rs"]);
+        call(&db, None);
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].symbol.path, "src/caller.rs");
+
+        let db = many_definitions(&["src/caller.rs", "src/store.rs"]);
+        call(&db, Some("caller"));
         let out = edges_out(&db, "caller", &[]).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].symbol.path, "src/caller.rs");

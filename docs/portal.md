@@ -617,9 +617,11 @@ on; when that line is unknown nothing is printed rather than a wrong one.
 Treat `extracted` and `resolved` as answers, `inferred` as a hint and `ambiguous`
 as a question. `extracted` and `inferred` are stored at extraction; `resolved` and
 `ambiguous` are computed on every read, because indexing another definition of the
-same name can change the answer. Resolution prefers a definition in the same file,
-then the file the source names, then a file the source imports, then a unique
-definition in the corpus. Ambiguous edges are drawn dashed amber and never crossed
+same name can change the answer. Resolution prefers a definition in the same file
+(unless a module path in the call names another), then the file the source names, then a file the source imports, then a unique
+definition in the corpus. A call through a receiver (`x.run()`) is different: it
+settles only on a method of the receiver's stated type and never on a free
+function, so a receiver nothing typed is `ambiguous`. Ambiguous edges are drawn dashed amber and never crossed
 by a walk that prefers verified edges; a chain may also only leave from the
 definition it arrived at (see **seam** below).
 

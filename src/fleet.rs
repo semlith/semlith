@@ -878,6 +878,7 @@ impl Fleet {
                 None => merged = Some(part),
                 Some(into) => {
                     into.definitions.extend(part.definitions);
+                    into.total += part.total;
                     into.callers.extend(part.callers);
                     into.callees.extend(part.callees);
                     into.ego.extend(part.ego);
@@ -887,6 +888,7 @@ impl Fleet {
         Ok(merged.unwrap_or_else(|| crate::graph::Evidence {
             name: name.to_string(),
             definitions: Vec::new(),
+            total: 0,
             callers: Vec::new(),
             callees: Vec::new(),
             ego: Vec::new(),

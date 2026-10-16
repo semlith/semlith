@@ -51,6 +51,12 @@ pub const KINDS: [&str; 6] = [
 pub const EXTRACTED: &str = "extracted";
 /// Stored on the edge: the target was matched by bare name alone.
 pub const INFERRED: &str = "inferred";
+
+/// What `edges.hint` starts with when the call went through a receiver
+/// (`x.run()`, `self.flush()`): the rest is the receiver's type or name, and
+/// may be empty. The resolver never settles such an edge on a free function,
+/// and settles it at all only on a method of the receiver's stated type.
+pub const RECEIVER: &str = ".";
 /// Computed at query time: the name had several definitions and the hint,
 /// the source file, or its imports picked exactly one of them.
 pub const RESOLVED: &str = "resolved";
@@ -115,6 +121,13 @@ pub struct Edge {
     /// `None` on every row an older binary wrote, which is why the format
     /// version does not move for it.
     pub line: Option<u32>,
+    /// The edge leaves from the file's module symbol: a `defines` edge, or a
+    /// reference at the top level. Without it a file and a definition that
+    /// share a name — `main.rs` and `fn main` — are one source, and the
+    /// module's `defines` edges were written onto `fn main` (2026-10-14
+    /// audit, G3).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_module: bool,
 }
 
 /// What one file yielded.
@@ -210,11 +223,20 @@ fn supplement(lang: &str) -> &'static str {
               function: (scoped_identifier
                 path: (scoped_identifier name: (identifier) @hint)
                 name: (identifier) @name)) @reference.call
+            ; `crate::search_parallel(args)`, `self::helper()`, `super::run()`:
+            ; a path the grammar spells with a keyword, so `(identifier)` above
+            ; never matched it and the call was missed (2026-10-14 audit, G2).
+            ; The keyword names no file, so there is no hint.
+            (call_expression
+              function: (scoped_identifier
+                path: [(crate) (self) (super)]
+                name: (identifier) @name)) @reference.call
             ; A method call: `self.flush()`, `store.db()`, `self.index.search()`.
-            ; The receiver is the hint, reduced to its last identifier.
+            ; The receiver is the hint, reduced to its type or last identifier,
+            ; and marked as a receiver: a method call never means a free fn.
             (call_expression
               function: (field_expression
-                value: (_) @hint
+                value: (_) @receiver
                 field: (field_identifier) @name)) @reference.call
         "#
         }
@@ -271,10 +293,11 @@ fn supplement(lang: &str) -> &'static str {
               name: (_) @reference.alias
               alias: (identifier) @name) @definition.alias
             ; `json.loads(...)`, `self.store.search(...)`: the object names the
-            ; module or the attribute the call went through.
+            ; module or the receiver the call went through. A receiver unless
+            ; the file imports the name as a module; see `extract`.
             (call
               function: (attribute
-                object: (_) @hint
+                object: (_) @receiver
                 attribute: (identifier) @name)) @reference.call
         "#
         }
@@ -282,13 +305,19 @@ fn supplement(lang: &str) -> &'static str {
             r#"
             ; `const MaxHolders = 4`, and every name in a parenthesised
             ; `const (...)` block, which is one `const_spec` each.
-            (const_declaration (const_spec name: (identifier) @name)) @definition.constant
+            (const_declaration (const_spec name: (identifier) @name) @definition.constant)
             (import_spec path: (interpreted_string_literal) @reference.import)
             ; `import fp "path/filepath"` — the alias is what the file then
             ; writes, and the path is what it stands for.
             (import_spec
               name: (package_identifier) @name
               path: (interpreted_string_literal) @reference.alias) @definition.alias
+            ; `fmt.Errorf(...)`, `c.validate()`: the operand is the hint, which
+            ; is what tells `fmt.Errorf` from a call into this corpus.
+            (call_expression
+              function: (selector_expression
+                operand: (identifier) @hint
+                field: (field_identifier) @name)) @reference.call
         "#
         }
         "java" => {
@@ -710,6 +739,10 @@ struct Ref {
     at: usize,
     line: u32,
     hint: Option<String>,
+    /// The call went through a receiver (`x.f()`), so it means a method.
+    method: bool,
+    /// That receiver is `self`, `this` or `cls`: the enclosing class.
+    on_self: bool,
 }
 
 /// The deepest nesting a block grammar is given. tree-sitter-md and
@@ -850,6 +883,12 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
     for query in queries(lang, &language, tags) {
         collect(query, &tree, text, rust.as_ref(), &mut defs, &mut refs);
     }
+    // Markdown's sections come from the one heading scanner the chunker cuts
+    // with, which reads setext headings as well as ATX ones.
+    if lang == "markdown" {
+        defs.retain(|d| d.kind != "heading");
+        defs.extend(markdown_sections(text));
+    }
 
     // The bundled query and the supplement can capture one item twice — and
     // within the bundled query a method is often both `definition.method` and
@@ -924,6 +963,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 // the definition itself starts on rather than nothing: that is
                 // where the source says the containment happens.
                 line: Some(def.start_line),
+                from_module: false,
             }),
             None => edges.push(Edge {
                 from: module.clone(),
@@ -932,6 +972,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 confidence: EXTRACTED.to_string(),
                 hint: None,
                 line: Some(def.start_line),
+                from_module: true,
             }),
         }
     }
@@ -945,6 +986,26 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         .flat_map(|r| import_names(&r.name))
         .collect();
 
+    // The class a definition sits in: the Rust `impl` the extractor read, or
+    // the nearest enclosing definition of a class kind for everything else.
+    // What `self`, `this` and `cls` are, and what makes a call recursion.
+    let class_of = |at: Option<usize>| -> Option<String> {
+        let mut at = at;
+        if let Some(owner) = at.and_then(|i| defs[i].owner.clone()) {
+            return Some(owner);
+        }
+        // Bounded: two definitions over one range are each other's parent,
+        // and a cycle there hung the whole file (cobra completions.go).
+        for _ in 0..defs.len() {
+            let i = at?;
+            if defs[i].kind == "class" {
+                return Some(defs[i].name.clone());
+            }
+            at = parents[i];
+        }
+        None
+    };
+
     let holders = innermost_at(&defs, refs.iter().map(|r| r.at), None);
     for (reference, holder) in refs.iter().zip(holders) {
         let enclosing = holder.map(|h| &defs[h]);
@@ -952,39 +1013,62 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
             Some(def) => def.name.clone(),
             None => module.clone(),
         };
+        let owner = class_of(holder);
+        // A receiver is what the call went through: its type where the
+        // source states it, `self`'s class, or the receiver's own name. A
+        // Python object the file imported as a module (`import json` then
+        // `json.loads()`) is a module path, not a receiver.
+        let lead = match (&reference.hint, reference.on_self) {
+            (Some(h), _) => Some(h.clone()),
+            (None, true) => owner.clone(),
+            (None, false) => None,
+        };
+        let method = reference.method
+            && !(lang == "python"
+                && !reference.on_self
+                && lead.as_ref().is_some_and(|l| {
+                    imported.contains(l) || defs.iter().any(|d| d.kind == "alias" && d.name == *l)
+                }));
         // Direct recursion adds a self-edge and no information. A call to the
-        // same name on a receiver of another type is not recursion:
-        // `Fleet::search_preferring` calling `store.search_preferring()` on
-        // a `Semlith` is the one edge that says what the fleet delegates to.
-        let other_owner = reference
-            .hint
-            .as_ref()
-            .is_some_and(|h| h.chars().next().is_some_and(char::is_uppercase))
-            && enclosing.and_then(|d| d.owner.as_ref()) != reference.hint.as_ref();
-        if from == reference.name && !other_owner {
+        // same name through anything but the caller's own class is not
+        // recursion: `Fleet::search_preferring` calling
+        // `store.search_preferring()`, or helpers.py's `make_response` calling
+        // `current_app.make_response(args)` (2026-10-14 audit, G2).
+        let recursion = from == reference.name
+            && match &lead {
+                None => true,
+                Some(l) => owner.as_ref() == Some(l) || (!method && l == "Self"),
+            };
+        if recursion {
             continue;
         }
         // The file said where this came from, one way or the other: it
         // imported the name itself (`use ...::edges_out;` then `edges_out()`),
         // or it imported the thing the call went through (`use ...::store;`
-        // then `store::edges_out()`). The second is exactly as determined as
-        // the first — the module the call names is in the file's own imports —
-        // and reading it as inferred is what left Rust at 2% extracted while
-        // the source was perfectly explicit.
+        // then `store::edges_out()`, or `use ...::HiArgs;` then a method on an
+        // `&HiArgs`). The second is exactly as determined as the first — the
+        // module the call names is in the file's own imports — and reading it
+        // as inferred is what left Rust at 2% extracted while the source was
+        // perfectly explicit.
         let named_by_file = reference.kind == "imports"
             || imported.contains(&reference.name)
-            || reference
-                .hint
-                .as_ref()
-                .is_some_and(|h| imported.contains(h));
+            || lead.as_ref().is_some_and(|h| imported.contains(h));
         let confidence = if named_by_file { EXTRACTED } else { INFERRED };
+        // A method call's hint carries a leading `.`, so the resolver knows the
+        // call went through a receiver and can never mean a free function.
+        let hint = if method {
+            Some(format!("{RECEIVER}{}", lead.unwrap_or_default()))
+        } else {
+            reference.hint.clone()
+        };
         edges.push(Edge {
             from,
             to: reference.name.clone(),
             kind: reference.kind.to_string(),
             confidence: confidence.to_string(),
-            hint: reference.hint.clone(),
+            hint,
             line: Some(reference.line),
+            from_module: enclosing.is_none(),
         });
     }
 
@@ -998,6 +1082,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
             &a.from,
             &a.to,
             &a.kind,
+            a.from_module,
             confidence_rank(&a.confidence),
             a.hint.is_none(),
             &a.hint,
@@ -1008,6 +1093,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 &b.from,
                 &b.to,
                 &b.kind,
+                b.from_module,
                 confidence_rank(&b.confidence),
                 b.hint.is_none(),
                 &b.hint,
@@ -1015,7 +1101,9 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 b.line,
             ))
     });
-    edges.dedup_by(|a, b| (&a.from, &a.to, &a.kind) == (&b.from, &b.to, &b.kind));
+    edges.dedup_by(|a, b| {
+        (&a.from, &a.to, &a.kind, a.from_module) == (&b.from, &b.to, &b.kind, b.from_module)
+    });
 
     Ok(Some(Extraction { symbols, edges }))
 }
@@ -1041,6 +1129,7 @@ fn collect(
         let mut span: Option<(&str, tree_sitter::Node)> = None;
         let mut name: Option<tree_sitter::Node> = None;
         let mut hint: Option<tree_sitter::Node> = None;
+        let mut method = false;
         let mut references: Vec<(&str, tree_sitter::Node)> = Vec::new();
         for capture in m.captures() {
             let capture_name = names[capture.index as usize];
@@ -1050,6 +1139,9 @@ fn collect(
                 name = Some(capture.node);
             } else if capture_name == "hint" {
                 hint = Some(capture.node);
+            } else if capture_name == "receiver" {
+                hint = Some(capture.node);
+                method = true;
             } else if let Some(kind) = capture_name.strip_prefix("reference.") {
                 references.push((kind, capture.node));
             }
@@ -1112,11 +1204,22 @@ fn collect(
                     rust.and_then(|fields| receiver_type(h, text, fields))
                         .or_else(|| hint_text(h, text))
                 }),
+                method,
+                on_self: hint
+                    .is_some_and(|h| matches!(&text[h.byte_range()], "self" | "this" | "cls")),
             });
         }
 
         if let (Some((kind, node)), Some(name)) = (span, name) {
-            let span = definition_span(node, name);
+            // An alias is the clause that names it, and its name sits at the
+            // clause's very end: climbing from there reached Python's whole
+            // `module`, so `BaseResponse` spanned app.py and owned every class
+            // in it (2026-10-14 audit, G4 and G5).
+            let span = if kind == "alias" {
+                node
+            } else {
+                definition_span(node, name)
+            };
             let raw = &text[name.byte_range()];
             defs.push(Def {
                 kind: kind.to_string(),
@@ -1133,6 +1236,39 @@ fn collect(
             });
         }
     }
+}
+
+/// Each Markdown heading as a definition spanning its section: from its own
+/// line to the line before the next heading at its depth or above, or the
+/// file's last line.
+fn markdown_sections(text: &str) -> Vec<Def> {
+    let mut starts = vec![0usize];
+    starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+    let lines = text.lines().count();
+    let byte = |line: usize| starts.get(line).copied().unwrap_or(text.len());
+    let found = crate::chunk::headings(text);
+    found
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let next = found[i + 1..]
+                .iter()
+                .find(|n| n.level <= h.level)
+                .map_or(lines + 1, |n| n.line as usize);
+            let end_line = (next - 1).max(h.line as usize);
+            Def {
+                kind: "heading".to_string(),
+                name: h.title.clone(),
+                owner: None,
+                start: byte(h.line as usize - 1),
+                end: byte(end_line)
+                    .saturating_sub(1)
+                    .max(byte(h.line as usize - 1) + 1),
+                start_line: h.line,
+                end_line: end_line as u32,
+            }
+        })
+        .collect()
 }
 
 /// A Rust type as far as a method call needs it: its name, and for a
@@ -1498,7 +1634,9 @@ fn definition_span<'a>(
     }
     let mut best = captured;
     let mut node = name;
-    while let Some(parent) = node.parent() {
+    // The root is the file, never one definition's extent — Python's is called
+    // `module`, which reads as declaration-shaped.
+    while let Some(parent) = node.parent().filter(|p| p.parent().is_some()) {
         if declaration_shaped(parent.kind()) && parent.end_byte() > best.end_byte() {
             best = parent;
         }
@@ -1711,6 +1849,717 @@ pub fn dependency_kinds() -> Vec<String> {
 /// heading a hit sits under, and `semlith stats` counts them. They simply
 /// cannot be what an edge meant.
 pub const NAVIGATIONAL_KINDS: [&str; 4] = ["heading", "key", "selector", "element"];
+
+/// Whether an edge target is the language's own: a builtin (`len`, `print`,
+/// `Ok`, `println!`), a call through a standard-library namespace
+/// (`fmt.Errorf`, `os.path.join`, `std::mem::take`), or an import of one
+/// (`"os"`, `std::io::Write`, `import json`).
+///
+/// For "Called and not found", which is a list of code the corpus does not
+/// hold: cobra's was `Errorf` 198 times, `len`, `append` and `os` (2026-10-14
+/// audit, item 30 of 0.42.0). A name this answers yes for is only ever asked
+/// about when nothing in the store defines it, so a user function of the same
+/// name is never hidden.
+///
+/// `hint` is the edge's stored hint, receiver mark and all. Covers the
+/// languages a corpus is mostly made of — Go, Rust, Python, JavaScript and
+/// TypeScript; any other answers no.
+// ponytail: curated names, not the full standard libraries; widen a list when
+// a gaps report shows a standard name.
+pub fn is_builtin(language: &str, name: &str, kind: &str, hint: Option<&str>) -> bool {
+    let hint = hint.map(|h| h.trim_start_matches(RECEIVER));
+    let list = |names: &[&str], n: &str| names.contains(&n);
+    match language {
+        "go" => {
+            const BUILTINS: &[&str] = &[
+                "append",
+                "cap",
+                "clear",
+                "close",
+                "complex",
+                "copy",
+                "delete",
+                "imag",
+                "len",
+                "make",
+                "max",
+                "min",
+                "new",
+                "panic",
+                "print",
+                "println",
+                "real",
+                "recover",
+                "bool",
+                "byte",
+                "error",
+                "float32",
+                "float64",
+                "int",
+                "int8",
+                "int16",
+                "int32",
+                "int64",
+                "rune",
+                "string",
+                "uint",
+                "uint8",
+                "uint16",
+                "uint32",
+                "uint64",
+                "uintptr",
+                "any",
+                // The standard types' methods every Go file calls through a
+                // variable: `t.Errorf` on a `*testing.T` was 171 of cobra's.
+                "Errorf",
+                "Error",
+                "Fatal",
+                "Fatalf",
+                "Log",
+                "Logf",
+                "Helper",
+                "Run",
+                "Skip",
+                "Skipf",
+                "Cleanup",
+                "TempDir",
+                "Setenv",
+                "Parallel",
+                "Name",
+                "String",
+                "Close",
+                "Write",
+                "WriteString",
+                "Read",
+                "Len",
+                "Lock",
+                "Unlock",
+                "RLock",
+                "RUnlock",
+                "Add",
+                "Done",
+                "Wait",
+                "Unwrap",
+                "Is",
+                "As",
+                "Bytes",
+                "Reset",
+                "Sum",
+                "Contains",
+                "HasPrefix",
+                "Sprintf",
+            ];
+            const PACKAGES: &[&str] = &[
+                "fmt",
+                "os",
+                "io",
+                "strings",
+                "strconv",
+                "errors",
+                "bytes",
+                "sort",
+                "sync",
+                "time",
+                "context",
+                "filepath",
+                "path",
+                "bufio",
+                "regexp",
+                "reflect",
+                "unicode",
+                "utf8",
+                "math",
+                "rand",
+                "json",
+                "http",
+                "url",
+                "log",
+                "flag",
+                "exec",
+                "runtime",
+                "atomic",
+                "template",
+                "testing",
+                "hex",
+                "base64",
+                "ioutil",
+                "signal",
+                "syscall",
+                "user",
+                "unsafe",
+                "slices",
+                "maps",
+                "cmp",
+                "iter",
+                "tabwriter",
+                "heap",
+                "list",
+            ];
+            if kind == "imports" {
+                // A standard package's path has no dot in its first element.
+                let path = name.trim_matches('"');
+                return !path.split('/').next().unwrap_or(path).contains('.');
+            }
+            list(BUILTINS, name) || hint.is_some_and(|h| list(PACKAGES, h))
+        }
+        "rust" => {
+            const BUILTINS: &[&str] = &[
+                "Ok",
+                "Err",
+                "Some",
+                "Box",
+                "drop",
+                "panic!",
+                "println!",
+                "print!",
+                "eprintln!",
+                "eprint!",
+                "format!",
+                "vec!",
+                "write!",
+                "writeln!",
+                "assert!",
+                "assert_eq!",
+                "assert_ne!",
+                "debug_assert!",
+                "debug_assert_eq!",
+                "unreachable!",
+                "todo!",
+                "unimplemented!",
+                "matches!",
+                "concat!",
+                "env!",
+                "include_str!",
+                "include_bytes!",
+                "stringify!",
+                "line!",
+                "file!",
+                "format_args!",
+                "dbg!",
+                "cfg!",
+                "thread_local!",
+                "compile_error!",
+                // The standard traits' and types' methods every Rust file calls.
+                "clone",
+                "unwrap",
+                "expect",
+                "into",
+                "iter",
+                "into_iter",
+                "iter_mut",
+                "collect",
+                "map",
+                "to_string",
+                "to_owned",
+                "as_str",
+                "as_ref",
+                "as_deref",
+                "len",
+                "is_empty",
+                "push",
+                "push_str",
+                "pop",
+                "get",
+                "get_mut",
+                "insert",
+                "remove",
+                "contains",
+                "contains_key",
+                "unwrap_or",
+                "unwrap_or_default",
+                "unwrap_or_else",
+                "ok",
+                "err",
+                "ok_or",
+                "ok_or_else",
+                "and_then",
+                "filter",
+                "filter_map",
+                "next",
+                "join",
+                "split",
+                "trim",
+                "starts_with",
+                "ends_with",
+                "lock",
+                "borrow",
+                "borrow_mut",
+                "take",
+                "extend",
+                "enumerate",
+                "zip",
+                "chain",
+                "rev",
+                "sort",
+                "sort_by",
+                "sort_by_key",
+                "dedup",
+                "retain",
+                "entry",
+                "or_insert",
+                "or_default",
+                "chars",
+                "bytes",
+                "lines",
+                "find",
+                "position",
+                "any",
+                "all",
+                "count",
+                "sum",
+                "first",
+                "last",
+                "is_some",
+                "is_none",
+                "is_ok",
+                "is_err",
+                "from",
+                "default",
+                "fmt",
+                "eq",
+                "cmp",
+                "hash",
+                "with_capacity",
+                "map_err",
+                "flatten",
+                "flat_map",
+                "skip",
+                "copied",
+                "cloned",
+                "truncate",
+                "clear",
+                "to_vec",
+                "keys",
+                "values",
+                "display",
+                "load",
+                "store",
+                "send",
+                "recv",
+                "spawn",
+                "now",
+                "elapsed",
+            ];
+            const NAMESPACES: &[&str] = &[
+                "std",
+                "core",
+                "alloc",
+                "String",
+                "Vec",
+                "Option",
+                "Result",
+                "Box",
+                "Rc",
+                "Arc",
+                "HashMap",
+                "HashSet",
+                "BTreeMap",
+                "BTreeSet",
+                "VecDeque",
+                "Path",
+                "PathBuf",
+                "File",
+                "fs",
+                "io",
+                "env",
+                "thread",
+                "mem",
+                "ptr",
+                "fmt",
+                "process",
+                "Duration",
+                "Instant",
+                "Mutex",
+                "RwLock",
+                "AtomicBool",
+                "AtomicUsize",
+                "AtomicU64",
+                "Ordering",
+                "Cow",
+                "Cell",
+                "RefCell",
+                "iter",
+                "str",
+                "char",
+                "u8",
+                "u32",
+                "u64",
+                "usize",
+                "i32",
+                "i64",
+                "f64",
+                "Self",
+            ];
+            if kind == "imports" {
+                return ["std", "core", "alloc"]
+                    .iter()
+                    .any(|root| name == *root || name.starts_with(&format!("{root}::")));
+            }
+            list(BUILTINS, name) || hint.is_some_and(|h| list(NAMESPACES, h))
+        }
+        "python" => {
+            const BUILTINS: &[&str] = &[
+                "abs",
+                "all",
+                "any",
+                "ascii",
+                "bin",
+                "bool",
+                "breakpoint",
+                "bytearray",
+                "bytes",
+                "callable",
+                "chr",
+                "classmethod",
+                "compile",
+                "complex",
+                "delattr",
+                "dict",
+                "dir",
+                "divmod",
+                "enumerate",
+                "eval",
+                "exec",
+                "filter",
+                "float",
+                "format",
+                "frozenset",
+                "getattr",
+                "globals",
+                "hasattr",
+                "hash",
+                "help",
+                "hex",
+                "id",
+                "input",
+                "int",
+                "isinstance",
+                "issubclass",
+                "iter",
+                "len",
+                "list",
+                "locals",
+                "map",
+                "max",
+                "memoryview",
+                "min",
+                "next",
+                "object",
+                "oct",
+                "open",
+                "ord",
+                "pow",
+                "print",
+                "property",
+                "range",
+                "repr",
+                "reversed",
+                "round",
+                "set",
+                "setattr",
+                "slice",
+                "sorted",
+                "staticmethod",
+                "str",
+                "sum",
+                "super",
+                "tuple",
+                "type",
+                "vars",
+                "zip",
+                "__import__",
+                "Exception",
+                "ValueError",
+                "TypeError",
+                "KeyError",
+                "IndexError",
+                "RuntimeError",
+                "NotImplementedError",
+                "AttributeError",
+                "OSError",
+                "ImportError",
+                "StopIteration",
+                "AssertionError",
+                "LookupError",
+                "FileNotFoundError",
+                "PermissionError",
+                "UnicodeDecodeError",
+                "Warning",
+                "DeprecationWarning",
+                "UserWarning",
+                // The built-in types' methods.
+                "append",
+                "extend",
+                "get",
+                "items",
+                "keys",
+                "values",
+                "join",
+                "split",
+                "strip",
+                "rstrip",
+                "lstrip",
+                "startswith",
+                "endswith",
+                "replace",
+                "lower",
+                "upper",
+                "pop",
+                "update",
+                "setdefault",
+                "encode",
+                "decode",
+                "add",
+                "remove",
+                "insert",
+                "sort",
+                "copy",
+                "count",
+                "index",
+                "discard",
+                "partition",
+                "rpartition",
+                "splitlines",
+                "isdigit",
+                "isidentifier",
+            ];
+            const MODULES: &[&str] = &[
+                "os",
+                "sys",
+                "re",
+                "json",
+                "typing",
+                "t",
+                "collections",
+                "cabc",
+                "functools",
+                "itertools",
+                "pathlib",
+                "io",
+                "time",
+                "datetime",
+                "logging",
+                "subprocess",
+                "shutil",
+                "tempfile",
+                "threading",
+                "asyncio",
+                "inspect",
+                "contextlib",
+                "dataclasses",
+                "enum",
+                "abc",
+                "copy",
+                "math",
+                "random",
+                "string",
+                "textwrap",
+                "traceback",
+                "warnings",
+                "weakref",
+                "types",
+                "uuid",
+                "hashlib",
+                "base64",
+                "struct",
+                "socket",
+                "urllib",
+                "http",
+                "email",
+                "unittest",
+                "argparse",
+                "pickle",
+                "csv",
+                "glob",
+                "fnmatch",
+                "operator",
+                "queue",
+                "signal",
+                "platform",
+                "importlib",
+                "gzip",
+                "zipfile",
+                "decimal",
+                "statistics",
+                "secrets",
+                "hmac",
+                "ssl",
+                "errno",
+                "codecs",
+                "locale",
+                "pprint",
+                "heapq",
+                "bisect",
+                "ast",
+                "gc",
+                "atexit",
+                "mimetypes",
+                "numbers",
+                "__future__",
+                "path",
+            ];
+            if kind == "imports" {
+                // `import typing as t` is recorded with its alias.
+                let module = name.split_whitespace().next().unwrap_or(name);
+                let top = module.split('.').next().unwrap_or(module);
+                return !module.starts_with('.') && list(MODULES, top);
+            }
+            list(BUILTINS, name) || hint.is_some_and(|h| list(MODULES, h))
+        }
+        "javascript" | "typescript" | "tsx" => {
+            const BUILTINS: &[&str] = &[
+                "require",
+                "parseInt",
+                "parseFloat",
+                "isNaN",
+                "isFinite",
+                "setTimeout",
+                "setInterval",
+                "clearTimeout",
+                "clearInterval",
+                "setImmediate",
+                "Promise",
+                "Object",
+                "Array",
+                "JSON",
+                "Math",
+                "Number",
+                "String",
+                "Boolean",
+                "Date",
+                "Error",
+                "TypeError",
+                "RangeError",
+                "Symbol",
+                "Map",
+                "Set",
+                "WeakMap",
+                "RegExp",
+                "encodeURIComponent",
+                "decodeURIComponent",
+                "encodeURI",
+                "decodeURI",
+                "fetch",
+                "structuredClone",
+                "queueMicrotask",
+                "push",
+                "pop",
+                "shift",
+                "unshift",
+                "map",
+                "filter",
+                "forEach",
+                "reduce",
+                "join",
+                "split",
+                "slice",
+                "splice",
+                "indexOf",
+                "includes",
+                "keys",
+                "values",
+                "entries",
+                "then",
+                "catch",
+                "finally",
+                "log",
+                "error",
+                "warn",
+                "info",
+                "debug",
+                "toString",
+                "hasOwnProperty",
+                "call",
+                "apply",
+                "bind",
+                "replace",
+                "trim",
+                "concat",
+                "find",
+                "some",
+                "every",
+                "sort",
+                "test",
+                "exec",
+                "match",
+                "startsWith",
+                "endsWith",
+                "toLowerCase",
+                "toUpperCase",
+                "stringify",
+                "parse",
+                "assign",
+                "freeze",
+                "isArray",
+                "resolve",
+                "reject",
+                "all",
+                "get",
+                "set",
+                "has",
+                "delete",
+                "emit",
+                "on",
+            ];
+            const MODULES: &[&str] = &[
+                "fs",
+                "path",
+                "http",
+                "https",
+                "url",
+                "util",
+                "events",
+                "stream",
+                "os",
+                "crypto",
+                "child_process",
+                "assert",
+                "buffer",
+                "querystring",
+                "zlib",
+                "net",
+                "readline",
+                "process",
+                "console",
+                "Object",
+                "Array",
+                "JSON",
+                "Math",
+                "Promise",
+                "Number",
+                "String",
+                "Date",
+                "Reflect",
+            ];
+            if kind == "imports" {
+                let module = name.trim_matches(|c| c == '"' || c == '\'');
+                return module.starts_with("node:") || list(MODULES, module);
+            }
+            list(BUILTINS, name) || hint.is_some_and(|h| list(MODULES, h))
+        }
+        _ => false,
+    }
+}
+
+/// Whether an import names the importing project itself — `crate::`,
+/// `super::`, Python's `from . import`, `./x` — and so is never code the
+/// corpus does not hold, whatever its text resolves to by name.
+pub fn is_relative_import(language: &str, name: &str) -> bool {
+    match language {
+        "rust" => {
+            ["crate::", "super::", "self::"]
+                .iter()
+                .any(|p| name.starts_with(p))
+                || matches!(name, "crate" | "super" | "self")
+        }
+        "python" => name.starts_with('.'),
+        "javascript" | "typescript" | "tsx" => {
+            let n = name.trim_matches(|c| c == '"' || c == '\'');
+            n.starts_with("./") || n.starts_with("../")
+        }
+        _ => false,
+    }
+}
 
 /// The same list as a SQL `NOT IN` list, for the two joins that resolve a name.
 pub fn not_navigational(column: &str) -> String {
@@ -1982,10 +2831,57 @@ pub fn call_site(end: &crate::store::EdgeEnd, shorten: &dyn Fn(&str) -> String) 
     let Some(line) = end.line else {
         return means;
     };
+    // A structural edge's line is where the definition starts, not a call:
+    // printing "call at line 78" for `fn run`'s own line read as a call that
+    // does not exist (2026-10-14 audit, G3).
+    let what = if matches!(end.kind.as_str(), "defines" | "contains") {
+        ("defined at", "defined on line")
+    } else {
+        ("called at", "call at line")
+    };
     match &end.from_path {
-        Some(path) => format!("  · called at {}:{line}{means}", shorten(path)),
-        None => format!("  · call at line {line}{means}"),
+        Some(path) => format!("  · {} {}:{line}{means}", what.0, shorten(path)),
+        None => format!("  · {} {line}{means}", what.1),
     }
+}
+
+/// `1 definition`, `4 definitions`.
+pub fn definitions_word(n: usize) -> String {
+    format!("{n} definition{}", if n == 1 { "" } else { "s" })
+}
+
+/// One edge end as every surface prints it — `semlith neighbors`, `semlith
+/// symbol` and their MCP replies — so the CLI and an agent read one line.
+pub fn render_end(end: &crate::store::EdgeEnd, shorten: &dyn Fn(&str) -> String) -> String {
+    let name = if end.symbol.kind == "module" {
+        format!("{} (module)", end.symbol.name)
+    } else {
+        end.symbol.name.clone()
+    };
+    let site = call_site(end, shorten);
+    // A collapsed row stands for several definitions and must not name one
+    // of them: a reader of `get  src/a.rs:12` quotes that file, and it is one
+    // of four the call could have meant. A caller (no `from_path`) is one
+    // definite place whatever it called, so it keeps its path.
+    if end.confidence == AMBIGUOUS && end.from_path.is_some() {
+        return format!(
+            "  {name} via {} ({}) · {}{site}",
+            end.kind,
+            end.confidence,
+            definitions_word(end.definitions),
+        );
+    }
+    let store = match &end.symbol.store {
+        Some(label) => format!("[{label}] "),
+        None => String::new(),
+    };
+    format!(
+        "  {name} via {} ({})  {store}{}:{}{site}",
+        end.kind,
+        end.confidence,
+        shorten(&end.symbol.path),
+        end.symbol.start_line,
+    )
 }
 
 /// `name @ path:line`, or the bare name when the store could not say where.
@@ -2056,23 +2952,37 @@ impl Scope {
         self.paths.as_ref().is_none_or(|p| p.contains(path))
     }
 
-    /// The definitions of `name` inside the scope, at most `limit`.
+    /// The definitions of `name` inside the scope, at most `limit`, code
+    /// before headings, keys and selectors: ripgrep's twenty YAML `run:` keys
+    /// filled `symbol run` ahead of its six Rust `run`s (2026-10-14 audit, G10).
     fn definitions(
         &self,
         db: &rusqlite::Connection,
         name: &str,
         limit: usize,
     ) -> Result<Vec<crate::store::SymbolRow>> {
+        Ok(self.definitions_counted(db, name, limit)?.0)
+    }
+
+    /// [`Scope::definitions`], and how many there are in all.
+    fn definitions_counted(
+        &self,
+        db: &rusqlite::Connection,
+        name: &str,
+        limit: usize,
+    ) -> Result<(Vec<crate::store::SymbolRow>, usize)> {
         if self.paths.is_none() {
-            return crate::store::symbols_named(db, name, limit);
+            return crate::store::symbols_named_counted(db, name, limit);
         }
         let mut rows = crate::store::symbols_by_names(
             db,
             std::slice::from_ref(&name.to_string()),
             &self.groups,
         )?;
+        rows.sort_by_key(|r| NAVIGATIONAL_KINDS.contains(&r.kind.as_str()));
+        let total = rows.len();
         rows.truncate(limit);
-        Ok(rows)
+        Ok((rows, total))
     }
 }
 
@@ -2120,16 +3030,15 @@ pub fn neighbours(
             continue;
         }
         let mut end = incoming.end;
+        // An unsettled caller stays `ambiguous`, the word `impact` uses for
+        // the same edge: rewording it `inferred` here gave one edge two
+        // confidences (2026-10-14 audit, G8). The caller is still one
+        // definition, so the row keeps its path.
         if end.definitions > 1 && incoming.means.len() == 1 {
             end.means = definitions
                 .iter()
                 .find(|d| d.id == incoming.means[0])
                 .map(|d| d.qualified.clone());
-        } else if end.confidence == AMBIGUOUS {
-            // A caller is one definition whatever it called, so it keeps its
-            // path; what did not settle is which of the targets it meant, and
-            // that is what `inferred` has always said about a caller.
-            end.confidence = INFERRED.to_string();
         }
         callers.push(end);
     }
@@ -2175,8 +3084,10 @@ pub struct Signature {
 ///
 /// The question it answers is "where are these defined and what do they look
 /// like" — three `semlith_symbol` calls before 0.30.0, each carrying callers,
-/// callees and a second ring the question did not ask for. Headings, keys and
-/// selectors are left out: they are places in a document, not definitions.
+/// callees and a second ring the question did not ask for. The rows are the
+/// ones `semlith symbol` gives for each name alone, code first: leaving the
+/// headings out made `symbol a b` drop a README heading `symbol a` shows
+/// (2026-10-14 audit, G11).
 pub fn signatures(
     db: &rusqlite::Connection,
     names: &[String],
@@ -2186,7 +3097,6 @@ pub fn signatures(
     for asked in names.iter().take(NAMES_LIMIT) {
         let (qualifier, bare) = split_qualified(asked);
         let mut rows = scope.definitions(db, bare, 64)?;
-        rows.retain(|r| !NAVIGATIONAL_KINDS.contains(&r.kind.as_str()));
         if let Some(q) = qualifier
             && rows.iter().any(|r| owned_by(r, q))
         {
@@ -2215,8 +3125,13 @@ pub fn signatures(
     Ok(out)
 }
 
-/// A definitions table as text, one row per definition.
-pub fn render_signatures(rows: &[Signature], shorten: &dyn Fn(&str) -> String) -> String {
+/// A definitions table as text, one row per definition, and a last line
+/// naming every asked name that has none.
+pub fn render_signatures(
+    rows: &[Signature],
+    asked: &[String],
+    shorten: &dyn Fn(&str) -> String,
+) -> String {
     const WIDTH: usize = 110;
     let mut out = String::new();
     for row in rows {
@@ -2237,6 +3152,14 @@ pub fn render_signatures(rows: &[Signature], shorten: &dyn Fn(&str) -> String) -
             row.symbol.end_line,
             signature
         ));
+    }
+    let missing: Vec<&str> = asked
+        .iter()
+        .filter(|n| !rows.iter().any(|r| r.asked == **n))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        out.push_str(&format!("no definition: {}\n", missing.join(", ")));
     }
     out.trim_end().to_string()
 }
@@ -2322,7 +3245,12 @@ pub struct Hop {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Evidence {
     pub name: String,
+    /// The first `k`, code before headings, keys and selectors.
     pub definitions: Vec<crate::store::SymbolRow>,
+    /// How many definitions the name has in all, of which `definitions` is
+    /// the first `k`. `symbol run -k 3` said "3 definitions of this name" of
+    /// 52 (2026-10-14 audit, G9).
+    pub total: usize,
     pub callers: Vec<crate::store::EdgeEnd>,
     pub callees: Vec<crate::store::EdgeEnd>,
     /// The second ring, reached only through names the first ring settled.
@@ -2345,11 +3273,16 @@ pub fn evidence(
     scope: &Scope,
 ) -> Result<Evidence> {
     let (qualifier, bare) = split_qualified(name);
-    let mut definitions = scope.definitions(db, bare, limit)?;
+    let (mut definitions, mut total) = scope.definitions_counted(db, bare, limit)?;
     if let Some(q) = qualifier
         && definitions.iter().any(|d| owned_by(d, q))
     {
-        definitions.retain(|d| owned_by(d, q));
+        // Every owned one, counted as the bare name is: the qualifier narrows
+        // the question, and the count says what it narrowed to.
+        let (every, _) = scope.definitions_counted(db, bare, usize::MAX)?;
+        let owned: Vec<_> = every.into_iter().filter(|d| owned_by(d, q)).collect();
+        total = owned.len();
+        definitions = owned.into_iter().take(limit).collect();
     }
     let ring = neighbours(db, name, kinds, all, scope)?;
 
@@ -2404,6 +3337,7 @@ pub fn evidence(
     Ok(Evidence {
         name: name.to_string(),
         definitions,
+        total,
         callers: ring.callers,
         callees: ring.callees,
         ego,
@@ -2428,11 +3362,14 @@ impl Evidence {
                 symbol.end_line,
             ));
         }
-        if self.definitions.len() > 1 {
+        let total = self.total.max(self.definitions.len());
+        if total > self.definitions.len() {
             out.push_str(&format!(
-                "{} definitions of this name\n",
+                "{total} definitions of this name, {} shown; k {total} lists every one\n",
                 self.definitions.len()
             ));
+        } else if total > 1 {
+            out.push_str(&format!("{total} definitions of this name\n"));
         }
         for (heading, ends) in [("callers", &self.callers), ("callees", &self.callees)] {
             out.push_str(&format!("\n{bold}{heading}{reset} ({})\n", ends.len()));
@@ -2440,26 +3377,8 @@ impl Evidence {
                 out.push_str("  none\n");
             }
             for end in ends.iter() {
-                if end.confidence == AMBIGUOUS {
-                    out.push_str(&format!(
-                        "  {} via {} ({}) · {} definitions{}\n",
-                        end.symbol.name,
-                        end.kind,
-                        end.confidence,
-                        end.definitions,
-                        call_site(end, shorten),
-                    ));
-                    continue;
-                }
-                out.push_str(&format!(
-                    "  {} via {} ({})  {}:{}{}\n",
-                    end.symbol.name,
-                    end.kind,
-                    end.confidence,
-                    shorten(&end.symbol.path),
-                    end.symbol.start_line,
-                    call_site(end, shorten),
-                ));
+                out.push_str(&render_end(end, shorten));
+                out.push('\n');
             }
         }
         if !self.ego.is_empty() {
@@ -4087,23 +5006,30 @@ mod tests {
         assert_eq!(hint_of(&e, "edges_out", "calls").as_deref(), Some("store"));
     }
 
-    /// A method call's receiver is a lead too, reduced to its last identifier.
-    /// `self` is dropped: it names the file the call is already in, so it
-    /// ranks nothing.
+    /// A method call's receiver is a lead too, reduced to its last identifier
+    /// and marked as a receiver. `self` outside any `impl` names no type, so
+    /// the mark stands alone.
     #[test]
     fn a_rust_method_call_hints_with_its_receiver() {
         let e = run(
             "a.rs",
             "fn go(&self) { self.index.search(v); self.flush(); }\n",
         );
-        assert_eq!(hint_of(&e, "search", "calls").as_deref(), Some("index"));
-        assert_eq!(hint_of(&e, "flush", "calls"), None);
+        assert_eq!(hint_of(&e, "search", "calls").as_deref(), Some(".index"));
+        assert_eq!(hint_of(&e, "flush", "calls").as_deref(), Some("."));
     }
 
+    /// A Python object the file imports as a module is a module path; any
+    /// other object is a receiver, and `self` is the enclosing class.
     #[test]
     fn python_and_typescript_qualified_calls_carry_the_object_as_a_hint() {
-        let py = run("m.py", "def go():\n    json.loads(raw)\n");
+        let py = run(
+            "m.py",
+            "import json\n\nclass Store:\n    def go(self):\n        json.loads(raw)\n        app.render()\n        self.flush()\n",
+        );
         assert_eq!(hint_of(&py, "loads", "calls").as_deref(), Some("json"));
+        assert_eq!(hint_of(&py, "render", "calls").as_deref(), Some(".app"));
+        assert_eq!(hint_of(&py, "flush", "calls").as_deref(), Some(".Store"));
 
         let ts = run("app.ts", "function go(){ store.search(q); }\n");
         assert_eq!(hint_of(&ts, "search", "calls").as_deref(), Some("store"));
@@ -4139,18 +5065,18 @@ mod tests {
         };
         assert_eq!(
             hint("search_in", "search_preferring").as_deref(),
-            Some("Fleet")
+            Some(".Fleet")
         );
         // Not recursion: the same name, on a field declared `store: Semlith`.
         assert_eq!(
             hint("search_preferring", "search_preferring").as_deref(),
-            Some("Semlith"),
+            Some(".Semlith"),
             "{:?}",
             e.edges
         );
-        assert_eq!(hint("run", "open").as_deref(), Some("Fleet"));
-        assert_eq!(hint("build", "index").as_deref(), Some("Semlith"));
-        assert_eq!(hint("build", "go").as_deref(), Some("Other"));
+        assert_eq!(hint("run", "open").as_deref(), Some(".Fleet"));
+        assert_eq!(hint("build", "index").as_deref(), Some(".Semlith"));
+        assert_eq!(hint("build", "go").as_deref(), Some(".Other"));
         // A `for` binding is the element of what it iterates.
         let e = run(
             "a.rs",
@@ -4161,7 +5087,7 @@ mod tests {
             .iter()
             .find(|x| x.from == "all" && x.to == "go")
             .and_then(|x| x.hint.clone());
-        assert_eq!(go.as_deref(), Some("Item"), "{:?}", e.edges);
+        assert_eq!(go.as_deref(), Some(".Item"), "{:?}", e.edges);
     }
 
     /// Recursion still adds no edge.
@@ -5413,5 +6339,486 @@ mod tests {
             shortest_path(&db, "a", "d", 2, false).unwrap().is_none(),
             "d is three hops away, so a depth of two does not reach it"
         );
+    }
+}
+
+/// The 2026-10-14 audit's graph defects (G1-G11 and item 30 of 0.42.0), each
+/// replayed on a cut-down copy of the file the audit read, indexed under the
+/// path it had there. Red on 0.41.x; the audit is
+/// `full-regression-drive/14-10-2026/findings.md`.
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> String {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph-audit");
+        std::fs::read_to_string(root.join(name)).unwrap()
+    }
+
+    /// A store holding each fixture under the path the audit indexed it at,
+    /// written by the writer `index_set` uses.
+    fn store(files: &[(&str, &str)]) -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::store::prepare_for_tests(&db);
+        for (path, name) in files {
+            let text = fixture(name);
+            let file = crate::store::insert_file(&db, path, path, text.len() as u64, 0).unwrap();
+            let e = extract(Path::new(path), &text).unwrap().unwrap();
+            crate::store::write_extraction(&db, &e, file, &[]).unwrap();
+        }
+        db
+    }
+
+    fn ripgrep() -> rusqlite::Connection {
+        store(&[
+            ("crates/core/main.rs", "rust/ripgrep_main.rs"),
+            ("crates/ignore/src/walk.rs", "rust/ripgrep_walk.rs"),
+            ("crates/core/index/enabled.rs", "rust/ripgrep_enabled.rs"),
+            ("crates/core/search.rs", "rust/ripgrep_search.rs"),
+        ])
+    }
+
+    fn flask() -> rusqlite::Connection {
+        store(&[
+            ("src/flask/app.py", "python/flask_app.py"),
+            ("src/flask/helpers.py", "python/flask_helpers.py"),
+            ("src/flask/__init__.py", "python/flask_init.py"),
+            ("tests/test_basic.py", "python/flask_test_basic.py"),
+        ])
+    }
+
+    /// G1: `.build_parallel().run(||` is `WalkParallel::run`, and the audit got
+    /// `main::run` "resolved". A method call never resolves to a free
+    /// function, and a receiver nothing types leaves the edge ambiguous —
+    /// `clone`, `clear` and `unwrap` the same.
+    #[test]
+    fn a_method_call_is_never_resolved_to_a_free_function() {
+        let db = ripgrep();
+        for from in ["search_parallel", "files_parallel"] {
+            let out = crate::store::edges_out(&db, from, &dependency_kinds()).unwrap();
+            for to in ["run", "clone", "clear", "unwrap"] {
+                for e in out.iter().filter(|e| e.symbol.name == to) {
+                    assert_eq!(
+                        e.confidence, AMBIGUOUS,
+                        "{from} -> {to} settled on {}:{} ({})",
+                        e.symbol.path, e.symbol.start_line, e.symbol.qualified
+                    );
+                    assert!(
+                        e.symbol.qualified != "main::run",
+                        "{from} -> {to} names the free fn main::run"
+                    );
+                }
+            }
+            // `searcher.search(&result)` is a method, never the module search.rs.
+            assert!(
+                out.iter().all(|e| e.symbol.kind != "module"),
+                "{from}: {out:?}"
+            );
+        }
+    }
+
+    /// G1: on that edge `path files_parallel search_parallel` printed a 2-hop
+    /// "resolved" chain and trace cited main.rs:301 as a supporting fact.
+    #[test]
+    fn no_path_or_trace_crosses_an_untyped_method_call() {
+        let db = ripgrep();
+        let chain = shortest_path(&db, "files_parallel", "search_parallel", 6, false).unwrap();
+        assert!(chain.is_none(), "{chain:?}");
+        let t = trace(
+            "files_parallel",
+            "search_parallel",
+            6,
+            false,
+            chain,
+            |_, _| None,
+            &verbatim,
+        );
+        assert!(
+            t.lines.iter().all(|l| l.mark != "supporting fact"),
+            "{:?}",
+            t.lines
+        );
+    }
+
+    /// `mod search;` beside `fn search` in main.rs made the bare call
+    /// `search(&args, mode)` a tie: a call never means a module.
+    #[test]
+    fn a_call_never_means_a_module() {
+        let db = ripgrep();
+        let out = crate::store::edges_out(&db, "run", &dependency_kinds()).unwrap();
+        let search: Vec<_> = out.iter().filter(|e| e.symbol.name == "search").collect();
+        assert_eq!(search.len(), 1, "{search:?}");
+        assert_eq!(search[0].confidence, RESOLVED, "{search:?}");
+        assert_eq!(search[0].symbol.kind, "function", "{search:?}");
+        let n = neighbours(&db, "search", &[], false, &Scope::all()).unwrap();
+        assert!(
+            n.callers
+                .iter()
+                .any(|c| c.symbol.name == "run" && c.confidence == RESOLVED),
+            "{:?}",
+            n.callers
+        );
+    }
+
+    /// G2: `crate::search_parallel(args, mode)` on enabled.rs:14 is a caller.
+    #[test]
+    fn a_call_through_crate_is_a_caller() {
+        let db = ripgrep();
+        let n = neighbours(&db, "search_parallel", &[], false, &Scope::all()).unwrap();
+        assert!(
+            n.callers.iter().any(|c| c.symbol.name == "read"
+                && c.symbol.path == "crates/core/index/enabled.rs"
+                && c.line == Some(14)),
+            "{:?}",
+            n.callers
+        );
+    }
+
+    /// G2: helpers.py `make_response` calls `current_app.make_response(args)`
+    /// — another receiver's method of the same name, not itself.
+    #[test]
+    fn a_namesake_called_on_another_receiver_is_not_recursion() {
+        let db = flask();
+        let n = neighbours(&db, "Flask.make_response", &[], false, &Scope::all()).unwrap();
+        assert!(
+            n.callers
+                .iter()
+                .any(|c| c.symbol.path == "src/flask/helpers.py"
+                    && c.symbol.name == "make_response"
+                    && c.line == Some(27)),
+            "{:?}",
+            n.callers
+        );
+    }
+
+    /// G3: the file `main.rs` and `fn main` share a name, and the module's
+    /// `defines` edges were written onto `fn main` and printed as "call at
+    /// line N" with N the definition's own line.
+    #[test]
+    fn a_module_edge_sits_on_the_module_and_is_not_a_call() {
+        let db = ripgrep();
+        let into =
+            crate::store::edges_in(&db, "search_parallel", &["defines".to_string()]).unwrap();
+        assert!(!into.is_empty());
+        for e in &into {
+            assert_eq!(e.symbol.kind, "module", "{e:?}");
+            let site = call_site(e, &verbatim);
+            assert!(!site.contains("call"), "{site}");
+        }
+        let main = crate::store::edges_out(&db, "main", &["defines".to_string()]).unwrap();
+        assert!(!main.is_empty());
+        assert!(main.iter().all(|e| e.from_line == Some(1)), "{main:?}");
+    }
+
+    /// G8: one edge, one confidence, whichever command shows it
+    /// (test_basic.py `flask.make_response()`: impact said ambiguous,
+    /// neighbors said inferred).
+    #[test]
+    fn neighbors_and_impact_give_one_edge_one_confidence() {
+        let db = flask();
+        let n = neighbours(&db, "make_response", &[], false, &Scope::all()).unwrap();
+        let reach = impact(&db, "make_response", &[], 1, false, &Scope::all()).unwrap();
+        let caller = n
+            .callers
+            .iter()
+            .find(|c| c.symbol.name == "test_make_response")
+            .expect("test_make_response calls make_response");
+        let row = reach
+            .reached
+            .iter()
+            .find(|r| r.name == "test_make_response")
+            .expect("impact reaches test_make_response");
+        assert_eq!(caller.confidence, row.confidence);
+    }
+
+    /// G4: `BaseResponse::Flask`, `t::Config`, `ft::Blueprint`: a top-level
+    /// definition is owned by its module, never by an import alias.
+    #[test]
+    fn a_python_definition_is_not_owned_by_an_import_alias() {
+        let e = extract(
+            Path::new("src/flask/app.py"),
+            &fixture("python/flask_app.py"),
+        )
+        .unwrap()
+        .unwrap();
+        let flask = e.symbols.iter().find(|s| s.name == "Flask").unwrap();
+        assert_eq!(flask.qualified, "app::Flask");
+        let method = e
+            .symbols
+            .iter()
+            .find(|s| s.name == "make_response")
+            .unwrap();
+        assert_eq!(method.qualified, "Flask::make_response");
+        for s in &e.symbols {
+            for alias in ["BaseResponse::", "t::", "ft::", "cabc::", "_url_quote::"] {
+                assert!(!s.qualified.starts_with(alias), "{s:?}");
+            }
+        }
+        assert!(
+            !e.edges
+                .iter()
+                .any(|x| x.kind == "contains"
+                    && ["BaseResponse", "t", "ft"].contains(&x.from.as_str())),
+            "{:?}",
+            e.edges
+        );
+    }
+
+    /// G5: an alias row is its import line, not `__init__.py:1-40` for a
+    /// 39-line file.
+    #[test]
+    fn an_alias_row_is_its_import_line() {
+        let e = extract(
+            Path::new("src/flask/__init__.py"),
+            &fixture("python/flask_init.py"),
+        )
+        .unwrap()
+        .unwrap();
+        for (name, line) in [("Flask", 2), ("make_response", 17), ("url_for", 22)] {
+            let s = e
+                .symbols
+                .iter()
+                .find(|s| s.name == name && s.kind == "alias")
+                .unwrap_or_else(|| panic!("no alias {name}"));
+            assert_eq!((s.start_line, s.end_line), (line, line), "{s:?}");
+        }
+    }
+
+    /// G6: setext headings (an underline of `===` or `---`) are headings: the
+    /// ripgrep CHANGELOG's gave `1-1871` past the end of the file, and a body
+    /// line belonged to no section or the wrong one.
+    #[test]
+    fn setext_headings_define_their_own_sections() {
+        let text = fixture("markdown/ripgrep_changelog.md");
+        let lines = text.lines().count() as u32;
+        let e = extract(Path::new("CHANGELOG.md"), &text).unwrap().unwrap();
+        let headings: Vec<&Symbol> = e.symbols.iter().filter(|s| s.kind == "heading").collect();
+        let titles: Vec<&str> = headings.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "TBD",
+                "15.2.0 (2026-07-15)",
+                "15.1.0 (2025-10-22)",
+                "15.0.0 (2025-10-15)",
+                "12.1.1 (2020-05-29)"
+            ]
+        );
+        let spans: Vec<(u32, u32)> = headings
+            .iter()
+            .map(|s| (s.start_line, s.end_line))
+            .collect();
+        assert_eq!(spans, [(1, 5), (6, 35), (36, 53), (54, 65), (66, lines)]);
+        for h in &headings {
+            assert_eq!(h.qualified, format!("CHANGELOG::{}", h.name), "{h:?}");
+        }
+    }
+
+    /// The census `stats` prints counts a call through a receiver the way the
+    /// resolver settles it: ripgrep's `searcher.clone()` was "resolved"
+    /// because the store held one `clone`, a method of another type.
+    #[test]
+    fn the_census_counts_an_untyped_method_call_as_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::store::open(&dir.path().join("store.db")).unwrap();
+        crate::store::read_only(&db, false).unwrap();
+        for (path, text) in [
+            ("src/a.rs", "fn caller(t: Thing) { t.go(); }\n"),
+            (
+                "src/b.rs",
+                "struct Other;\nimpl Other {\n    fn go(&self) {}\n}\n",
+            ),
+        ] {
+            let file = crate::store::insert_file(&db, path, path, 1, 0).unwrap();
+            let e = extract(Path::new(path), text).unwrap().unwrap();
+            crate::store::write_extraction(&db, &e, file, &[]).unwrap();
+        }
+        let rust = crate::store::coverage_by_language(&db)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.language == "rust")
+            .unwrap();
+        assert_eq!((rust.resolved, rust.ambiguous), (0, 1), "{rust:?}");
+        let out = crate::store::edges_out(&db, "caller", &[]).unwrap();
+        assert!(out.iter().all(|e| e.confidence == AMBIGUOUS), "{out:?}");
+    }
+
+    /// flask's tests call `flask.Flask(...)`, and the checkout's own folder
+    /// is `flask`: the folder named every candidate, so a test's subclass of
+    /// `Flask` won as "extracted" on 72 edges of the audit's store.
+    #[test]
+    fn a_folder_both_files_sit_in_names_no_candidate() {
+        let db = store(&[
+            ("/w/flask/src/flask/app.py", "python/flask_app.py"),
+            ("/w/flask/src/flask/__init__.py", "python/flask_init.py"),
+            (
+                "/w/flask/tests/test_config.py",
+                "python/flask_test_config.py",
+            ),
+            ("/w/flask/tests/test_basic.py", "python/flask_test_basic.py"),
+        ]);
+        // The 17 left after that: `flask.Flask(...)` beside the subclass, in
+        // test_config.py itself. The module path names flask, not this file.
+        for from in ["test_response_type_errors", "test_config_from_object"] {
+            let out = crate::store::edges_out(&db, from, &[]).unwrap();
+            let flask: Vec<_> = out.iter().filter(|e| e.symbol.name == "Flask").collect();
+            assert!(!flask.is_empty(), "{from}");
+            for e in flask {
+                assert!(
+                    e.confidence == AMBIGUOUS || e.symbol.path.contains("/src/flask/"),
+                    "{from}: {e:?}"
+                );
+            }
+        }
+        // A bare `Flask(__name__)` beside the subclass still means it.
+        let out = crate::store::edges_out(&db, "test_custom_config_class", &[]).unwrap();
+        let own: Vec<_> = out
+            .iter()
+            .filter(|e| e.symbol.name == "Flask" && e.kind == "calls")
+            .collect();
+        assert_eq!(own.len(), 1, "{own:?}");
+        assert_eq!(own[0].symbol.path, "/w/flask/tests/test_config.py");
+    }
+
+    /// A structural edge is the file saying where its own definition sits:
+    /// `steps` holding a `run:` key is not a maybe-caller of a Rust `run`,
+    /// and a struct's `contains` edge means its own method.
+    #[test]
+    fn a_structural_edge_means_its_own_file() {
+        let db = store(&[
+            (".github/workflows/ci.yml", "yaml/ripgrep_ci.yml"),
+            ("crates/core/main.rs", "rust/ripgrep_main.rs"),
+            ("crates/ignore/src/walk.rs", "rust/ripgrep_walk.rs"),
+        ]);
+        let n = neighbours(&db, "run", &[], false, &Scope::all()).unwrap();
+        let structural: Vec<_> = n
+            .callers
+            .iter()
+            .filter(|c| c.kind == "contains" || c.kind == "defines")
+            .collect();
+        assert!(!structural.is_empty());
+        for c in structural {
+            assert_eq!(c.confidence, EXTRACTED, "{c:?}");
+        }
+        let out = crate::store::edges_out(&db, "steps", &["contains".to_string()]).unwrap();
+        assert!(
+            out.iter()
+                .all(|e| e.symbol.path == ".github/workflows/ci.yml"),
+            "{out:?}"
+        );
+    }
+
+    /// G9, G10: `symbol run -k 3` said "3 definitions" of 52, with nothing
+    /// saying the list was cut, and the default list was YAML `run:` keys
+    /// ahead of every Rust `run`.
+    #[test]
+    fn symbol_counts_every_definition_and_lists_code_first() {
+        let db = store(&[
+            (".github/workflows/ci.yml", "yaml/ripgrep_ci.yml"),
+            ("crates/core/main.rs", "rust/ripgrep_main.rs"),
+            ("crates/ignore/src/walk.rs", "rust/ripgrep_walk.rs"),
+        ]);
+        let total = 7 + 2;
+        let found = evidence(&db, "run", &dependency_kinds(), 3, false, &Scope::all()).unwrap();
+        let kinds: Vec<&str> = found.definitions.iter().map(|d| d.kind.as_str()).collect();
+        assert_eq!(
+            &kinds[..2],
+            ["function", "method"],
+            "{:?}",
+            found.definitions
+        );
+        let text = found.render("", "", &verbatim);
+        assert!(
+            text.contains(&format!("{total} definitions of this name")),
+            "{text}"
+        );
+        assert!(text.contains("3 shown"), "{text}");
+        let all = evidence(&db, "run", &dependency_kinds(), 20, false, &Scope::all()).unwrap();
+        assert_eq!(all.definitions.len(), total, "{:?}", all.definitions);
+        assert!(!all.render("", "", &verbatim).contains("shown"));
+    }
+
+    /// G11: several names at once kept a heading out that one name finds.
+    #[test]
+    fn several_names_answer_with_the_rows_one_name_does() {
+        let db = store(&[
+            ("CHANGELOG.md", "markdown/ripgrep_changelog.md"),
+            ("crates/core/main.rs", "rust/ripgrep_main.rs"),
+        ]);
+        let one = evidence(&db, "15.2.0 (2026-07-15)", &[], 20, false, &Scope::all()).unwrap();
+        assert_eq!(one.definitions.len(), 1);
+        let names = [
+            "15.2.0 (2026-07-15)".to_string(),
+            "search_parallel".to_string(),
+        ];
+        let rows = signatures(&db, &names, &Scope::all()).unwrap();
+        let asked: Vec<&str> = rows.iter().map(|r| r.asked.as_str()).collect();
+        assert_eq!(
+            asked,
+            ["15.2.0 (2026-07-15)", "search_parallel"],
+            "{rows:?}"
+        );
+    }
+
+    /// G7: `symbol --json` printed two "kind" keys per caller, so a parser
+    /// kept the edge's and lost the symbol's.
+    #[test]
+    fn an_edge_end_serialises_one_kind_key() {
+        let db = ripgrep();
+        let found = evidence(
+            &db,
+            "search_parallel",
+            &dependency_kinds(),
+            20,
+            false,
+            &Scope::all(),
+        )
+        .unwrap();
+        assert!(!found.callers.is_empty());
+        let json = serde_json::to_string(&found.callers[0]).unwrap();
+        assert_eq!(json.matches("\"kind\":").count(), 1, "{json}");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["symbol_kind"], "function", "{value}");
+        assert_eq!(value["kind"], "calls", "{value}");
+    }
+
+    /// cobra's completions.go: every name in a `const ( ... )` block spanned
+    /// the whole block, so each was qualified by another, and the two being
+    /// each other's parent hung the receiver pass until the file was given up
+    /// as unparsed. Each name is its own line now.
+    #[test]
+    fn a_go_const_block_gives_each_name_its_own_line() {
+        let text = "package cobra\n\nconst (\n\t// ShellCompRequestCmd is the name of the hidden command.\n\tShellCompRequestCmd = \"__complete\"\n\t// ShellCompNoDescRequestCmd is the name of the other one.\n\tShellCompNoDescRequestCmd = \"__completeNoDesc\"\n)\n\nfunc (c *Command) initCompleteCmd() {\n\tc.AddCommand(ShellCompRequestCmd)\n}\n";
+        let e = extract(Path::new("completions.go"), text).unwrap().unwrap();
+        for (name, line) in [("ShellCompRequestCmd", 5), ("ShellCompNoDescRequestCmd", 7)] {
+            let s = e.symbols.iter().find(|s| s.name == name).unwrap();
+            assert_eq!(s.qualified, format!("completions::{name}"), "{s:?}");
+            assert_eq!((s.start_line, s.end_line), (line, line), "{s:?}");
+        }
+    }
+
+    /// Item 30: "Called and not found" was cobra's builtins and standard
+    /// library — `Errorf` 198 times, `len`, `append`, `os`.
+    #[test]
+    fn called_and_not_found_leaves_out_builtins_and_the_standard_library() {
+        let db = store(&[("command.go", "go/cobra_command.go")]);
+        let (targets, distinct) = crate::store::unresolved_targets(&db, 20).unwrap();
+        let names: Vec<&str> = targets.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"validateRequiredFlags"), "{names:?}");
+        for builtin in [
+            "Errorf",
+            "len",
+            "append",
+            "os",
+            "fmt",
+            "strings",
+            "TrimSpace",
+            "Fprintln",
+        ] {
+            assert!(!names.contains(&builtin), "{builtin} in {names:?}");
+        }
+        assert_eq!(distinct, names.len() as i64);
+        assert!(crate::store::builtin_targets(&db).unwrap() >= 7);
     }
 }

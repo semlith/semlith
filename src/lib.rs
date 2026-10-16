@@ -5010,57 +5010,10 @@ impl Semlith {
         file_id: i64,
         spans: &[(u32, u32, i64)],
     ) -> Result<(usize, usize)> {
-        let Some(extraction) = extraction else {
-            return Ok((0, 0));
-        };
-
-        // Name to id, for the edges below. A file may define the same name
-        // twice — two `new` methods on two types — and the first wins, because
-        // an edge out of this file names its source by name and nothing here
-        // can tell them apart either.
-        let mut ids: std::collections::HashMap<&str, (i64, bool)> =
-            std::collections::HashMap::new();
-        for symbol in &extraction.symbols {
-            let chunk_id = spans
-                .iter()
-                .find(|(start, end, _)| symbol.start_line >= *start && symbol.start_line <= *end)
-                .map(|(_, _, id)| *id);
-            let id = store::insert_symbol(&self.db, file_id, chunk_id, symbol)?;
-            // A definition outranks the file's module symbol of the same name:
-            // `fn brief` in `brief.rs` is where its calls come from, and giving
-            // them to the module put every caller of it at line 1.
-            let module = symbol.kind == "module";
-            match ids.get(symbol.name.as_str()) {
-                None => {
-                    ids.insert(symbol.name.as_str(), (id, module));
-                }
-                Some((_, true)) if !module => {
-                    ids.insert(symbol.name.as_str(), (id, false));
-                }
-                _ => {}
-            }
+        match extraction {
+            Some(extraction) => store::write_extraction(&self.db, &extraction, file_id, spans),
+            None => Ok((0, 0)),
         }
-        let ids: std::collections::HashMap<&str, i64> =
-            ids.into_iter().map(|(k, (id, _))| (k, id)).collect();
-
-        let mut written = 0;
-        for edge in &extraction.edges {
-            let Some(src) = ids.get(edge.from.as_str()) else {
-                continue;
-            };
-            store::insert_edge(
-                &self.db,
-                *src,
-                &edge.to,
-                &edge.kind,
-                &edge.confidence,
-                edge.hint.as_deref(),
-                edge.line,
-            )?;
-            written += 1;
-        }
-
-        Ok((extraction.symbols.len(), written))
     }
 
     /// Record files as indexed, in one transaction. Their vectors must already
