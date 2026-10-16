@@ -1095,6 +1095,7 @@ impl RemoteHit {
             symbol_kind: self.symbol_kind.clone(),
             symbol_line: None,
             copies: Vec::new(),
+            agreed: Vec::new(),
         }
     }
 
@@ -1257,6 +1258,12 @@ pub fn search(targets: &[Named], q: &Query<'_>, who: &Who<'_>) -> Fetched {
 /// merging"), which is what makes one order meaningful. Local hits are
 /// labelled with their store when the fleet left them unlabelled, so a
 /// merged list never mixes named and unnamed rows.
+///
+/// A remote hit naming the same span of the same repository as a local one is
+/// the same answer and is shown once (0.42.0, F21): with a local checkout and
+/// its mirror in the cloud, every hit used to print twice. The fresher of the
+/// two is kept — the local one unless it is stale and the remote one is not —
+/// and names the other in [`crate::Hit::agreed`].
 pub fn merge(
     local: Vec<crate::Hit>,
     local_label: Option<&str>,
@@ -1272,7 +1279,28 @@ pub fn merge(
             h
         })
         .collect();
-    all.extend(remote.iter().map(RemoteHit::to_hit));
+    let at_home: Vec<(Option<String>, String)> =
+        all.iter().map(|h| repository_relative(&h.path)).collect();
+    for hit in remote {
+        let twin = at_home
+            .iter()
+            .zip(&all)
+            .position(|(home, l)| same_span(home, l.start_line, l.end_line, &l.text, hit));
+        match twin {
+            Some(at) => {
+                let kept = &mut all[at];
+                if !kept.fresh && hit.fresh {
+                    let mut replaced = hit.to_hit();
+                    replaced.agreed = kept.store.iter().cloned().collect();
+                    *kept = replaced;
+                } else {
+                    kept.agreed
+                        .push(format!("{} ({})", hit.name, hit.provenance()));
+                }
+            }
+            None => all.push(hit.to_hit()),
+        }
+    }
     all.sort_by(|a, b| b.score.total_cmp(&a.score));
     all.truncate(k);
     all
@@ -1280,13 +1308,139 @@ pub fn merge(
 
 /// [`merge`] for an answer in JSON: local rows as they are, remote hits as
 /// [`RemoteHit::to_json`] rows with their remote fields, by score, cut to `k`.
+/// A remote hit for a span a local row already names is merged into it the
+/// same way, as an `agreed` entry.
 pub fn merge_rows(local: Vec<Value>, remote: &[RemoteHit], query: &str, k: usize) -> Vec<Value> {
     let mut all = local;
-    all.extend(remote.iter().map(|h| h.to_json(query)));
+    let at_home: Vec<(Option<String>, String)> = all
+        .iter()
+        .map(|row| repository_relative(row["path"].as_str().unwrap_or_default()))
+        .collect();
+    for hit in remote {
+        let twin = at_home.iter().zip(&all).position(|(home, row)| {
+            same_span(
+                home,
+                row["start_line"].as_u64().unwrap_or(0) as u32,
+                row["end_line"].as_u64().unwrap_or(0) as u32,
+                row["text"].as_str().unwrap_or_default(),
+                hit,
+            )
+        });
+        match twin {
+            Some(at) => {
+                let fresh = all[at]["fresh"].as_bool().unwrap_or(true);
+                if !fresh && hit.fresh {
+                    let other = all[at]["store"].clone();
+                    let mut row = hit.to_json(query);
+                    row["agreed"] = json!(
+                        [other]
+                            .into_iter()
+                            .filter(|v| !v.is_null())
+                            .collect::<Vec<_>>()
+                    );
+                    all[at] = row;
+                } else {
+                    let name = format!("{} ({})", hit.name, hit.provenance());
+                    match all[at]["agreed"].as_array_mut() {
+                        Some(list) => list.push(json!(name)),
+                        None => all[at]["agreed"] = json!([name]),
+                    }
+                }
+            }
+            None => all.push(hit.to_json(query)),
+        }
+    }
     let score = |v: &Value| v["score"].as_f64().unwrap_or(0.0);
     all.sort_by(|a, b| score(b).total_cmp(&score(a)));
     all.truncate(k);
     all
+}
+
+/// Whether a local hit and a remote one name the same span of the same
+/// repository: the same lines, a path that ends the other at a component
+/// boundary once the local one is made relative to its checkout, and either
+/// the same text or a remote source named after that checkout.
+///
+/// The text is not required to match, because the two copies may be indexed
+/// at different revisions — which one is fresher is the point of keeping one.
+/// Without it the repository has to agree by name, so `src/lib.rs:1-20` in two
+/// unrelated repositories is two answers.
+fn same_span(
+    (checkout, relative): &(Option<String>, String),
+    start: u32,
+    end: u32,
+    text: &str,
+    remote: &RemoteHit,
+) -> bool {
+    if start != remote.start_line || end != remote.end_line || start == 0 {
+        return false;
+    }
+    let tail = |long: &str, short: &str| {
+        let (long, short) = (long.replace('\\', "/"), short.replace('\\', "/"));
+        long == short || long.ends_with(&format!("/{}", short.trim_start_matches('/')))
+    };
+    let path_agrees = tail(&remote.path, relative) || tail(relative, &remote.path);
+    if !path_agrees {
+        return false;
+    }
+    let source_agrees = match (&remote.source, checkout) {
+        (Some(source), Some(checkout)) => source.rsplit('/').next() == Some(checkout.as_str()),
+        _ => false,
+    };
+    source_agrees || text.trim() == remote.text.trim()
+}
+
+/// Whether a forwarded tool's text says nothing the local answer has not said:
+/// every row of it — an indented line, an exact match's `  12 name | text` or
+/// a definition's row — is a row of the local answer, once each path in a row
+/// is cut to its file name, because the two stores print the same file under
+/// different roots. Headers and counts are not rows: "16 matching lines in
+/// 965 files" and "16 in 337" are the same sixteen lines (F21).
+///
+/// An answer with no rows is never said to agree: there is nothing to compare.
+pub fn agrees(local: &str, remote: &str) -> bool {
+    fn rows(text: &str) -> Vec<String> {
+        text.lines()
+            .filter(|l| l.starts_with(' ') && !l.trim().is_empty())
+            .map(|l| {
+                l.split_whitespace()
+                    .map(|token| match token.rsplit_once(['/', '\\']) {
+                        Some((_, file)) => file,
+                        None => token,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    }
+    let theirs = rows(remote);
+    if theirs.is_empty() {
+        return false;
+    }
+    let ours: std::collections::HashSet<String> = rows(local).into_iter().collect();
+    theirs.iter().all(|row| ours.contains(row))
+}
+
+/// How many rows [`agrees`] compared in a forwarded answer.
+pub fn rows_in(text: &str) -> usize {
+    text.lines()
+        .filter(|l| l.starts_with(' ') && !l.trim().is_empty())
+        .count()
+}
+
+/// A local path relative to the git checkout holding it, with the checkout's
+/// directory name; the path as it is when no ancestor holds `.git`.
+fn repository_relative(path: &str) -> (Option<String>, String) {
+    let at = Path::new(path);
+    for dir in at.ancestors().skip(1) {
+        if dir.join(".git").exists()
+            && let Ok(rest) = at.strip_prefix(dir)
+        {
+            let name = dir.file_name().map(|n| n.to_string_lossy().into_owned());
+            return (name, rest.to_string_lossy().into_owned());
+        }
+    }
+    (None, path.to_string())
 }
 
 /// Forward one tool call to a remote store's MCP endpoint and return its
@@ -2184,6 +2338,92 @@ mod tests {
             merged[0].store.as_deref(),
             Some("acme/platform (remote · acme · a41c9e2 · checked 38 s ago)")
         );
+    }
+
+    /// A local checkout and its mirror name one span of one repository: one
+    /// hit, the fresher, naming the other (F21). The repository is told by the
+    /// checkout's directory against the remote's source, and a span elsewhere
+    /// in the file, or the same path in another repository, is its own hit.
+    #[test]
+    fn a_mirror_hit_for_a_local_span_is_one_hit_naming_the_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("semlith");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let path = repo.join("src/lib.rs").to_string_lossy().into_owned();
+        let mine = |fresh: bool| crate::Hit {
+            fresh,
+            store: Some("semlith".into()),
+            ..local(0.03, &path)
+        };
+        let mirror = |start: u32, source: &str, text: &str| RemoteHit {
+            start_line: start,
+            end_line: start + 1,
+            source: Some(source.into()),
+            text: text.into(),
+            ..remote(0.02, "semlith/semlith/src/lib.rs")
+        };
+        let merged = merge(
+            vec![mine(true)],
+            None,
+            &[mirror(1, "aakashpawar/semlith", "older text")],
+            8,
+        );
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        assert_eq!(merged[0].store.as_deref(), Some("semlith"));
+        assert!(merged[0].agreed[0].starts_with("acme/platform (remote"));
+
+        // The local copy is stale and the mirror is not: the mirror's hit.
+        let merged = merge(
+            vec![mine(false)],
+            None,
+            &[mirror(1, "aakashpawar/semlith", "newer text")],
+            8,
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "newer text");
+        assert_eq!(merged[0].agreed, ["semlith"]);
+
+        // Another span, and the same path in another repository.
+        let merged = merge(
+            vec![mine(true)],
+            None,
+            &[
+                mirror(5, "aakashpawar/semlith", "x"),
+                mirror(1, "someone/other", "x"),
+            ],
+            8,
+        );
+        assert_eq!(merged.len(), 3, "{merged:?}");
+
+        // The same, as JSON rows.
+        let rows = merge_rows(
+            vec![serde_json::to_value(mine(true)).unwrap()],
+            &[mirror(1, "aakashpawar/semlith", "older text")],
+            "q",
+            8,
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            rows[0]["agreed"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("acme/platform")
+        );
+    }
+
+    /// A forwarded answer whose rows the local one already holds agrees,
+    /// whatever its header counts say; one more row and it does not.
+    #[test]
+    fn a_forwarded_answer_agrees_on_its_rows_not_its_counts() {
+        let local = "root /work/semlith\n2 matching lines in 965 files searched\n\
+                     semlith src/lib.rs\n  350 fuse | for (name, is_image, ranking) in lists {\n  \
+                     362 fuse | let contribution = weight;";
+        let remote = "2 matching lines in 337 files searched\nsemlith/semlith/src/lib.rs\n  \
+                      350 fuse | for (name, is_image, ranking) in lists {\n  362 fuse | let contribution = weight;";
+        assert!(agrees(local, remote));
+        assert_eq!(rows_in(remote), 2);
+        assert!(!agrees(local, &format!("{remote}\n  400 other | new")));
+        assert!(!agrees(local, "0 matching lines in 337 files searched"));
     }
 
     /// The budget cuts a merged list as it cuts a local one: the same

@@ -98,10 +98,14 @@ row's id — a reused id would fall inside two shards' ranges at once. Do not
 change that.
 
 Search is hybrid: the query embedding goes to the vector index and the bare
-terms go to FTS5, each searched `4 * k` deep, then fused by reciprocal rank
-(`1 / (60 + rank)`). Scores are fusion scores, not cosines — meaningful for
-ordering within one result set, meaningless across queries. Query text reaches
-FTS5 as bare terms, never as typed, because `MATCH` is a query language.
+terms go to FTS5, each searched 32 deep (`FUSE_DEPTH`) whatever `k` is, then
+fused by reciprocal rank (`1 / (60 + rank)`) and cut to `k`. Scores are fusion
+scores, not cosines — meaningful for ordering within one result set,
+meaningless across queries. Query text reaches FTS5 as bare terms, never as
+typed, because `MATCH` is a query language. **`k` cuts the answer and never
+changes it (0.42.0).** A depth of `4 * k` scored and ordered the first results
+of k=5 differently from k=8 (audit G12); do not make the depth a function of
+`k` again.
 
 `index.rs` reads nothing from disk until a caller asks something only vectors
 can answer, so `stats`, `files`, and an idle MCP server cost no vectors. Peak
@@ -545,6 +549,15 @@ Module responsibilities:
   lengths about different things, and comparing them returns whatever the
   arithmetic happens to produce — which is why the two CLIP repositories in
   `image.rs` are fixed as a pair rather than selectable.
+- **A picture answers a query that describes one, and nothing else (0.42.0).**
+  The image list is asked only when `pictured(query)` (beside `shape_of` and
+  `code_shaped` in `lib.rs`: a picture word, a colour or a shape) and holds only
+  images CLIP scores at the floor or above, each weighted as the two lists a
+  chunk can be found by. CLIP reads the words in a screenshot, so a question
+  naming a project scores that project's screenshots as high as a description
+  of them (flask's `flaskr_index.png` at 0.355 for "how does flask dispatch a
+  request to a view"); no cosine floor or margin separated them, which is why
+  the gate is the query's words. A weak image is left out, not weighted down.
 - **The images table and `images/` are additive, so `FORMAT_VERSION` does not
   move.** Both are `IF NOT EXISTS`, and a binary that knows nothing about either
   reads such a store as the text corpus it already was. Anything that would make
@@ -709,6 +722,16 @@ Module responsibilities:
   rather than a grace period.
 - Extraction dispatches on extension *before* looking at bytes — `.docx` and
   friends are ZIP archives and the binary check would reject them all.
+- **Markup is stored as written except in a docs store (0.42.0).**
+  `chunk::MARKUP` (`html`, `htm`, the only two a reader ever stripped) goes
+  down the plain-text arm, so `read` and an exact search answer a template's
+  own lines; the writer swaps in `chunk::markup_text` only when the store's
+  `kind` or `lean` is `docs`, and for a page under the store's `downloads/`.
+  The `markup` meta row (`raw` or `extracted`, absent before 0.42.0 and read as
+  `extracted`) says how a store's markup was last swept; when it differs from
+  the store's rule, the pass drops those files' hashes so they alone are read
+  again, and the row moves only at the end of a full sweep. Additive, so
+  `FORMAT_VERSION` does not move.
 - **Semlith Cloud is reached only after `semlith cloud login`.** With no
   `~/.semlith/cloud.json` nothing opens a socket, starts the sync thread or
   probes a host. `cloud::call` is the only function that calls one: it takes a

@@ -2222,6 +2222,9 @@ fn run() -> Result<()> {
                         display(std::path::Path::new(&h.path)),
                         reset()
                     )?;
+                    if !h.agreed.is_empty() {
+                        writeln!(out, "   (agreed: {})", h.agreed.join(", "))?;
+                    }
                     for line in h.text.lines() {
                         writeln!(out, "   {line}")?;
                     }
@@ -2662,7 +2665,9 @@ fn run() -> Result<()> {
                         if span.fresh { "" } else { "  · stale" },
                         reset(),
                     )?;
-                    for line in span.text.lines() {
+                    // Every line of the span, a blank one included: `lines()`
+                    // printed nothing for a blank line on its own (G14).
+                    for line in span.text.split('\n') {
                         writeln!(out, "{line}")?;
                     }
                 }
@@ -5137,6 +5142,7 @@ fn brief(
     }
 
     let mut out = std::io::stdout().lock();
+    let untexted = semlith::brief::untexted_note(&brief.spans);
     for (i, span) in brief.spans.iter().enumerate() {
         let from = match &span.store {
             Some(label) => format!("[{label}] "),
@@ -5162,12 +5168,11 @@ fn brief(
         };
         writeln!(
             out,
-            "{}{}. {via:<3} {from}{}:{}-{}{what}{}",
+            "{}{}. {via:<3} {from}{}{}{what}{}",
             bold(),
             i + 1,
             display(std::path::Path::new(&span.path)),
-            span.start_line,
-            span.end_line,
+            span.range(),
             reset()
         )?;
         match &span.text {
@@ -5179,7 +5184,7 @@ fn brief(
             // Said rather than left blank: a span with no text under it
             // looks like a span with no text in it.
             None if span.over_budget => writeln!(out, "   (text left out for the budget)")?,
-            None => writeln!(out, "   (text: top span only)")?,
+            None => writeln!(out, "   {untexted}")?,
         }
         writeln!(out)?;
     }
@@ -5212,13 +5217,7 @@ fn brief(
         brief.tokens, brief.counted_with
     );
     if !brief.cut.is_empty() {
-        let mut dropped = Vec::new();
-        if brief.cut.span_text > 0 {
-            dropped.push(format!("{} spans left without text", brief.cut.span_text));
-        }
-        if brief.cut.symbols > 0 {
-            dropped.push(format!("{} symbols' edges", brief.cut.symbols));
-        }
+        let dropped = semlith::brief::dropped(&brief.cut);
         tail.push_str(&format!(" -- dropped: {}", dropped.join(", ")));
     }
     writeln!(out, "{tail}")?;

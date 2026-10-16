@@ -1411,6 +1411,22 @@ fn merge(queues: Vec<Vec<(Hit, f32)>>, k: usize) -> Vec<Hit> {
         }
         let Some((i, _, _)) = best else { break };
         let (hit, _) = queues[i].pop_front().expect("the winner has a head");
+        // Two stores over one checkout answer with the same span of the same
+        // file; it is one answer, said once, naming the store that agreed
+        // (F21). An image has no span to compare and is never merged.
+        if hit.image.is_none()
+            && let Some(kept) = out.iter_mut().find(|o: &&mut Hit| {
+                o.image.is_none()
+                    && o.path == hit.path
+                    && o.start_line == hit.start_line
+                    && o.end_line == hit.end_line
+            })
+        {
+            if let Some(label) = hit.store {
+                kept.agreed.push(label);
+            }
+            continue;
+        }
         out.push(hit);
     }
 
@@ -1548,6 +1564,7 @@ mod tests {
             symbol_kind: None,
             symbol_line: None,
             copies: Vec::new(),
+            agreed: Vec::new(),
         }
     }
 

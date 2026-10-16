@@ -1056,14 +1056,29 @@ fn call_with_remotes(
 
     let mut parts: Vec<String> = Vec::new();
     let mut failed = false;
+    let mut local_text = None;
     if !skip_local {
         let local = call_local(stores, writer, &local_params(), session, None)?;
         failed = local["isError"] == json!(true);
+        local_text = Some(text_of(&local));
         parts.push(text_of(&local));
     }
     let mut skipped = Vec::new();
     for (store, remote) in &targets {
         match crate::cloud::forward_tool(store, remote, name, &args, &who) {
+            // A mirror of the local checkout answers with the same rows, and
+            // printing them again doubled what an agent paid (F21).
+            Ok(text)
+                if local_text
+                    .as_deref()
+                    .is_some_and(|local| crate::cloud::agrees(local, &text)) =>
+            {
+                parts.push(format!(
+                    "{store} ({}) agreed: the same {} rows as above",
+                    crate::cloud::badge(remote),
+                    crate::cloud::rows_in(&text)
+                ))
+            }
             Ok(text) => parts.push(format!("{store} ({})\n{text}", crate::cloud::badge(remote))),
             Err(why) => skipped.push(why),
         }
@@ -2656,6 +2671,9 @@ fn locate_row(hit: &crate::Hit, terms: &[String], shorten: &dyn Fn(&str) -> Stri
             copies.join(", ")
         ));
     }
+    if !hit.agreed.is_empty() {
+        marks.push(format!("agreed: {}", hit.agreed.join(", ")));
+    }
     let at = match hit.symbol_line {
         Some(line) => format!(" @{line}"),
         None => String::new(),
@@ -2742,6 +2760,7 @@ fn tokens(text: &str) -> usize {
 /// tell them apart treats a neighbour as an answer.
 fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -> String {
     let mut out = String::new();
+    let untexted = crate::brief::untexted_note(&brief.spans);
     for span in &brief.spans {
         let via = if span.lists.is_empty() {
             String::new()
@@ -2754,11 +2773,10 @@ fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -
             _ => String::new(),
         };
         out.push_str(&format!(
-            "{}{}:{}-{}{what}{via}\n",
+            "{}{}{}{what}{via}\n",
             label_of(&span.store),
             shorten(&span.path),
-            span.start_line,
-            span.end_line
+            span.range(),
         ));
         match &span.text {
             Some(text) => {
@@ -2769,7 +2787,7 @@ fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -
                 }
             }
             None if span.over_budget => out.push_str("    (text left out for the budget)\n"),
-            None => out.push_str("    (text: top span only)\n"),
+            None => out.push_str(&format!("    {untexted}\n")),
         }
     }
     for symbol in &brief.symbols {
@@ -2803,13 +2821,7 @@ fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -
         brief.tokens, brief.budget, brief.counted_with
     ));
     if !brief.cut.is_empty() {
-        let mut dropped = Vec::new();
-        if brief.cut.span_text > 0 {
-            dropped.push(format!("{} spans left without text", brief.cut.span_text));
-        }
-        if brief.cut.symbols > 0 {
-            dropped.push(format!("{} symbols' edges", brief.cut.symbols));
-        }
+        let dropped = crate::brief::dropped(&brief.cut);
         out.push_str(&format!(" -- dropped: {}", dropped.join(", ")));
     }
     out.push('\n');
@@ -3084,6 +3096,7 @@ mod tests {
             symbol_kind: Some("fn".to_string()),
             symbol_line: None,
             copies: Vec::new(),
+            agreed: Vec::new(),
         }
     }
 

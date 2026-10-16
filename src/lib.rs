@@ -134,6 +134,12 @@ pub(crate) const UNSORTED_ENV: &str = "SEMLITH_UNSORTED";
 /// The meta row counting a store's chunks per vector variant.
 const VARIANTS_KEY: &str = "variants";
 
+/// The meta row naming how this store's markup files were last swept:
+/// `raw` (as written) or `extracted` (the text a browser shows). Absent on a
+/// store written before 0.42.0, which extracted every one. An additive row, so
+/// `FORMAT_VERSION` does not move: an older binary reads raw markup as text.
+const MARKUP_KEY: &str = "markup";
+
 /// Embedding sessions writers hold in this process, for `/api/about`.
 static SESSIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -444,6 +450,76 @@ pub fn code_shaped(query: &str) -> bool {
     }) || query.contains("()")
 }
 
+/// Whether a query describes something seen, which is what the image list
+/// is for (0.42.0, G13).
+///
+/// A third reading of the same text, beside [`shape_of`] and [`code_shaped`]
+/// for the same reason they sit together. CLIP cannot be the judge: it reads
+/// the words in a screenshot, so a question naming the project scores the
+/// project's own screenshots like a description of them. Measured on flask,
+/// "how does flask dispatch a request to a view" put flaskr_index.png at a
+/// cosine of 0.355 — the right picture for "a green triangle" scores 0.359 —
+/// and no floor or margin over a caption true of any picture told the two
+/// apart. The query's own words do: a picture word (`screenshot`, `diagram`,
+/// `logo`), a colour or a shape. A crude list a reader can predict, as with
+/// the shape, rather than a judgement nobody can.
+pub fn pictured(query: &str) -> bool {
+    const SEEN: [&str; 46] = [
+        "picture",
+        "pictures",
+        "image",
+        "images",
+        "photo",
+        "photos",
+        "photograph",
+        "screenshot",
+        "screenshots",
+        "screen",
+        "diagram",
+        "diagrams",
+        "logo",
+        "icon",
+        "icons",
+        "drawing",
+        "illustration",
+        "sketch",
+        "painting",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "webp",
+        "red",
+        "green",
+        "blue",
+        "yellow",
+        "orange",
+        "purple",
+        "pink",
+        "black",
+        "white",
+        "grey",
+        "gray",
+        "brown",
+        "circle",
+        "square",
+        "triangle",
+        "rectangle",
+        "ring",
+        "stripes",
+        "striped",
+        "checkerboard",
+        "gradient",
+        "donut",
+    ];
+    let lower = query.to_lowercase();
+    lower.contains("look like")
+        || lower.contains("looks like")
+        || lower
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| SEEN.contains(&w))
+}
+
 /// The identifiers a sentence names: backticked, `snake_case`, `camelCase`,
 /// `a::b` and `call()` words, at most three.
 fn named_identifiers(query: &str) -> Vec<String> {
@@ -702,17 +778,13 @@ const TEST_PENALTY: f32 = 0.10;
 /// spaces is what added the fourth.
 type Candidate = (((bool, u64), f32), Vec<&'static str>);
 
-/// How many ranked lists a text chunk can be found by: vector, keyword and
-/// graph. An image can be found by one, which is what
-/// [`Semlith::search_ranked`] weighs a confident image match against.
-const TEXT_LISTS: f32 = 3.0;
-
-/// What an image below [`IMAGE_FLOOR`] is worth in the fusion.
-///
-/// Small enough that a weak image scores about what it did before the list
-/// was given the steep curve, so #122's fix moved the confident case and
-/// nothing else.
-const WEAK_IMAGE: f32 = 0.25;
+/// How many ranked lists a text chunk of an ordinary question is found by:
+/// vector and keyword. An image can be found by one, so an image that really
+/// matches stands in for both, which is what [`Semlith::search_ranked`] gives
+/// it. It was three, counting the graph list 0.36.0 removed, and that third
+/// list was most of why a picture's 3/13 sat at the top of every answer on a
+/// store holding screenshots (2026-10-14 audit, G13).
+const TEXT_LISTS: f32 = 2.0;
 
 /// The CLIP cosine above which an image match is treated as a confident one.
 ///
@@ -746,7 +818,28 @@ fn image_floor() -> f32 {
 /// reorders a candidate pool and never adds to it. The pool itself is the only
 /// thing that can, so this is the mean that was tried for recall, with the pair
 /// on either side of it recorded in the release.
+///
+/// From 0.42.0 the depth is fixed rather than a multiple of the `k` asked
+/// for: [`FUSE_DEPTH`].
 const RANK_DEPTH: usize = 4;
+
+/// How deep every list is searched and fused, whatever `k` is: four times the
+/// default `k` of 8, which is the depth the harness has always measured at.
+///
+/// A depth of `4 * k` made the answer a function of `k`. A chunk second in
+/// one list and 25th in the other collects both contributions at k=8 and only
+/// one at k=5, so asking for fewer results reordered the first ones and moved
+/// their scores: ripgrep's "how does ripgrep detect binary files" scored
+/// 723-736 at 0.077 with k=5 and 0.089 with k=8, and 754-765 was third at k=5
+/// and gone at k=3 (2026-10-14 audit, G12). Fused at one depth and then cut,
+/// the first `n` results of any `k` up to this are the same results with the
+/// same scores.
+///
+/// ponytail: a `k` above it widens the pool to `k`, so a request for more than
+/// 32 results can still order its head differently from one for 32. A fixed
+/// depth of the largest `k` a surface allows (50) would close that and fetch
+/// six times the rows on every default search.
+const FUSE_DEPTH: usize = RANK_DEPTH * 8;
 
 /// How many files an index run may get through without making its work
 /// durable.
@@ -949,6 +1042,11 @@ pub struct Hit {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(serialize_with = "serialize_plain_list")]
     pub copies: Vec<String>,
+    /// Other stores that answered with this same span of the same repository
+    /// — a local checkout and its remote mirror — merged into this one hit
+    /// rather than printed twice (0.42.0, F21).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agreed: Vec<String>,
 }
 
 /// An image's pixel size.
@@ -3241,6 +3339,21 @@ impl Semlith {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0)
             < GRAPH_RULES;
+        // How this store keeps markup (0.42.0, F13): as written, unless the
+        // store says it holds docs or leans to them. A store whose markup
+        // files were last swept the other way — every store written before
+        // 0.42.0, which stripped them, and has no row — re-reads them on this
+        // pass, and only them: their bytes have not changed, the rule has.
+        let markup_extracted = {
+            let settings = crate::home::store_settings(&self.dir);
+            settings.kind == "docs" || settings.lean == "docs"
+        };
+        let markup_rule = if markup_extracted { "extracted" } else { "raw" };
+        let markup_moved = store::get_meta(&self.db, MARKUP_KEY)?
+            .as_deref()
+            .unwrap_or("extracted")
+            != markup_rule;
+        let downloads = add::downloads_dir(&self.dir);
         let prehashed = std::mem::take(&mut self.prehashed);
         let run_started = std::time::Instant::now();
 
@@ -3363,7 +3476,16 @@ impl Semlith {
             hashes: if self.force {
                 Default::default()
             } else {
-                store::all_hashes(&self.db)?
+                let mut hashes = store::all_hashes(&self.db)?;
+                // A file with no recorded hash is read, extracted and chunked
+                // again, which is the whole of the markup upgrade.
+                if markup_moved {
+                    hashes.retain(|path, _| {
+                        let path = Path::new(path);
+                        !chunk::is_markup(path) || path.starts_with(&downloads)
+                    });
+                }
+                hashes
             },
             uncounted: store::uncounted(&self.db)?,
             over_cap: store::acceptances(&self.db)?
@@ -4051,7 +4173,19 @@ impl Semlith {
                     } => {
                         report.bytes += file_bytes;
                         read_mtime = seen;
-                        (hash, len, text, units, found, ready)
+                        // The prepare stage reads markup as written. A docs
+                        // store, and a page `semlith add` fetched, keep the
+                        // text a browser shows instead: scanned again, and
+                        // parsed and chunked below from that text.
+                        if chunk::is_markup(&path)
+                            && (markup_extracted || path.starts_with(&downloads))
+                        {
+                            let text = chunk::markup_text(&text);
+                            let found = keyscan::scan(&key, &text);
+                            (hash, len, text, units, found, None)
+                        } else {
+                            (hash, len, text, units, found, ready)
+                        }
                     }
                 };
                 let file_bytes = report.bytes - bytes_before;
@@ -4661,6 +4795,9 @@ impl Semlith {
             }
             if regraph {
                 store::set_meta(&self.db, "graph_rules", &GRAPH_RULES.to_string())?;
+            }
+            if markup_moved {
+                store::set_meta(&self.db, MARKUP_KEY, markup_rule)?;
             }
         }
 
@@ -5777,8 +5914,9 @@ impl Semlith {
 
         // Look deeper than `k` in each half. Fusion can only rank what it is
         // given, and a chunk that is second on one side and absent from the
-        // other still deserves to be considered.
-        let depth = (k * RANK_DEPTH).max(k);
+        // other still deserves to be considered. At one depth for every `k`,
+        // so `k` only cuts the answer and never changes it (G12).
+        let depth = FUSE_DEPTH.max(k);
 
         // Which half of the fusion this query's own text says to trust.
         let shape = shape_of(query);
@@ -5892,7 +6030,14 @@ impl Semlith {
         // query has to be embedded a second time, with CLIP's text encoder
         // rather than the store's own model, and a store of source code should
         // not pay for a model it has nothing to compare against.
-        let (images, truncated) = self.image_search(query, depth, filter)?;
+        // And only for a query that describes something seen: see
+        // [`pictured`]. Anything else is not asked, which also spares it the
+        // CLIP embed.
+        let (images, truncated) = if pictured(query) {
+            self.image_search(query, depth, filter)?
+        } else {
+            (Vec::new(), false)
+        };
 
         // Two id spaces — a chunk id and an image id both count from one — so
         // the fusion is keyed by which space an id belongs to as well as by the
@@ -5902,38 +6047,37 @@ impl Semlith {
         // The image list goes in first so that a tie resolves to the image.
         // A tie means the two are equally ranked, and only one of them was
         // found by a model that looked at the thing being asked about.
-        let image_list: Vec<(u64, f32)> = images
-            .iter()
-            .map(|(id, similarity)| {
-                // A confident image match stands in for the lists a chunk
-                // can appear in: an image can only ever be found by this one,
-                // and a chunk collects a contribution from each of the
-                // others. Without this weight a picture could never place
-                // above a passing text match however well CLIP matched it.
-                //
-                // Below the floor the image is a weak candidate rather than a
-                // wrong one, so it sits where that puts it instead of being
-                // dropped — and because the list's curve is now steep for
-                // every shape (#122), the weak weight is a fraction rather
-                // than 1.0, so an unconfident image scores what it scored
-                // before: 0.25 / 13 = 0.019 at rank one, against 1 / 61 =
-                // 0.016 under the old flat curve. The order among the
-                // also-rans is unchanged; only the confident case moved.
-                //
-                // A query CLIP had to cut short is never confident: the cosine
-                // is of its opening words, not of what was asked. An issue or a
-                // pasted paragraph runs past 77 tokens, and a screenshot of
-                // text matches the opening of almost any technical prose
-                // (0.24-0.31 on Django's docs, against 0.39 for a sentence
-                // describing a screenshot).
-                let weight = if *similarity >= image_floor() && !truncated {
-                    TEXT_LISTS
-                } else {
-                    WEAK_IMAGE
-                };
-                (*id, weight)
-            })
-            .collect();
+        //
+        // Only the pictures that really match, fused by their rank among
+        // those (0.42.0, G13). A real match stands in for the lists a chunk
+        // can appear in: an image can only ever be found by this one, and a
+        // chunk collects a contribution from each of the others, so without
+        // the weight a picture could never place above a passing text match
+        // however well CLIP matched it (#122).
+        //
+        // Everything else is left out rather than weighted down. Until 0.41.x
+        // a weak image joined at a quarter of a list, and a strong one at
+        // three lists, on a floor that a screenshot of text clears for almost
+        // any sentence: flask's "register a blueprint url prefix" opened with
+        // two PNGs at 3/13 and 3/14 above every chunk of code, and brief led
+        // with debugger.png. A query is shown a picture when it describes
+        // one (above) and CLIP agrees past the floor, and otherwise not at
+        // all.
+        //
+        // A query CLIP had to cut short is never a real match: the cosine is
+        // of its opening words, not of what was asked. An issue or a pasted
+        // paragraph runs past 77 tokens, and a screenshot of text matches the
+        // opening of almost any technical prose (0.24-0.31 on Django's docs,
+        // against 0.39 for a sentence describing a screenshot).
+        let image_list: Vec<(u64, f32)> = if truncated {
+            Vec::new()
+        } else {
+            images
+                .iter()
+                .filter(|(_, similarity)| *similarity >= image_floor())
+                .map(|(id, _)| (*id, TEXT_LISTS))
+                .collect()
+        };
 
         let candidate_lists = [
             // Weightless on purpose. A definition does not out-*score* the
@@ -6037,6 +6181,7 @@ impl Semlith {
                             symbol_kind: None,
                             symbol_line: None,
                             copies: Vec::new(),
+                            agreed: Vec::new(),
                         },
                         0.0,
                     ));
@@ -6068,6 +6213,7 @@ impl Semlith {
                         symbol_kind: None,
                         symbol_line: None,
                         copies: Vec::new(),
+                        agreed: Vec::new(),
                     },
                     similarity,
                 ));
@@ -6327,9 +6473,14 @@ impl Semlith {
         // Chunks overlap by two lines, so they are stitched by line number
         // rather than concatenated — concatenation would repeat the seam and
         // the caller would read two copies of the same line as two lines.
+        //
+        // Split on `\n` rather than with `lines()`: a chunk is its lines joined
+        // by `\n`, so one that ends on a blank line ends in `\n`, and `lines()`
+        // drops that last line. `read main.rs:8-10` printed two lines of three
+        // (2026-10-14 audit, G14).
         let mut lines: Vec<(u32, String)> = Vec::new();
         for chunk in &chunks {
-            for (offset, line) in chunk.text.lines().enumerate() {
+            for (offset, line) in chunk.text.split('\n').enumerate() {
                 let number = chunk.start_line + offset as u32;
                 if lines.iter().any(|(n, _)| *n == number) {
                     continue;
@@ -7893,6 +8044,33 @@ fn semlithignore_for(dir: &Path) -> Option<ignore::gitignore::Gitignore> {
 mod tests {
     use super::*;
 
+    /// The image list is asked only by a query that describes something
+    /// seen (G13): every question of the image class does, and the audit's
+    /// questions about flask's code do not.
+    #[test]
+    fn only_a_query_describing_something_seen_asks_for_pictures() {
+        for seen in [
+            "a red circle",
+            "a black and white checkerboard pattern",
+            "yellow horizontal stripes",
+            "an orange ring, like a donut",
+            "a grey gradient fading from dark to light",
+            "a screenshot of the flaskr login page",
+            "what does the debugger look like",
+        ] {
+            assert!(pictured(seen), "{seen}");
+        }
+        for text in [
+            "register a blueprint url prefix",
+            "where does flask register a blueprint",
+            "how does flask dispatch a request to a view",
+            "how does ripgrep detect binary files",
+            "search_preferring",
+        ] {
+            assert!(!pictured(text), "{text}");
+        }
+    }
+
     /// Every dotfile the hidden rule skipped is listed, so the Review step
     /// accounts for every file on disk; `.git` and a whitelisted one are not.
     #[test]
@@ -8066,6 +8244,7 @@ mod tests {
                     symbol_kind: None,
                     symbol_line: None,
                     copies: Vec::new(),
+                    agreed: Vec::new(),
                 },
                 1.0,
             )
@@ -8181,6 +8360,7 @@ mod tests {
                     symbol_kind: None,
                     symbol_line: None,
                     copies: Vec::new(),
+                    agreed: Vec::new(),
                 },
                 0.0,
             )

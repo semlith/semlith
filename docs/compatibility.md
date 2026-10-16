@@ -761,6 +761,20 @@ open; an older binary ignores them.
 | Exports | HTML embeds IBM Plex and the logos and follows the portal's tokens; the PDF embeds IBM Plex subsets (and an OS CJK font for glyphs Plex lacks), A4 or Letter by locale, page x of y, bookmarks, metadata, tags. |
 | Library | `report` is a module directory: `Report::new`, `Figure`, `Cell`, `Column`, `Kind`, `Table`, `Kpi`, `Fact`, `Meta`, `Chip`, `Chain`, `WindowInfo`, `Block::{Table, Facts, Note, Code}`, `render_table`, `table_ids`, `extension`, `number`, `num`, `DEFAULT_WINDOW`, `CSV`, `SCHEMA`, `REPORT_CSP`; `Options` gains `salt`. `store::report_rows_since`, `files_read_since`, `path_bounds`; `home::report_salt`; `http::Response::with_csp`. |
 
+### 0.42.0 — search, read and brief
+
+Search, read and brief against the 2026-10-14 audit. `FORMAT_VERSION` does not
+move: the `markup` meta row is additive, and markup a 0.42.0 code store holds as
+written reads as text under 0.41.x.
+
+| Surface | Change |
+|---|---|
+| **Break: what a code store holds** | `.html` and `.htm` are stored as written and chunked as text unless the store's `kind` or `lean` is `docs` (or the page came from `semlith add`). A store re-reads those files, and only those, on its next full pass. |
+| Search ranking | Every list is searched 32 deep whatever `k` is, so `-k 3` returns the first three of `-k 8` with the same scores. An image joins only for a query describing something seen (a picture word, a colour or a shape) and at or above the floor; a weak image is no longer listed. |
+| Search output | A hit another store answered with the same span of the same repository (a remote mirror, or two stores over one checkout) is shown once with `agreed` naming the other: a JSON field, `agreed: …` in a locate row, `(agreed: …)` in the CLI. A forwarded exact or symbol answer whose rows the local answer holds prints one line, `<store> (remote · <org>) agreed: the same N rows as above`. |
+| `read` | Prints every line of the range, blank ones included. |
+| `brief` | Buys the top locator and the text span's locator, then that definition's own edges edge by edge, then the other locators, then text (none once an edge is dropped). `-- dropped:` names locators, edges, symbols' edges and spans' text; a span without text says which span has it; an image is named without a line range. |
+
 ### 0.41.0
 
 The rest of the 0.39.0 audit. `FORMAT_VERSION` does not move: a store 0.41.0

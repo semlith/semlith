@@ -32,11 +32,31 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
+/// What a reader makes of a fixture. For markup that is the docs store's
+/// reading, the text a browser shows: every other store keeps markup as
+/// written from 0.42.0, which `markup_is_kept_as_written` holds.
 fn text_of(name: &str) -> String {
     let path = fixtures().join(name);
     let bytes = fs::read(&path).unwrap_or_else(|e| panic!("reading {name}: {e}"));
-    chunk::extract(&path, &bytes)
-        .unwrap_or_else(|why| panic!("{name} was skipped ({}), not read", why.as_str()))
+    let text = chunk::extract(&path, &bytes)
+        .unwrap_or_else(|why| panic!("{name} was skipped ({}), not read", why.as_str()));
+    if chunk::is_markup(&path) {
+        chunk::markup_text(&text)
+    } else {
+        text
+    }
+}
+
+/// Outside a docs store a page is source, byte for byte (0.42.0).
+#[test]
+fn markup_is_kept_as_written() {
+    let path = fixtures().join("page.html");
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(
+        chunk::extract(&path, &bytes).unwrap().as_bytes(),
+        &bytes[..],
+        "page.html is not held as written"
+    );
 }
 
 /// The release's central claim, one format at a time: the phrase a person can
@@ -538,7 +558,6 @@ fn a_mixed_corpus_indexes_and_answers() {
         "deck.odp",
         "sheet.ods",
         "analysis.ipynb",
-        "page.html",
         "book.epub",
         "notes.rtf",
         "message.eml",
@@ -551,6 +570,14 @@ fn a_mixed_corpus_indexes_and_answers() {
     for name in ["protected.docx", "bomb.docx"] {
         fs::copy(fixtures().join(name), corpus.path().join(name)).unwrap();
     }
+    // And a page, which a store that is not a docs store holds as written
+    // (0.42.0): the token in its script is then text like any source file's,
+    // and the scan refuses the file as it would that file.
+    fs::copy(
+        fixtures().join("page.html"),
+        corpus.path().join("page.html"),
+    )
+    .unwrap();
 
     let mut s = semlith::Semlith::open(store.path(), None).unwrap();
     s.quiet = true;
@@ -567,6 +594,13 @@ fn a_mixed_corpus_indexes_and_answers() {
         report.skipped, 2,
         "the unreadable files were not skipped cleanly: {report:?}"
     );
+    assert!(
+        report
+            .refused
+            .iter()
+            .any(|(path, _)| path.ends_with("page.html")),
+        "the page's script was not scanned as written: {report:?}"
+    );
 
     let questions = [
         ("quokka thermostat calibration", "notes.docx"),
@@ -576,7 +610,6 @@ fn a_mixed_corpus_indexes_and_answers() {
         ("okapi rollout plan", "deck.odp"),
         ("civet expense summary", "sheet.ods"),
         ("capybara regression writeup", "analysis.ipynb"),
-        ("wombat migration corridor", "page.html"),
         ("numbat lighthouse inventory", "book.epub"),
         ("binturong pier maintenance log", "notes.rtf"),
         ("serval dispatch confirmation", "message.eml"),
