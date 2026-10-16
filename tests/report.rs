@@ -1038,7 +1038,13 @@ fn the_pdf_text_layer_is_the_text() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("r.pdf");
     std::fs::write(&file, &pdf).unwrap();
-    if let Ok(out) = Command::new("pdftotext").arg(&file).arg("-").output() {
+    // UTF-8 named: on Windows pdftotext writes the system code page otherwise.
+    if let Ok(out) = Command::new("pdftotext")
+        .args(["-enc", "UTF-8"])
+        .arg(&file)
+        .arg("-")
+        .output()
+    {
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(text.contains("Résumé café 東京"), "pdftotext: {text}");
         let fonts = Command::new("pdffonts").arg(&file).output().unwrap();
