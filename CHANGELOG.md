@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.42.0] - 2026-10-17
 
 ### Added
 
@@ -63,6 +63,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer is one row, in the store that answered.
 - The tool-list cost is one count, bytes over four: the gate in
   `tests/retrieval.rs` and the Agents page print the same number.
+- **Every report looks like Semlith, in every format.** The five reports are one
+  typed structure drawn by five renderers to the reports-v1 design: HTML with the
+  portal's own tokens, IBM Plex and logos embedded (no script, no URL), light and
+  dark, A4 print and a 390 px layout; a PDF typeset natively with IBM Plex
+  embedded as a subset, full Unicode (`Résumé café 東京` comes back out of the
+  text layer exactly; CJK glyphs come from the system's fonts), page x of y, the
+  ledger head, bookmarks, metadata and tags; Markdown for a PR body. Two
+  dependencies are new, for the PDF only: `subsetter` (typst's, without default
+  features) and `ttf-parser` (already in the tree under lopdf), with five IBM
+  Plex TrueType subsets of about 26 KB each. The macOS arm64 release binary grew
+  from 127,745,888 to 128,906,832 bytes (+1,160,944, +0.9 %).
+- **Break: CSV and JSON are data.** CSV is one file per table, numbers
+  unformatted, saved as a zip (`--table` prints one); JSON is the schema
+  `semlith.report/2` with typed figures (value, unit, currency, over, display),
+  documented in docs/portal.md.
+- **Break: one default window, and it applies to every figure.** Reports open at
+  30 days on the CLI, the portal, `semlith_report` and schedules alike, and a
+  windowed savings report narrows whole, excerpt, refunds, zero-hit and latency
+  too, so Whole less Excerpt is Net; the access audit counts each row by its own
+  time, not by its session's last.
+- **Break: a schedule replaces one file in place** (`semlith-savings-week.md`)
+  instead of writing a dated file per run, and keeps every option it was given:
+  `schedule add` takes `--redact` and `--excerpts`, and the portal sends them.
+- Numbers in reports print `736,397`, as the portal does, through one formatter.
+- The change brief counts every file it re-read (no per-store cap of 200), does
+  not call a first index a re-read, and carries the blast radius of the changed
+  definitions from the impact walk; paths print relative to the store's root.
+- The Reports page previews the rendered HTML in a sandboxed frame under a
+  report-only policy; Copy stays Markdown. Its command uses `--scope` and only the
+  flags a report reads; "Attach the excerpts" is "Attach the per-retrieval rows"
+  and says it attaches counts, not lines. The Schedules card names the real
+  schedules file and says any cadence (a 60 s schedule read "every 0 h").
+- `semlith_report` takes `window`, `scope`, `redact`, `excerpts` and `table`.
+
+**The settled share drops, and that is the honest number.** Untyped method
+calls are ambiguous now rather than guessed, so `semlith stats` and the health
+report settle fewer call edges: ripgrep 36 % to 31 % (resolved 1,827 to 1,652,
+ambiguous 3,917 to 4,283), flask 64 % to 39 % (resolved 758 to 289, ambiguous
+672 to 1,166), cobra 85 % to 88 %. Stores keep their pre-0.42.0 hints, without
+the receiver mark, until their files are re-indexed.
 
 ### Fixed
 
@@ -91,12 +131,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lock for minutes, and every daemon killed meanwhile left a worker waiting
   behind it for good. The worker's protocol number moves to 4, so the first
   Neural Engine run after upgrading compiles its models once more.
+- A Core ML worker removes only earlier protocols' worker copies, never a
+  later one's. With two versions on one machine (a 0.41.0 daemon beside a
+  0.42.0 CLI) each removed the other's, and the newer one compiled every Neural
+  Engine model again, about four minutes on the M1, on every run. A 0.41.0
+  binary still removes 0.42.0's copy, so that pairing recompiles until the
+  daemon is upgraded too.
 - A file whose first 8 KiB is mostly invalid UTF-8 or control characters is
   refused as binary with the share in its reason (ripgrep's `sherlock.br`, a
   Brotli file with no NUL, became one chunk of U+FFFD). Latin-1 prose is still
   read.
 
-### Fixed
 
 From the graph ground-truth pass of the 2026-10-14 audit (G1-G11 and the gaps
 list), each with a test on a cut-down copy of the file the audit read.
@@ -210,51 +255,6 @@ A remote hit naming the same span of the same repository is merged into the
 local one — the fresher kept, the other named in `agreed` — and a forwarded
 exact or symbol answer whose rows the local answer holds is one line saying
 it agreed. Two local stores over one checkout merge the same way.
-
-### Changed
-
-**The settled share drops, and that is the honest number.** Untyped method
-calls are ambiguous now rather than guessed, so `semlith stats` and the health
-report settle fewer call edges: ripgrep 36 % to 31 % (resolved 1,827 to 1,652,
-ambiguous 3,917 to 4,283), flask 64 % to 39 % (resolved 758 to 289, ambiguous
-672 to 1,166), cobra 85 % to 88 %. Stores keep their pre-0.42.0 hints, without
-the receiver mark, until their files are re-indexed.
-
-### Changed
-
-- **Every report looks like Semlith, in every format.** The five reports are one
-  typed structure drawn by five renderers to the reports-v1 design: HTML with the
-  portal's own tokens, IBM Plex and logos embedded (no script, no URL), light and
-  dark, A4 print and a 390 px layout; a PDF typeset natively with IBM Plex
-  embedded as a subset, full Unicode (`Résumé café 東京` comes back out of the
-  text layer exactly; CJK glyphs come from the system's fonts), page x of y, the
-  ledger head, bookmarks, metadata and tags; Markdown for a PR body. Two
-  dependencies are new, for the PDF only: `subsetter` (typst's, without default
-  features) and `ttf-parser` (already in the tree under lopdf), with five IBM
-  Plex TrueType subsets of about 26 KB each. The macOS arm64 release binary grew
-  from 127,745,888 to 128,906,832 bytes (+1,160,944, +0.9 %).
-- **Break: CSV and JSON are data.** CSV is one file per table, numbers
-  unformatted, saved as a zip (`--table` prints one); JSON is the schema
-  `semlith.report/2` with typed figures (value, unit, currency, over, display),
-  documented in docs/portal.md.
-- **Break: one default window, and it applies to every figure.** Reports open at
-  30 days on the CLI, the portal, `semlith_report` and schedules alike, and a
-  windowed savings report narrows whole, excerpt, refunds, zero-hit and latency
-  too, so Whole less Excerpt is Net; the access audit counts each row by its own
-  time, not by its session's last.
-- **Break: a schedule replaces one file in place** (`semlith-savings-week.md`)
-  instead of writing a dated file per run, and keeps every option it was given:
-  `schedule add` takes `--redact` and `--excerpts`, and the portal sends them.
-- Numbers in reports print `736,397`, as the portal does, through one formatter.
-- The change brief counts every file it re-read (no per-store cap of 200), does
-  not call a first index a re-read, and carries the blast radius of the changed
-  definitions from the impact walk; paths print relative to the store's root.
-- The Reports page previews the rendered HTML in a sandboxed frame under a
-  report-only policy; Copy stays Markdown. Its command uses `--scope` and only the
-  flags a report reads; "Attach the excerpts" is "Attach the per-retrieval rows"
-  and says it attaches counts, not lines. The Schedules card names the real
-  schedules file and says any cadence (a 60 s schedule read "every 0 h").
-- `semlith_report` takes `window`, `scope`, `redact`, `excerpts` and `table`.
 
 ### Security
 
