@@ -2735,6 +2735,7 @@ fn tokens(text: &str) -> usize {
 /// tell them apart treats a neighbour as an answer.
 fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -> String {
     let mut out = String::new();
+    let untexted = crate::brief::untexted_note(&brief.spans);
     for span in &brief.spans {
         let via = if span.lists.is_empty() {
             String::new()
@@ -2747,11 +2748,10 @@ fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -
             _ => String::new(),
         };
         out.push_str(&format!(
-            "{}{}:{}-{}{what}{via}\n",
+            "{}{}{}{what}{via}\n",
             label_of(&span.store),
             shorten(&span.path),
-            span.start_line,
-            span.end_line
+            span.range(),
         ));
         match &span.text {
             Some(text) => {
@@ -2762,7 +2762,7 @@ fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -
                 }
             }
             None if span.over_budget => out.push_str("    (text left out for the budget)\n"),
-            None => out.push_str("    (text: top span only)\n"),
+            None => out.push_str(&format!("    {untexted}\n")),
         }
     }
     for symbol in &brief.symbols {
@@ -2796,13 +2796,7 @@ fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -
         brief.tokens, brief.budget, brief.counted_with
     ));
     if !brief.cut.is_empty() {
-        let mut dropped = Vec::new();
-        if brief.cut.span_text > 0 {
-            dropped.push(format!("{} spans left without text", brief.cut.span_text));
-        }
-        if brief.cut.symbols > 0 {
-            dropped.push(format!("{} symbols' edges", brief.cut.symbols));
-        }
+        let dropped = crate::brief::dropped(&brief.cut);
         out.push_str(&format!(" -- dropped: {}", dropped.join(", ")));
     }
     out.push('\n');
