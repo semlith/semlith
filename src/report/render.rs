@@ -874,6 +874,7 @@ h1{font-size:22px}.top .grow+.pill{display:none}.kpi .v{font-size:19px}}
 body{font-size:10.5pt;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .sheet{max-width:none;margin:0;padding:0}.tw{overflow:visible}
 thead{display:table-header-group}tr,.kpi,.card-h,.facts>div{break-inside:avoid}.card-h{break-after:avoid}
+th{white-space:normal}th,td{padding:6px 8px}table{font-size:9.5pt}.id{white-space:normal;font-size:8.5pt}.card{overflow:visible}
 .kpis{grid-template-columns:repeat(4,minmax(0,1fr))}.kpis.k3{grid-template-columns:repeat(3,minmax(0,1fr))}.meta{grid-template-columns:repeat(3,minmax(0,1fr))}}
 "#;
 
