@@ -336,12 +336,18 @@ fn load_fallbacks(text: &str) -> Vec<(Vec<u8>, u32, String)> {
             if serves.is_empty() {
                 return None;
             }
+            // The first PostScript name ttf-parser can decode (a Mac-encoded
+            // record comes back `None`), else the file's own name, so
+            // `pdffonts` says which system font the glyphs came from.
             let name = face
                 .names()
                 .into_iter()
-                .find(|n| n.name_id == ttf_parser::name_id::POST_SCRIPT_NAME)
-                .and_then(|n| n.to_string())
-                .unwrap_or_else(|| "Fallback".into());
+                .filter(|n| n.name_id == ttf_parser::name_id::POST_SCRIPT_NAME)
+                .find_map(|n| n.to_string())
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .map_or("Fallback".into(), |s| s.to_string_lossy().into_owned())
+                });
             Some((index, serves, name))
         });
         if let Some((index, serves, name)) = found {

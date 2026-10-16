@@ -1033,6 +1033,24 @@ fn the_pdf_text_layer_is_the_text() {
         "{}",
         &text[..text.len().min(400)]
     );
+    // And by poppler, where it is installed: what `pdftotext` and `pdffonts`
+    // say is what a reader's tools will say.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("r.pdf");
+    std::fs::write(&file, &pdf).unwrap();
+    if let Ok(out) = Command::new("pdftotext").arg(&file).arg("-").output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("Résumé café 東京"), "pdftotext: {text}");
+        let fonts = Command::new("pdffonts").arg(&file).output().unwrap();
+        let fonts = String::from_utf8_lossy(&fonts.stdout);
+        assert!(fonts.contains("+IBMPlexSans"), "{fonts}");
+        for line in fonts.lines().skip(2) {
+            assert!(
+                line.contains(" yes yes yes "),
+                "a font not embedded as a subset with a ToUnicode map: {line}"
+            );
+        }
+    }
 }
 
 #[test]

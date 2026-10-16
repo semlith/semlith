@@ -15,9 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dark, A4 print and a 390 px layout; a PDF typeset natively with IBM Plex
   embedded as a subset, full Unicode (`Résumé café 東京` comes back out of the
   text layer exactly; CJK glyphs come from the system's fonts), page x of y, the
-  ledger head, bookmarks, metadata and tags; Markdown for a PR body. The binary
-  grows by the five Plex TrueType subsets and the `subsetter` crate (sizes in the
-  release notes).
+  ledger head, bookmarks, metadata and tags; Markdown for a PR body. Two
+  dependencies are new, for the PDF only: `subsetter` (typst's, without default
+  features) and `ttf-parser` (already in the tree under lopdf), with five IBM
+  Plex TrueType subsets of about 26 KB each. The macOS arm64 release binary grew
+  from 127,745,888 to 128,906,832 bytes (+1,160,944, +0.9 %).
 - **Break: CSV and JSON are data.** CSV is one file per table, numbers
   unformatted, saved as a zip (`--table` prints one); JSON is the schema
   `semlith.report/2` with typed figures (value, unit, currency, over, display),
