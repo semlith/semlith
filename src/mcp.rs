@@ -1822,23 +1822,8 @@ fn call_local(
                 match stores.signatures_in(Some(&only), &names, &filter) {
                     Ok(rows) if rows.is_empty() => empty_graph(stores, &names.join(", ")),
                     Ok(rows) => {
-                        let text = crate::graph::render_signatures(&rows, &|p| paths.short(p));
-                        let missing: Vec<&String> = names
-                            .iter()
-                            .filter(|n| !rows.iter().any(|r| r.asked == **n))
-                            .collect();
-                        let text = if missing.is_empty() {
-                            text
-                        } else {
-                            format!(
-                                "{text}\nno definition: {}",
-                                missing
-                                    .iter()
-                                    .map(|m| m.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        };
+                        let text =
+                            crate::graph::render_signatures(&rows, &names, &|p| paths.short(p));
                         paths.with_header(crate::graph::fit(text, "ask for fewer names"))
                     }
                     Err(e) => return Ok(tool_error(&e.to_string())),
@@ -2288,31 +2273,7 @@ fn render_ends(ends: &[crate::store::EdgeEnd], shorten: &dyn Fn(&str) -> String)
         return "  none".to_string();
     }
     ends.iter()
-        .map(|e| {
-            // A collapsed row stands for several definitions and must not name
-            // one of them: an agent reading `get  src/a.rs:12` will quote that
-            // file, and it is one of four the call could have meant.
-            if e.confidence == crate::graph::AMBIGUOUS {
-                return format!(
-                    "  {} via {} ({}) · {} definitions{}",
-                    e.symbol.name,
-                    e.kind,
-                    e.confidence,
-                    e.definitions,
-                    crate::graph::call_site(e, shorten)
-                );
-            }
-            format!(
-                "  {} via {} ({})  {}{}:{}{}",
-                e.symbol.name,
-                e.kind,
-                e.confidence,
-                label_of(&e.symbol.store),
-                shorten(&e.symbol.path),
-                e.symbol.start_line,
-                crate::graph::call_site(e, shorten)
-            )
-        })
+        .map(|e| crate::graph::render_end(e, shorten))
         .collect::<Vec<_>>()
         .join("\n")
 }

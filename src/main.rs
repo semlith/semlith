@@ -2515,7 +2515,7 @@ fn run() -> Result<()> {
                 } else {
                     println!(
                         "{}",
-                        semlith::graph::render_signatures(&rows, &|p| display(
+                        semlith::graph::render_signatures(&rows, &names, &|p| display(
                             std::path::Path::new(p)
                         ))
                     );
@@ -4500,31 +4500,10 @@ fn print_ends(out: &mut impl Write, heading: &str, ends: &[semlith::store::EdgeE
         return Ok(());
     }
     for end in ends {
-        // A collapsed row stands for every definition of the name, so it says
-        // how many rather than pointing at whichever one came back first —
-        // which would read as a fact about where the call goes.
-        if end.confidence == semlith::graph::AMBIGUOUS {
-            writeln!(
-                out,
-                "  {} via {} ({}) · {} definitions{}",
-                end.symbol.name,
-                end.kind,
-                end.confidence,
-                end.definitions,
-                semlith::graph::call_site(end, &|p| display(std::path::Path::new(p))),
-            )?;
-            continue;
-        }
         writeln!(
             out,
-            "  {} via {} ({})  {}{}:{}{}",
-            end.symbol.name,
-            end.kind,
-            end.confidence,
-            store_prefix(&end.symbol.store),
-            display(std::path::Path::new(&end.symbol.path)),
-            end.symbol.start_line,
-            semlith::graph::call_site(end, &|p| display(std::path::Path::new(p))),
+            "{}",
+            semlith::graph::render_end(end, &|p| display(std::path::Path::new(p)))
         )?;
     }
     Ok(())
