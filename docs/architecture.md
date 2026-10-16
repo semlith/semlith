@@ -155,7 +155,19 @@ The readers live in `src/formats.rs`, private because what is extracted from a
 document is behaviour, not API. Six of the nine formats are ZIP archives of XML
 and share one bounded archive reader and one tag scanner. A notebook is JSON,
 handled by serde_json. HTML is a character scan that removes tags but keeps every
-newline, so a hit in an HTML page still names the line in the file on disk.
+newline, so a hit in an HTML page still names the line in the file on disk; a
+line the markup emptied is empty.
+
+From 0.42.0 that reading is only for a store that says it holds docs or leans to
+them (the Store settings' `kind` or `lean` is `docs`) and for a page `semlith
+add` fetched. Every other store keeps `.html` and `.htm` as written and chunks
+them as text, because a Jinja or Handlebars template is source: `read` and an
+exact search answer its own lines. Those two are the only markup extensions a
+reader ever stripped; `vue`, `svelte`, `xhtml` and the template extensions
+(`jinja`, `j2`, `hbs`, `mustache`, `erb`, `ejs`, `liquid`, `twig`, `njk`) were
+always plain text. The `markup` meta row records which way a store's markup was
+last swept; a store with none (every store from before 0.42.0) or with the other
+reading re-reads its markup files, and only those, on its next full pass.
 
 A file that cannot be read — corrupt, truncated, encrypted, or expanding past
 the 32 MiB decompression cap — is `None`, counted as skipped. A panic inside any
@@ -198,10 +210,10 @@ format row ([compatibility.md](compatibility.md#store-format)).
 ## Searching
 
 ```
-query ──┬─▶ embed ──▶ index.search(k*4) ──▶ exact rescoring ──▶ vector list
+query ──┬─▶ embed ──▶ index.search(32) ──▶ exact rescoring ──▶ vector list
         ├─▶ terms ──▶ chunks_fts MATCH ─────────────────────▶ keyword list
         ├─▶ names in the query ──▶ symbols ──────────────────▶ definition / named lists
-        └─▶ CLIP text encoder (only if the store holds images) ▶ image list
+        └─▶ CLIP text encoder (a query describing a picture, a store with images) ▶ image list
                                                     │
                                      reciprocal rank fusion
                                                     │
@@ -213,9 +225,12 @@ query ──┬─▶ embed ──▶ index.search(k*4) ──▶ exact rescorin
 The vector index knows what a chunk means; FTS5 knows which literal terms it
 contains. Neither suffices alone: an embedding of `EMBED_BATCH` sits near every
 other constant, and a keyword index cannot answer "how does the retry backoff
-work". The vector and keyword lists are each searched `4 * k` deep before
-fusing, so a chunk ranked second by one and absent from the other is still
-considered.
+work". Every list is searched 32 deep (`FUSE_DEPTH`, four times the default
+`k` of 8) before fusing, so a chunk ranked second by one and absent from the
+other is still considered. The depth does not move with `k` (0.42.0): fused at
+`4 * k`, asking for five results scored and ordered the first ones differently
+from asking for eight, and `k` now only cuts the answer. A `k` above 32 widens
+the pool to `k`.
 
 Embeddings are L2-normalised on both sides, so turbovec's inner product is cosine
 similarity. Candidates are then reordered by their full-precision vectors from
@@ -257,7 +272,7 @@ every answer, and `prefer` overrules it.
 | keyword | always | chunks by literal terms (FTS5) |
 | definition | identifier-shaped query | up to three chunks defining that exact name (`DEFINITION_LIFT`), lifted above the fused order rather than scored into it; the badge `definition` |
 | named | question-shaped query | the definitions of identifiers the sentence names, as a list that votes beside the others |
-| image | the store holds images | images by CLIP similarity, keyed in their own id space; a confident match is weighted to stand in for the lists a chunk can appear in, and a query CLIP had to cut short (over 77 tokens) is never confident |
+| image | the store holds images and the query describes something seen (`pictured`: a picture word, a colour or a shape) | images CLIP scores at or above the floor (0.28, `SEMLITH_IMAGE_FLOOR`), keyed in their own id space and fused by rank with the weight of the two lists a chunk can appear in; nothing below the floor, and nothing for a query CLIP had to cut short (over 77 tokens) |
 
 **After fusion**, applied once the rows are fetched because each needs something
 fusion cannot know:

@@ -61,6 +61,67 @@ builtins and standard library (Go, Rust, Python, JavaScript, TypeScript) and
 relative imports are left out: cobra's list was `Errorf` 198, `len`, `append`,
 `os`. `store::builtin_targets` counts what was left out.
 
+From the same audit's search, read and brief pass (G12-G16, F13, F21), each with
+a test in `tests/fidelity.rs` or `tests/cloud.rs` on copies of the files the
+audit asked about (`tests/fixtures/fidelity/`).
+
+**Asking for fewer results only cuts the answer (G12).** Every list was searched
+`4 * k` deep, so ripgrep's "how does ripgrep detect binary files" scored
+GUIDE.md 723-736 at 0.077 with `-k 5` and 0.089 with `-k 8`, and 754-765 was
+third at `-k 5` and gone at `-k 3`. Lists are now searched and fused 32 deep
+whatever `k` is, then cut; a `k` above 32 widens the pool.
+
+**A question about code is answered with code (G13).** A picture that cleared
+CLIP's floor was weighted as three lists, and a screenshot of text clears it
+for almost any sentence: flask's "register a blueprint url prefix" opened with
+two tutorial PNGs at 0.231 and 0.214 above every chunk (0.088 at best), and
+brief led with `debugger.png:0-0`. The image list is now asked only for a
+query that describes something seen — a picture word, a colour or a shape —
+and holds only images at or above the floor, weighted as the two lists a chunk
+can be found by (the graph list that made it three left in 0.36.0). CLIP reads
+the words in a screenshot, so no cosine could tell "how does flask dispatch a
+request to a view" (flaskr_index.png, 0.355) from "a green triangle" (the
+triangle, 0.359). "where does flask register a blueprint" now has
+`Flask.register_blueprint` (sansio/app.py:569) fifth, where the audit found it
+outside the first eight. The image class still finds 7 of 8 pictures at k=1, 3
+and 8. No surface prints an image's span as `0-0`.
+
+**`read` prints every line of its range (G14).** A chunk that ends on a blank
+line ends in a newline, and both the stitching and the CLI split with
+`lines()`, which drops it: `read main.rs:8-10` printed two lines of three and
+`read main.rs:6`, a blank line, printed nothing.
+
+**brief spends its budget in the order its help states and names every drop
+(G15, G16).** The top locator and the text span's locator come first, then that
+definition's edges one by one, then the other locators, then text — none once
+an edge is left out. Locators were counted with their absolute path, so eight
+of them took a 600-token budget and the edges were dropped. `-- dropped:`
+names locators, edges, symbols' edges and spans' text (`-b 150` dropped five
+locators and printed nothing after the colon). The edges are those of the
+definition the span sits in, by its owner: `View.dispatch_request` no longer
+lists `MethodView`, which holds a `dispatch_request` of its own, as a caller.
+A row prints once, and a span without text names the span that has it rather
+than saying "(text: top span only)" under spans whose text was another's.
+
+**Markup is read and searched as written (F13).** `.html` and `.htm` were stored
+tag-stripped in every store, so flask's Jinja template `create.html` lost its
+`<form>` and `<input name="title" value="{{ request.form['title'] }}">`:
+`read create.html:8-12` printed text that is not in the file and
+`search --exact "request.form\[.title.\]"` found 7 of grep's 9 lines. Outside a
+store whose `kind` or `lean` is `docs` (and a page `semlith add` fetched),
+markup is now stored as written and chunked as text; those two extensions are
+the only ones a reader ever stripped. A store re-reads its markup files, and
+only those, on its next full pass. The extracted reading's emptied lines are
+empty rather than runs of spaces.
+
+**A local store and its remote mirror answer once (F21).** With a local checkout
+and its copy in Semlith Cloud, every search printed each hit twice and an exact
+search printed both blocks ("16 matching lines in 965 files", then "16 in 337").
+A remote hit naming the same span of the same repository is merged into the
+local one — the fresher kept, the other named in `agreed` — and a forwarded
+exact or symbol answer whose rows the local answer holds is one line saying
+it agreed. Two local stores over one checkout merge the same way.
+
 ### Changed
 
 **The settled share drops, and that is the honest number.** Untyped method
@@ -69,6 +130,17 @@ report settle fewer call edges: ripgrep 36 % to 31 % (resolved 1,827 to 1,652,
 ambiguous 3,917 to 4,283), flask 64 % to 39 % (resolved 758 to 289, ambiguous
 672 to 1,166), cobra 85 % to 88 %. Stores keep their pre-0.42.0 hints, without
 the receiver mark, until their files are re-indexed.
+
+**What a code store holds of an HTML file.** It is the file as written, so a
+page with a credential-shaped string in a `<script>` is now refused or listed
+for review in such a store, as the same line in a `.js` file always was. A docs
+store keeps the text a browser shows. The retrieval harness reads the same with
+markup as written, fusion at a fixed depth and the image gate: development set
+hit@1 58/77 (75%), hit@3 61/77 (79%), hit@8 69/77 (89%) before (three runs)
+and after (six), no spread; sealed 25/30 (83%), 27/30 (90%), 29/30 (96%)
+before and after; wrong-yes 0; median bytes per answer 1,570 to 1,574 (dev)
+and 1,611 to 1,610 (sealed); the image class 7 of 8 at k=1, 3 and 8 before and
+after.
 
 ## [0.41.0] - 2026-10-15
 
