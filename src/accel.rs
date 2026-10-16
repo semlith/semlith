@@ -86,6 +86,30 @@ pub fn keep_warm(for_: Duration) {
     WARM_UNTIL.fetch_max(until, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// How long a watched folder's last change keeps the lanes loaded.
+///
+/// A save is a few chunks, and a worker that has exited costs it a cold
+/// start: one save of cobra's command.go took 39.5 s while the Neural
+/// Engine's worker started, against 0.2 s warm (audit, item 29). Ten minutes
+/// covers a person editing in bursts; after it the worker goes as before.
+pub const WATCH_WARM: Duration = Duration::from_secs(600);
+
+/// A file in a watched folder changed: start every lane a run would embed on
+/// now, before the change is debounced and chunked, and keep them for
+/// [`WATCH_WARM`]. A no-op outside a process that uses the lanes.
+pub fn prewarm() {
+    if !MANAGED.load(Ordering::Relaxed) {
+        return;
+    }
+    keep_warm(WATCH_WARM);
+    let on = enabled();
+    for lane in lanes() {
+        if on.lane(lane.id) && unavailable_here(lane.id).is_none() && lane.usable() {
+            lane.wake();
+        }
+    }
+}
+
 fn kept_warm() -> bool {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

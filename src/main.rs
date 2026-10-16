@@ -2685,7 +2685,7 @@ fn run() -> Result<()> {
                 &CLI_LEDGER,
                 "pattern",
                 &query,
-                "",
+                &serde_json::to_string(&found).unwrap_or_default(),
                 !found.matches.is_empty(),
                 started.elapsed(),
             );
@@ -2830,7 +2830,7 @@ fn run() -> Result<()> {
                 &CLI_LEDGER,
                 "impact",
                 &name,
-                "",
+                &serde_json::to_string(&impact).unwrap_or_default(),
                 !impact.reached.is_empty(),
                 started.elapsed(),
             );
@@ -2863,7 +2863,7 @@ fn run() -> Result<()> {
                 &CLI_LEDGER,
                 "trace",
                 &from,
-                &to,
+                &serde_json::to_string(&trace).unwrap_or_default(),
                 trace.chain.is_some(),
                 started.elapsed(),
             );
