@@ -1947,11 +1947,18 @@ pub fn coreml_worker(cache: &Path) -> Result<PathBuf> {
             .with_context(|| format!("copying this binary to {}", temp.display()))?;
     }
     std::fs::rename(&temp, &exe).with_context(|| format!("placing {}", exe.display()))?;
-    // Earlier protocols' workers are nobody's any more.
+    // Earlier protocols' workers are nobody's any more. A later one is: an
+    // older binary that removed it sent the newer one back to compiling every
+    // model, minutes on the M1, each time the two took turns (0.42.0's
+    // throughput A/B against a 0.41.0 daemon recompiled on every 0.42.0 run).
     if let Ok(entries) = std::fs::read_dir(cache.join("accel")) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with("coreml-worker-v") && entry.path() != dir {
+            let earlier = name
+                .strip_prefix("coreml-worker-v")
+                .and_then(|v| v.parse::<u32>().ok())
+                .is_some_and(|v| v < COREML_WORKER);
+            if earlier {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
@@ -2734,6 +2741,11 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let old = component_dir(cache.path(), "coreml-worker-v0");
         std::fs::create_dir_all(&old).unwrap();
+        let later = component_dir(
+            cache.path(),
+            &format!("coreml-worker-v{}", COREML_WORKER + 1),
+        );
+        std::fs::create_dir_all(&later).unwrap();
         let made = coreml_worker(cache.path()).unwrap();
         assert!(made.is_file());
         assert!(made.starts_with(cache.path()));
@@ -2748,6 +2760,7 @@ mod tests {
             !old.exists(),
             "the earlier protocol's worker is still there"
         );
+        assert!(later.exists(), "a later protocol's worker was removed");
         let modified = std::fs::metadata(&made).unwrap().modified().unwrap();
         let again = coreml_worker(cache.path()).unwrap();
         assert_eq!(again, made);
