@@ -3434,7 +3434,8 @@ def _(d):
     if not name.startswith("health-") or not name.endswith(".md"):
         fail("the preview names %r, which is not the chosen report in the chosen Markdown format" % name)
     press_text(d, "#main .seg button", "CSV")
-    d.wait_for("(document.querySelector('#main .card.flexcol .card-h .mono').textContent || '').endsWith('.csv')",
+    # CSV is one file per table from 0.42.0, saved together as a .zip.
+    d.wait_for("/\\.(csv|zip)$/.test(document.querySelector('#main .card.flexcol .card-h .mono').textContent || '')",
                what="the format to change the file written")
 
 
