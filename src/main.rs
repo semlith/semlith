@@ -2216,6 +2216,9 @@ fn run() -> Result<()> {
                         display(std::path::Path::new(&h.path)),
                         reset()
                     )?;
+                    if !h.agreed.is_empty() {
+                        writeln!(out, "   (agreed: {})", h.agreed.join(", "))?;
+                    }
                     for line in h.text.lines() {
                         writeln!(out, "   {line}")?;
                     }

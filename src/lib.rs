@@ -1042,6 +1042,11 @@ pub struct Hit {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(serialize_with = "serialize_plain_list")]
     pub copies: Vec<String>,
+    /// Other stores that answered with this same span of the same repository
+    /// — a local checkout and its remote mirror — merged into this one hit
+    /// rather than printed twice (0.42.0, F21).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agreed: Vec<String>,
 }
 
 /// An image's pixel size.
@@ -6176,6 +6181,7 @@ impl Semlith {
                             symbol_kind: None,
                             symbol_line: None,
                             copies: Vec::new(),
+                            agreed: Vec::new(),
                         },
                         0.0,
                     ));
@@ -6207,6 +6213,7 @@ impl Semlith {
                         symbol_kind: None,
                         symbol_line: None,
                         copies: Vec::new(),
+                        agreed: Vec::new(),
                     },
                     similarity,
                 ));
@@ -8237,6 +8244,7 @@ mod tests {
                     symbol_kind: None,
                     symbol_line: None,
                     copies: Vec::new(),
+                    agreed: Vec::new(),
                 },
                 1.0,
             )
@@ -8352,6 +8360,7 @@ mod tests {
                     symbol_kind: None,
                     symbol_line: None,
                     copies: Vec::new(),
+                    agreed: Vec::new(),
                 },
                 0.0,
             )

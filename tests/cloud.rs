@@ -1570,3 +1570,91 @@ fn a_local_search_asks_no_connected_org() {
         "a search naming no store did not ask the connected org"
     );
 }
+
+// ------------------------------------------------------------- one answer
+
+const PRICING: &str = "The order total is the sum of the line totals, then tax.";
+
+/// An org whose `platform` store is a mirror of the local `notes` checkout:
+/// its search answers the local file's own span, and its MCP endpoint
+/// answers an exact search with the local store's own row.
+fn mirror_host() -> Stub {
+    Stub::start(move |seen: &Seen| {
+        let path = seen.path.split('?').next().unwrap_or_default();
+        match path {
+            "/v1/whoami" => stub::json(200, json!({ "org": { "slug": "acme", "plan": "team" } })),
+            "/v1/orgs/acme/status" => stub::json(
+                200,
+                json!({ "org": { "slug": "acme" }, "mcp_url": "SELF",
+                        "stores": [{ "name": "platform" }] }),
+            ),
+            "/v1/orgs/acme/search" => stub::json(
+                200,
+                json!({ "hits": [{
+                    "score": 0.05, "store": "platform", "path": "notes/pricing.md",
+                    "start_line": 1, "end_line": 1, "text": PRICING,
+                    "lists": ["vector", "keyword"], "fresh": true, "source": "acme/notes",
+                    "revision": "a41c9e2", "behind_seconds": 38
+                }] }),
+            ),
+            "/acme/mcp" => stub::json(
+                200,
+                json!({ "jsonrpc": "2.0", "id": 1, "result": { "content": [{ "type": "text",
+                    "text": format!("1 matching lines in 337 files searched\nnotes/pricing.md\n  1 | {PRICING}")
+                }] } }),
+            ),
+            _ => stub::error(404, "not_found", "No such route."),
+        }
+    })
+}
+
+/// A local store and its remote mirror answer once (2026-10-14 audit, F21):
+/// every search and exact answer printed each hit twice, "16 matching lines
+/// in 965 files" and then "16 in 337". The hit is shown once, from the
+/// fresher copy, naming the other as agreeing.
+#[test]
+#[ignore = "indexes a local store, so it needs the embedding model"]
+fn a_local_store_and_its_remote_mirror_answer_once() {
+    let home = tempfile::tempdir().unwrap();
+    index_notes(home.path());
+    let host = mirror_host();
+    signed_in(home.path(), &host);
+    let o = semlith(home.path(), &["cloud", "connect", "acme"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let query = "how is the order total computed";
+
+    let o = semlith_model(home.path(), &["search", "--json", "-k", "8", query]);
+    assert!(o.status.success(), "{}", out(&o));
+    let rows: Value =
+        serde_json::from_str(&stdout(&o)).unwrap_or_else(|e| panic!("{e}: {}", out(&o)));
+    let pricing: Vec<&Value> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["path"].as_str().unwrap().ends_with("pricing.md"))
+        .collect();
+    assert_eq!(pricing.len(), 1, "the span printed twice: {rows:#}");
+    assert!(
+        pricing[0]["agreed"].to_string().contains("acme/platform"),
+        "the mirror is not named as agreeing: {rows:#}"
+    );
+
+    let o = semlith_model(home.path(), &["search", "-k", "8", query]);
+    let text = stdout(&o);
+    assert_eq!(text.matches("pricing.md").count(), 1, "{}", out(&o));
+    assert!(text.contains("agreed: acme/platform"), "{}", out(&o));
+
+    let cache = model_cache();
+    let daemon = Daemon::start_with(home.path(), &[("SEMLITH_MODEL_CACHE", cache.as_os_str())]);
+    let text = tool_text(&daemon.tool("semlith_search", json!({ "query": query, "k": 8 })));
+    assert_eq!(text.matches("pricing.md").count(), 1, "{text}");
+    let exact = tool_text(&daemon.tool(
+        "semlith_search",
+        json!({ "query": "order total", "exact": true }),
+    ));
+    assert_eq!(exact.matches(PRICING).count(), 1, "{exact}");
+    assert!(
+        exact.contains("acme/platform (remote · acme) agreed"),
+        "{exact}"
+    );
+}

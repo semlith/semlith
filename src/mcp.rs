@@ -1051,14 +1051,29 @@ fn call_with_remotes(
 
     let mut parts: Vec<String> = Vec::new();
     let mut failed = false;
+    let mut local_text = None;
     if !skip_local {
         let local = call_local(stores, writer, &local_params(), session, None)?;
         failed = local["isError"] == json!(true);
+        local_text = Some(text_of(&local));
         parts.push(text_of(&local));
     }
     let mut skipped = Vec::new();
     for (store, remote) in &targets {
         match crate::cloud::forward_tool(store, remote, name, &args, &who) {
+            // A mirror of the local checkout answers with the same rows, and
+            // printing them again doubled what an agent paid (F21).
+            Ok(text)
+                if local_text
+                    .as_deref()
+                    .is_some_and(|local| crate::cloud::agrees(local, &text)) =>
+            {
+                parts.push(format!(
+                    "{store} ({}) agreed: the same {} rows as above",
+                    crate::cloud::badge(remote),
+                    crate::cloud::rows_in(&text)
+                ))
+            }
             Ok(text) => parts.push(format!("{store} ({})\n{text}", crate::cloud::badge(remote))),
             Err(why) => skipped.push(why),
         }
@@ -2631,6 +2646,9 @@ fn locate_row(hit: &crate::Hit, terms: &[String], shorten: &dyn Fn(&str) -> Stri
             copies.join(", ")
         ));
     }
+    if !hit.agreed.is_empty() {
+        marks.push(format!("agreed: {}", hit.agreed.join(", ")));
+    }
     let at = match hit.symbol_line {
         Some(line) => format!(" @{line}"),
         None => String::new(),
@@ -3059,6 +3077,7 @@ mod tests {
             symbol_kind: Some("fn".to_string()),
             symbol_line: None,
             copies: Vec::new(),
+            agreed: Vec::new(),
         }
     }
 
