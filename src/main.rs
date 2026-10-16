@@ -2656,7 +2656,9 @@ fn run() -> Result<()> {
                         if span.fresh { "" } else { "  · stale" },
                         reset(),
                     )?;
-                    for line in span.text.lines() {
+                    // Every line of the span, a blank one included: `lines()`
+                    // printed nothing for a blank line on its own (G14).
+                    for line in span.text.split('\n') {
                         writeln!(out, "{line}")?;
                     }
                 }

@@ -6327,9 +6327,14 @@ impl Semlith {
         // Chunks overlap by two lines, so they are stitched by line number
         // rather than concatenated — concatenation would repeat the seam and
         // the caller would read two copies of the same line as two lines.
+        //
+        // Split on `\n` rather than with `lines()`: a chunk is its lines joined
+        // by `\n`, so one that ends on a blank line ends in `\n`, and `lines()`
+        // drops that last line. `read main.rs:8-10` printed two lines of three
+        // (2026-10-14 audit, G14).
         let mut lines: Vec<(u32, String)> = Vec::new();
         for chunk in &chunks {
-            for (offset, line) in chunk.text.lines().enumerate() {
+            for (offset, line) in chunk.text.split('\n').enumerate() {
                 let number = chunk.start_line + offset as u32;
                 if lines.iter().any(|(n, _)| *n == number) {
                     continue;
