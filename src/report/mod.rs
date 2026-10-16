@@ -1129,6 +1129,9 @@ const NOT_QUERIES: [&str; 5] = [
 /// searches, and kept out of what agents did not read.
 const HUMAN: [&str; 2] = ["cli", "portal"];
 
+/// A question nothing answered: times asked, last asked, the stores asked.
+type Unanswered = (i64, i64, BTreeSet<String>);
+
 /// Every figure a ledger report prints, from the rows inside the window.
 ///
 /// The one place the reports count the ledger. ponytail: a report-local
@@ -1148,7 +1151,7 @@ struct Tally {
     clients: BTreeMap<String, ClientTally>,
     sessions: BTreeMap<(String, String), SessionTally>,
     /// Zero-hit agent queries by their text: times, last asked, stores.
-    unanswered: BTreeMap<String, (i64, i64, BTreeSet<String>)>,
+    unanswered: BTreeMap<String, Unanswered>,
     /// Every agent row, newest first, for the attachment.
     rows: Vec<(String, crate::store::ReportRow)>,
 }
@@ -1641,7 +1644,7 @@ fn access(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
     ];
 
     let mut rows: Vec<(&(String, String), &SessionTally)> = t.sessions.iter().collect();
-    rows.sort_by(|a, b| b.1.last.cmp(&a.1.last));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1.last));
     let sessions_table = Table {
         id: "sessions",
         title: "Sessions".into(),
@@ -2227,7 +2230,7 @@ const GAPS_LISTED: usize = 50;
 
 fn gaps(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
     let t = tally(ctx)?;
-    let mut asked: Vec<(&String, &(i64, i64, BTreeSet<String>))> = t.unanswered.iter().collect();
+    let mut asked: Vec<(&String, &Unanswered)> = t.unanswered.iter().collect();
     asked.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(b.1.1.cmp(&a.1.1)));
     let times: i64 = asked.iter().map(|(_, e)| e.0).sum();
     let mut missing = Vec::new();
