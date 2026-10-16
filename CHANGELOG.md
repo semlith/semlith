@@ -86,6 +86,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counted as registered, Review lists every dotfile the hidden rule skipped,
   and an encrypted document or an archive past the 32 MiB budget says so
   rather than "no text layer".
+- A Neural Engine worker waiting on the Core ML compile lock leaves when the
+  process that started it has gone. One compile wedged inside Core ML held the
+  lock for minutes, and every daemon killed meanwhile left a worker waiting
+  behind it for good. The worker's protocol number moves to 4, so the first
+  Neural Engine run after upgrading compiles its models once more.
 - A file whose first 8 KiB is mostly invalid UTF-8 or control characters is
   refused as binary with the share in its reason (ripgrep's `sherlock.br`, a
   Brotli file with no NUL, became one chunk of U+FFFD). Latin-1 prose is still

@@ -1905,8 +1905,9 @@ fn worker_args(lane: &Arc<Lane>) -> Result<Vec<String>> {
 
 /// The Core ML worker's protocol: bump it whenever the `__embed-worker ane`
 /// or `gpu-coreml` code, its arguments or its frames change, and a fresh copy
-/// of the binary becomes the worker (see [`coreml_worker`]).
-pub const COREML_WORKER: u32 = 3;
+/// of the binary becomes the worker (see [`coreml_worker`]). 4 (0.42.0): a
+/// worker waiting on the compile lock leaves when its parent has gone.
+pub const COREML_WORKER: u32 = 4;
 
 /// Run the Core ML lanes' worker from the binary that is running now rather
 /// than the stable copy: for developing the worker itself.
@@ -2005,8 +2006,26 @@ pub fn coreml_compile_lock() -> Option<std::fs::File> {
         .write(true)
         .open(dir.join("coreml-compile.lock"))
         .ok()?;
-    file.lock().ok()?;
-    Some(file)
+    // Waited for in turns rather than blocked on: a worker queued behind a
+    // compile that never ends (one wedged inside Core ML for twelve minutes on
+    // the M1) outlived the process that started it, and every test daemon
+    // killed meanwhile left another one waiting here for good. A worker whose
+    // parent has gone is not wanted by anyone, so it leaves.
+    #[cfg(unix)]
+    let parent = std::os::unix::process::parent_id();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                #[cfg(unix)]
+                if std::os::unix::process::parent_id() != parent {
+                    std::process::exit(0);
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 /// Whether a Core ML worker holds the compile lock, which it does until the
