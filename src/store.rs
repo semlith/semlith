@@ -676,7 +676,7 @@ const FTS_BUILT: &str = "fts_built";
 /// never sees them. That is the whole reason `format_version` does not move —
 /// the same reasoning `docs/compatibility.md` records for the graph tables.
 fn add_columns(db: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 21] = [
+    const ADDITIONS: [(&str, &str, &str); 24] = [
         ("edges", "hint", "TEXT"),
         // 0.16.0: the line the reference was written on.
         ("edges", "line", "INTEGER"),
@@ -734,6 +734,19 @@ fn add_columns(db: &Connection) -> Result<()> {
         // what freshness compares now (see `Stamp::fresh`). NULL on a row an
         // older binary wrote; an older binary ignores the column.
         ("files", "read_mtime", "INTEGER"),
+        // 0.42.0: what the whole-file side of a row was counted from —
+        // `bytes` (the file's size on disk, every row before 0.42.0, NULL
+        // here) or `text` (the text a reader extracted, for a PDF, an Office
+        // file, an image). The Ledger says which, row by row.
+        ("retrievals", "whole_basis", "TEXT"),
+        // 0.42.0: which chain formula hashed the row. NULL is the 0.15.0/0.41.0
+        // formula (or 0.14.0's, told apart by `tool`), 2 is chain v2, which
+        // covers every column a figure reads.
+        ("retrievals", "chain", "INTEGER"),
+        // 0.42.0: the hash over a v2 row's late columns (usage, synced_at),
+        // rewritten whenever they are, so a late column cannot change without
+        // the verify noticing.
+        ("retrievals", "seal", "TEXT"),
     ];
     for (table, column, kind) in ADDITIONS {
         if has_column(db, table, column)? {
@@ -2890,6 +2903,17 @@ pub fn usage_at(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Option<Row
 /// The chain is the point: a row cannot be quietly edited or removed without
 /// every hash after it failing to recompute.
 pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
+    record_counted(db, row, BASIS_BYTES)
+}
+
+/// What the whole-file side of a row was counted from: the file's bytes.
+pub const BASIS_BYTES: &str = "bytes";
+/// What the whole-file side of a row was counted from: the text a reader
+/// extracted from it, counted the way the excerpt was.
+pub const BASIS_TEXT: &str = "text";
+
+/// [`record_retrieval`], saying what the whole-file side was counted from.
+pub fn record_counted(db: &Connection, row: &NewRetrieval<'_>, basis: &str) -> Result<()> {
     // A key pasted as a search is text a person typed, and nothing else in the
     // store keeps one in full: every file passes the scan before it is held.
     // The same scan, the same marker, before the row is hashed, so the chain
@@ -2923,15 +2947,12 @@ pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
         .unwrap_or(0);
     let key = ledger_key(db, true);
     append_chained(db, |prev| {
-        let hash = match &key {
-            Some(key) => keyed_chain_hash(key, prev, at, row),
-            None => chain_hash(prev, at, row),
-        };
+        let hash = v2_hash(key.as_ref(), prev, at, row, basis);
         db.execute(
             "INSERT INTO retrievals
              (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
-              session, tool, stale_hits, tokenizer, query_id, client_version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+              session, tool, stale_hits, tokenizer, query_id, client_version, whole_basis, chain)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 2)",
             params![
                 at,
                 client,
@@ -2947,9 +2968,11 @@ pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
                 row.stale_hits,
                 row.tokenizer,
                 row.query_id,
-                (!row.client_version.is_empty()).then_some(row.client_version)
+                (!row.client_version.is_empty()).then_some(row.client_version),
+                basis,
             ],
         )?;
+        set_head(db, key.as_ref(), db.last_insert_rowid(), &hash)?;
         Ok(())
     })?;
     // The one place a retrieval is written, so the one place the portal's
@@ -3071,6 +3094,13 @@ pub fn fill_usage(db: &Connection, row: &Unfilled, filled: &Filled) -> Result<()
             row.query_id,
         ],
     )?;
+    let ids: Vec<i64> = {
+        let mut q =
+            db.prepare("SELECT id FROM retrievals WHERE id = ?1 OR (?2 != '' AND query_id = ?2)")?;
+        q.query_map(params![row.id, row.query_id], |r| r.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    reseal(db, &ids)?;
     Ok(())
 }
 
@@ -3127,6 +3157,7 @@ pub fn mark_synced(db: &Connection, ids: &[i64], at: i64) -> Result<()> {
             q.execute(params![at, id])?;
         }
     }
+    reseal(&tx, ids)?;
     tx.commit()?;
     Ok(())
 }
@@ -3260,6 +3291,103 @@ fn chain_payload(prev: &str, at: i64, row: &NewRetrieval<'_>) -> String {
     payload
 }
 
+/// What a v2 row's hash starts with: keyed by the store's ledger key, or
+/// plain where no key could be made (an in-memory database).
+const V2_KEYED: &str = "k2:";
+const V2_PLAIN: &str = "v2:";
+
+/// The meta key holding the chain's head: the newest v2 row's id and hash,
+/// and a MAC over both, so deleting the newest rows fails `--verify`.
+const LEDGER_HEAD: &str = "ledger_head";
+
+/// Chain v2 (0.42.0): every column a figure reads.
+///
+/// v1 left out `query_id`, so rewriting every id collapsed a ledger's
+/// "16 retrievals, coverage 75 %" into "1 of 1, coverage 100 %" and the chain
+/// still read intact. It also had no head, so deleting the newest row
+/// verified. v2 covers the id, the client's version and the whole-file
+/// basis, the row says it is v2 in `chain`, and [`set_head`] records the head.
+/// The late columns (usage, `synced_at`) cannot be in a hash written before
+/// them; [`reseal`] covers them in `seal` whenever they are written.
+///
+/// An older binary does not know the formula and reports the first v2 row as
+/// the break; rows it wrote itself keep verifying here, under v1.
+fn v2_hash(
+    key: Option<&[u8; 32]>,
+    prev: &str,
+    at: i64,
+    row: &NewRetrieval<'_>,
+    basis: &str,
+) -> String {
+    let payload = format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{basis}\u{1f}v2",
+        chain_payload(prev, at, row),
+        row.query_id,
+        row.client_version,
+    );
+    mac(key, V2_KEYED, V2_PLAIN, &payload)
+}
+
+/// A keyed blake3 under the store's key, or a plain one marked as such.
+fn mac(key: Option<&[u8; 32]>, keyed: &str, plain: &str, payload: &str) -> String {
+    match key {
+        Some(key) => format!(
+            "{keyed}{}",
+            blake3::keyed_hash(key, payload.as_bytes()).to_hex()
+        ),
+        None => format!("{plain}{}", blake3::hash(payload.as_bytes()).to_hex()),
+    }
+}
+
+fn head_mac(key: Option<&[u8; 32]>, id: i64, hash: &str) -> String {
+    mac(key, "k:", "p:", &format!("head\u{1f}{id}\u{1f}{hash}"))
+}
+
+/// Record the newest v2 row as the chain's head, in the append's transaction.
+fn set_head(db: &Connection, key: Option<&[u8; 32]>, id: i64, hash: &str) -> Result<()> {
+    set_meta(
+        db,
+        LEDGER_HEAD,
+        &format!("{id}:{hash}:{}", head_mac(key, id, hash)),
+    )
+}
+
+/// The late columns of a v2 row, as `seal` covers them.
+fn seal_payload(r: &rusqlite::Row<'_>) -> rusqlite::Result<String> {
+    let mut payload: String = r.get::<_, String>(0)?;
+    for at in 1..=10 {
+        let value: rusqlite::types::Value = r.get(at)?;
+        payload.push('\u{1f}');
+        payload.push_str(&match value {
+            rusqlite::types::Value::Null => String::from("\u{0}"),
+            rusqlite::types::Value::Integer(n) => n.to_string(),
+            rusqlite::types::Value::Real(f) => format!("{f:?}"),
+            rusqlite::types::Value::Text(t) => t,
+            rusqlite::types::Value::Blob(b) => blake3::hash(&b).to_hex().to_string(),
+        });
+    }
+    Ok(payload)
+}
+
+const SEAL_COLUMNS: &str = "hash, model, input_tokens, output_tokens, cache_read_tokens, \
+     cache_write_tokens, reasoning_tokens, cost_usd, cost_source, usage_source, synced_at";
+
+/// Rewrite `seal` on the v2 rows among `ids`, after their late columns moved.
+fn reseal(db: &Connection, ids: &[i64]) -> Result<()> {
+    let key = ledger_key(db, true);
+    let mut read = db.prepare(&format!(
+        "SELECT {SEAL_COLUMNS} FROM retrievals WHERE id = ?1 AND chain = 2"
+    ))?;
+    let mut write = db.prepare("UPDATE retrievals SET seal = ?1 WHERE id = ?2")?;
+    for id in ids {
+        let Some(payload) = read.query_row([id], seal_payload).optional()? else {
+            continue;
+        };
+        write.execute(params![mac(key.as_ref(), "k:", "p:", &payload), id])?;
+    }
+    Ok(())
+}
+
 /// Append a row in the shape 0.14.0 wrote, for the test that proves a store
 /// holding both kinds still verifies.
 ///
@@ -3308,6 +3436,46 @@ pub fn record_legacy_retrieval(
                 whole_file_tokens,
                 prev,
                 hash
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// Append a row the way 0.15.0 to 0.41.0 wrote it — chain v1, no basis, no
+/// head — for the test that proves a store holding v1 and v2 rows verifies.
+pub fn record_v1_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
+    let _writing = Writing::begin(db)?;
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let key = ledger_key(db, true);
+    append_chained(db, |prev| {
+        let hash = match &key {
+            Some(key) => keyed_chain_hash(key, prev, at, row),
+            None => chain_hash(prev, at, row),
+        };
+        db.execute(
+            "INSERT INTO retrievals
+             (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
+              session, tool, stale_hits, tokenizer, query_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                at,
+                row.client,
+                row.query,
+                row.hits,
+                row.micros,
+                row.excerpt_tokens,
+                row.whole_file_tokens,
+                prev,
+                hash,
+                row.session,
+                row.tool,
+                row.stale_hits,
+                row.tokenizer,
+                row.query_id
             ],
         )?;
         Ok(())
@@ -3696,9 +3864,45 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
     let key = ledger_key(db, false);
     let mut stmt = db.prepare(
         "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
-                session, tool, stale_hits, tokenizer
+                session, tool, stale_hits, tokenizer, chain, COALESCE(query_id, ''),
+                COALESCE(client_version, ''), COALESCE(whole_basis, ''), seal
          FROM retrievals ORDER BY id",
     )?;
+    let mut sealed = db.prepare(&format!(
+        "SELECT {SEAL_COLUMNS} FROM retrievals WHERE id = ?1"
+    ))?;
+    // The head: the newest v2 row as it was written. A v2 row after it, or no
+    // row at its id with its hash, is a tail somebody cut or a row somebody
+    // forged; v1 rows after it are an older binary's, and allowed.
+    let head: Option<(i64, String)> = get_meta(db, LEDGER_HEAD)?.and_then(|text| {
+        let mut parts = text.splitn(3, ':');
+        let id: i64 = parts.next()?.parse().ok()?;
+        let rest = parts.next()?;
+        // The hash itself holds a colon (`k2:…`), so it is two parts.
+        let mut tail = parts.next()?.splitn(2, ':');
+        let hash = format!("{rest}:{}", tail.next()?);
+        let mac = tail.next()?;
+        (head_mac(key.as_ref(), id, &hash) == mac).then_some((id, hash))
+    });
+    // Erasing every row is one documented `DELETE`, and an empty ledger has
+    // nothing left to vouch for; a head with no rows under it is that, not a
+    // cut tail.
+    let empty: bool = db.query_row("SELECT NOT EXISTS (SELECT 1 FROM retrievals)", [], |r| {
+        r.get(0)
+    })?;
+    if empty {
+        return Ok(None);
+    }
+    let head_claimed = get_meta(db, LEDGER_HEAD)?.is_some();
+    if head_claimed && head.is_none() {
+        // A head that does not verify is a head somebody wrote by hand.
+        return Ok(Some(db.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM retrievals",
+            [],
+            |r| r.get(0),
+        )?));
+    }
+    let mut head_seen = false;
     let mut rows = stmt.query([])?;
     let mut expected = String::new();
     while let Some(r) = rows.next()? {
@@ -3719,7 +3923,59 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
         // `tool` is NULL on every row written before 0.15.0 and set on every
         // row written since, which is what says which formula wrote this hash.
         let tool: Option<String> = r.get(11)?;
+        let chain: Option<i64> = r.get(14)?;
+        if let Some((head_id, head_hash)) = &head {
+            if id == *head_id {
+                if hash != *head_hash {
+                    return Ok(Some(id));
+                }
+                head_seen = true;
+            } else if id > *head_id && chain == Some(2) && !acked.contains(&id) {
+                return Ok(Some(id));
+            }
+        }
         let recomputed = match tool {
+            Some(tool) if chain == Some(2) => {
+                let session: String = r.get(10)?;
+                let stale: i64 = r.get(12)?;
+                let tokenizer: String = r.get(13)?;
+                let query_id: String = r.get(15)?;
+                let version: String = r.get(16)?;
+                let basis: String = r.get(17)?;
+                let seal: Option<String> = r.get(18)?;
+                let row = NewRetrieval {
+                    client_version: &version,
+                    client: &client,
+                    session: &session,
+                    tool: &tool,
+                    query: &query,
+                    hits,
+                    micros,
+                    excerpt_tokens: excerpt,
+                    whole_file_tokens: whole,
+                    stale_hits: stale,
+                    tokenizer: &tokenizer,
+                    query_id: &query_id,
+                };
+                if hash.starts_with(V2_KEYED) && key.is_none() {
+                    return Ok(Some(id));
+                }
+                let k = if hash.starts_with(V2_KEYED) {
+                    key.as_ref()
+                } else {
+                    None
+                };
+                // The late columns: a seal over what they say now, or none at
+                // all while none of them has been written.
+                let late = sealed.query_row([id], seal_payload)?;
+                let blank = late.split('\u{1f}').skip(1).all(|v| v == "\u{0}");
+                match seal {
+                    Some(seal) if seal != mac(k, "k:", "p:", &late) => return Ok(Some(id)),
+                    None if !blank => return Ok(Some(id)),
+                    _ => {}
+                }
+                v2_hash(k, &prev, at, &row, &basis)
+            }
             Some(tool) => {
                 let session: String = r.get(10)?;
                 let stale: i64 = r.get(12)?;
@@ -3754,7 +4010,106 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
         }
         expected = hash;
     }
+    if let Some((head_id, _)) = head
+        && !head_seen
+        && !acked.contains(&head_id)
+    {
+        // The head's row is gone: the tail was cut.
+        return Ok(Some(head_id));
+    }
     Ok(None)
+}
+
+/// One ledger row, every column a figure is made of.
+///
+/// The input to `ledger::figures`, the one aggregation every surface renders
+/// (0.42.0). Read whole rather than summed here, because the figures union
+/// retrievals across stores (one search over five stores is five rows and one
+/// query), and SQL inside one store cannot see the other four.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LedgerFact {
+    pub id: i64,
+    pub at: i64,
+    pub client: String,
+    pub session: String,
+    /// Empty on a row written before 0.15.0.
+    pub tool: String,
+    pub query: String,
+    pub hits: i64,
+    pub micros: i64,
+    pub excerpt_tokens: i64,
+    pub whole_file_tokens: i64,
+    pub stale_hits: i64,
+    pub tokenizer: String,
+    /// Empty on a row written before 0.20.2, which was its own retrieval.
+    pub query_id: String,
+    pub client_version: String,
+    /// `bytes`, `text`, or empty for a row written before 0.42.0 (bytes).
+    pub whole_basis: String,
+    /// 2 for chain v2, 1 otherwise.
+    pub chain: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<RowUsage>,
+}
+
+/// Every ledger row with `since <= at < until`, oldest first.
+pub fn ledger_facts(db: &Connection, since: i64, until: Option<i64>) -> Result<Vec<LedgerFact>> {
+    let mut stmt = db.prepare(&format!(
+        "SELECT id, at, client, COALESCE(session, ''), COALESCE(tool, ''), query, hits, micros,
+                excerpt_tokens, whole_file_tokens, COALESCE(stale_hits, 0),
+                COALESCE(tokenizer, ''), COALESCE(query_id, ''), COALESCE(client_version, ''),
+                COALESCE(whole_basis, ''), COALESCE(chain, 1), {USAGE_COLUMNS}
+           FROM retrievals WHERE at >= ?1 AND at < ?2 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map(params![since, until.unwrap_or(i64::MAX)], |r| {
+        Ok(LedgerFact {
+            id: r.get(0)?,
+            at: r.get(1)?,
+            client: r.get(2)?,
+            session: r.get(3)?,
+            tool: r.get(4)?,
+            query: r.get(5)?,
+            hits: r.get(6)?,
+            micros: r.get(7)?,
+            excerpt_tokens: r.get(8)?,
+            whole_file_tokens: r.get(9)?,
+            stale_hits: r.get(10)?,
+            tokenizer: r.get(11)?,
+            query_id: r.get(12)?,
+            client_version: r.get(13)?,
+            whole_basis: r.get(14)?,
+            chain: r.get(15)?,
+            usage: usage_at(r, 16)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The text the store holds for `path`, stitched by line from its chunks.
+///
+/// The whole-file side of a row for a file a reader extracted (a PDF, an
+/// Office file): reading the file would have meant reading this text, not its
+/// bytes — 2.2 MB of PDF is 45,849 characters. `None` for a file not held.
+pub fn held_text(db: &Connection, path: &str) -> Result<Option<String>> {
+    let mut stmt = db.prepare(
+        "SELECT c.start_line, c.text FROM chunks c JOIN files f ON f.id = c.file_id
+          WHERE f.path = ?1 ORDER BY c.start_line, c.id",
+    )?;
+    let mut lines: std::collections::BTreeMap<i64, String> = Default::default();
+    let mut any = false;
+    let rows = stmt.query_map(params![path], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (start, text) = row?;
+        any = true;
+        for (offset, line) in text.split('\n').enumerate() {
+            lines
+                .entry(start + offset as i64)
+                .or_insert_with(|| line.to_string());
+        }
+    }
+    Ok(any.then(|| lines.into_values().collect::<Vec<_>>().join("\n")))
 }
 
 /// The total bytes of every file a grep for `name` would have to read.

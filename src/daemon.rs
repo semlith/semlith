@@ -3076,6 +3076,9 @@ pub struct State {
     /// there is no disconnect to observe over HTTP either, so a client is
     /// "connected" for as long as it has been heard from recently.
     pub clients: Mutex<BTreeMap<String, Client>>,
+    /// The conversation a stateless MCP client is in, by client, version and
+    /// transport: `(id, last heard)`. See [`State::conversation`].
+    pub conversations: Mutex<BTreeMap<String, (String, u64)>>,
     /// A second reader, for forwarded MCP calls, opened on first use.
     ///
     /// Separate from `fleet` on purpose: a forwarded `semlith_index` blocks its
@@ -3126,6 +3129,11 @@ pub struct State {
 
 /// How recently a proxy must have called to count as connected.
 const PROXY_FRESH: u64 = 120;
+
+/// How long a stateless client may be quiet and still be in the same
+/// conversation. Half an hour: an agent reading code between calls is quiet
+/// for minutes, and a new task after lunch is a new conversation.
+pub const CONVERSATION_IDLE: u64 = 30 * 60;
 
 /// Each open store's directory beside the name the daemon knows it by.
 ///
@@ -3881,6 +3889,28 @@ impl State {
             .collect()
     }
 
+    /// The conversation id for a call that carries no session.
+    ///
+    /// MCP 2026-07-28 is stateless: no `initialize`, no `Mcp-Session-Id`, and
+    /// nothing in a request says which conversation it belongs to. Until
+    /// 0.42.0 every such call shared one "anonymous" session — 432 of the
+    /// owner's rows in ten days, one session. The derivation is the one fact
+    /// left: one client, one version, one transport, until it has been quiet
+    /// for [`CONVERSATION_IDLE`]. Two windows of the same client at once read
+    /// as one conversation; a revision that defines a conversation id replaces
+    /// this function and nothing else.
+    pub fn conversation(&self, client: &str, version: &str, transport: &str) -> String {
+        let now = now();
+        let key = format!("{transport}\u{1f}{client}\u{1f}{version}");
+        let mut all = self.conversations.lock().unwrap_or_else(|e| e.into_inner());
+        all.retain(|_, (_, seen)| now.saturating_sub(*seen) <= CONVERSATION_IDLE);
+        let entry = all
+            .entry(key)
+            .or_insert_with(|| (crate::routes::new_session(), now));
+        entry.1 = now;
+        entry.0.clone()
+    }
+
     /// Note that a forwarding `semlith mcp` is alive.
     pub fn saw_proxy(&self, pid: u32) {
         let mut proxies = self.proxies.lock().unwrap_or_else(|e| e.into_inner());
@@ -4447,6 +4477,7 @@ pub fn run(
         awaiting: Mutex::new(BTreeMap::new()),
         proxies: Mutex::new(BTreeMap::new()),
         clients: Mutex::new(BTreeMap::new()),
+        conversations: Mutex::new(BTreeMap::new()),
         mcp_fleet: Mutex::new(None),
         readers_stale: AtomicBool::new(false),
         mcp_stale: AtomicBool::new(false),
@@ -6628,6 +6659,7 @@ mod tests {
             awaiting: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
+            conversations: Mutex::new(BTreeMap::new()),
             mcp_fleet: Mutex::new(None),
             readers_stale: AtomicBool::new(false),
             mcp_stale: AtomicBool::new(false),

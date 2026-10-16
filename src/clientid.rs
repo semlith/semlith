@@ -81,6 +81,22 @@ pub fn label(client_info: Option<&str>, host: Option<&str>) -> String {
     }
 }
 
+/// The client and version a User-Agent names, when it names a documented
+/// client: `claude-code/2.1.299 (sdk-cli)` is Claude Code 2.1.299. A library's
+/// agent (`node`, `python-requests`) or a name this module does not know is
+/// `None`, so a User-Agent can only ever confirm a name, never invent one.
+pub fn user_agent(ua: &str) -> Option<(&str, &str)> {
+    let first = ua.split_whitespace().next()?;
+    let (name, version) = first.split_once('/')?;
+    let plain = |t: &str| {
+        !t.is_empty()
+            && t.len() <= 64
+            && t.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.+".contains(&b))
+    };
+    (plain(name) && plain(version) && label(Some(name), None) != name).then_some((name, version))
+}
+
 /// The app a host label names, for an unknown client running inside it.
 fn app_of(host: &str) -> &str {
     match host {

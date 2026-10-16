@@ -44,6 +44,42 @@ const LEGACY_NEWEST: &str = "2025-11-25";
 const LEGACY_OLDEST: &str = "2024-11-05";
 
 const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+/// Where 2026-07-28 carries the client's name: on every request, since there
+/// is no `initialize` to carry it once.
+const META_CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
+
+/// The `clientInfo` a request carries: the handshake's, or a stateless
+/// request's `_meta` copy. Claude Code 2.1.299 sends only the second, so a
+/// server reading only the first recorded every call as client `mcp`.
+pub fn client_info(params: Option<&Value>) -> Option<&Value> {
+    let params = params?;
+    params
+        .get("clientInfo")
+        .or_else(|| params.get("_meta")?.get(META_CLIENT_INFO))
+}
+
+/// The revision a request asks for: the handshake's `protocolVersion`, or a
+/// stateless request's `_meta` one.
+pub fn revision_of(params: Option<&Value>) -> Option<&str> {
+    let params = params?;
+    params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .or_else(|| declared_version(params))
+}
+
+/// Name `session` from a `clientInfo`, resolved against its host.
+fn name_session(session: &mut Session, info: Option<&Value>) {
+    let name = info.and_then(|c| c.get("name")).and_then(Value::as_str);
+    session.client = crate::clientid::label(name, session.host.as_deref());
+    if let Some(version) = info
+        .and_then(|c| c.get("version"))
+        .and_then(Value::as_str)
+        .filter(|_| !name.is_some_and(crate::clientid::generic))
+    {
+        session.version = version.chars().take(64).collect();
+    }
+}
 const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 
 /// `UnsupportedProtocolVersionError`, from the error range 2026-07-28 reserved
@@ -420,6 +456,14 @@ fn without_stores(
         )));
     }
     let modern = declared == Some(MODERN);
+    // A stateless request names its client every time; the stdio server takes
+    // the name from the first one that does, as it would from `initialize`.
+    if modern
+        && session.client == "mcp"
+        && let Some(info) = params.get("_meta").and_then(|m| m.get(META_CLIENT_INFO))
+    {
+        name_session(session, Some(info));
+    }
 
     Some(match method {
         // Mandatory in the modern era, and the probe a dual-era client opens
@@ -441,19 +485,7 @@ fn without_stores(
             // calls itself in its own configuration.
             // Resolved against the app that started this process, since a
             // stdio client may name only its MCP library (`mcp`, `rmcp`).
-            let info = params.get("clientInfo");
-            session.client = crate::clientid::label(
-                info.and_then(|c| c.get("name")).and_then(Value::as_str),
-                session.host.as_deref(),
-            );
-            let name = info.and_then(|c| c.get("name")).and_then(Value::as_str);
-            if let Some(version) = info
-                .and_then(|c| c.get("version"))
-                .and_then(Value::as_str)
-                .filter(|_| !name.is_some_and(crate::clientid::generic))
-            {
-                session.version = version.chars().take(64).collect();
-            }
+            name_session(session, params.get("clientInfo"));
             let asked = params.get("protocolVersion").and_then(Value::as_str);
             let version = negotiate(asked);
             // "The agent sees no tools" is otherwise undiagnosable from the
@@ -2160,15 +2192,43 @@ fn record(
                 elapsed,
             );
         }
-        "semlith_pattern" => {
-            let subject = args.get("query").and_then(Value::as_str).unwrap_or("");
-            let found = !body.starts_with("No match") && !body.starts_with("No indexed");
-            crate::ledger::graph(stores, &who, "pattern", subject, "", found, elapsed);
+        // A read and a pattern name the files they quote, as a search does,
+        // so they are recorded from the reply the same way: the excerpt is
+        // what the agent was handed, the whole side the files it names. Until
+        // 0.42.0 both went through `graph` with the target as a name to grep:
+        // a `path:range` read greps to nothing and wrote no row, a symbol read
+        // wrote an excerpt of 0 and credited the whole file, and a pattern
+        // recorded its reply as "".
+        "semlith_pattern" | "semlith_read" => {
+            let key = if tool == "semlith_read" {
+                "target"
+            } else {
+                "query"
+            };
+            let subject = args.get(key).and_then(Value::as_str).unwrap_or("");
+            crate::ledger::reply(
+                stores,
+                &who,
+                tool.trim_start_matches("semlith_"),
+                subject,
+                body,
+                &strings(args, "store"),
+                elapsed,
+            );
         }
-        "semlith_read" => {
-            let subject = args.get("target").and_then(Value::as_str).unwrap_or("");
-            let found = !body.starts_with("Nothing indexed");
-            crate::ledger::graph(stores, &who, "read", subject, "", found, elapsed);
+        "semlith_impact" | "semlith_trace" => {
+            let Some(subject) = args
+                .get("name")
+                .or_else(|| args.get("from"))
+                .and_then(Value::as_str)
+            else {
+                return;
+            };
+            let short = tool.trim_start_matches("semlith_");
+            let found = !body.contains("not connected")
+                && !body.contains("nothing")
+                && !body.starts_with("No ");
+            crate::ledger::graph(stores, &who, short, subject, body, found, elapsed);
         }
         "semlith_neighbors" | "semlith_path" | "semlith_symbol" => {
             // `path` is asked about two names and the first is the one the

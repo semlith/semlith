@@ -5627,17 +5627,28 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     };
     let method = body.get("method").and_then(Value::as_str).unwrap_or("");
     let params = body.get("params");
-    let name = params
-        .and_then(|p| p.get("clientInfo"))
+    // MCP 2026-07-28 has no handshake: the client names itself in `_meta` on
+    // every request, and Claude Code also says who it is in its User-Agent
+    // (`claude-code/2.1.299 (sdk-cli)`), which names a client that sends
+    // neither. Read at `initialize` only, every such call was "unnamed client".
+    let info = crate::mcp::client_info(params);
+    let agent = request
+        .header("user-agent")
+        .and_then(crate::clientid::user_agent);
+    let name = info
         .and_then(|c| c.get("name"))
-        .and_then(Value::as_str);
-    let version = params
-        .and_then(|p| p.get("clientInfo"))
+        .and_then(Value::as_str)
+        .or(agent.map(|(n, _)| n));
+    let version = info
         .and_then(|c| c.get("version"))
-        .and_then(Value::as_str);
-    let revision = params
-        .and_then(|p| p.get("protocolVersion"))
-        .and_then(Value::as_str);
+        .and_then(Value::as_str)
+        .or(agent.and_then(|(n, v)| (name == Some(n)).then_some(v)));
+    let revision = crate::mcp::revision_of(params).or_else(|| {
+        request
+            .header("mcp-protocol-version")
+            .filter(|v| crate::mcp::SUPPORTED.contains(v))
+    });
+    let stateless = revision == Some("2026-07-28");
     // What the proxy read from its own ancestry: one of `clientid`'s names or
     // a dash. Anything else is ignored rather than recorded, since the header
     // comes from whatever holds the token.
@@ -5663,6 +5674,10 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
         .unwrap_or_else(|| {
             if method == "initialize" {
                 new_session()
+            } else if stateless || name.is_some() {
+                // No session in the protocol, so the conversation is derived:
+                // one client on one transport, until it goes quiet.
+                state.conversation(name.unwrap_or(""), version.unwrap_or(""), transport)
             } else {
                 String::from("anonymous")
             }
@@ -5705,7 +5720,7 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     // A method that is about the server rather than about a corpus is answered
     // whether or not anything is indexed: an agent connecting to a fresh
     // install should be told which tools exist, not that the daemon is broken.
-    let corpus_free = matches!(method, "initialize" | "tools/list" | "ping")
+    let corpus_free = matches!(method, "initialize" | "server/discover" | "tools/list" | "ping")
         || method.starts_with("notifications/")
         // A machine whose only stores are remote still answers from them.
         || !crate::cloud::remote_stores().is_empty();
@@ -5732,7 +5747,7 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     // The session id is handed back at `initialize`, which is where the MCP
     // HTTP transport says a server may assign one. A client that echoes it is
     // counted as itself on every later call; one that does not still works.
-    if method == "initialize" {
+    if method == "initialize" && !stateless {
         return response.header("Mcp-Session-Id", session);
     }
     response
@@ -5745,7 +5760,7 @@ fn is_session_id(value: &str) -> bool {
 }
 
 /// A session id, which identifies a client and guards nothing.
-fn new_session() -> String {
+pub(crate) fn new_session() -> String {
     let mut bytes = [0u8; 8];
     getrandom::fill(&mut bytes).expect("the OS random source");
     bytes.iter().map(|b| format!("{b:02x}")).collect()
