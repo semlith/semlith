@@ -59,6 +59,7 @@ import os
 import re
 import time
 import urllib.parse
+import urllib.request
 
 import cdp
 import fixtures
@@ -3421,12 +3422,13 @@ def _(d):
     types = d.eval("document.querySelectorAll('#main .kind-card').length")
     if types != 5:
         fail("the Reports picker offers %d report types, expected 5" % types)
-    d.wait_for("((document.querySelector('#main .preview') || {}).textContent || '').length > 40",
-               what="the selected report to generate")
-    first = d.eval("document.querySelector('#main .preview').textContent")
+    # From 0.42.0 the preview is the rendered HTML in a sandboxed frame, one
+    # preview route per generated report, rather than a Markdown <pre>.
+    frame = "(document.querySelector('#main .preview iframe.report-frame') || {}).src || ''"
+    d.wait_for("(%s).length > 0" % frame, what="the selected report to generate")
+    first = d.eval(frame)
     press_text(d, "#main .kind-card .t", "Index health")
-    d.wait_for("((document.querySelector('#main .preview') || {}).textContent || '') !== %s"
-               " && !/Generating/.test(document.querySelector('#main .preview').textContent)" % json.dumps(first),
+    d.wait_for("(%s) !== %s && (%s).length > 0" % (frame, json.dumps(first), frame),
                what="the preview to follow the selected report")
     name = text_of(d, "#main .card.flexcol .card-h .mono", "the preview's file name")
     if not name.startswith("health-") or not name.endswith(".md"):
@@ -5092,6 +5094,13 @@ def _(d):
     for name in ("callee", "caller"):
         if name not in nodes:
             fail("asking for 'callee, caller' drew no %s node: %r" % (name, nodes))
+    # The definitions table arrives after the graph, on its own request.
+    try:
+        d.wait_for("(() => { const t = (document.querySelector('.g-sel') || {}).innerText || '';"
+                   " return /\\b2 definitions\\b/.test(t) || (t.includes('callee') && t.includes('caller')); })()",
+                   timeout=15, what="the definitions of both names")
+    except cdp.ProtocolError:
+        pass
     side = d.eval("document.querySelector('.g-sel').innerText")
     if not re.search(r"\b2 definitions\b", side) and not ("callee" in side and "caller" in side):
         fail("the selection names neither both definitions nor how many there are: %r" % side[:300])
@@ -5505,7 +5514,8 @@ def _(d):
         fail("the name of an existing store, %s, is not refused: %r" % (taken, state()["hint"]))
     name = "wz-name-%d" % random.randint(1000, 99999)
     d.type(box, name)
-    if ("~/.semlith/stores/%s" % name) not in state()["hint"]:
+    # The daemon's own store home, which in this drive is not ~/.semlith.
+    if ("/stores/%s" % name) not in state()["hint"] or "kept at" not in state()["hint"]:
         fail("a free name does not say where the store will be kept: %r" % state()["hint"])
     press_text(d, ".wz-foot button", "Create store")
     wz_step(d, 2)
@@ -6007,13 +6017,22 @@ def _(d):
 def _(d):
     a_store(d)
     open_clean(d, "reports", fresh=True)
-    d.wait_for("((document.querySelector('#main .preview') || {}).textContent || '').length > 40", what="the preview")
-    model = d.eval("[...document.querySelectorAll('#main .seg button[aria-pressed=\"true\"]')].map(b => b.textContent).find(t => /claude|gpt|gemini/i.test(t)) || ''")
-    answer = d.api("/api/report?kind=savings&format=markdown%s" % ("&model=" + urllib.parse.quote(model) if model else ""))
-    shown = d.eval("document.querySelector('#main .preview').textContent")
-    if (answer.get("text") or "").splitlines()[:1] != shown.splitlines()[:1]:
-        fail("the preview opens %r and the daemon's savings report opens %r"
-             % (shown.splitlines()[:1], (answer.get("text") or "").splitlines()[:1]))
+    frame = "(document.querySelector('#main .preview iframe.report-frame') || {}).src || ''"
+    d.wait_for("(%s).length > 0" % frame, what="the preview")
+    src = d.eval(frame)
+    # The frame is the daemon's own rendering, served under a report-only
+    # policy: what it shows is the savings report the route generates.
+    with urllib.request.urlopen(src, timeout=30) as response:
+        page = response.read().decode("utf-8", "replace")
+        policy = response.headers.get("Content-Security-Policy") or ""
+    if "script-src" in policy and "'none'" not in policy.split("script-src", 1)[1].split(";", 1)[0]:
+        fail("the preview is served with a policy that allows script: %r" % policy)
+    if "<script" in page.lower():
+        fail("the preview carries a script")
+    answer = d.api("/api/report?kind=savings&format=json")
+    title = (answer.get("report") or {}).get("title") or "Retrieval savings"
+    if title not in page:
+        fail("the preview does not show the daemon's %r report" % title)
     want("the schedules listed", d.eval("document.querySelectorAll('#main .sched-row').length"),
          len(d.api("/api/schedules").get("schedules") or {}))
     no_console_errors(d, "Reports")
