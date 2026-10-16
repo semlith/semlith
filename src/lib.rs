@@ -1855,13 +1855,13 @@ const PAUSE_TICK: std::time::Duration = std::time::Duration::from_millis(120);
 pub struct Semlith {
     dir: PathBuf,
     db: Connection,
-    index: VectorIndex,
+    index: index::Vectors,
     /// The image vectors, in their own space at CLIP's 512 dimensions.
     ///
     /// A second index rather than a second kind of row in the first: vectors
     /// from two models are not comparable, and one index holding both would
     /// rank a picture against a paragraph by arithmetic that means nothing.
-    images: VectorIndex,
+    images: index::Vectors,
     /// The full-precision copy of what the codes approximate, for reordering
     /// the handful of candidates a query is about to return.
     exact: index::Exact,
@@ -1902,6 +1902,8 @@ pub struct Semlith {
     /// The index generation this process has loaded. Compared against the
     /// store's on every search to notice another process's writes.
     generation: u64,
+    /// Whether this reader takes its vectors from [`index::shared`].
+    shares_vectors: bool,
     /// The filters this store resolved most recently, newest first, each kept
     /// until the store changes. An agent scoped to one repository asks with
     /// the same `path` call after call, and resolving it again was the largest
@@ -2013,11 +2015,16 @@ impl Semlith {
         // most commands never look at them. Which layout they are in is the
         // store's business, decided when it was created and never migrated.
         let sharded = store::format(&db)? >= store::SHARDED_FORMAT;
-        let index = VectorIndex::open(&dir, dim, BIT_WIDTH, sharded)?;
+        let index = index::Vectors::own(VectorIndex::open(&dir, dim, BIT_WIDTH, sharded)?);
         // Beside the text index rather than inside it. Created lazily by
         // `VectorIndex::open`, so a store that never holds an image never grows
         // the directory.
-        let images = VectorIndex::open(&dir.join(image::INDEX_DIR), image::DIM, BIT_WIDTH, true)?;
+        let images = index::Vectors::own(VectorIndex::open(
+            &dir.join(image::INDEX_DIR),
+            image::DIM,
+            BIT_WIDTH,
+            true,
+        )?);
 
         let generation = generation(&db)?;
 
@@ -2044,6 +2051,7 @@ impl Semlith {
             tokenizer: None,
             clip: image::Clip::default(),
             generation,
+            shares_vectors: false,
             filter_memo: std::collections::VecDeque::new(),
             quiet: false,
             boundary: Boundary::default(),
@@ -2117,14 +2125,27 @@ impl Semlith {
     /// Name the store's two vector indexes again from what is on disk.
     fn reopen_indexes(&mut self) -> Result<()> {
         let sharded = store::format(&self.db)? >= store::SHARDED_FORMAT;
-        self.index = VectorIndex::open(&self.dir, self.dim, BIT_WIDTH, sharded)?;
-        self.images = VectorIndex::open(
-            &self.dir.join(image::INDEX_DIR),
-            image::DIM,
-            BIT_WIDTH,
-            true,
-        )?;
+        let (dir, dim) = (self.dir.clone(), self.dim);
+        let text = move || VectorIndex::open(&dir, dim, BIT_WIDTH, sharded);
+        let pictures_dir = self.dir.join(image::INDEX_DIR);
+        let pictures = move || VectorIndex::open(&pictures_dir, image::DIM, BIT_WIDTH, true);
+        if self.shares_vectors {
+            let generation = generation(&self.db)?;
+            self.index = index::shared(&self.dir, "text", generation, text)?;
+            self.images = index::shared(&self.dir, "images", generation, pictures)?;
+        } else {
+            self.index = index::Vectors::own(text()?);
+            self.images = index::Vectors::own(pictures()?);
+        }
         Ok(())
+    }
+
+    /// Answer from the one copy of this store's vectors every reader in this
+    /// process shares, from now on (the daemon's readers; see
+    /// [`index::Vectors`]). Never the writer's: its index moves under a run.
+    pub fn share_vectors(&mut self) -> Result<()> {
+        self.shares_vectors = true;
+        self.reopen_indexes()
     }
 
     /// The vector half of a search, read consistently against a compaction
@@ -3193,7 +3214,7 @@ impl Semlith {
         // written only after the index lands, so a crash re-indexes them.
         let mut completed: Vec<(i64, String)> = Vec::new();
 
-        let checkpointing = matches!(self.index, index::VectorIndex::Sharded(_));
+        let checkpointing = self.index.is_sharded();
         let every = checkpoint_files();
         let mut since_checkpoint = 0usize;
 
@@ -5231,7 +5252,7 @@ impl Semlith {
         crate::cpucap::pace();
         self.follow_budget();
         let timed = std::time::Instant::now();
-        let (index, exact) = (&mut self.index, &mut self.exact);
+        let (index, exact) = (&self.index, &mut self.exact);
         crate::cpucap::within(|| -> Result<()> {
             index.add(&flat, &done.ids)?;
             exact.append(&flat, &done.ids)

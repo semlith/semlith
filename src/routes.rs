@@ -3092,7 +3092,12 @@ fn with_fleet(
     let Some(fleet) = fleet.as_ref() else {
         return Response::json(&empty);
     };
-    match read(fleet) {
+    // A run's snapshot held, moved or let go of before and after the call:
+    // see `Fleet::reconcile`.
+    fleet.reconcile(&daemon::snapshots());
+    let answer = read(fleet);
+    fleet.reconcile(&daemon::snapshots());
+    match answer {
         Ok(mut value) => {
             failures_beside(fleet, &mut value);
             Response::json(&value)
@@ -3118,7 +3123,12 @@ fn on_fleet(
     }
     let mut guard = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
     match guard.as_mut() {
-        Some(fleet) => route(fleet, request),
+        Some(fleet) => {
+            fleet.reconcile(&daemon::snapshots());
+            let answer = route(fleet, request);
+            fleet.reconcile(&daemon::snapshots());
+            answer
+        }
         None => {
             let refused = route(&mut crate::fleet::Fleet::empty(), request);
             if (400..500).contains(&refused.status()) {
@@ -4618,11 +4628,7 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
     // tick, and runs-at-once admits or holds at once.
     let limits = daemon::Limits::in_force();
     limits.apply();
-    for fleet in [&state.fleet, &state.mcp_fleet] {
-        if let Some(fleet) = fleet.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-            fleet.follow_budget();
-        }
-    }
+    state.each_reader(|fleet| fleet.follow_budget());
     state.admission.set_limit(limits.runs_at_once.value);
     let applied = format!(
         "now running with {} run(s) at once, {} thread(s) each, {} MiB of vectors per store, and a {} % CPU cap",
@@ -5861,21 +5867,24 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
         || method.starts_with("notifications/")
         // A machine whose only stores are remote still answers from them.
         || !crate::cloud::remote_stores().is_empty();
-    if let Err(e) = state.open_mcp_fleet()
+    let (mut reader, opened) = state.mcp_reader();
+    if let Err(e) = opened
         && !corpus_free
     {
         return Response::error(409, &e.to_string());
     }
 
-    let mut fleet = state.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner());
     let mut nothing = crate::fleet::Fleet::empty();
-    let fleet = match fleet.as_mut() {
+    let fleet = match reader.1.as_mut() {
         Some(fleet) => fleet,
         None if corpus_free => &mut nothing,
         None => return Response::error(409, "this daemon has no store open"),
     };
 
-    let response = match crate::mcp::answer(fleet, Some(&writer), &body, &mut mcp_session) {
+    fleet.reconcile(&daemon::snapshots());
+    let answered = crate::mcp::answer(fleet, Some(&writer), &body, &mut mcp_session);
+    fleet.reconcile(&daemon::snapshots());
+    let response = match answered {
         Some(value) => Response::json(&value),
         // A notification. Answered with an empty 200 rather than an empty JSON
         // object, so the proxy writes nothing to a client that expects nothing.

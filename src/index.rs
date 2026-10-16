@@ -156,6 +156,133 @@ impl Allowlist {
     }
 }
 
+/// A store's vector index as a `Semlith` holds it: its own, or the one copy
+/// every reader of that store in this process shares (0.42.0).
+///
+/// The daemon answers forwarded MCP calls from several readers at once
+/// (item 18), and each one loading the store's vectors would multiply the
+/// largest thing a store owns by the number of agents. Readers share one
+/// index per store and generation through [`shared`]; the writer keeps its
+/// own, because its index changes under a run and the readers' must not
+/// (item 17). The search itself is the one step taken in turn — a scan over
+/// resident codes, milliseconds — while embedding the query, the keyword
+/// search, SQLite and the rerank run side by side.
+#[derive(Clone)]
+pub struct Vectors(std::sync::Arc<std::sync::Mutex<VectorIndex>>);
+
+impl Vectors {
+    /// An index of this `Semlith`'s own.
+    pub fn own(index: VectorIndex) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(index)))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, VectorIndex> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Run `f` against the index itself.
+    pub fn with<R>(&self, f: impl FnOnce(&mut VectorIndex) -> R) -> R {
+        f(&mut self.lock())
+    }
+
+    pub fn is_sharded(&self) -> bool {
+        matches!(*self.lock(), VectorIndex::Sharded(_))
+    }
+    pub fn exists(&self) -> bool {
+        self.lock().exists()
+    }
+    pub fn is_resident(&self) -> bool {
+        self.lock().is_resident()
+    }
+    pub fn resident_len(&self) -> Option<usize> {
+        self.lock().resident_len()
+    }
+    pub fn evict(&self) {
+        self.lock().evict()
+    }
+    pub fn prepare(&self) -> Result<()> {
+        self.lock().prepare()
+    }
+    pub fn add(&self, vectors: &[f32], ids: &[u64]) -> Result<()> {
+        self.lock().add(vectors, ids)
+    }
+    pub fn remove(&self, id: u64) -> Result<()> {
+        self.lock().remove(id)
+    }
+    pub fn contains(&self, id: u64) -> Result<bool> {
+        self.lock().contains(id)
+    }
+    pub fn search(
+        &self,
+        vector: &[f32],
+        depth: usize,
+        allowlist: &Allowlist,
+    ) -> Result<(Vec<f32>, Vec<u64>)> {
+        self.lock().search(vector, depth, allowlist)
+    }
+    pub fn save(&self) -> Result<()> {
+        self.lock().save()
+    }
+    pub fn max_resident(&self) -> Option<usize> {
+        self.lock().max_resident()
+    }
+    pub fn apply_budget(&self) {
+        self.lock().apply_budget()
+    }
+    pub fn resident_shards(&self) -> usize {
+        self.lock().resident_shards()
+    }
+    pub fn evictions(&self) -> u64 {
+        self.lock().evictions()
+    }
+    pub fn capacity(&self) -> Option<usize> {
+        self.lock().capacity()
+    }
+    pub fn shards(&self) -> usize {
+        self.lock().shards()
+    }
+    pub fn clean(&self) {
+        self.lock().clean()
+    }
+    #[cfg(test)]
+    pub(crate) fn set_capacity(&self, capacity: usize) {
+        self.lock().set_capacity(capacity)
+    }
+
+    /// Whether `other` is this very index, not merely an equal one.
+    pub fn same(&self, other: &Vectors) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// The index every reader of `dir`'s `which` side at `generation` shares,
+/// opened by `open` the first time any asks.
+///
+/// Held weakly: when the last reader of a generation moves on (the writer
+/// committed and the generation moved) or closes, the vectors are freed
+/// rather than kept for a reader that will never come back.
+pub fn shared(
+    dir: &Path,
+    which: &str,
+    generation: u64,
+    open: impl FnOnce() -> Result<VectorIndex>,
+) -> Result<Vectors> {
+    type Key = (PathBuf, String, u64);
+    static SHARED: std::sync::Mutex<
+        Option<std::collections::HashMap<Key, std::sync::Weak<std::sync::Mutex<VectorIndex>>>>,
+    > = std::sync::Mutex::new(None);
+    let mut all = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    let all = all.get_or_insert_with(Default::default);
+    all.retain(|_, weak| weak.strong_count() > 0);
+    let key = (dir.to_path_buf(), which.to_string(), generation);
+    if let Some(live) = all.get(&key).and_then(std::sync::Weak::upgrade) {
+        return Ok(Vectors(live));
+    }
+    let made = Vectors::own(open()?);
+    all.insert(key, std::sync::Arc::downgrade(&made.0));
+    Ok(made)
+}
+
 /// A store's vectors, in whichever layout the store was written with.
 pub enum VectorIndex {
     /// One file. Every store written before 0.7.0. Boxed because a whole

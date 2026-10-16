@@ -2906,6 +2906,75 @@ pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
     record_counted(db, row, BASIS_BYTES)
 }
 
+/// The connections holding a run's snapshot ([`pin_snapshot`]), by address.
+///
+/// A reader's connection lives inside a `Semlith` inside a fleet behind its
+/// reader's mutex, and does not move between the pin and the release, so its
+/// address names it for exactly as long as the mark matters.
+static PINNED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+fn address(db: &Connection) -> usize {
+    std::ptr::from_ref(db) as usize
+}
+
+/// Hold this reader at the store as it is now, until [`unpin_snapshot`].
+///
+/// A run re-indexing files the store already holds deletes a file's rows and
+/// writes its new ones file by file, and embeds them after; a reader between
+/// those moments answered from half a run — old chunks gone, new ones not yet
+/// embedded (item 17). A WAL reader inside one read transaction sees one
+/// committed state however much is committed after it, so the daemon opens
+/// one on every reader before the run's first write and ends it when the run
+/// commits. The cost is the WAL keeping the run's pages until then.
+pub fn pin_snapshot(db: &Connection) -> Result<()> {
+    if !db.is_autocommit() {
+        return Ok(());
+    }
+    db.execute_batch("BEGIN DEFERRED")?;
+    // A deferred transaction takes its snapshot at its first read.
+    let _: i64 = db.query_row("SELECT COUNT(*) FROM meta", [], |r| r.get(0))?;
+    PINNED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(address(db));
+    Ok(())
+}
+
+/// End [`pin_snapshot`]'s read transaction: the reader sees the run's commit.
+pub fn unpin_snapshot(db: &Connection) -> Result<()> {
+    let mut pinned = PINNED.lock().unwrap_or_else(|e| e.into_inner());
+    let at = address(db);
+    if let Some(i) = pinned.iter().position(|a| *a == at) {
+        pinned.swap_remove(i);
+        drop(pinned);
+        if !db.is_autocommit() {
+            db.execute_batch("COMMIT")?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether this connection is holding a run's snapshot.
+pub fn is_pinned(db: &Connection) -> bool {
+    PINNED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&address(db))
+}
+
+/// A connection of its own for a write a pinned reader must make — a ledger
+/// row, a usage fill — which its read transaction cannot: a write there would
+/// fail as soon as the run had committed anything since the pin.
+fn beside(db: &Connection) -> Result<Option<Connection>> {
+    if !is_pinned(db) {
+        return Ok(None);
+    }
+    match db.path().filter(|p| !p.is_empty()) {
+        Some(path) => Ok(Some(open(Path::new(path))?)),
+        None => Ok(None),
+    }
+}
+
 /// What the whole-file side of a row was counted from: the file's bytes.
 pub const BASIS_BYTES: &str = "bytes";
 /// What the whole-file side of a row was counted from: the text a reader
@@ -2914,6 +2983,9 @@ pub const BASIS_TEXT: &str = "text";
 
 /// [`record_retrieval`], saying what the whole-file side was counted from.
 pub fn record_counted(db: &Connection, row: &NewRetrieval<'_>, basis: &str) -> Result<()> {
+    if let Some(side) = beside(db)? {
+        return record_counted(&side, row, basis);
+    }
     // A key pasted as a search is text a person typed, and nothing else in the
     // store keeps one in full: every file passes the scan before it is held.
     // The same scan, the same marker, before the row is hashed, so the chain
@@ -3072,6 +3144,9 @@ pub struct Filled {
 /// Write a row's usage. Every row sharing its `query_id` is the same call,
 /// written once per store that answered, so all of them are filled.
 pub fn fill_usage(db: &Connection, row: &Unfilled, filled: &Filled) -> Result<()> {
+    if let Some(side) = beside(db)? {
+        return fill_usage(&side, row, filled);
+    }
     let _writing = Writing::begin(db)?;
     let t = filled.tokens;
     db.execute(
@@ -3149,6 +3224,9 @@ pub fn unsynced_count(db: &Connection, since: i64) -> Result<i64> {
 
 /// Record that these rows reached the org's ledger.
 pub fn mark_synced(db: &Connection, ids: &[i64], at: i64) -> Result<()> {
+    if let Some(side) = beside(db)? {
+        return mark_synced(&side, ids, at);
+    }
     let _writing = Writing::begin(db)?;
     let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
     {

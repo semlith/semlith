@@ -54,7 +54,11 @@ fn real_model_cache() -> PathBuf {
 }
 
 fn semlith(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_semlith"));
+    // `SEMLITH_TEST_BIN` runs these against another build: a test shown red
+    // on the release before its fix.
+    let bin = std::env::var_os("SEMLITH_TEST_BIN")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_semlith").into());
+    let mut command = Command::new(bin);
     command
         .env("SEMLITH_HOME", home)
         .env("HOME", home)
@@ -2218,5 +2222,178 @@ fn a_forwarded_index_names_the_reasons_it_skipped() {
     assert!(
         text.contains("skipped (") || text.contains("skipped ("),
         "the reasons are not where the in-process summary puts them:\n{text}"
+    );
+}
+
+/// One `tools/call` over the daemon's `/mcp` with the agent key, as an HTTP
+/// client sends it; the reply's text.
+fn mcp_text(port: u16, key: &str, tool: &str, arguments: serde_json::Value) -> String {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": tool, "arguments": arguments },
+    })
+    .to_string();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the daemon listens");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(120)))
+        .unwrap();
+    write!(
+        stream,
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {key}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let json = raw.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+    let value: serde_json::Value =
+        serde_json::from_str(json).unwrap_or_else(|e| panic!("not JSON ({e}): {raw}"));
+    value["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no text: {value}"))
+        .to_string()
+}
+
+/// Item 17: while a run re-indexes files the store already holds, every
+/// answer comes from one committed generation — the store before the run
+/// until it commits, the store after it once it has. Before 0.42.0 a reader
+/// between a file's delete and its new rows saw some files old, some new and
+/// some in neither.
+///
+/// The files change before the daemon starts, so the startup catch-up is one
+/// run over all of them.
+#[test]
+#[ignore = "embeds with the real model"]
+fn a_reindex_is_answered_from_one_generation() {
+    // Under exact search's 200-line cap, so a count is a count.
+    const FILES: usize = 150;
+    let (dir, home, work) = sandbox("snapshot");
+    let body = |mark: &str, i: usize| {
+        let mut text = format!("# Note {i}\n\n{mark} ledger {i}\n\n");
+        for p in 0..30 {
+            text.push_str(&format!(
+                "Paragraph {p} of note {i} covers the harbour, its tariffs and its weather.\n\n"
+            ));
+        }
+        text
+    };
+    let files: Vec<(String, String)> = (0..FILES)
+        .map(|i| (format!("n{i:03}.md"), body("MARKOLD", i)))
+        .collect();
+    let named: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(n, t)| (n.as_str(), t.as_str()))
+        .collect();
+    corpus(&home, &work, "notes", &named);
+    for (name, _) in &files {
+        let i: usize = name[1..4].parse().unwrap();
+        std::fs::write(work.join("notes").join(name), body("MARKNEW", i)).unwrap();
+    }
+
+    let daemon = Daemon::start_in(dir, home.clone(), work.clone(), &[]);
+    let key = std::fs::read_to_string(home.join("agent.key"))
+        .unwrap()
+        .trim()
+        .to_string();
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + SLOW;
+    loop {
+        // One answer holding both, so the two counts are one reading.
+        let text = mcp_text(
+            daemon.port,
+            &key,
+            "semlith_search",
+            serde_json::json!({ "query": "MARK(OLD|NEW) ledger", "exact": true, "max_tokens": 50000 }),
+        );
+        let old = text.matches("MARKOLD").count() as u64;
+        let new = text.matches("MARKNEW").count() as u64;
+        assert!(
+            (old == FILES as u64 && new == 0) || (old == 0 && new == FILES as u64),
+            "an answer mixed two generations: {old} old and {new} new lines (states so far {seen:?})"
+        );
+        if seen.last() != Some(&(old, new)) {
+            seen.push((old, new));
+        }
+        if new == FILES as u64 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the catch-up never committed: {seen:?}"
+        );
+    }
+    assert!(
+        seen.len() == 2 || seen == vec![(0, FILES as u64)],
+        "old, then new, and nothing between: {seen:?}"
+    );
+}
+
+/// Item 18: several agents searching one store run side by side, and the
+/// daemon holds one copy of the store's vectors however many readers it has.
+#[test]
+#[ignore = "embeds with the real model"]
+fn parallel_searches_overlap_and_share_one_index() {
+    let (dir, home, work) = sandbox("parallel");
+    let files: Vec<(String, String)> = (0..400)
+        .map(|i| {
+            (
+                format!("m{i:03}.md"),
+                format!("# Module {i}\n\nModule {i} parses the tariff ledger and reconciles harbour fees.\n"),
+            )
+        })
+        .collect();
+    let named: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(n, t)| (n.as_str(), t.as_str()))
+        .collect();
+    corpus(&home, &work, "mods", &named);
+    let daemon = std::sync::Arc::new(Daemon::start_in(dir, home.clone(), work.clone(), &[]));
+    let key = std::fs::read_to_string(home.join("agent.key"))
+        .unwrap()
+        .trim()
+        .to_string();
+    let ask =
+        |n: usize| serde_json::json!({ "query": format!("how are harbour fees reconciled {n}") });
+
+    // Warm: the model and one reader's vectors.
+    mcp_text(daemon.port, &key, "semlith_search", ask(0));
+    let one_reader = daemon.rss().unwrap_or(0);
+    let started = Instant::now();
+    for n in 0..4 {
+        mcp_text(daemon.port, &key, "semlith_search", ask(n));
+    }
+    let serial = started.elapsed();
+
+    let at_once = || {
+        let started = Instant::now();
+        let threads: Vec<_> = (0..4)
+            .map(|n| {
+                let (port, key) = (daemon.port, key.clone());
+                std::thread::spawn(move || {
+                    let body = serde_json::json!({ "query": format!("how are harbour fees reconciled {n}") });
+                    mcp_text(port, &key, "semlith_search", body)
+                })
+            })
+            .collect();
+        for t in threads {
+            assert!(t.join().unwrap().contains("Module"));
+        }
+        started.elapsed()
+    };
+    // Once to give every reader its first call, then measured.
+    let first = at_once();
+    let parallel = at_once();
+    eprintln!("first round at once: {first:?}");
+    let after = daemon.rss().unwrap_or(0);
+    eprintln!(
+        "4 searches: {serial:?} one after another, {parallel:?} at once; rss {one_reader} -> {after}"
+    );
+    // The second round warms the other readers' models but no second copy
+    // of the vectors; a copy per reader of a 400-chunk store is small, so
+    // the test asserts on time, and prints memory for the measurement.
+    assert!(
+        parallel < serial.mul_f64(0.8),
+        "four searches at once took {parallel:?}, one after another {serial:?}"
     );
 }

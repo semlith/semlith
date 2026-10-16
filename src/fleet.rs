@@ -31,6 +31,9 @@ pub struct Fleet {
     /// through a fleet takes `&self`, and a store going unreadable mid-session
     /// is an observation about the disk rather than a change to the fleet.
     unreadable: RefCell<Vec<Unreadable>>,
+    /// The members holding a run's snapshot, by store directory, and the
+    /// run's epoch. See [`Fleet::reconcile`].
+    pinned: RefCell<std::collections::BTreeMap<PathBuf, u64>>,
     /// One loaded model per distinct model, shared by every store using it.
     /// Three stores built with the same model cost one copy of the weights.
     /// The tokenizer of the first model this fleet loaded, for counting the
@@ -41,7 +44,7 @@ pub struct Fleet {
     /// fleet never uses it — which is exactly how the ledger came to label every
     /// row `chars4` while the code claimed to count with the real thing: the
     /// tokenizer was hung off the object that was not doing the work.
-    tokenizer: Option<tokenizers::Tokenizer>,
+    tokenizer: Option<Arc<tokenizers::Tokenizer>>,
     /// Query embeds performed, which is what the "one embed per model, not per
     /// store" claim is measured against.
     embeds: usize,
@@ -142,6 +145,7 @@ impl Fleet {
             members: Vec::new(),
             broken: Vec::new(),
             unreadable: RefCell::new(Vec::new()),
+            pinned: RefCell::new(Default::default()),
             tokenizer: None,
             embeds: 0,
             quiet: true,
@@ -183,6 +187,42 @@ impl Fleet {
     /// an absolute one, a symlink — is opened once. Merging a store with itself
     /// would give every one of its hits a second copy at the same score and
     /// hand it the whole result list.
+    /// Hold, move or release each member's snapshot to match `wanted`: the
+    /// stores a run is re-indexing, by directory, with the run's epoch.
+    ///
+    /// Called by the daemon before and after every call a reader answers, and
+    /// by the writer on every idle reader as a run starts and commits, so a
+    /// reader answers a store mid-run from the state before the run (item 17).
+    pub fn reconcile(&self, wanted: &std::collections::BTreeMap<PathBuf, u64>) {
+        let mut pinned = self.pinned.borrow_mut();
+        for member in &self.members {
+            let dir = member.store.dir().to_path_buf();
+            let want = wanted.get(&dir).copied();
+            let have = pinned.get(&dir).copied();
+            if want == have {
+                continue;
+            }
+            if have.is_some() {
+                let _ = crate::store::unpin_snapshot(member.store.db());
+                pinned.remove(&dir);
+            }
+            if let Some(epoch) = want
+                && crate::store::pin_snapshot(member.store.db()).is_ok()
+            {
+                pinned.insert(dir, epoch);
+            }
+        }
+    }
+
+    /// Answer from the vectors every reader in this process shares, as the
+    /// daemon's readers do (`index::Vectors`).
+    pub fn share_vectors(&mut self) -> Result<()> {
+        for member in &mut self.members {
+            member.store.share_vectors()?;
+        }
+        Ok(())
+    }
+
     pub fn open(dirs: &[PathBuf]) -> Result<Self> {
         if dirs.is_empty() {
             bail!("no store given");
@@ -258,6 +298,7 @@ impl Fleet {
             members,
             broken,
             unreadable: RefCell::new(Vec::new()),
+            pinned: RefCell::new(Default::default()),
             tokenizer: None,
             embeds: 0,
             quiet: false,
@@ -921,7 +962,7 @@ impl Fleet {
     /// them and labelling the row, which is what this does.
     pub fn counter(&self) -> crate::ledger::Counter<'_> {
         self.tokenizer
-            .as_ref()
+            .as_deref()
             // A store's own tokenizer, for a caller that drove `Semlith`
             // directly and handed the result here.
             .or_else(|| self.members.iter().find_map(|m| m.store.tokenizer()))
@@ -1265,8 +1306,18 @@ impl Fleet {
         let cache = model_cache_dir()?;
         // Read from the same cache in the same breath as the weights, so the
         // count and the model's own segmentation are the same arithmetic.
+        // One parsed tokenizer per model in the process, as the session is:
+        // each of the daemon's readers parsing its own held tens of MB apiece.
         if self.tokenizer.is_none() {
-            self.tokenizer = model.tokenizer(&cache);
+            let mut known = QUERY_TOKENIZERS.lock().unwrap_or_else(|e| e.into_inner());
+            self.tokenizer = match known.iter().find(|(m, _)| m == model) {
+                Some((_, t)) => Some(Arc::clone(t)),
+                None => model.tokenizer(&cache).map(|t| {
+                    let t = Arc::new(t);
+                    known.push((model.clone(), Arc::clone(&t)));
+                    t
+                }),
+            };
         }
         let mut shared = QUERY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, session)) = shared.iter().find(|(m, _)| m == model) {
@@ -1288,6 +1339,9 @@ type QuerySessions = Vec<(Model, Arc<Mutex<TextEmbedding>>)>;
 
 /// Query sessions, one per model, shared by every reader in the process.
 static QUERY_SESSIONS: Mutex<QuerySessions> = Mutex::new(Vec::new());
+
+/// Counting tokenizers, one per model, shared the same way.
+static QUERY_TOKENIZERS: Mutex<Vec<(Model, Arc<tokenizers::Tokenizer>)>> = Mutex::new(Vec::new());
 
 /// How many query sessions are loaded, for `/api/about`.
 pub fn query_sessions() -> usize {
