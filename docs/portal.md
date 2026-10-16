@@ -790,42 +790,141 @@ generator answers `semlith report` and `semlith_report`, byte for byte.
 | Report | What it is | For |
 |---|---|---|
 | Retrieval savings | Tokens agents did not read, from the ledger. | whoever approves the spend |
-| AI access audit | Which agent read which file, when, from the hash-chained record. | security review and AI-use policy |
-| Change brief | Blast radius of what changed, as a note for the PR. | the reviewer |
-| Index health | Stale files, skipped formats, graph coverage. | whoever owns the store |
-| Knowledge gaps | Questions the corpus could not answer well. | whoever writes the docs |
+| AI access audit | Which agent asked what, and when, from the hash-chained record. | security review and AI-use policy |
+| Change brief | Files re-read, the definitions they changed, and what reaches them. | the reviewer |
+| Index health | What the index holds, graph coverage, what was refused or skipped. | whoever owns the store |
+| Knowledge gaps | Questions the corpus could not answer; names called and not defined. | whoever writes the docs |
 
-Choosing a report generates it. **Window** (24 hours, 7 days, 30 days, Quarter)
-applies to the access audit and change brief; the others count the whole history
-and say so. **Format** is Markdown, CSV, JSON, HTML or PDF, rendered by the server
-(the PDF is typeset inside the binary, not printed from HTML). **Stores** is all or
-a selection. **Hash the query text** replaces each query with a digest; **Attach
-the excerpts** adds the exact lines each agent was shown.
+Choosing a report generates it. **Window** (24 hours, 7 days, 30 days, Quarter;
+30 days to start, the same default `semlith report` uses) applies to every report
+but Index health, which is the index as it stands and says so; every figure of a
+windowed report is counted from the rows inside the window. **Format** is
+Markdown, CSV (a zip of one file per table), JSON, HTML or PDF, rendered by the
+server (the PDF is typeset inside the binary, not printed from HTML). **Stores** is
+all or a selection. **Hash the query text** replaces each query with a digest keyed
+to this machine, in the access audit and the gaps report; **Attach the
+per-retrieval rows** adds who asked, when, with which tool and what it cost to the
+access audit — counts, not the lines an agent was shown, which the ledger does not
+keep.
 
-The preview shows the file name (dated by this machine's clock), **Copy** and
-**Save to disk** (the browser's own save; no route writes a file for the page).
-**The savings, line by line** prices the arithmetic at a model you pick, with the
-rate, source and date; **Update prices** fetches models.dev's table once, after
-asking — the only network request on this page. **Without the browser** shows the
-equivalent `semlith report` command and MCP call. The page never redraws on its own:
-a report is a reading of a moment.
+The preview is the rendered HTML report, in a sandboxed frame served from its own
+route under a policy that allows no script and no network; **Copy** copies the
+Markdown and **Save to disk** saves the chosen format through the browser (no
+route writes a file for the page). **The savings, line by line** prices the
+arithmetic at a model you pick, with the rate, source and date; **Update prices**
+fetches models.dev's table once, after asking — the only network request on this
+page. **Without the browser** shows the `semlith report` command that writes the
+same document, with only the flags that report reads (`--scope` for stores), and
+`semlith_report` over MCP takes the same window, scope and toggles. The page never
+redraws on its own: a report is a reading of a moment. What each format holds and
+the JSON schema are under [Formats and the JSON schema](#formats-and-the-json-schema).
 
 ### Schedules
 
 A schedule is a report the daemon writes on a cadence into a directory you name.
-**Schedule…** on the preview asks for both; the card lists each schedule with its
-last and next run and **Remove schedule**. Schedules live in
-`~/.semlith/schedules.json`; with no daemon running they wait. The daemon never
-creates the directory (an unmounted volume must not be written into its mount
-point), replaces the file in place each run (a tracked folder shows a readable
-diff), never generates two at once, and waits while a store is indexing.
+**Schedule…** on the preview asks for both and keeps every option the page set —
+window, stores, format, model, hashing and the attached rows; the card lists each
+schedule with the file it writes, its cadence in words (any interval, down to the
+one-minute floor), its last and next run and **Remove schedule**, and names the
+schedules file the daemon reads (`schedules.json` in the store home). With no
+daemon running they wait. Each schedule writes one file, named for its options
+(`semlith-savings-week.md`, `semlith-access-month-flask.pdf`), replaced in place
+each run through a temporary file and a rename, so a tracked folder shows a
+readable diff and a reader never sees half a report. The daemon never creates the
+directory (an unmounted volume must not be written into its mount point), never
+generates two at once, and waits while a store is indexing.
 
 ```sh
 semlith schedule list
-semlith schedule add savings --every 604800 --to ~/Reports --format pdf
+semlith schedule add savings --every 604800 --to ~/Reports --format pdf --window week
+semlith schedule add access --every 86400 --to ~/Reports --redact --excerpts
 semlith schedule remove s1
 semlith schedule set s1 off
 ```
+
+### Formats and the JSON schema
+
+Human surfaces (the portal and `semlith search`) are recorded in the ledger and
+counted as human searches, never as agent queries or agent saving. Refunds (a
+whole-file read the steering hook saw) and rows that are not queries (notes,
+refusals, accept, revoke) are never queries, coverage, zero-hit or gaps. Every
+number prints through one formatter, the portal's: `711,763`, `$1.42`, `80%`,
+`325.3×`, `67 ms`.
+
+**HTML** is the reference rendering: one file, no script, no URL. IBM Plex (the
+portal's own subsets, about 90 KB as base64) and both logos are embedded, the
+colours are the portal's tokens read from its stylesheet, light or dark follows the
+reader's system, and printing gives light A4 pages with table headers repeated. At
+390 px it stacks without scrolling sideways; a wide table scrolls inside its card.
+
+**PDF** is typeset by the binary to match the HTML's print rendering: A4 (Letter
+when the locale is US or Canada), IBM Plex embedded as a per-document subset, a
+running footer with *page x of y* and the ledger head, a bookmark per card,
+Title/Author/Producer/date metadata and a tagged structure. A character Plex has
+no glyph for is taken from the system's CJK fonts at render time (Hiragino, Apple
+SD Gothic Neo or Arial Unicode on macOS; Noto CJK, Droid Sans Fallback or
+WenQuanYi on Linux; Yu Gothic, MS Gothic, Microsoft YaHei or Malgun on Windows).
+With none installed the glyph draws as a box and the text layer still holds the
+character: every glyph carries a ToUnicode entry.
+
+**Markdown** is built for GitHub and a PR body: a meta table, a KPI table, tables
+with `---:` on numeric columns, notes as quotes, tables over ten rows inside
+`<details>`, the recompute command fenced.
+
+**CSV** is data: one file per table, a header of stable snake_case keys, numbers
+unformatted (`711763`, `1.42`, `0.8`), stamps ISO 8601. A report is a `.zip` of
+`<kind>-summary.csv` (`key,value,unit,currency,over`) and one
+`<kind>-<table>.csv` per table; `semlith report --format csv --table summary` (or a
+table's id) prints one.
+
+**JSON** is `semlith.report/2`:
+
+```json
+{
+  "schema": "semlith.report/2",
+  "kind": "savings", "title": "Retrieval savings",
+  "audience": "for whoever approves the spend",
+  "lede": "Agents on this machine asked 10 questions in the last 7 days. …",
+  "generated": "2026-10-14 20:13:04 +05:30", "generated_at": "2026-10-14T20:13:04+05:30",
+  "version": "0.42.0",
+  "window": { "name": "week", "label": "Last 7 days", "applies": true,
+              "from": "2026-10-07T20:13:04+05:30", "to": "2026-10-14T20:13:04+05:30" },
+  "stores": ["flask", "ripgrep"], "redacted": false,
+  "meta": [ { "label": "Ledger chain", "lines": ["46 rows · head 849df1da…81ab"],
+              "chips": [ { "text": "verifies", "tone": "green" } ] } ],
+  "kpis": [ { "label": "Net cost avoided", "value": 1.423526, "unit": "money",
+              "currency": "USD", "over": "at claude-sonnet-5-5 input price",
+              "display": "$1.42", "lead": false } ],
+  "blocks": [
+    { "block": "table", "id": "not_read", "title": "What was not read", "meta": "…",
+      "columns": [ { "key": "line", "label": "Line", "kind": "strong" },
+                   { "key": "tokens", "label": "Tokens", "kind": "num" },
+                   { "key": "cost_usd", "label": "Cost", "kind": "num" } ],
+      "rows": [ ["Whole files not read", 713944, 1.427888] ],
+      "total": ["Net not read", 711763, 1.423526], "note": "…", "empty": "…" },
+    { "block": "facts", "title": "Counted alongside", "meta": "…",
+      "facts": [ { "label": "Latency p50", "value": 67.0, "unit": "ms",
+                   "over": "over 10 queries in the window", "display": "67 ms" } ] },
+    { "block": "note", "text": "…" },
+    { "block": "code", "title": "Recompute it", "meta": "…", "comment": "…",
+      "lines": ["semlith report savings --window week --model claude-sonnet-5-5"] }
+  ],
+  "chain": { "state": "verifies", "rows": 46, "head": "k1:849df1da…" }
+}
+```
+
+A **figure** (a KPI or a fact) is `value` (a number; a string for a word such as a
+tier; `null` when there is nothing to divide by), `unit` (`tokens`, `queries`,
+`files`, `sessions`, `definitions`, `names`, `stores`, `bytes`, `ms`, `ratio` from
+0 to 1, `times`, `money`, `text`), `currency` (with `money` only), `over` and
+`display` (what a person saw). A **table** has typed `columns` — a stable
+snake_case `key` carrying its unit, and a `kind` of `text`, `strong`, `muted`,
+`id`, `num` or `bar` — and `rows` of raw values in column order: numbers as
+numbers, shares as ratios, stamps as ISO 8601, nothing as `null`; `more` counts
+rows not listed. `window.applies` is false for health and `from` is absent for
+`all`; `chain` (`verifies`, `broken` or `empty`) is absent from reports that do not
+read the ledger. `semlith.report/1` (0.27.0 to 0.41.0) held display strings in
+untyped blocks and is no longer produced.
 
 ## Privacy
 

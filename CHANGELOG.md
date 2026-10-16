@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Every report looks like Semlith, in every format.** The five reports are one
+  typed structure drawn by five renderers to the reports-v1 design: HTML with the
+  portal's own tokens, IBM Plex and logos embedded (no script, no URL), light and
+  dark, A4 print and a 390 px layout; a PDF typeset natively with IBM Plex
+  embedded as a subset, full Unicode (`Résumé café 東京` comes back out of the
+  text layer exactly; CJK glyphs come from the system's fonts), page x of y, the
+  ledger head, bookmarks, metadata and tags; Markdown for a PR body. The binary
+  grows by the five Plex TrueType subsets and the `subsetter` crate (sizes in the
+  release notes).
+- **Break: CSV and JSON are data.** CSV is one file per table, numbers
+  unformatted, saved as a zip (`--table` prints one); JSON is the schema
+  `semlith.report/2` with typed figures (value, unit, currency, over, display),
+  documented in docs/portal.md.
+- **Break: one default window, and it applies to every figure.** Reports open at
+  30 days on the CLI, the portal, `semlith_report` and schedules alike, and a
+  windowed savings report narrows whole, excerpt, refunds, zero-hit and latency
+  too, so Whole less Excerpt is Net; the access audit counts each row by its own
+  time, not by its session's last.
+- **Break: a schedule replaces one file in place** (`semlith-savings-week.md`)
+  instead of writing a dated file per run, and keeps every option it was given:
+  `schedule add` takes `--redact` and `--excerpts`, and the portal sends them.
+- Numbers in reports print `736,397`, as the portal does, through one formatter.
+- The change brief counts every file it re-read (no per-store cap of 200), does
+  not call a first index a re-read, and carries the blast radius of the changed
+  definitions from the impact walk; paths print relative to the store's root.
+- The Reports page previews the rendered HTML in a sandboxed frame under a
+  report-only policy; Copy stays Markdown. Its command uses `--scope` and only the
+  flags a report reads; "Attach the excerpts" is "Attach the per-retrieval rows"
+  and says it attaches counts, not lines. The Schedules card names the real
+  schedules file and says any cadence (a 60 s schedule read "every 0 h").
+- `semlith_report` takes `window`, `scope`, `redact`, `excerpts` and `table`.
+
+### Security
+
+- A redacted report's query digest is keyed with a per-machine salt
+  (`~/.semlith/report.salt`); the unkeyed digest could be reversed by hashing a
+  corpus's own symbol names.
+
 ## [0.41.0] - 2026-10-15
 
 ### Security

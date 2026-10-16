@@ -261,7 +261,7 @@ pub const CSV: &str = "csv";
 pub const ALL_FORMATS: [&str; 5] = ["markdown", CSV, "json", "html", PDF];
 
 /// The schema the JSON format and `/api/report` carry, published in
-/// `docs/reports.md`.
+/// `docs/portal.md` (Reports › Formats and the JSON schema).
 pub const SCHEMA: &str = "semlith.report/2";
 
 /// The model a savings figure is priced at when nobody names one.
