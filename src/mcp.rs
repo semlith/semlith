@@ -875,7 +875,12 @@ fn all_tool_defs(open: &str) -> Value {
                 "type": "object",
                 "properties": {
                     "kind": { "type": "string" },
-                    "format": { "type": "string", "description": "markdown, csv, json, html." },
+                    "format": { "type": "string", "description": "markdown, json or html; csv with table." },
+                    "table": { "type": "string", "description": "One table as CSV: summary or a table id." },
+                    "window": { "type": "string", "description": "all, day, week, month (default) or quarter." },
+                    "scope": { "type": "array", "items": { "type": "string" } },
+                    "redact": { "type": "boolean" },
+                    "excerpts": { "type": "boolean" },
                     "model": { "type": "string" },
                     "store": { "type": "string" }
                 },
@@ -2018,7 +2023,27 @@ fn call_local(
                 .get("model")
                 .and_then(Value::as_str)
                 .unwrap_or(crate::report::DEFAULT_MODEL);
-            match crate::report::generate(stores, kind, model).and_then(|r| r.render(format)) {
+            // The same document the CLI and the portal make for the same
+            // window, scope and toggles — before 0.42.0 this took none of
+            // them, so it matched only at the defaults (R11).
+            let flag = |name: &str| args.get(name).and_then(Value::as_bool).unwrap_or(false);
+            let options = crate::report::Options {
+                excerpts: flag("excerpts"),
+                redact: flag("redact"),
+                salt: None,
+            };
+            let mut only = strings(&args, "scope");
+            only.extend(strings(&args, "store"));
+            let table = args.get("table").and_then(Value::as_str);
+            let rendered = crate::report::window_of(args.get("window").and_then(Value::as_str))
+                .and_then(|window| {
+                    crate::report::generate_with(stores, kind, model, window, &only, options)
+                })
+                .and_then(|r| match table {
+                    Some(id) => r.render_table(id),
+                    None => r.render(format),
+                });
+            match rendered {
                 Ok(text) => text,
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }

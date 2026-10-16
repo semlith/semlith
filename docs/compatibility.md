@@ -728,6 +728,21 @@ From 0.37.0-rc.7:
 |---|---|
 | Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
+### 0.42.0 — reports and exports
+
+| Surface | Change |
+|---|---|
+| **Break: report JSON** | `semlith.report/2` (docs/portal.md, Reports › Formats and the JSON schema): typed figures (`value`, `unit`, `currency`, `over`, `display`), KPIs, meta and typed table columns with raw values. `window` is an object (`name`, `label`, `from`, `to`, `applies`). The 0.41 shape (blocks of display strings, `window` a sentence) is gone. |
+| **Break: report CSV** | One file per table with snake_case headers and unformatted numbers, saved as a `.zip` with `summary.csv`; `--table <id>` (`table=` on `/api/report`, `table` on `semlith_report`) prints one. `semlith report --format csv` needs `--out` or `--table`. `report::FORMATS` (text) is markdown, json, html. |
+| **Break: the default window** | No window named is `month` (30 days) on every surface — the CLI, `/api/report`, `semlith_report` and a schedule without one; it used to be everything outside the portal. `report::Window::Unset` is gone. Every figure of a windowed report counts only rows inside the window. |
+| **Break: schedules** | A schedule writes one file named for its options (`semlith-<kind>[-<window>][-<store>…].<ext>`), replaced in place, where it wrote a dated file per run. A record gains `redact` and `excerpts`; an older binary ignores them. |
+| Redaction | A redacted query is `hash:` and 16 hex characters of blake3 keyed with `~/.semlith/report.salt` (new, `0600`), not an unkeyed digest. |
+| CLI | `semlith report --table`; `semlith schedule add --redact --excerpts`. Numbers in reports print `736,397`. |
+| MCP | `semlith_report` takes `window`, `scope`, `redact`, `excerpts` and `table`. |
+| Routes | `/api/report` answers CSV without `table` as `application/zip`, takes `table`, and with `preview=1` adds `preview`, a `/report-preview/<id>` path served (credential-free, ten minutes) under a CSP with no script. `/api/schedules` gains `path`; `add` takes `redact` and `excerpts`. |
+| Exports | HTML embeds IBM Plex and the logos and follows the portal's tokens; the PDF embeds IBM Plex subsets (and an OS CJK font for glyphs Plex lacks), A4 or Letter by locale, page x of y, bookmarks, metadata, tags. |
+| Library | `report` is a module directory: `Report::new`, `Figure`, `Cell`, `Column`, `Kind`, `Table`, `Kpi`, `Fact`, `Meta`, `Chip`, `Chain`, `WindowInfo`, `Block::{Table, Facts, Note, Code}`, `render_table`, `table_ids`, `extension`, `number`, `num`, `DEFAULT_WINDOW`, `CSV`, `SCHEMA`, `REPORT_CSP`; `Options` gains `salt`. `store::report_rows_since`, `files_read_since`, `path_bounds`; `home::report_salt`; `http::Response::with_csp`. |
+
 ### 0.41.0
 
 The rest of the 0.39.0 audit. `FORMAT_VERSION` does not move: a store 0.41.0

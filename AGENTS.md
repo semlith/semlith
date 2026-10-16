@@ -139,8 +139,8 @@ Module responsibilities:
 | `src/graph.rs` | tree-sitter extraction, the bounded traversals over the edges, and the ranked walk search expands through |
 | `src/pattern.rs` | `semlith pattern`: one tree-sitter query over the indexed files of one language |
 | `src/ledger.rs` | The one place a retrieval is recorded, whichever surface answered it |
-| `src/report.rs` | The five reports: one structure of blocks, five renderers over it, so Markdown, CSV, JSON, HTML and PDF cannot disagree. No engine of its own |
-| `src/schedule.rs` | A report the daemon writes on a cadence: the record, `~/.semlith/schedules.json`, and the one thread that runs them |
+| `src/report/` | The five reports: one typed structure (`mod.rs`, which also gathers each report's figures), Markdown/CSV/JSON/HTML (`render.rs`) and the natively typeset PDF (`pdf.rs`, `fonts/`) over it, so the formats cannot disagree. No engine of its own |
+| `src/schedule.rs` | A report the daemon writes on a cadence: the record (every option the builder set), `~/.semlith/schedules.json`, one file per schedule replaced in place, and the one thread that runs them |
 | `src/replay.rs` | What an agent did after an answer, read from this machine's Claude Code transcripts unless the Privacy page's toggle is off (on by default from 0.35.0; a file that wrote off stays off) |
 | `src/image.rs` | Image support: the five extensions, and the CLIP pair that makes a picture comparable with a sentence |
 | `src/lock.rs` | One writer per store, OS advisory lock (not file existence) |
@@ -579,15 +579,35 @@ Module responsibilities:
   loses the file. The runner sleeps on a condition variable to the next due
   time, capped at a minute — not to poll, but because `semlith schedule add` is
   a different process and cannot reach that condvar.
-- **PDF is a renderer, not a second report.** `Report::render` returns a
-  `String` and serves the four text formats; `Report::render_bytes` serves all
-  five over the same blocks. That is why `report::FORMATS` is four and
-  `report::ALL_FORMATS` is five, and why a surface that can only print text
-  calls `check_format` while one that can hand back bytes calls
-  `check_any_format`. A PDF is typeset from the blocks in base-14 Courier, where
-  every glyph is 0.6 em — the width of a line is its length, which is what makes
-  the table arithmetic provable and why no font is embedded. It is not a print
-  of the HTML.
+- **Five renderers, one typed report.** A `Report` is figures (value, unit,
+  currency, over, display), a meta strip, KPIs and blocks (typed tables, facts,
+  notes, a recompute command); `render.rs` draws Markdown, CSV, JSON and HTML and
+  `pdf.rs` the PDF, all from that structure and nothing else, so no format can
+  hold a figure another lacks. Every number goes through `report::num` (`number`
+  is its `i64` face for the CLI), which prints what the portal's `n` and `pct`
+  print; `report::tests` pins app.js to it. `Report::render` returns text for
+  `report::FORMATS` (markdown, json, html); CSV (a zip of one file per table, or
+  one table through `render_table`) and PDF are bytes from `render_bytes`, which
+  is why a text-only surface calls `check_format` and one that hands back bytes
+  `check_any_format`. The HTML's colours are read from `src/portal/style.css`'s
+  tokens at render time — change a token there and every report follows — and it
+  embeds the portal's Plex woff2 and logos, with no script and no URL. The PDF is
+  typeset natively to match the HTML's print rendering, not printed by a browser:
+  IBM Plex (`src/report/fonts`, OFL, cut to Latin and Latin Extended-A) embedded
+  as a per-document subset (`subsetter`) measured with its real advances
+  (`ttf-parser`), and a glyph Plex lacks taken from the OS's CJK fonts at render
+  time, read for that render only and never kept. Every glyph has a ToUnicode
+  entry, so the text layer is the text even where no font had the glyph. Never a
+  base-14 font, never `?`. The portal's preview is that HTML in a sandboxed frame
+  from `/report-preview/<id>` under `report::REPORT_CSP` (no script): the frame
+  cannot send the session token, so the 128-bit id, minted only by the
+  token-guarded `/api/report?preview=1` and kept ten minutes, is the credential.
+- **A report's figures come from the rows inside its window.** Each report
+  gathers through one function (`tally` for the ledger reports) over
+  `store::report_rows_since`, so a window narrows every figure on the page, not
+  only some of them. A redacted query is a blake3 digest keyed with the
+  machine's `report.salt` beside the agent key — an unkeyed digest is a
+  dictionary lookup away from a symbol name.
 - **The ledger records by default, locally, from every surface.** `src/ledger.rs`
   is the one writer, and stdio MCP, the daemon's `/mcp` route, the CLI and the
   portal all call it — a search from the CLI and the same search from an agent
@@ -752,7 +772,9 @@ relaxation without an issue like
   agent key as a bearer instead, and is the only route that does.
 - The `Host` header must be `localhost`, `127.0.0.1` or `::1`. Otherwise: 400.
 - Every response carries a `Content-Security-Policy` allowing only `'self'`, and
-  no CORS header is emitted anywhere.
+  no CORS header is emitted anywhere. The one exception is narrower, never
+  wider: a report preview (`/report-preview/<id>`) is served under
+  `report::REPORT_CSP`, which allows no script, no network and no form at all.
 - Every byte the portal loads is `include_bytes!`d into the binary. No CDN, no
   build step, no npm. The page loads with the cable unplugged.
 - No telemetry, no analytics, and no update check Semlith makes on its own.

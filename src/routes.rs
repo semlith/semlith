@@ -65,6 +65,10 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
     if get && let Some((kind, bytes)) = crate::portal::asset(path) {
         return Response::asset(kind, bytes);
     }
+    // Credential-free like the assets: the id is the credential (`keep_preview`).
+    if get && path.starts_with(PREVIEW_PREFIX) {
+        return report_preview(path);
+    }
 
     // A write naming a remote store is refused here, once, with the sentence
     // that says why, rather than by each route finding no such store open.
@@ -498,7 +502,12 @@ fn with_remotes(state: &Arc<State>, request: &Request) -> Option<Response> {
 /// while the terminal showed another.
 fn schedules(_state: &Arc<State>) -> Response {
     match crate::schedule::Schedules::load() {
-        Ok(file) => Response::json(&serde_json::json!({ "schedules": file.schedules })),
+        // The file's own path, so the card names it rather than a
+        // `~/.semlith` a `SEMLITH_HOME` moved elsewhere.
+        Ok(file) => Response::json(&serde_json::json!({
+            "schedules": file.schedules,
+            "path": crate::home::schedules_path().ok().map(|p| crate::plain(&p.to_string_lossy())),
+        })),
         // A schedules file this binary cannot read is a report that will not be
         // written, not a reason for the page to fail to draw.
         Err(e) => error_response(&e),
@@ -561,6 +570,11 @@ fn schedule_write(state: &Arc<State>, request: &Request) -> Response {
                         .collect()
                 })
                 .unwrap_or_default();
+            // Every option the builder set: a schedule saved with "Hash the
+            // query text" on wrote plain queries in 0.41 (R8).
+            let flag = |name: &str| body.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
+            schedule.redact = flag("redact");
+            schedule.excerpts = flag("excerpts");
             // Refused before anything is written, naming what would have
             // worked. Half a schedules file is worse than none.
             if let Err(e) = schedule.check() {
@@ -3770,15 +3784,13 @@ static MEASURING: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
 /// One of the five reports, in one of the five formats, over a window and a
 /// scope.
 ///
-/// The same bytes `semlith report` writes, from the same generator: the
+/// The same document `semlith report` writes, from the same generator: the
 /// portal's export is not a second renderer, so a file downloaded from the
-/// page and one written in a terminal are the same file.
-///
-/// `window` and `scope` are both optional and both omitted means exactly what
-/// it meant in 0.26.x — every open store, and each report's own span. `scope`
-/// is the store filter the route took as `store` and discarded; `store` is
-/// still read, as its own alias, because a caller that was already sending it
-/// meant it.
+/// page and one written in a terminal are the same file. No `window` is
+/// `report::DEFAULT_WINDOW`, as in the terminal. `scope` narrows by store
+/// label (`store` is read as its alias). CSV is a zip of one file per table,
+/// unless `table` names one. With `preview=1` an HTML report is also kept for
+/// the page's sandboxed frame and its address returned as `preview`.
 fn report(state: &Arc<State>, request: &Request) -> Response {
     let Some(kind) = request.query("kind") else {
         return Response::error(400, "missing kind");
@@ -3789,15 +3801,10 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(400, &e.to_string());
     }
     let format = request.query("format").unwrap_or("markdown").to_string();
-    if !crate::report::ALL_FORMATS.contains(&format.as_str()) && format != "md" {
-        return Response::error(
-            400,
-            &format!(
-                "unknown format {format:?}; the formats are {}",
-                crate::report::ALL_FORMATS.join(", ")
-            ),
-        );
+    if let Err(e) = crate::report::check_any_format(&format) {
+        return Response::error(400, &e.to_string());
     }
+    let table = request.query("table").map(str::to_string);
     let window = match crate::report::window_of(request.query("window")) {
         Ok(window) => window,
         Err(e) => return Response::error(400, &e.to_string()),
@@ -3820,19 +3827,18 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
     }
     let mut only = request.query_all("scope");
     only.extend(request.query_all("store"));
-
-    // The builder's two content toggles. Absent is off, which is what every
-    // 0.26.x caller sends.
     let flag = |name: &str| matches!(request.query(name), Some("1" | "true" | "on"));
     let options = crate::report::Options {
         excerpts: flag("excerpts"),
         redact: flag("redact"),
+        salt: None,
     };
+    let preview = flag("preview");
 
-    // A PDF is bytes and cannot ride inside the JSON envelope the other four
-    // use, so this one format answers as the file itself. Same generator, same
-    // blocks, same window and scope — only the wrapper differs.
-    if format == crate::report::PDF {
+    // A PDF and a CSV zip are bytes and cannot ride inside the JSON envelope
+    // the text formats use, so they answer as the file itself. Same
+    // generator, same window and scope — only the wrapper differs.
+    if format == crate::report::PDF || (format == crate::report::CSV && table.is_none()) {
         if let Err(e) = state.open_fleet() {
             return Response::error(500, &e.to_string());
         }
@@ -3840,10 +3846,15 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
         let Some(fleet) = fleet.as_ref() else {
             return Response::error(409, "no store is open to report on");
         };
+        let content_type = if format == crate::report::PDF {
+            "application/pdf"
+        } else {
+            "application/zip"
+        };
         return match crate::report::generate_with(fleet, &kind, &model, window, &only, options)
             .and_then(|report| report.render_bytes(&format))
         {
-            Ok(bytes) => Response::new(200, "application/pdf", bytes),
+            Ok(bytes) => Response::new(200, content_type, bytes),
             Err(e) => Response::error(400, &e.to_string()),
         };
     }
@@ -3853,15 +3864,72 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
     // deciding to save it.
     with_fleet(state, json!({ "report": null }), move |fleet| {
         let report = crate::report::generate_with(fleet, &kind, &model, window, &only, options)?;
+        let text = match &table {
+            Some(id) => report.render_table(id)?,
+            None => report.render(&format)?,
+        };
+        let preview = if preview {
+            Some(keep_preview(report.render("html")?))
+        } else {
+            None
+        };
         Ok(json!({
             "kind": report.kind,
             "title": report.title,
             "generated": report.generated,
             "format": format,
-            "text": report.render(&format)?,
+            "text": text,
+            "preview": preview,
             "report": report,
         }))
     })
+}
+
+/// Rendered HTML reports the Reports page's frame may load, by a random id.
+///
+/// The frame cannot send the session token — a document a page frames is
+/// fetched with no header of the page's choosing — so the route that serves it
+/// is credential-free like the page's own assets, and the id is the
+/// credential: 128 random bits, minted only by the token-guarded
+/// `/api/report`, kept for ten minutes, and never more than eight at once.
+static PREVIEWS: std::sync::Mutex<Vec<(String, std::time::Instant, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+const PREVIEW_PREFIX: &str = "/report-preview/";
+const PREVIEW_LIFE: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn keep_preview(html: String) -> String {
+    let mut bytes = [0u8; 16];
+    let id: String = match getrandom::fill(&mut bytes) {
+        Ok(()) => bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        // No random source: no preview rather than a guessable one.
+        Err(_) => return String::new(),
+    };
+    let mut kept = PREVIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    kept.retain(|(_, at, _)| at.elapsed() < PREVIEW_LIFE);
+    if kept.len() >= 8 {
+        kept.remove(0);
+    }
+    kept.push((id.clone(), std::time::Instant::now(), html));
+    format!("{PREVIEW_PREFIX}{id}")
+}
+
+/// `/report-preview/<id>`: one kept report, under a policy that allows its
+/// own inline stylesheet and data-URI fonts and logos, and no script, no
+/// network, no form — `report::REPORT_CSP`.
+fn report_preview(path: &str) -> Response {
+    let id = path.trim_start_matches(PREVIEW_PREFIX);
+    let kept = PREVIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    match kept
+        .iter()
+        .find(|(k, at, _)| k == id && at.elapsed() < PREVIEW_LIFE)
+    {
+        Some((_, _, html)) => {
+            Response::new(200, "text/html; charset=utf-8", html.clone().into_bytes())
+                .with_csp(crate::report::REPORT_CSP)
+        }
+        None => Response::error(404, "this preview has expired; generate the report again"),
+    }
 }
 
 /// The nodes and edges the Graph page draws.
@@ -6092,6 +6160,23 @@ fn drop_resolve(state: &Arc<State>, request: &Request) -> Response {
 
 #[cfg(test)]
 mod tests {
+    /// The Reports page's frame loads a kept report under the report-only
+    /// policy (no script), by an id nobody can guess; an unknown id is a 404.
+    #[test]
+    fn a_report_preview_is_served_under_the_report_policy() {
+        let path = super::keep_preview("<!doctype html><p>kept</p>".into());
+        assert!(path.starts_with(super::PREVIEW_PREFIX), "{path}");
+        assert_eq!(path.len(), super::PREVIEW_PREFIX.len() + 32, "{path}");
+        let found = super::report_preview(&path);
+        assert_eq!(found.status(), 200);
+        assert_eq!(found.csp(), crate::report::REPORT_CSP);
+        assert!(!crate::report::REPORT_CSP.contains("script-src"));
+        assert!(crate::report::REPORT_CSP.contains("default-src 'none'"));
+        let missing =
+            super::report_preview(&format!("{}{}", super::PREVIEW_PREFIX, "0".repeat(32)));
+        assert_eq!(missing.status(), 404);
+    }
+
     /// Three Claude Code windows are one app with three sessions, not three
     /// apps; versions seen are listed once each.
     #[test]

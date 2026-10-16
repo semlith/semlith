@@ -143,12 +143,18 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 # PATH. `rust_backend` keeps it from linking a system zlib.
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 # The PDF half of `semlith report`. Chosen for what it does not bring: no
-# dependencies at all, no build script, no system library and no font file, so
-# it cross-compiles to the three release targets like the rest of the crate and
-# `cargo publish` has nothing to object to. It writes PDF objects rather than
-# laying anything out, which is why `report::pdf` typesets in a fixed-width
-# base-14 face — the layout is arithmetic, not a font metrics table.
+# dependencies at all, no build script, no system library, so it cross-compiles
+# to the three release targets like the rest of the crate and `cargo publish`
+# has nothing to object to. It writes PDF objects; `report::pdf` lays them out.
 pdf-writer = "0.15.0"
+# From 0.42.0 the report PDF embeds IBM Plex (and, for a glyph Plex lacks, an OS
+# font found at render time) as a per-document subset. `ttf-parser` reads the
+# cmap and the real advance widths the layout is measured with — already in the
+# tree under lopdf, so it adds no crate. `subsetter` (typst's) cuts each face
+# down to the glyphs one document draws; without default features it brings no
+# dependency of its own (the variable-font support is what pulls skrifa).
+ttf-parser = "0.25.1"
+subsetter = { version = "0.2.6", default-features = false }
 
 # The Neural Engine lane: Core ML called from Rust, macOS only. Bindings, not
 # a framework of their own — the models are Apple's format and the runtime is

@@ -414,6 +414,61 @@ pub fn rotate_agent_key() -> Result<String> {
     Ok(key)
 }
 
+/// The machine's key for the digests a redacted report prints in place of a
+/// query, created on first use and never rotated implicitly.
+///
+/// A digest is only a redaction if nobody holding the report can recompute it:
+/// 0.41.0 printed an unkeyed blake3, and `detect_binary` came back from it by
+/// hashing the corpus's own symbol names (R7). keyscan's salt is the same idea
+/// but lives in each store, and a report a read-only connection writes can
+/// neither make one nor give one query the same digest in two stores, so the
+/// report's key is the machine's, beside the agent key, 0600.
+pub fn report_salt() -> Result<[u8; 32]> {
+    let path = home_or_error()?.join("report.salt");
+    let read = |path: &Path| -> Option<[u8; 32]> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let text = text.trim();
+        let mut out = [0u8; 32];
+        if text.len() != 64 {
+            return None;
+        }
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(text.get(2 * i..2 * i + 2)?, 16).ok()?;
+        }
+        Some(out)
+    };
+    if let Some(salt) = read(&path) {
+        return Ok(salt);
+    }
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("no random source: {e}"))?;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    if let Some(parent) = path.parent() {
+        secure_dir(parent)?;
+    }
+    // `create_new`, so two processes making it at once agree on the first one
+    // written rather than each keeping a key the other overwrote.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(FILE_MODE);
+    }
+    match options.open(&path) {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(hex.as_bytes())
+                .with_context(|| format!("writing {}", path.display()))?;
+            Ok(bytes)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            read(&path).with_context(|| format!("{} does not hold a report key", path.display()))
+        }
+        Err(e) => Err(e).with_context(|| format!("writing {}", path.display())),
+    }
+}
+
 /// Where the agent key's scope is kept: `read` or `write`, beside the key.
 pub fn agent_scope_path() -> Result<PathBuf> {
     Ok(home_or_error()?.join("agent.scope"))

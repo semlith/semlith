@@ -9310,14 +9310,15 @@ async function exportLedger(format) {
 
 const REPORTS = [
   ["savings", "Retrieval savings", "Tokens agents did not read, counted from the ledger.", "for whoever approves the spend", "What retrieval actually saved, per client, with the arithmetic shown."],
-  ["access", "AI access audit", "Which agent read which file, when — from a hash-chained record.", "for security review", "Every file an agent was shown, by client, in the window."],
+  ["access", "AI access audit", "Which agent asked what, when — from a hash-chained record.", "for security review", "Every agent session and what it asked, in the window."],
   ["change", "Change brief", "Blast radius for what changed, as a note to paste in the PR.", "for the reviewer", "What the change reaches."],
   ["health", "Index health", "Stale files, skipped formats and graph coverage.", "for whoever owns the store", "What the index holds, skipped, and let go stale."],
   ["gaps", "Knowledge gaps", "Questions the corpus could not answer well — a docs to-do list.", "for whoever writes the docs", "The questions that came back empty or thin."],
 ];
 const REPORT_FORMATS = [
   ["markdown", "Markdown", "md", "text/markdown"],
-  ["csv", "CSV", "csv", "text/csv"],
+  // A report's CSV is one file per table, so it saves as a zip of them.
+  ["csv", "CSV", "zip", "application/zip"],
   ["json", "JSON", "json", "application/json"],
   ["html", "HTML", "html", "text/html"],
   ["pdf", "PDF", "pdf", "application/pdf"],
@@ -9328,7 +9329,8 @@ const REPORT_WINDOWS = [
   ["month", "30 days"],
   ["quarter", "Quarter"],
 ];
-const WINDOWED = ["access", "change"];
+// Every report but the index's health narrows to a window (report::Window).
+const WINDOWED = ["savings", "access", "change", "gaps"];
 const CADENCES = [
   ["day", 86400],
   ["week", 604800],
@@ -9349,7 +9351,9 @@ VIEWS.reports = {
     const inert = !WINDOWED.includes(rp.kind);
     const fmt = REPORT_FORMATS.find((f) => f[0] === rp.format);
     const fileName = `${rp.kind}-${localDay()}.${fmt[2]}`;
-    const preview = el("div", { class: "preview", "data-scroll-keep": "rp-preview" });
+    // The rendered HTML, in a frame with no script, no same-origin access and a
+    // report-only policy from its own route; Copy stays Markdown.
+    const preview = el("div", { class: "preview report-preview", "data-scroll-keep": "rp-preview" });
     const previewMeta = el("div", { class: "card-foot" });
     const savingsCard = el("div", {});
     holder.onData = () => {};
@@ -9365,17 +9369,16 @@ VIEWS.reports = {
         if (rp.seq !== mine || !preview.isConnected) return clearInterval(tick);
         setText(preview, `Generating on this machine… ${Math.round((Date.now() - began) / 1000)} s — a report over a large store reads all of it`);
       }, 1000);
-      const p = new URLSearchParams({ kind: rp.kind, format: rp.format === "pdf" ? "markdown" : rp.format, model: rp.model });
-      if (!inert) p.set("window", rp.window);
-      for (const s of rp.stores) p.append("scope", s);
-      if (rp.hash) p.set("redact", "1");
-      if (rp.excerpts) p.set("excerpts", "1");
+      const p = reportParams("markdown");
+      p.set("preview", "1");
       try {
         const out = await api(`/api/report?${p}`);
         if (rp.seq !== mine) return;
         rp.out = out;
-        setText(preview, rp.out.text || "");
-        fill(previewMeta, `${def[4]} · ${rp.format} · ${rp.out.report ? rp.out.report.window : ""} · generated ${rp.out.generated || ""} · nothing uploaded`);
+        if (out.preview) fill(preview, el("iframe", { class: "report-frame", sandbox: "", title: `${def[1]} preview`, src: out.preview }));
+        else setText(preview, out.text || "");
+        const w = out.report ? out.report.window : null;
+        fill(previewMeta, `${def[4]} · ${w ? (w.applies ? w.label : "the index as it stands") : ""} · generated ${out.generated || ""} · nothing uploaded`);
         paintSavings();
       } catch (e) {
         if (rp.seq !== mine) return;
@@ -9386,12 +9389,18 @@ VIEWS.reports = {
         if (rp.seq === mine) rp.busy = false;
       }
     };
-    const save = async () => {
-      const p = new URLSearchParams({ kind: rp.kind, format: rp.format, model: rp.model });
+    // Only what this report reads: the copy-command and the request agree.
+    function reportParams(format) {
+      const p = new URLSearchParams({ kind: rp.kind, format });
+      if (rp.kind === "savings") p.set("model", rp.model);
       if (!inert) p.set("window", rp.window);
       for (const s of rp.stores) p.append("scope", s);
-      if (rp.hash) p.set("redact", "1");
-      if (rp.excerpts) p.set("excerpts", "1");
+      if (rp.hash && QUERIED.includes(rp.kind)) p.set("redact", "1");
+      if (rp.excerpts && rp.kind === "access") p.set("excerpts", "1");
+      return p;
+    }
+    const save = async () => {
+      const p = reportParams(rp.format);
       try {
         const out = await api(`/api/report?${p}`);
         if (out instanceof Blob) download(fileName, out, fmt[3]);
@@ -9403,11 +9412,14 @@ VIEWS.reports = {
     };
     function paintSavings() {
       if (rp.kind !== "savings" || !rp.out || !rp.out.report) return fill(savingsCard);
-      const blocks = rp.out.report.blocks || [];
-      const table = blocks.find((b) => b.block === "table");
-      const facts = (blocks.find((b) => b.block === "facts") || {}).facts || [];
-      const net = facts.find((f) => f[0] === "Net") || [];
-      const netCost = facts.find((f) => /cost avoided/i.test(f[0])) || [];
+      // The typed report (semlith.report/2): the not-read table's rows carry
+      // raw tokens and dollars, the KPIs carry what the page prints.
+      const report = rp.out.report;
+      const table = (report.blocks || []).find((b) => b.block === "table" && b.id === "not_read");
+      const facts = ((report.blocks || []).find((b) => b.block === "facts") || {}).facts || [];
+      const kpi = (label) => (report.kpis || []).find((k) => k.label === label) || {};
+      const net = kpi("Net tokens not read");
+      const netCost = kpi("Net cost avoided");
       const model = models.find((m) => m.name === rp.model);
       fill(
         savingsCard,
@@ -9425,21 +9437,30 @@ VIEWS.reports = {
             btn({ class: "btn xs", onclick: updatePrices, "data-tip": `One request to ${prices.url || "models.dev"}, made now because you asked` }, "Update prices"),
           ),
           table
-            ? table.rows.map((r) => el("div", { class: "save-line" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: r[0] }), el("span", { class: "muted t-xs", text: r[3] || "" })), el("span", { class: "tok", text: r[1] }), el("span", { class: "cost", text: r[2] || "—" })))
+            ? table.rows.map((r) => el("div", { class: "save-line" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: r[0] }), el("span", { class: "muted t-xs", text: r[3] || "" })), el("span", { class: "tok", text: n(r[1]) }), el("span", { class: "cost", text: r[2] == null ? "—" : `$${Number(r[2]).toFixed(2)}` })))
             : empty("No savings recorded yet."),
           el(
             "div",
             { class: "save-line net" },
-            el("span", { class: "row gap6" }, el("span", { class: "t-b big14", text: "Net" }), facts.filter((f) => !/^Net/.test(f[0])).map((f) => el("span", { class: "factchip sm", text: `${f[0].toLowerCase()} ${f[1]}` })), data.ledger ? el("span", { class: `factchip sm${data.ledger.intact === false ? " red" : ""}`, "data-tip": data.ledger.intact === false ? "A ledger row does not match its parent; see the Ledger page" : "Every ledger row matches its parent in the hash chain", text: data.ledger.intact === false ? "chain broken" : "chain verified" }) : null),
-            el("span", { class: "tok", text: net[1] || "—" }),
-            el("span", { class: "cost", text: netCost[1] || "—" }),
+            el("span", { class: "row gap6" }, el("span", { class: "t-b big14", text: "Net" }), [kpi("Coverage"), kpi("Fewer tokens")].filter((k) => k.label).concat(facts).map((f) => el("span", { class: "factchip sm", text: `${f.label.toLowerCase()} ${f.display}` })), data.ledger ? el("span", { class: `factchip sm${data.ledger.intact === false ? " red" : ""}`, "data-tip": data.ledger.intact === false ? "A ledger row does not match its parent; see the Ledger page" : "Every ledger row matches its parent in the hash chain", text: data.ledger.intact === false ? "chain broken" : "chain verified" }) : null),
+            el("span", { class: "tok", text: net.display || "—" }),
+            el("span", { class: "cost", text: netCost.display || "—" }),
           ),
         ),
       );
     }
     const optRow = (key, title, sub) => toggleRow(rp[key], title, sub, (v) => ((rp[key] = v), repaint(), generate()));
     const schedules = Object.entries((data.schedules || {}).schedules || {});
-    const cli = `semlith report ${rp.kind} \\\n  --format ${rp.format} \\\n  ${inert ? "" : `--window ${rp.window} \\\n  `}--model "${rp.model}"${rp.stores.length ? ` \\\n  ${rp.stores.map((s) => `--store ${s}`).join(" ")}` : ""}${rp.hash ? " \\\n  --redact" : ""}${rp.excerpts ? " \\\n  --excerpts" : ""}`;
+    // The command that writes this document: `--scope`, not `--store` (L13),
+    // and only the flags this report reads — no `--model` outside savings.
+    const flags = [`--format ${rp.format}`];
+    if (!inert) flags.push(`--window ${rp.window}`);
+    if (rp.kind === "savings") flags.push(`--model ${rp.model}`);
+    for (const s of rp.stores) flags.push(`--scope ${s}`);
+    if (rp.hash && QUERIED.includes(rp.kind)) flags.push("--redact");
+    if (rp.excerpts && rp.kind === "access") flags.push("--excerpts");
+    if (rp.format === "pdf" || rp.format === "csv") flags.push(`--out ${fileName}`);
+    const cli = [`semlith report ${rp.kind}`, ...flags].join(" \\\n  ");
     const node = el(
       "div",
       { class: "page" },
@@ -9454,7 +9475,7 @@ VIEWS.reports = {
           el(
             "div",
             { class: "card pad auto-fit m320 gap14" },
-            el("div", { class: "col gap6" }, el("span", { class: "eyebrow sm", text: "WINDOW" }), seg(REPORT_WINDOWS, inert ? "" : rp.window, (v) => ((rp.window = v), repaint()), { disabled: () => inert }), inert ? el("span", { class: "muted t-xs", text: "This report counts the whole history." }) : null),
+            el("div", { class: "col gap6" }, el("span", { class: "eyebrow sm", text: "WINDOW" }), seg(REPORT_WINDOWS, inert ? "" : rp.window, (v) => ((rp.window = v), repaint()), { disabled: () => inert }), inert ? el("span", { class: "muted t-xs", text: "The index as it stands: no window applies." }) : null),
             el("div", { class: "col gap6" }, el("span", { class: "eyebrow sm", text: "FORMAT" }), seg(REPORT_FORMATS.map((f) => [f[0], f[1]]), rp.format, (v) => ((rp.format = v), repaint()))),
             el(
               "div",
@@ -9467,7 +9488,7 @@ VIEWS.reports = {
                 liveStores().map((s) => btn({ class: "chip sm mono", "aria-pressed": String(rp.stores.includes(s.name)), onclick: () => ((rp.stores = rp.stores.includes(s.name) ? rp.stores.filter((x) => x !== s.name) : rp.stores.concat(s.name)), repaint()) }, s.name)),
               ),
             ),
-            el("div", { class: "row gap8 full-row" }, optRow("hash", "Hash the query text", "Keeps who, when and which file; drops what was asked."), optRow("excerpts", "Attach the excerpts", "The exact lines each agent was shown. A larger file.")),
+            el("div", { class: "row gap8 full-row" }, optRow("hash", "Hash the query text", "A digest keyed to this machine: keeps who, when and the cost; drops what was asked. Access and gaps."), optRow("excerpts", "Attach the per-retrieval rows", "Who asked, when, with which tool and what it cost — counts, not the lines shown. Access only.")),
           ),
           el(
             "div",
@@ -9493,13 +9514,13 @@ VIEWS.reports = {
         el(
           "div",
           { class: "card flexcol" },
-          el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Schedules" }), el("span", { class: "t-mono-sm", text: "run by the daemon · ~/.semlith/schedules.json" })),
+          el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Schedules" }), el("span", { class: "t-mono-sm anywhere", text: `run by the daemon · ${tilde((data.schedules || {}).path || "schedules.json")}` })),
           !schedules.length && !rp.picking ? empty("None yet. Set a report up above and press Schedule — the daemon writes the file in place, so it can be a tracked file with a readable diff.") : null,
           schedules.map(([id, s]) =>
             el(
               "div",
               { class: "sched-row" },
-              el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: (REPORTS.find((r) => r[0] === s.kind) || [, s.kind])[1] }), el("span", { class: "txt-dim", text: `${tilde(s.dir)} · ${s.format}${s.last_error ? ` · last run failed: ${s.last_error}` : s.next_run ? ` · next ${until(s.next_run)}` : ""}` })),
+              el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: (REPORTS.find((r) => r[0] === s.kind) || [, s.kind])[1] }), el("span", { class: "txt-dim", text: `${tilde(s.last_path || s.dir)} · ${s.format}${s.window ? ` · ${s.window}` : ""}${s.redact ? " · hashed" : ""}${s.excerpts ? " · rows" : ""}${s.last_error ? ` · last run failed: ${s.last_error}` : s.next_run ? ` · next ${until(s.next_run)}` : ""}` })),
               pill(everyWord(s.every_seconds), s.last_error ? "red" : "blue", { dot: false }),
               btn({ class: "x-btn", "aria-label": "Remove schedule", onclick: () => removeSchedule(id) }, icon(I.x, 12, { w: 2 })),
             ),
@@ -9529,25 +9550,34 @@ VIEWS.reports = {
   },
 };
 
+// The reports that print query text, so hashing it means something there.
+const QUERIED = ["access", "gaps"];
+
 function until(unix) {
   const s = unix - Math.floor(Date.now() / 1000);
   if (s <= 0) return "due now";
+  if (s < 60) return "in under a minute";
   if (s < 3600) return `in ${Math.round(s / 60)}m`;
   if (s < 86400) return `in ${Math.round(s / 3600)}h`;
   return `in ${Math.round(s / 86400)}d`;
 }
 
+/** `every 1 minute`, `every 90 seconds`, `every 2 hours`: any cadence, as
+ * the CLI's `every_words` says it (a 60 s schedule read "every 0 h"). */
 function everyWord(seconds) {
   const hit = CADENCES.find(([, s]) => s === seconds);
   if (hit) return `every ${hit[0]}`;
-  if (seconds % 86400 === 0) return `every ${seconds / 86400} days`;
-  return `every ${Math.round(seconds / 3600)} h`;
+  const unit = (count, word) => `every ${count} ${word}${count === 1 ? "" : "s"}`;
+  if (seconds >= 86400 && seconds % 86400 === 0) return unit(seconds / 86400, "day");
+  if (seconds >= 3600 && seconds % 3600 === 0) return unit(seconds / 3600, "hour");
+  if (seconds >= 60 && seconds % 60 === 0) return unit(seconds / 60, "minute");
+  return unit(seconds, "second");
 }
 
 async function addSchedule(every) {
   const dir = await pickFolder({ title: "Where should the daemon write it?", ok: "Write it here", hint: "The file is replaced in place on each run, so a tracked folder shows a readable diff." });
   if (!dir) return;
-  const out = await act(() => post("/api/schedules", { action: "add", kind: rp.kind, format: rp.format, model: rp.model, every_seconds: every, dir, window: WINDOWED.includes(rp.kind) ? rp.window : undefined, stores: rp.stores }), `Scheduled ${everyWord(every)}`);
+  const out = await act(() => post("/api/schedules", { action: "add", kind: rp.kind, format: rp.format, model: rp.model, every_seconds: every, dir, window: WINDOWED.includes(rp.kind) ? rp.window : undefined, stores: rp.stores, redact: rp.hash && QUERIED.includes(rp.kind), excerpts: rp.excerpts && rp.kind === "access" }), `Scheduled ${everyWord(every)}`);
   rp.picking = false;
   if (out) await load("schedules", true);
   repaint();

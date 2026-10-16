@@ -891,42 +891,48 @@ enum Command {
 
         /// markdown, csv, json, html or pdf.
         ///
-        /// A PDF is bytes rather than text, so it needs `--out`: writing it to
-        /// a terminal would be a screenful of binary and a file nobody has.
+        /// A PDF, and a CSV (a zip of one file per table), are bytes rather
+        /// than text, so they need `--out`; `--table` prints one CSV table.
         #[arg(long, short, default_value = "markdown")]
         format: String,
+
+        /// With `--format csv`: print one table as a plain CSV instead of
+        /// the zip — `summary`, or a table's id (the error lists them).
+        #[arg(long)]
+        table: Option<String>,
 
         /// Which model's prices the savings report costs tokens at.
         #[arg(long, default_value = semlith::report::DEFAULT_MODEL)]
         model: String,
 
-        /// Narrow the report to a period: all, day, week, month or quarter.
+        /// The period: all, day, week, month or quarter. Month when not named,
+        /// as on the portal's Reports page.
         ///
-        /// Three of the five reports are lifetime aggregates with no date to
-        /// narrow by. They say so under their title rather than printing a
-        /// span they did not apply.
+        /// The health report is the index as it stands and says so rather
+        /// than printing a span it did not apply.
         #[arg(long)]
         window: Option<String>,
 
         /// Narrow the report to these stores, by label. Repeatable.
         ///
-        /// Every open store when none is named, which is what this command has
-        /// always done.
+        /// Every open store when none is named.
         #[arg(long)]
         scope: Vec<String>,
 
-        /// Attach the individual retrievals, not only the session totals.
+        /// Attach the per-retrieval rows behind the session totals: who asked,
+        /// when, with which tool, how many hits and what they cost.
         ///
-        /// A session line says an agent asked forty times; this is which forty.
-        /// Access report only.
+        /// The ledger keeps counts, not the lines an agent was shown, so this
+        /// attaches rows, never lines. Access report only.
         #[arg(long)]
         excerpts: bool,
 
-        /// Replace every query text with a digest of it.
+        /// Replace every query text with a digest keyed to this machine.
         ///
-        /// Keeps the who, the when and the which-file, and drops what was
-        /// asked. Applies wherever a query reaches the page, not only to the
-        /// attachment above.
+        /// Keeps the who, the when and the cost, and drops what was asked,
+        /// wherever a query reaches the page. The key is
+        /// `~/.semlith/report.salt`, so a digest cannot be recomputed from a
+        /// guess elsewhere.
         #[arg(long)]
         redact: bool,
 
@@ -2873,6 +2879,7 @@ fn run() -> Result<()> {
         Command::Report {
             kind,
             format,
+            table,
             model,
             window,
             scope,
@@ -2900,6 +2907,15 @@ fn run() -> Result<()> {
             if format == semlith::report::PDF && out.is_none() {
                 anyhow::bail!("a pdf is bytes rather than text — name a file with --out");
             }
+            if table.is_some() && format != semlith::report::CSV {
+                anyhow::bail!("--table picks one CSV table; add --format csv");
+            }
+            if format == semlith::report::CSV && table.is_none() && out.is_none() {
+                anyhow::bail!(
+                    "a report's csv is a zip of one file per table — name a file with --out, \
+                     or print one table with --table (summary, or the table's id)"
+                );
+            }
             let fleet = read_fleet(&cli.store, &cwd, false)?;
             let report = semlith::report::generate_with(
                 &fleet,
@@ -2907,14 +2923,25 @@ fn run() -> Result<()> {
                 &model,
                 window,
                 &scope,
-                semlith::report::Options { excerpts, redact },
+                semlith::report::Options {
+                    excerpts,
+                    redact,
+                    salt: None,
+                },
             )?;
+            let bytes = match &table {
+                Some(id) => report.render_table(id)?.into_bytes(),
+                None => report.render_bytes(&format)?,
+            };
             match out {
                 Some(path) => {
-                    std::fs::write(&path, report.render_bytes(&format)?)?;
+                    std::fs::write(&path, bytes)?;
                     println!("{} written to {}", report.title, display(&path));
                 }
-                None => print!("{}", report.render(&format)?),
+                None => {
+                    use std::io::Write;
+                    std::io::stdout().write_all(&bytes)?;
+                }
             }
         }
 
@@ -5241,6 +5268,16 @@ enum ScheduleCommand {
         /// Narrow to these stores, by label. Repeatable.
         #[arg(long)]
         scope: Vec<String>,
+
+        /// Replace every query text with a digest keyed to this machine, as
+        /// `semlith report --redact` does.
+        #[arg(long)]
+        redact: bool,
+
+        /// Attach the per-retrieval rows (counts, never lines), as `semlith
+        /// report --excerpts` does. Access report only.
+        #[arg(long)]
+        excerpts: bool,
     },
 
     /// Remove a schedule by its id.
@@ -5319,6 +5356,8 @@ fn run_schedule(what: ScheduleCommand) -> anyhow::Result<()> {
             model,
             window,
             scope,
+            redact,
+            excerpts,
         } => {
             // Absolute here rather than in `check`, so a relative path typed at
             // a terminal means what the person typing it meant. The daemon has
@@ -5332,6 +5371,8 @@ fn run_schedule(what: ScheduleCommand) -> anyhow::Result<()> {
             let mut schedule = Schedule::new(&kind, &format, &model, every, &to);
             schedule.window = window;
             schedule.stores = scope;
+            schedule.redact = redact;
+            schedule.excerpts = excerpts;
             // Refused before anything is written, naming what would have
             // worked: half a schedules file is worse than none.
             schedule.check()?;
