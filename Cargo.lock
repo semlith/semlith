@@ -2568,6 +2568,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustc-hash"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
+
+[[package]]
 name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2660,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "semlith"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2688,6 +2694,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "subsetter",
  "tempfile",
  "tokenizers",
  "tree-sitter",
@@ -2737,6 +2744,7 @@ dependencies = [
  "tree-sitter-yaml",
  "tree-sitter-zig",
  "ts-parser-perl",
+ "ttf-parser",
  "turbovec",
  "ureq",
  "windows-sys 0.61.2",
@@ -2944,6 +2952,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
+name = "subsetter"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38803281d1c23166c5ebcb455439a5d2afe711cc909cf88af72448c297756ad6"
+dependencies = [
+ "rustc-hash",
+]
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2989,7 +3006,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

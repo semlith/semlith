@@ -134,6 +134,12 @@ pub(crate) const UNSORTED_ENV: &str = "SEMLITH_UNSORTED";
 /// The meta row counting a store's chunks per vector variant.
 const VARIANTS_KEY: &str = "variants";
 
+/// The meta row naming how this store's markup files were last swept:
+/// `raw` (as written) or `extracted` (the text a browser shows). Absent on a
+/// store written before 0.42.0, which extracted every one. An additive row, so
+/// `FORMAT_VERSION` does not move: an older binary reads raw markup as text.
+const MARKUP_KEY: &str = "markup";
+
 /// Embedding sessions writers hold in this process, for `/api/about`.
 static SESSIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -444,6 +450,76 @@ pub fn code_shaped(query: &str) -> bool {
     }) || query.contains("()")
 }
 
+/// Whether a query describes something seen, which is what the image list
+/// is for (0.42.0, G13).
+///
+/// A third reading of the same text, beside [`shape_of`] and [`code_shaped`]
+/// for the same reason they sit together. CLIP cannot be the judge: it reads
+/// the words in a screenshot, so a question naming the project scores the
+/// project's own screenshots like a description of them. Measured on flask,
+/// "how does flask dispatch a request to a view" put flaskr_index.png at a
+/// cosine of 0.355 — the right picture for "a green triangle" scores 0.359 —
+/// and no floor or margin over a caption true of any picture told the two
+/// apart. The query's own words do: a picture word (`screenshot`, `diagram`,
+/// `logo`), a colour or a shape. A crude list a reader can predict, as with
+/// the shape, rather than a judgement nobody can.
+pub fn pictured(query: &str) -> bool {
+    const SEEN: [&str; 46] = [
+        "picture",
+        "pictures",
+        "image",
+        "images",
+        "photo",
+        "photos",
+        "photograph",
+        "screenshot",
+        "screenshots",
+        "screen",
+        "diagram",
+        "diagrams",
+        "logo",
+        "icon",
+        "icons",
+        "drawing",
+        "illustration",
+        "sketch",
+        "painting",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "webp",
+        "red",
+        "green",
+        "blue",
+        "yellow",
+        "orange",
+        "purple",
+        "pink",
+        "black",
+        "white",
+        "grey",
+        "gray",
+        "brown",
+        "circle",
+        "square",
+        "triangle",
+        "rectangle",
+        "ring",
+        "stripes",
+        "striped",
+        "checkerboard",
+        "gradient",
+        "donut",
+    ];
+    let lower = query.to_lowercase();
+    lower.contains("look like")
+        || lower.contains("looks like")
+        || lower
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| SEEN.contains(&w))
+}
+
 /// The identifiers a sentence names: backticked, `snake_case`, `camelCase`,
 /// `a::b` and `call()` words, at most three.
 fn named_identifiers(query: &str) -> Vec<String> {
@@ -702,17 +778,13 @@ const TEST_PENALTY: f32 = 0.10;
 /// spaces is what added the fourth.
 type Candidate = (((bool, u64), f32), Vec<&'static str>);
 
-/// How many ranked lists a text chunk can be found by: vector, keyword and
-/// graph. An image can be found by one, which is what
-/// [`Semlith::search_ranked`] weighs a confident image match against.
-const TEXT_LISTS: f32 = 3.0;
-
-/// What an image below [`IMAGE_FLOOR`] is worth in the fusion.
-///
-/// Small enough that a weak image scores about what it did before the list
-/// was given the steep curve, so #122's fix moved the confident case and
-/// nothing else.
-const WEAK_IMAGE: f32 = 0.25;
+/// How many ranked lists a text chunk of an ordinary question is found by:
+/// vector and keyword. An image can be found by one, so an image that really
+/// matches stands in for both, which is what [`Semlith::search_ranked`] gives
+/// it. It was three, counting the graph list 0.36.0 removed, and that third
+/// list was most of why a picture's 3/13 sat at the top of every answer on a
+/// store holding screenshots (2026-10-14 audit, G13).
+const TEXT_LISTS: f32 = 2.0;
 
 /// The CLIP cosine above which an image match is treated as a confident one.
 ///
@@ -746,7 +818,28 @@ fn image_floor() -> f32 {
 /// reorders a candidate pool and never adds to it. The pool itself is the only
 /// thing that can, so this is the mean that was tried for recall, with the pair
 /// on either side of it recorded in the release.
+///
+/// From 0.42.0 the depth is fixed rather than a multiple of the `k` asked
+/// for: [`FUSE_DEPTH`].
 const RANK_DEPTH: usize = 4;
+
+/// How deep every list is searched and fused, whatever `k` is: four times the
+/// default `k` of 8, which is the depth the harness has always measured at.
+///
+/// A depth of `4 * k` made the answer a function of `k`. A chunk second in
+/// one list and 25th in the other collects both contributions at k=8 and only
+/// one at k=5, so asking for fewer results reordered the first ones and moved
+/// their scores: ripgrep's "how does ripgrep detect binary files" scored
+/// 723-736 at 0.077 with k=5 and 0.089 with k=8, and 754-765 was third at k=5
+/// and gone at k=3 (2026-10-14 audit, G12). Fused at one depth and then cut,
+/// the first `n` results of any `k` up to this are the same results with the
+/// same scores.
+///
+/// ponytail: a `k` above it widens the pool to `k`, so a request for more than
+/// 32 results can still order its head differently from one for 32. A fixed
+/// depth of the largest `k` a surface allows (50) would close that and fetch
+/// six times the rows on every default search.
+const FUSE_DEPTH: usize = RANK_DEPTH * 8;
 
 /// How many files an index run may get through without making its work
 /// durable.
@@ -949,6 +1042,11 @@ pub struct Hit {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(serialize_with = "serialize_plain_list")]
     pub copies: Vec<String>,
+    /// Other stores that answered with this same span of the same repository
+    /// — a local checkout and its remote mirror — merged into this one hit
+    /// rather than printed twice (0.42.0, F21).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agreed: Vec<String>,
 }
 
 /// An image's pixel size.
@@ -1051,6 +1149,15 @@ pub enum SkipReason {
     NoText,
     /// An image whose header no decoder recognised.
     NotDecodableImage,
+    /// A password-protected document: there is no text to read without the
+    /// password, which is a different fact from a document with no text.
+    Encrypted,
+    /// An archive format (a `.docx`, an EPUB) that decompresses past
+    /// [`crate::formats::MAX_ARCHIVE_TEXT`]: left out as a zip bomb would be.
+    ArchiveTooLarge,
+    /// Bytes with no NUL that are still not text: this percentage of the
+    /// first 8 KiB is invalid UTF-8 or control characters (a Brotli file).
+    NotText(u8),
 }
 
 impl SkipReason {
@@ -1065,6 +1172,14 @@ impl SkipReason {
             Self::Binary => "binary".to_string(),
             Self::NoText => "no text in this document".to_string(),
             Self::NotDecodableImage => "not a decodable image".to_string(),
+            Self::Encrypted => "encrypted: no text without its password".to_string(),
+            Self::ArchiveTooLarge => format!(
+                "decompresses past {} MiB, left out as a zip bomb would be",
+                crate::formats::MAX_ARCHIVE_TEXT / (1024 * 1024)
+            ),
+            Self::NotText(share) => {
+                format!("binary: {share} % of its first 8 KiB is not valid UTF-8 text")
+            }
         }
     }
 
@@ -1088,6 +1203,9 @@ impl SkipReason {
             Self::Binary => "binary",
             Self::NoText => "no text in this document",
             Self::NotDecodableImage => "not a decodable image",
+            Self::Encrypted => "encrypted",
+            Self::ArchiveTooLarge => "archive too large",
+            Self::NotText(_) => "binary",
         }
     }
 }
@@ -1564,6 +1682,9 @@ pub struct Plan {
     /// can list what was left out rather than only count it.
     #[serde(serialize_with = "serialize_plain_lists")]
     pub not_indexed_paths: std::collections::BTreeMap<String, Vec<String>>,
+    /// Why a listed file has no text, by path, where the reader could say: a
+    /// zip bomb and an encrypted `.docx` read "no text layer" in Review.
+    pub not_indexed_why: std::collections::BTreeMap<String, String>,
     /// What a person could accept, one entry each.
     pub review: Vec<Review>,
     /// Credential files: listed, never offered.
@@ -1839,13 +1960,13 @@ const PAUSE_TICK: std::time::Duration = std::time::Duration::from_millis(120);
 pub struct Semlith {
     dir: PathBuf,
     db: Connection,
-    index: VectorIndex,
+    index: index::Vectors,
     /// The image vectors, in their own space at CLIP's 512 dimensions.
     ///
     /// A second index rather than a second kind of row in the first: vectors
     /// from two models are not comparable, and one index holding both would
     /// rank a picture against a paragraph by arithmetic that means nothing.
-    images: VectorIndex,
+    images: index::Vectors,
     /// The full-precision copy of what the codes approximate, for reordering
     /// the handful of candidates a query is about to return.
     exact: index::Exact,
@@ -1886,6 +2007,8 @@ pub struct Semlith {
     /// The index generation this process has loaded. Compared against the
     /// store's on every search to notice another process's writes.
     generation: u64,
+    /// Whether this reader takes its vectors from [`index::shared`].
+    shares_vectors: bool,
     /// The filters this store resolved most recently, newest first, each kept
     /// until the store changes. An agent scoped to one repository asks with
     /// the same `path` call after call, and resolving it again was the largest
@@ -1997,11 +2120,16 @@ impl Semlith {
         // most commands never look at them. Which layout they are in is the
         // store's business, decided when it was created and never migrated.
         let sharded = store::format(&db)? >= store::SHARDED_FORMAT;
-        let index = VectorIndex::open(&dir, dim, BIT_WIDTH, sharded)?;
+        let index = index::Vectors::own(VectorIndex::open(&dir, dim, BIT_WIDTH, sharded)?);
         // Beside the text index rather than inside it. Created lazily by
         // `VectorIndex::open`, so a store that never holds an image never grows
         // the directory.
-        let images = VectorIndex::open(&dir.join(image::INDEX_DIR), image::DIM, BIT_WIDTH, true)?;
+        let images = index::Vectors::own(VectorIndex::open(
+            &dir.join(image::INDEX_DIR),
+            image::DIM,
+            BIT_WIDTH,
+            true,
+        )?);
 
         let generation = generation(&db)?;
 
@@ -2028,6 +2156,7 @@ impl Semlith {
             tokenizer: None,
             clip: image::Clip::default(),
             generation,
+            shares_vectors: false,
             filter_memo: std::collections::VecDeque::new(),
             quiet: false,
             boundary: Boundary::default(),
@@ -2101,14 +2230,27 @@ impl Semlith {
     /// Name the store's two vector indexes again from what is on disk.
     fn reopen_indexes(&mut self) -> Result<()> {
         let sharded = store::format(&self.db)? >= store::SHARDED_FORMAT;
-        self.index = VectorIndex::open(&self.dir, self.dim, BIT_WIDTH, sharded)?;
-        self.images = VectorIndex::open(
-            &self.dir.join(image::INDEX_DIR),
-            image::DIM,
-            BIT_WIDTH,
-            true,
-        )?;
+        let (dir, dim) = (self.dir.clone(), self.dim);
+        let text = move || VectorIndex::open(&dir, dim, BIT_WIDTH, sharded);
+        let pictures_dir = self.dir.join(image::INDEX_DIR);
+        let pictures = move || VectorIndex::open(&pictures_dir, image::DIM, BIT_WIDTH, true);
+        if self.shares_vectors {
+            let generation = generation(&self.db)?;
+            self.index = index::shared(&self.dir, "text", generation, text)?;
+            self.images = index::shared(&self.dir, "images", generation, pictures)?;
+        } else {
+            self.index = index::Vectors::own(text()?);
+            self.images = index::Vectors::own(pictures()?);
+        }
         Ok(())
+    }
+
+    /// Answer from the one copy of this store's vectors every reader in this
+    /// process shares, from now on (the daemon's readers; see
+    /// [`index::Vectors`]). Never the writer's: its index moves under a run.
+    pub fn share_vectors(&mut self) -> Result<()> {
+        self.shares_vectors = true;
+        self.reopen_indexes()
     }
 
     /// The vector half of a search, read consistently against a compaction
@@ -2581,7 +2723,11 @@ impl Semlith {
                         .map(|e| e.symbols)
                         .unwrap_or_default(),
                 ),
-                _ => {
+                other => {
+                    if let Ok(Err(why)) = &other {
+                        plan.not_indexed_why
+                            .insert(crate::plain(&path.to_string_lossy()), why.as_str());
+                    }
                     not(&mut plan, store::class::UNINDEXABLE, &path);
                     continue;
                 }
@@ -3173,7 +3319,7 @@ impl Semlith {
         // written only after the index lands, so a crash re-indexes them.
         let mut completed: Vec<(i64, String)> = Vec::new();
 
-        let checkpointing = matches!(self.index, index::VectorIndex::Sharded(_));
+        let checkpointing = self.index.is_sharded();
         let every = checkpoint_files();
         let mut since_checkpoint = 0usize;
 
@@ -3193,6 +3339,21 @@ impl Semlith {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0)
             < GRAPH_RULES;
+        // How this store keeps markup (0.42.0, F13): as written, unless the
+        // store says it holds docs or leans to them. A store whose markup
+        // files were last swept the other way — every store written before
+        // 0.42.0, which stripped them, and has no row — re-reads them on this
+        // pass, and only them: their bytes have not changed, the rule has.
+        let markup_extracted = {
+            let settings = crate::home::store_settings(&self.dir);
+            settings.kind == "docs" || settings.lean == "docs"
+        };
+        let markup_rule = if markup_extracted { "extracted" } else { "raw" };
+        let markup_moved = store::get_meta(&self.db, MARKUP_KEY)?
+            .as_deref()
+            .unwrap_or("extracted")
+            != markup_rule;
+        let downloads = add::downloads_dir(&self.dir);
         let prehashed = std::mem::take(&mut self.prehashed);
         let run_started = std::time::Instant::now();
 
@@ -3315,7 +3476,16 @@ impl Semlith {
             hashes: if self.force {
                 Default::default()
             } else {
-                store::all_hashes(&self.db)?
+                let mut hashes = store::all_hashes(&self.db)?;
+                // A file with no recorded hash is read, extracted and chunked
+                // again, which is the whole of the markup upgrade.
+                if markup_moved {
+                    hashes.retain(|path, _| {
+                        let path = Path::new(path);
+                        !chunk::is_markup(path) || path.starts_with(&downloads)
+                    });
+                }
+                hashes
             },
             uncounted: store::uncounted(&self.db)?,
             over_cap: store::acceptances(&self.db)?
@@ -4003,7 +4173,19 @@ impl Semlith {
                     } => {
                         report.bytes += file_bytes;
                         read_mtime = seen;
-                        (hash, len, text, units, found, ready)
+                        // The prepare stage reads markup as written. A docs
+                        // store, and a page `semlith add` fetched, keep the
+                        // text a browser shows instead: scanned again, and
+                        // parsed and chunked below from that text.
+                        if chunk::is_markup(&path)
+                            && (markup_extracted || path.starts_with(&downloads))
+                        {
+                            let text = chunk::markup_text(&text);
+                            let found = keyscan::scan(&key, &text);
+                            (hash, len, text, units, found, None)
+                        } else {
+                            (hash, len, text, units, found, ready)
+                        }
                     }
                 };
                 let file_bytes = report.bytes - bytes_before;
@@ -4614,6 +4796,9 @@ impl Semlith {
             if regraph {
                 store::set_meta(&self.db, "graph_rules", &GRAPH_RULES.to_string())?;
             }
+            if markup_moved {
+                store::set_meta(&self.db, MARKUP_KEY, markup_rule)?;
+            }
         }
 
         // A batch that changed nothing must not rewrite index.tv. A watcher
@@ -4962,57 +5147,10 @@ impl Semlith {
         file_id: i64,
         spans: &[(u32, u32, i64)],
     ) -> Result<(usize, usize)> {
-        let Some(extraction) = extraction else {
-            return Ok((0, 0));
-        };
-
-        // Name to id, for the edges below. A file may define the same name
-        // twice — two `new` methods on two types — and the first wins, because
-        // an edge out of this file names its source by name and nothing here
-        // can tell them apart either.
-        let mut ids: std::collections::HashMap<&str, (i64, bool)> =
-            std::collections::HashMap::new();
-        for symbol in &extraction.symbols {
-            let chunk_id = spans
-                .iter()
-                .find(|(start, end, _)| symbol.start_line >= *start && symbol.start_line <= *end)
-                .map(|(_, _, id)| *id);
-            let id = store::insert_symbol(&self.db, file_id, chunk_id, symbol)?;
-            // A definition outranks the file's module symbol of the same name:
-            // `fn brief` in `brief.rs` is where its calls come from, and giving
-            // them to the module put every caller of it at line 1.
-            let module = symbol.kind == "module";
-            match ids.get(symbol.name.as_str()) {
-                None => {
-                    ids.insert(symbol.name.as_str(), (id, module));
-                }
-                Some((_, true)) if !module => {
-                    ids.insert(symbol.name.as_str(), (id, false));
-                }
-                _ => {}
-            }
+        match extraction {
+            Some(extraction) => store::write_extraction(&self.db, &extraction, file_id, spans),
+            None => Ok((0, 0)),
         }
-        let ids: std::collections::HashMap<&str, i64> =
-            ids.into_iter().map(|(k, (id, _))| (k, id)).collect();
-
-        let mut written = 0;
-        for edge in &extraction.edges {
-            let Some(src) = ids.get(edge.from.as_str()) else {
-                continue;
-            };
-            store::insert_edge(
-                &self.db,
-                *src,
-                &edge.to,
-                &edge.kind,
-                &edge.confidence,
-                edge.hint.as_deref(),
-                edge.line,
-            )?;
-            written += 1;
-        }
-
-        Ok((extraction.symbols.len(), written))
     }
 
     /// Record files as indexed, in one transaction. Their vectors must already
@@ -5211,7 +5349,7 @@ impl Semlith {
         crate::cpucap::pace();
         self.follow_budget();
         let timed = std::time::Instant::now();
-        let (index, exact) = (&mut self.index, &mut self.exact);
+        let (index, exact) = (&self.index, &mut self.exact);
         crate::cpucap::within(|| -> Result<()> {
             index.add(&flat, &done.ids)?;
             exact.append(&flat, &done.ids)
@@ -5776,8 +5914,9 @@ impl Semlith {
 
         // Look deeper than `k` in each half. Fusion can only rank what it is
         // given, and a chunk that is second on one side and absent from the
-        // other still deserves to be considered.
-        let depth = (k * RANK_DEPTH).max(k);
+        // other still deserves to be considered. At one depth for every `k`,
+        // so `k` only cuts the answer and never changes it (G12).
+        let depth = FUSE_DEPTH.max(k);
 
         // Which half of the fusion this query's own text says to trust.
         let shape = shape_of(query);
@@ -5891,7 +6030,14 @@ impl Semlith {
         // query has to be embedded a second time, with CLIP's text encoder
         // rather than the store's own model, and a store of source code should
         // not pay for a model it has nothing to compare against.
-        let (images, truncated) = self.image_search(query, depth, filter)?;
+        // And only for a query that describes something seen: see
+        // [`pictured`]. Anything else is not asked, which also spares it the
+        // CLIP embed.
+        let (images, truncated) = if pictured(query) {
+            self.image_search(query, depth, filter)?
+        } else {
+            (Vec::new(), false)
+        };
 
         // Two id spaces — a chunk id and an image id both count from one — so
         // the fusion is keyed by which space an id belongs to as well as by the
@@ -5901,38 +6047,37 @@ impl Semlith {
         // The image list goes in first so that a tie resolves to the image.
         // A tie means the two are equally ranked, and only one of them was
         // found by a model that looked at the thing being asked about.
-        let image_list: Vec<(u64, f32)> = images
-            .iter()
-            .map(|(id, similarity)| {
-                // A confident image match stands in for the lists a chunk
-                // can appear in: an image can only ever be found by this one,
-                // and a chunk collects a contribution from each of the
-                // others. Without this weight a picture could never place
-                // above a passing text match however well CLIP matched it.
-                //
-                // Below the floor the image is a weak candidate rather than a
-                // wrong one, so it sits where that puts it instead of being
-                // dropped — and because the list's curve is now steep for
-                // every shape (#122), the weak weight is a fraction rather
-                // than 1.0, so an unconfident image scores what it scored
-                // before: 0.25 / 13 = 0.019 at rank one, against 1 / 61 =
-                // 0.016 under the old flat curve. The order among the
-                // also-rans is unchanged; only the confident case moved.
-                //
-                // A query CLIP had to cut short is never confident: the cosine
-                // is of its opening words, not of what was asked. An issue or a
-                // pasted paragraph runs past 77 tokens, and a screenshot of
-                // text matches the opening of almost any technical prose
-                // (0.24-0.31 on Django's docs, against 0.39 for a sentence
-                // describing a screenshot).
-                let weight = if *similarity >= image_floor() && !truncated {
-                    TEXT_LISTS
-                } else {
-                    WEAK_IMAGE
-                };
-                (*id, weight)
-            })
-            .collect();
+        //
+        // Only the pictures that really match, fused by their rank among
+        // those (0.42.0, G13). A real match stands in for the lists a chunk
+        // can appear in: an image can only ever be found by this one, and a
+        // chunk collects a contribution from each of the others, so without
+        // the weight a picture could never place above a passing text match
+        // however well CLIP matched it (#122).
+        //
+        // Everything else is left out rather than weighted down. Until 0.41.x
+        // a weak image joined at a quarter of a list, and a strong one at
+        // three lists, on a floor that a screenshot of text clears for almost
+        // any sentence: flask's "register a blueprint url prefix" opened with
+        // two PNGs at 3/13 and 3/14 above every chunk of code, and brief led
+        // with debugger.png. A query is shown a picture when it describes
+        // one (above) and CLIP agrees past the floor, and otherwise not at
+        // all.
+        //
+        // A query CLIP had to cut short is never a real match: the cosine is
+        // of its opening words, not of what was asked. An issue or a pasted
+        // paragraph runs past 77 tokens, and a screenshot of text matches the
+        // opening of almost any technical prose (0.24-0.31 on Django's docs,
+        // against 0.39 for a sentence describing a screenshot).
+        let image_list: Vec<(u64, f32)> = if truncated {
+            Vec::new()
+        } else {
+            images
+                .iter()
+                .filter(|(_, similarity)| *similarity >= image_floor())
+                .map(|(id, _)| (*id, TEXT_LISTS))
+                .collect()
+        };
 
         let candidate_lists = [
             // Weightless on purpose. A definition does not out-*score* the
@@ -6036,6 +6181,7 @@ impl Semlith {
                             symbol_kind: None,
                             symbol_line: None,
                             copies: Vec::new(),
+                            agreed: Vec::new(),
                         },
                         0.0,
                     ));
@@ -6067,6 +6213,7 @@ impl Semlith {
                         symbol_kind: None,
                         symbol_line: None,
                         copies: Vec::new(),
+                        agreed: Vec::new(),
                     },
                     similarity,
                 ));
@@ -6326,9 +6473,14 @@ impl Semlith {
         // Chunks overlap by two lines, so they are stitched by line number
         // rather than concatenated — concatenation would repeat the seam and
         // the caller would read two copies of the same line as two lines.
+        //
+        // Split on `\n` rather than with `lines()`: a chunk is its lines joined
+        // by `\n`, so one that ends on a blank line ends in `\n`, and `lines()`
+        // drops that last line. `read main.rs:8-10` printed two lines of three
+        // (2026-10-14 audit, G14).
         let mut lines: Vec<(u32, String)> = Vec::new();
         for chunk in &chunks {
-            for (offset, line) in chunk.text.lines().enumerate() {
+            for (offset, line) in chunk.text.split('\n').enumerate() {
                 let number = chunk.start_line + offset as u32;
                 if lines.iter().any(|(n, _)| *n == number) {
                     continue;
@@ -7101,6 +7253,9 @@ pub fn check_roots(roots: &[PathBuf]) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) 
 /// The file of gitignore patterns a store honours on top of `.gitignore`.
 pub const IGNORE_FILE: &str = ".semlithignore";
 
+/// The rule a dotfile the walk skipped is listed under.
+pub const HIDDEN_RULE: &str = "hidden file or folder";
+
 /// Walk `roots`, honouring `.gitignore` and skipping hidden files. Returns
 /// canonical paths so the same file reached two ways is one entry.
 /// Which path a walk error is about.
@@ -7801,6 +7956,21 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf], gitignore: bool) -> Wal
                     )
                 {
                     credentials.push(key(&entry.file_name()));
+                    continue;
+                }
+                // Any other dotfile the hidden rule stepped over is said too,
+                // a folder once: ripgrep's `.gitignore`, `.ignore`,
+                // `.nvim.lua` and `.cargo/` were skipped with nothing on the
+                // Review step saying so (224 + 7 shown of 236). A whitelisted
+                // one the walk yielded is not; `.git` is the repository's
+                // own bookkeeping, not a file of it.
+                let yielded_here = if kind.is_dir() {
+                    walked_dirs.contains(&path)
+                } else {
+                    yielded.contains(&path)
+                };
+                if !yielded_here && name != ".git" && (kind.is_file() || kind.is_dir()) {
+                    excluded.push((key(&entry.file_name()), HIDDEN_RULE.to_string()));
                 }
                 continue;
             }
@@ -7873,6 +8043,65 @@ fn semlithignore_for(dir: &Path) -> Option<ignore::gitignore::Gitignore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The image list is asked only by a query that describes something
+    /// seen (G13): every question of the image class does, and the audit's
+    /// questions about flask's code do not.
+    #[test]
+    fn only_a_query_describing_something_seen_asks_for_pictures() {
+        for seen in [
+            "a red circle",
+            "a black and white checkerboard pattern",
+            "yellow horizontal stripes",
+            "an orange ring, like a donut",
+            "a grey gradient fading from dark to light",
+            "a screenshot of the flaskr login page",
+            "what does the debugger look like",
+        ] {
+            assert!(pictured(seen), "{seen}");
+        }
+        for text in [
+            "register a blueprint url prefix",
+            "where does flask register a blueprint",
+            "how does flask dispatch a request to a view",
+            "how does ripgrep detect binary files",
+            "search_preferring",
+        ] {
+            assert!(!pictured(text), "{text}");
+        }
+    }
+
+    /// Every dotfile the hidden rule skipped is listed, so the Review step
+    /// accounts for every file on disk; `.git` and a whitelisted one are not.
+    #[test]
+    fn a_skipped_dotfile_is_listed_not_silent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join(".cargo/config.toml"), "x").unwrap();
+        std::fs::write(root.join(".nvim.lua"), "x").unwrap();
+        std::fs::write(root.join(".ignore"), "!/.github/\n").unwrap();
+        std::fs::create_dir_all(root.join(".github")).unwrap();
+        std::fs::write(root.join(".github/ci.yml"), "x").unwrap();
+        std::fs::write(root.join("src/a.rs"), "fn a() {}").unwrap();
+        let walked = walk_allowing(std::slice::from_ref(&root), &[], true);
+        let hidden: Vec<String> = walked
+            .excluded
+            .iter()
+            .filter(|(_, rule)| rule == HIDDEN_RULE)
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(hidden.contains(&".cargo".to_string()), "{hidden:?}");
+        assert!(hidden.contains(&".nvim.lua".to_string()), "{hidden:?}");
+        assert!(hidden.contains(&".ignore".to_string()), "{hidden:?}");
+        assert!(!hidden.contains(&".git".to_string()), "{hidden:?}");
+        assert!(
+            !hidden.contains(&".github".to_string()),
+            "a whitelisted folder: {hidden:?}"
+        );
+    }
 
     fn def(start: u32, end: u32, name: &str) -> (u32, u32, String, String) {
         (start, end, name.to_string(), "function".to_string())
@@ -8015,6 +8244,7 @@ mod tests {
                     symbol_kind: None,
                     symbol_line: None,
                     copies: Vec::new(),
+                    agreed: Vec::new(),
                 },
                 1.0,
             )
@@ -8130,6 +8360,7 @@ mod tests {
                     symbol_kind: None,
                     symbol_line: None,
                     copies: Vec::new(),
+                    agreed: Vec::new(),
                 },
                 0.0,
             )

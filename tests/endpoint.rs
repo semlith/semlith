@@ -28,7 +28,11 @@ struct Daemon {
 impl Daemon {
     fn start(home: &std::path::Path, args: &[&str]) -> Self {
         std::fs::create_dir_all(home).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        // `SEMLITH_TEST_BIN` runs these against another build, which is how a
+        // test is shown red on the release before the fix.
+        let bin = std::env::var_os("SEMLITH_TEST_BIN")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_semlith").into());
+        let mut child = Command::new(bin)
             .arg("start")
             .arg("--port")
             .arg("0")
@@ -370,6 +374,48 @@ fn a_connected_client_is_listed_with_what_it_said_about_itself() {
         body.contains("2025-06-18"),
         "the negotiated revision is missing: {body}"
     );
+}
+
+/// MCP 2026-07-28 has no `initialize` and no session header: Claude Code
+/// 2.1.299 sends `server/discover` and then bare calls, naming itself in
+/// `params._meta` on every one (the capture in the 2026-10-14 audit). Every
+/// such call used to be one "unnamed client" in one "anonymous" session.
+#[test]
+fn a_stateless_client_is_named_from_its_meta_on_every_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(&dir.path().join("home"), &[]);
+    let key = daemon.key();
+    let meta = r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"claude-code","title":"Claude Code","version":"2.1.299"}}"#;
+    let headers = format!(
+        "Authorization: Bearer {key}\r\nUser-Agent: claude-code/2.1.299 (sdk-cli)\r\n\
+         mcp-protocol-version: 2026-07-28\r\n"
+    );
+    for (id, method) in [(1, "server/discover"), (2, "tools/list")] {
+        let body =
+            format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{{{meta}}}}}"#);
+        let (status, response) = daemon.send("POST", "/mcp", &headers, &body);
+        assert_eq!(status, 200, "{method} failed: {response}");
+        assert!(
+            !response.contains("Mcp-Session-Id"),
+            "a stateless revision is handed a session: {response}"
+        );
+    }
+    let (_, body) = daemon.with_token("GET", "/api/agents", "");
+    assert!(body.contains("Claude Code"), "not named: {body}");
+    assert!(body.contains("2.1.299"), "no version: {body}");
+    assert!(body.contains("2026-07-28"), "no revision: {body}");
+    assert!(!body.contains("unnamed client"), "an unnamed row: {body}");
+
+    // The User-Agent alone names a client that puts nothing in `_meta`.
+    let bare = r#"{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#;
+    let ua = format!("Authorization: Bearer {key}\r\nUser-Agent: opencode/1.4.0\r\n");
+    daemon.send("POST", "/mcp", &ua, bare);
+    let (_, body) = daemon.with_token("GET", "/api/agents", "");
+    assert!(
+        body.contains("OpenCode"),
+        "the User-Agent was ignored: {body}"
+    );
+    assert!(!body.contains("unnamed client"), "an unnamed row: {body}");
 }
 
 /// The key opens the endpoint, so a page that is merely open must not be handed

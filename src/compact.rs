@@ -21,7 +21,7 @@
 //! The CLI, the daemon, the portal route and the library's embedders all call
 //! this one function, so none of them can disagree about what compacting means.
 
-use crate::index::{self, VectorIndex};
+use crate::index;
 use crate::{BIT_WIDTH, GENERATION, Semlith, generation, image, lock, now, store};
 use anyhow::Result;
 use rusqlite::Connection;
@@ -181,7 +181,7 @@ impl Semlith {
     /// full-precision sidecar and the sharded layout. A store without either
     /// is compacted as far as it can be and told to re-index.
     pub fn compacts_vectors(&self) -> bool {
-        self.exact.exists() && matches!(self.index, VectorIndex::Sharded(_))
+        self.exact.exists() && self.index.is_sharded()
     }
 
     /// Compact this store, taking its writer's lock for the length of it.
@@ -219,7 +219,7 @@ impl Semlith {
             None => 0,
         };
         let mut notes = Vec::new();
-        let sharded = matches!(self.index, VectorIndex::Sharded(_));
+        let sharded = self.index.is_sharded();
         if !self.exact.exists() {
             notes.push(format!(
                 "no full-precision vectors (written before 0.23.0): {REINDEX_TO_COMPACT}"
@@ -400,7 +400,7 @@ mod tests {
 
     /// A store with shards of eight, so churn spans several of them.
     fn store(dir: &Path) -> Semlith {
-        let mut s = Semlith::open(dir, None).unwrap();
+        let s = Semlith::open(dir, None).unwrap();
         s.index.set_capacity(8);
         s
     }

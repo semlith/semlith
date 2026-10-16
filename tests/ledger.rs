@@ -430,12 +430,12 @@ fn rows_sharing_a_query_id_count_as_one_retrieval() {
 
     let shared = "one-search";
     for (excerpt, whole) in [(10, 100), (20, 200)] {
-        let mut r = row("portal", "sourdough", excerpt, whole);
+        let mut r = row("Claude Code", "sourdough", excerpt, whole);
         r.query_id = shared;
         semlith::store::record_retrieval(s.db(), &r).unwrap();
     }
     // A row from before this release, with no id: its own retrieval, as it was.
-    semlith::store::record_retrieval(s.db(), &row("cli", "rye", 5, 50)).unwrap();
+    semlith::store::record_retrieval(s.db(), &row("Zed", "rye", 5, 50)).unwrap();
 
     let (queries, _, excerpt, whole) = semlith::store::ledger_totals(s.db()).unwrap();
     assert_eq!(queries, 2, "two searches, three rows");

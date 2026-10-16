@@ -185,7 +185,9 @@ for changes** on, re-indexed when saved.
 - **Browse folders** — a picker confined to your home, multi-select, showing which
   folders other stores already read.
 - **Paste a path** — one per line; quotes are stripped, `file://` URLs decoded,
-  `~` expanded.
+  `~` expanded. The portal reads only inside your home folder; a path outside it
+  is refused with the command that indexes it from a terminal, `semlith index
+  <path>`, which has no such limit.
 - **Add a URL** — one https request for exactly that URL (a page, a PDF, a file
   on GitHub) when the run starts; no crawling, no credentials, kept in the
   store's own downloads folder. Refused under airgap.
@@ -215,8 +217,12 @@ and **Undo** reverses the last decision. Every decision is logged per file as
 yours. An agent can never make one: the route refuses any caller that is not a
 person on this page.
 
-**Left out automatically** groups what needs no decision: ignored files, build
-output, lockfiles, oversize files, files with no text, and credential files.
+**Left out automatically** groups what needs no decision: ignored files and
+hidden files (every dotfile and dot-folder the hidden rule skipped, named, so the
+counts add up to the files on disk), build output, lockfiles, oversize files,
+files with no text — each saying why where the reader can tell: binary, not
+UTF-8 text, encrypted, or an archive past the 32 MiB budget — and credential
+files.
 Credential files — keys, tokens, `.env` — are never offered, even with your
 agreement. Undecided files stay out; decisions can be changed later on the store's
 Review tab.
@@ -617,9 +623,11 @@ on; when that line is unknown nothing is printed rather than a wrong one.
 Treat `extracted` and `resolved` as answers, `inferred` as a hint and `ambiguous`
 as a question. `extracted` and `inferred` are stored at extraction; `resolved` and
 `ambiguous` are computed on every read, because indexing another definition of the
-same name can change the answer. Resolution prefers a definition in the same file,
-then the file the source names, then a file the source imports, then a unique
-definition in the corpus. Ambiguous edges are drawn dashed amber and never crossed
+same name can change the answer. Resolution prefers a definition in the same file
+(unless a module path in the call names another), then the file the source names, then a file the source imports, then a unique
+definition in the corpus. A call through a receiver (`x.run()`) is different: it
+settles only on a method of the receiver's stated type and never on a free
+function, so a receiver nothing typed is `ambiguous`. Ambiguous edges are drawn dashed amber and never crossed
 by a walk that prefers verified edges; a chain may also only leave from the
 definition it arrived at (see **seam** below).
 
@@ -689,12 +697,16 @@ not.
 
 ### Connected
 
-Clients talking to the daemon now: the name from the MCP handshake (or, for the
-stdio proxy, the app that launched it), state, version, transport, queries and the
-last one. Several windows of one client are one row with their sessions counted.
-**What the tool list costs** shows the tool list's size in tokens and bytes — paid
-once per session before the agent asks anything — measured from what the daemon
-serves now. With nothing connected, the tab says how to get a first client: register
+Clients talking to the daemon now: the name the client gives — at the MCP
+handshake, or on every request for a client on MCP 2026-07-28, which has no
+handshake (its User-Agent when it gives neither; for the stdio proxy, the app that
+launched it) — state, version, transport, queries and the last one. Several windows
+of one client are one row with their sessions counted. A stateless client's
+conversation is one client, version and transport until it has been quiet for 30
+minutes. **What the tool list costs** shows the tool list's size in bytes and in
+tokens at four bytes a token — the same count the release gate asserts — paid once
+per session before the agent asks anything, measured from what the daemon serves
+now. With nothing connected, the tab says how to get a first client: register
 it, then restart it.
 
 ### Add a client
@@ -744,12 +756,16 @@ does not verify, a banner offers **Re-verify**; a repair appends one note row sa
 where it broke and verifies from there — no row is edited or removed.
 `semlith ledger --verify` is the same walk.
 
+Every figure on the page is one aggregation over the rows (`ledger::figures`), the
+same one `semlith ledger`, the store cards and every report print, so a figure here
+can be recomputed from the rows and from any other surface.
+
 | Figure | Counts |
 |---|---|
-| Queries recorded | Retrievals, and how many clients ran them. |
-| Fewer tokens | Whole-file tokens over excerpt tokens, with coverage and tier. |
-| Net tokens not read | Whole-file less excerpt, over rows with a hit. |
-| Zero-hit | Share and count of queries the corpus could not answer. |
+| Queries recorded | Agent retrievals — a search several stores answered is one — and how many clients ran them; the portal's and the CLI's own searches are listed beside it and not counted. |
+| Fewer tokens | Whole-file tokens over excerpt tokens, over retrievals that found something, with coverage and tier. |
+| Net tokens not read | Whole-file less excerpt, over the same retrievals, summed as they are. |
+| Zero-hit | Share and count of retrievals nothing answered. |
 
 - **Coverage** — the share of retrievals the saving is computed over; a retrieval
   that found nothing counts in the denominator.
@@ -757,16 +773,27 @@ where it broke and verifies from there — no row is edited or removed.
   tokenizer, `modelled` when any was estimated at four characters per token.
 - **Refunds** — files an agent read whole anyway: measured on clients with the
   steering hook, a floor elsewhere. A refund is an agent not reaching for semlith; a
-  zero hit is semlith not reaching the answer.
+  zero hit is semlith not reaching the answer. A refund is never a query, never in
+  coverage, the saving, the zero hits or the gaps.
+- **Latency** — p50 and p95 over retrievals that measured work, one figure each.
 
-The ratio never counts a failure as a success or a row twice; the whole-file side
-is the files' size on disk at four characters per token.
+The ratio never counts a failure as a success or a row twice. The whole-file side
+is what reading the file would cost: for a PDF, an Office or OpenDocument file, an
+EPUB, mail, a notebook or HTML, the text the store holds for it counted like the
+excerpt; for plain text, its bytes at four a token; for an image, nothing. Rows
+written before 0.42.0 counted every file by its bytes and keep their numbers; the
+Retrievals tab's **Tier** column says which way each row was counted
+(`tokenizer · text`, `chars÷4 · bytes`). The chain from 0.42.0 also covers each
+row's query id, version and basis, and its usage once filled, and records its head,
+so a rewritten id or a deleted newest row fails the verify.
 
 **What agents read, against reading whole files** draws the two totals; **By
 client** draws a bar per client that filters the tables below. Three tabs:
 **Sessions** (one row per conversation: client, model, reads, net tokens, and
 **Saved** at that model's input price), **Retrievals** (one row per query: when,
-query, hits, what was sent, tier; filter by store, client, tier, **Zero-hit only**)
+client, store, tool, query, hits, what was sent, tier; filter by store, client,
+**Zero-hit only**; its export carries every row, tool, session, version, tier and
+stale hits, not only the newest the page loaded)
 and **Session replay** (what an agent did after each answer — sufficed, missed, or
 followed by a whole-file read — read from local agent session logs). Tables sort,
 page, and export to Markdown, CSV and JSON.
@@ -790,42 +817,141 @@ generator answers `semlith report` and `semlith_report`, byte for byte.
 | Report | What it is | For |
 |---|---|---|
 | Retrieval savings | Tokens agents did not read, from the ledger. | whoever approves the spend |
-| AI access audit | Which agent read which file, when, from the hash-chained record. | security review and AI-use policy |
-| Change brief | Blast radius of what changed, as a note for the PR. | the reviewer |
-| Index health | Stale files, skipped formats, graph coverage. | whoever owns the store |
-| Knowledge gaps | Questions the corpus could not answer well. | whoever writes the docs |
+| AI access audit | Which agent asked what, and when, from the hash-chained record. | security review and AI-use policy |
+| Change brief | Files re-read, the definitions they changed, and what reaches them. | the reviewer |
+| Index health | What the index holds, graph coverage, what was refused or skipped. | whoever owns the store |
+| Knowledge gaps | Questions the corpus could not answer; names called and not defined. | whoever writes the docs |
 
-Choosing a report generates it. **Window** (24 hours, 7 days, 30 days, Quarter)
-applies to the access audit and change brief; the others count the whole history
-and say so. **Format** is Markdown, CSV, JSON, HTML or PDF, rendered by the server
-(the PDF is typeset inside the binary, not printed from HTML). **Stores** is all or
-a selection. **Hash the query text** replaces each query with a digest; **Attach
-the excerpts** adds the exact lines each agent was shown.
+Choosing a report generates it. **Window** (24 hours, 7 days, 30 days, Quarter;
+30 days to start, the same default `semlith report` uses) applies to every report
+but Index health, which is the index as it stands and says so; every figure of a
+windowed report is counted from the rows inside the window. **Format** is
+Markdown, CSV (a zip of one file per table), JSON, HTML or PDF, rendered by the
+server (the PDF is typeset inside the binary, not printed from HTML). **Stores** is
+all or a selection. **Hash the query text** replaces each query with a digest keyed
+to this machine, in the access audit and the gaps report; **Attach the
+per-retrieval rows** adds who asked, when, with which tool and what it cost to the
+access audit — counts, not the lines an agent was shown, which the ledger does not
+keep.
 
-The preview shows the file name (dated by this machine's clock), **Copy** and
-**Save to disk** (the browser's own save; no route writes a file for the page).
-**The savings, line by line** prices the arithmetic at a model you pick, with the
-rate, source and date; **Update prices** fetches models.dev's table once, after
-asking — the only network request on this page. **Without the browser** shows the
-equivalent `semlith report` command and MCP call. The page never redraws on its own:
-a report is a reading of a moment.
+The preview is the rendered HTML report, in a sandboxed frame served from its own
+route under a policy that allows no script and no network; **Copy** copies the
+Markdown and **Save to disk** saves the chosen format through the browser (no
+route writes a file for the page). **The savings, line by line** prices the
+arithmetic at a model you pick, with the rate, source and date; **Update prices**
+fetches models.dev's table once, after asking — the only network request on this
+page. **Without the browser** shows the `semlith report` command that writes the
+same document, with only the flags that report reads (`--scope` for stores), and
+`semlith_report` over MCP takes the same window, scope and toggles. The page never
+redraws on its own: a report is a reading of a moment. What each format holds and
+the JSON schema are under [Formats and the JSON schema](#formats-and-the-json-schema).
 
 ### Schedules
 
 A schedule is a report the daemon writes on a cadence into a directory you name.
-**Schedule…** on the preview asks for both; the card lists each schedule with its
-last and next run and **Remove schedule**. Schedules live in
-`~/.semlith/schedules.json`; with no daemon running they wait. The daemon never
-creates the directory (an unmounted volume must not be written into its mount
-point), replaces the file in place each run (a tracked folder shows a readable
-diff), never generates two at once, and waits while a store is indexing.
+**Schedule…** on the preview asks for both and keeps every option the page set —
+window, stores, format, model, hashing and the attached rows; the card lists each
+schedule with the file it writes, its cadence in words (any interval, down to the
+one-minute floor), its last and next run and **Remove schedule**, and names the
+schedules file the daemon reads (`schedules.json` in the store home). With no
+daemon running they wait. Each schedule writes one file, named for its options
+(`semlith-savings-week.md`, `semlith-access-month-flask.pdf`), replaced in place
+each run through a temporary file and a rename, so a tracked folder shows a
+readable diff and a reader never sees half a report. The daemon never creates the
+directory (an unmounted volume must not be written into its mount point), never
+generates two at once, and waits while a store is indexing.
 
 ```sh
 semlith schedule list
-semlith schedule add savings --every 604800 --to ~/Reports --format pdf
+semlith schedule add savings --every 604800 --to ~/Reports --format pdf --window week
+semlith schedule add access --every 86400 --to ~/Reports --redact --excerpts
 semlith schedule remove s1
 semlith schedule set s1 off
 ```
+
+### Formats and the JSON schema
+
+Human surfaces (the portal and `semlith search`) are recorded in the ledger and
+counted as human searches, never as agent queries or agent saving. Refunds (a
+whole-file read the steering hook saw) and rows that are not queries (notes,
+refusals, accept, revoke) are never queries, coverage, zero-hit or gaps. Every
+number prints through one formatter, the portal's: `711,763`, `$1.42`, `80%`,
+`325.3×`, `67 ms`.
+
+**HTML** is the reference rendering: one file, no script, no URL. IBM Plex (the
+portal's own subsets, about 90 KB as base64) and both logos are embedded, the
+colours are the portal's tokens read from its stylesheet, light or dark follows the
+reader's system, and printing gives light A4 pages with table headers repeated. At
+390 px it stacks without scrolling sideways; a wide table scrolls inside its card.
+
+**PDF** is typeset by the binary to match the HTML's print rendering: A4 (Letter
+when the locale is US or Canada), IBM Plex embedded as a per-document subset, a
+running footer with *page x of y* and the ledger head, a bookmark per card,
+Title/Author/Producer/date metadata and a tagged structure. A character Plex has
+no glyph for is taken from the system's CJK fonts at render time (Hiragino, Apple
+SD Gothic Neo or Arial Unicode on macOS; Noto CJK, Droid Sans Fallback or
+WenQuanYi on Linux; Yu Gothic, MS Gothic, Microsoft YaHei or Malgun on Windows).
+With none installed the glyph draws as a box and the text layer still holds the
+character: every glyph carries a ToUnicode entry.
+
+**Markdown** is built for GitHub and a PR body: a meta table, a KPI table, tables
+with `---:` on numeric columns, notes as quotes, tables over ten rows inside
+`<details>`, the recompute command fenced.
+
+**CSV** is data: one file per table, a header of stable snake_case keys, numbers
+unformatted (`711763`, `1.42`, `0.8`), stamps ISO 8601. A report is a `.zip` of
+`<kind>-summary.csv` (`key,value,unit,currency,over`) and one
+`<kind>-<table>.csv` per table; `semlith report --format csv --table summary` (or a
+table's id) prints one.
+
+**JSON** is `semlith.report/2`:
+
+```json
+{
+  "schema": "semlith.report/2",
+  "kind": "savings", "title": "Retrieval savings",
+  "audience": "for whoever approves the spend",
+  "lede": "Agents on this machine asked 10 questions in the last 7 days. …",
+  "generated": "2026-10-14 20:13:04 +05:30", "generated_at": "2026-10-14T20:13:04+05:30",
+  "version": "0.42.0",
+  "window": { "name": "week", "label": "Last 7 days", "applies": true,
+              "from": "2026-10-07T20:13:04+05:30", "to": "2026-10-14T20:13:04+05:30" },
+  "stores": ["flask", "ripgrep"], "redacted": false,
+  "meta": [ { "label": "Ledger chain", "lines": ["46 rows · head 849df1da…81ab"],
+              "chips": [ { "text": "verifies", "tone": "green" } ] } ],
+  "kpis": [ { "label": "Net cost avoided", "value": 1.423526, "unit": "money",
+              "currency": "USD", "over": "at claude-sonnet-5-5 input price",
+              "display": "$1.42", "lead": false } ],
+  "blocks": [
+    { "block": "table", "id": "not_read", "title": "What was not read", "meta": "…",
+      "columns": [ { "key": "line", "label": "Line", "kind": "strong" },
+                   { "key": "tokens", "label": "Tokens", "kind": "num" },
+                   { "key": "cost_usd", "label": "Cost", "kind": "num" } ],
+      "rows": [ ["Whole files not read", 713944, 1.427888] ],
+      "total": ["Net not read", 711763, 1.423526], "note": "…", "empty": "…" },
+    { "block": "facts", "title": "Counted alongside", "meta": "…",
+      "facts": [ { "label": "Latency p50", "value": 67.0, "unit": "ms",
+                   "over": "over 10 queries in the window", "display": "67 ms" } ] },
+    { "block": "note", "text": "…" },
+    { "block": "code", "title": "Recompute it", "meta": "…", "comment": "…",
+      "lines": ["semlith report savings --window week --model claude-sonnet-5-5"] }
+  ],
+  "chain": { "state": "verifies", "rows": 46, "head": "k1:849df1da…" }
+}
+```
+
+A **figure** (a KPI or a fact) is `value` (a number; a string for a word such as a
+tier; `null` when there is nothing to divide by), `unit` (`tokens`, `queries`,
+`files`, `sessions`, `definitions`, `names`, `stores`, `bytes`, `ms`, `ratio` from
+0 to 1, `times`, `money`, `text`), `currency` (with `money` only), `over` and
+`display` (what a person saw). A **table** has typed `columns` — a stable
+snake_case `key` carrying its unit, and a `kind` of `text`, `strong`, `muted`,
+`id`, `num` or `bar` — and `rows` of raw values in column order: numbers as
+numbers, shares as ratios, stamps as ISO 8601, nothing as `null`; `more` counts
+rows not listed. `window.applies` is false for health and `from` is absent for
+`all`; `chain` (`verifies`, `broken` or `empty`) is absent from reports that do not
+read the ledger. `semlith.report/1` (0.27.0 to 0.41.0) held display strings in
+untyped blocks and is no longer produced.
 
 ## Privacy
 
@@ -853,7 +979,9 @@ and whether it is cached: the embedding model (once, on the first run), the WebG
 plugin and fp16 model, the CUDA pack (only after its lane is turned on), a URL you
 add (one request, when you press Fetch), Semlith Cloud (nothing until you sign in),
 and the release check and price table (github.com and models.dev, only when you
-press the button). Airgap refuses all of them unless already cached.
+press the button). Below them, every file `semlith add` has fetched into a store's
+`downloads/` folder, with the host it came from and its size. Airgap refuses all of
+them unless already cached.
 
 **What the stores already hold** runs today's refusal rules backwards: **Check
 now** applies the deny-list to each file's name and the credential shapes to its

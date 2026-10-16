@@ -129,7 +129,7 @@ Headless Claude Code on 50 held-out questions generated from the code of a 70-re
 
 ### Savings in real sessions
 
-The owner's own ledger across 8 stores, benchmark stores excluded: 1,575 retrievals, 87 % credited (measured/modelled). The excerpts returned were 1,281,313 tokens; the whole files they came from, 96,399,209 — 75.2x across all stores, 50.7x for the median store. That comparison is an upper bound on what reading would have cost, not a measurement of it; the agent table is the head-to-head.
+The owner's own ledger across 8 stores, benchmark stores excluded: 1,575 retrievals, 87 % credited (measured/modelled). The excerpts returned were 1,281,313 tokens; the whole files they came from, 96,399,209 — 75.2x across all stores, 50.7x for the median store. That comparison is an upper bound on what reading would have cost, not a measurement of it; the agent table is the head-to-head. Counted under 0.38.0's rules: from 0.42.0 the whole-file side of a PDF, an Office file, an EPUB, a notebook or an HTML page is the text the store holds for it rather than its bytes over four, which lowers the saving for document stores, and this figure was not re-measured under that rule.
 
 `python3 bench/scorecard/ledger_savings.py`
 <!-- scorecard:end -->

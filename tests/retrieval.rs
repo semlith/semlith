@@ -468,7 +468,8 @@ fn the_retrieval_metrics_are_measured() {
     }
 
     let tool_list = semlith::mcp::tool_list_bytes();
-    let tool_tokens = tool_list.div_ceil(4);
+    // The same count the Agents page prints (0.42.0): one function.
+    let tool_tokens = semlith::mcp::tool_list_tokens() as usize;
     let summary = Summary::of(reports);
     // Measured before the table is drawn, because its row goes in that table.
     let image = score_the_image_class(&fixtures, runs);
@@ -484,8 +485,14 @@ fn the_retrieval_metrics_are_measured() {
     // each costs.
     summary.print_cost();
 
+    // 0.42.0 moved this from 50 to 40, measured, for the reason the release
+    // gives: a call through a receiver nothing types is `ambiguous` now rather
+    // than settled on whatever definition sat nearest (ripgrep's
+    // `.build_parallel().run(||` was "resolved" to the free fn `main::run`).
+    // On this corpus that is 3,523 of 6,967 edges settled, 50 %; the gate is
+    // what the honest resolver measures less headroom, not a round number.
     assert!(
-        summary.census_share() > 50,
+        summary.census_share() > 40,
         "only {}% of call edges whose target this corpus holds resolve to one \
          definition; the resolver is the release's central change and this is the \
          number that says whether it works",

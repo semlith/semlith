@@ -728,6 +728,53 @@ From 0.37.0-rc.7:
 |---|---|
 | Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
+### 0.42.0
+
+`FORMAT_VERSION` does not move. The ledger gains three additive columns
+(`whole_basis`, `chain`, `seal`) and a `ledger_head` meta row, applied on
+open; an older binary ignores them.
+
+| Surface | Change |
+|---|---|
+| **Break: the whole-file side of a saving** | Rows written from 0.42.0 count a PDF, Office, OpenDocument, EPUB, mail, notebook or HTML file as the text the store holds for it, an image as none, plain text as its bytes over four (`retrievals.whole_basis = 'text'`). Rows already written keep their numbers. |
+| **Break: what the figures count** | Every figure is `ledger::figures`: refunds, notes, refusals and accept/revoke rows are not queries; rows from `cli` and `portal` are counted under `human` and out of the agents' figures; a retrieval several stores answered is one; net is not clamped; latency is per retrieval that measured work. `/api/ledger` gains `client_names`, `counted`, `p50_ms`, `p95_ms`, `human`, `sessions_total`, `by_agent`, `by_store`, `rows_total`, and each row `id`, `tool`, `session`, `client_version`, `stale_hits`, `tier`, `basis`, `chain`; `?rows=all` returns every row. The per-store `store::ledger_*` readers take `store::AGENT_RETRIEVAL`. |
+| **Break: chain v2** | Rows written from 0.42.0 carry `chain = 2` and a `k2:` hash covering `query_id`, the client version and the basis; `seal` covers usage and `synced_at`; the head is recorded. A binary before 0.42.0 reports the first v2 row as the break; rows it writes after a rollback verify on 0.42.0. |
+| MCP | A client on 2026-07-28 is named from `params._meta["io.modelcontextprotocol/clientInfo"]` on every request, or its User-Agent; a stateless client's conversation is derived (client, version, transport, 30 minutes idle) and no `Mcp-Session-Id` is sent to it. `server/discover` answers with no store open. `semlith_read`, `semlith_pattern`, `semlith_impact` and `semlith_trace` write ledger rows. |
+| Daemon | Forwarded MCP calls take one of two to four readers; readers share one vector index, query session and tokenizer per store. A run over files a store already holds is answered from the store before it until it commits (readers hold an SQLite read transaction; the WAL grows by the run until then). |
+| Library | `ledger::{figures, Figures, Window, is_retrieval, is_human, percent}`, `store::{record_counted, ledger_facts, LedgerFact, held_text, pin_snapshot, unpin_snapshot, is_pinned, record_v1_retrieval, BASIS_TEXT, BASIS_BYTES, AGENT_RETRIEVAL}`, `index::{Vectors, shared}`, `Semlith::share_vectors`, `Fleet::{share_vectors, reconcile}`, `clock::{offset_at, local_when}`, `clientid::user_agent`, `mcp::{client_info, revision_of}`. `mcp::tool_list_tokens()` takes no counter: it is bytes over four. `SkipReason` gains `Encrypted`, `ArchiveTooLarge`, `NotText`. |
+| Indexing | A file whose first 8 KiB is over 30 % invalid UTF-8 or control characters is refused as binary. |
+| Tool-written state | The Core ML worker's protocol is 4: a fresh `accel/coreml-worker-v4` copy is made and the Neural Engine compiles its models once more. |
+| CLI | `semlith ledger` prints one block for every store named, with latency and the human count; rows older than today carry their date. `semlith prices` lists its table. `semlith refused --store` narrows a daemon's listing. `cloud status` says "checked N ago". |
+
+### 0.42.0 — reports and exports
+
+| Surface | Change |
+|---|---|
+| **Break: report JSON** | `semlith.report/2` (docs/portal.md, Reports › Formats and the JSON schema): typed figures (`value`, `unit`, `currency`, `over`, `display`), KPIs, meta and typed table columns with raw values. `window` is an object (`name`, `label`, `from`, `to`, `applies`). The 0.41 shape (blocks of display strings, `window` a sentence) is gone. |
+| **Break: report CSV** | One file per table with snake_case headers and unformatted numbers, saved as a `.zip` with `summary.csv`; `--table <id>` (`table=` on `/api/report`, `table` on `semlith_report`) prints one. `semlith report --format csv` needs `--out` or `--table`. `report::FORMATS` (text) is markdown, json, html. |
+| **Break: the default window** | No window named is `month` (30 days) on every surface — the CLI, `/api/report`, `semlith_report` and a schedule without one; it used to be everything outside the portal. `report::Window::Unset` is gone. Every figure of a windowed report counts only rows inside the window. |
+| **Break: schedules** | A schedule writes one file named for its options (`semlith-<kind>[-<window>][-<store>…].<ext>`), replaced in place, where it wrote a dated file per run. A record gains `redact` and `excerpts`; an older binary ignores them. |
+| Redaction | A redacted query is `hash:` and 16 hex characters of blake3 keyed with `~/.semlith/report.salt` (new, `0600`), not an unkeyed digest. |
+| CLI | `semlith report --table`; `semlith schedule add --redact --excerpts`. Numbers in reports print `736,397`. |
+| MCP | `semlith_report` takes `window`, `scope`, `redact`, `excerpts` and `table`. |
+| Routes | `/api/report` answers CSV without `table` as `application/zip`, takes `table`, and with `preview=1` adds `preview`, a `/report-preview/<id>` path served (credential-free, ten minutes) under a CSP with no script. `/api/schedules` gains `path`; `add` takes `redact` and `excerpts`. |
+| Exports | HTML embeds IBM Plex and the logos and follows the portal's tokens; the PDF embeds IBM Plex subsets (and an OS CJK font for glyphs Plex lacks), A4 or Letter by locale, page x of y, bookmarks, metadata, tags. |
+| Library | `report` is a module directory: `Report::new`, `Figure`, `Cell`, `Column`, `Kind`, `Table`, `Kpi`, `Fact`, `Meta`, `Chip`, `Chain`, `WindowInfo`, `Block::{Table, Facts, Note, Code}`, `render_table`, `table_ids`, `extension`, `number`, `num`, `DEFAULT_WINDOW`, `CSV`, `SCHEMA`, `REPORT_CSP`; `Options` gains `salt`. `store::report_rows_since`, `files_read_since`, `path_bounds`; `home::report_salt`; `http::Response::with_csp`. |
+
+### 0.42.0 — search, read and brief
+
+Search, read and brief against the 2026-10-14 audit. `FORMAT_VERSION` does not
+move: the `markup` meta row is additive, and markup a 0.42.0 code store holds as
+written reads as text under 0.41.x.
+
+| Surface | Change |
+|---|---|
+| **Break: what a code store holds** | `.html` and `.htm` are stored as written and chunked as text unless the store's `kind` or `lean` is `docs` (or the page came from `semlith add`). A store re-reads those files, and only those, on its next full pass. |
+| Search ranking | Every list is searched 32 deep whatever `k` is, so `-k 3` returns the first three of `-k 8` with the same scores. An image joins only for a query describing something seen (a picture word, a colour or a shape) and at or above the floor; a weak image is no longer listed. |
+| Search output | A hit another store answered with the same span of the same repository (a remote mirror, or two stores over one checkout) is shown once with `agreed` naming the other: a JSON field, `agreed: …` in a locate row, `(agreed: …)` in the CLI. A forwarded exact or symbol answer whose rows the local answer holds prints one line, `<store> (remote · <org>) agreed: the same N rows as above`. |
+| `read` | Prints every line of the range, blank ones included. |
+| `brief` | Buys the top locator and the text span's locator, then that definition's own edges edge by edge, then the other locators, then text (none once an edge is dropped). `-- dropped:` names locators, edges, symbols' edges and spans' text; a span without text says which span has it; an image is named without a line range. |
+
 ### 0.41.0
 
 The rest of the 0.39.0 audit. `FORMAT_VERSION` does not move: a store 0.41.0

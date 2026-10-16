@@ -39,7 +39,7 @@ makes. It runs a fixed set of 107 questions with ground-truth spans from
 `tests/fixtures/retrieval/questions.yaml` — identifier-shaped, concept-shaped and
 multi-hop — and prints hit@1, hit@3, hit@8, bytes per answer, and from 0.23.0 calls and tokens per answered question for
 `brief` against the search-then-read path. It asserts two things: the wrong-yes
-count for `path` is zero, and `tools/list` costs under 675 tokens — from 0.36.0
+count for `path` is zero, and `tools/list` costs under 675 tokens (`mcp::tool_list_tokens`, bytes over four — the figure the Agents page prints too) — from 0.36.0
 eight listed tools (`mcp::LISTED`; clients offer agents only listed tools,
 so the other eight are the CLI's and portal's unless `SEMLITH_MCP_TOOLS=all`), 2 633 bytes, where sixteen were 7 330 and
 cost an Opus request 3 073 tokens against 1 323 now, measured; every array
@@ -98,10 +98,14 @@ row's id — a reused id would fall inside two shards' ranges at once. Do not
 change that.
 
 Search is hybrid: the query embedding goes to the vector index and the bare
-terms go to FTS5, each searched `4 * k` deep, then fused by reciprocal rank
-(`1 / (60 + rank)`). Scores are fusion scores, not cosines — meaningful for
-ordering within one result set, meaningless across queries. Query text reaches
-FTS5 as bare terms, never as typed, because `MATCH` is a query language.
+terms go to FTS5, each searched 32 deep (`FUSE_DEPTH`) whatever `k` is, then
+fused by reciprocal rank (`1 / (60 + rank)`) and cut to `k`. Scores are fusion
+scores, not cosines — meaningful for ordering within one result set,
+meaningless across queries. Query text reaches FTS5 as bare terms, never as
+typed, because `MATCH` is a query language. **`k` cuts the answer and never
+changes it (0.42.0).** A depth of `4 * k` scored and ordered the first results
+of k=5 differently from k=8 (audit G12); do not make the depth a function of
+`k` again.
 
 `index.rs` reads nothing from disk until a caller asks something only vectors
 can answer, so `stats`, `files`, and an idle MCP server cost no vectors. Peak
@@ -139,8 +143,8 @@ Module responsibilities:
 | `src/graph.rs` | tree-sitter extraction, the bounded traversals over the edges, and the ranked walk search expands through |
 | `src/pattern.rs` | `semlith pattern`: one tree-sitter query over the indexed files of one language |
 | `src/ledger.rs` | The one place a retrieval is recorded, whichever surface answered it |
-| `src/report.rs` | The five reports: one structure of blocks, five renderers over it, so Markdown, CSV, JSON, HTML and PDF cannot disagree. No engine of its own |
-| `src/schedule.rs` | A report the daemon writes on a cadence: the record, `~/.semlith/schedules.json`, and the one thread that runs them |
+| `src/report/` | The five reports: one typed structure (`mod.rs`, which also gathers each report's figures), Markdown/CSV/JSON/HTML (`render.rs`) and the natively typeset PDF (`pdf.rs`, `fonts/`) over it, so the formats cannot disagree. No engine of its own |
+| `src/schedule.rs` | A report the daemon writes on a cadence: the record (every option the builder set), `~/.semlith/schedules.json`, one file per schedule replaced in place, and the one thread that runs them |
 | `src/replay.rs` | What an agent did after an answer, read from this machine's Claude Code transcripts unless the Privacy page's toggle is off (on by default from 0.35.0; a file that wrote off stays off) |
 | `src/image.rs` | Image support: the five extensions, and the CLIP pair that makes a picture comparable with a sentence |
 | `src/lock.rs` | One writer per store, OS advisory lock (not file existence) |
@@ -454,11 +458,37 @@ Module responsibilities:
   added by the `ALTER TABLE` in `store::add_columns` that runs on open — which is
   why `FORMAT_VERSION` does not move. The ranking that reads it prefers, in order:
   the calling file's own definition, a definition whose file the hint names, one in
-  a file the caller imports, then a unique definition in the corpus. An edge the
+  a file the caller imports, then a unique definition in the corpus — except that a
+  module path (`store::edges_out`, Python's `flask.Flask` with `import flask`)
+  outranks the calling file unless it names the calling file, since 0.42.0. A
+  directory the caller and the candidate both sit in names nothing: the
+  checkout's own folder is often called after the package. An edge the
   syntax tree already settled stays `extracted` and is not re-ranked: a fact
   outranks a ranking. Rust's supplement must not emit the path segment of a scoped
   call as a second `calls` edge — `store::edges_out()` is a call to `edges_out`,
   not to `store`.
+- **A call through a receiver never resolves to a free function (0.42.0).** A
+  method call's hint starts with `graph::RECEIVER` (`.`): `.HiArgs`, `.Flask`
+  (`self`'s class), or `.` alone. `store::through_receiver` settles such an edge
+  only on a method owned by the receiver's stated type; everything else is
+  `ambiguous` among the methods of the name, free functions left out. The
+  calling-file tier is exactly what made `.build_parallel().run(||` in
+  ripgrep's main.rs "resolve" to `main::run`, so it must not apply to a
+  receiver. No type checker: an untyped receiver stays ambiguous, it is not
+  guessed. Rust and Python mark receivers; a Python object the file imports as
+  a module stays a module path. `coverage_by_language`'s census reads the mark
+  the same way, which is why the settled share dropped in 0.42.0.
+- **A module's edges leave from the module.** `Edge::from_module` says an edge
+  sits at the top level, and `store::write_extraction` gives it the module's
+  id even when a definition shares the file's name (`main.rs`, `fn main`).
+- **Markdown headings come from `chunk::headings`.** One scanner, ATX and setext,
+  gives the chunk cuts, the heading path and the graph's heading symbols, so a
+  section is the same section to all three; tree-sitter-md's sections open only
+  at ATX headings and are not used for spans.
+- **"Called and not found" leaves the language's own out.** `graph::is_builtin`
+  is the table (Go, Rust, Python, JavaScript, TypeScript); `store::
+  unresolved_targets` applies it and `store::builtin_targets` counts what it
+  left out.
 - **Traversal is bounded and reads one hop at a time.** No `petgraph`, no
   in-memory whole-graph structure: `graph::neighbours` and
   `graph::shortest_path` walk the indexed `edges(src)`/`edges(dst)` columns
@@ -519,6 +549,15 @@ Module responsibilities:
   lengths about different things, and comparing them returns whatever the
   arithmetic happens to produce — which is why the two CLIP repositories in
   `image.rs` are fixed as a pair rather than selectable.
+- **A picture answers a query that describes one, and nothing else (0.42.0).**
+  The image list is asked only when `pictured(query)` (beside `shape_of` and
+  `code_shaped` in `lib.rs`: a picture word, a colour or a shape) and holds only
+  images CLIP scores at the floor or above, each weighted as the two lists a
+  chunk can be found by. CLIP reads the words in a screenshot, so a question
+  naming a project scores that project's screenshots as high as a description
+  of them (flask's `flaskr_index.png` at 0.355 for "how does flask dispatch a
+  request to a view"); no cosine floor or margin separated them, which is why
+  the gate is the query's words. A weak image is left out, not weighted down.
 - **The images table and `images/` are additive, so `FORMAT_VERSION` does not
   move.** Both are `IF NOT EXISTS`, and a binary that knows nothing about either
   reads such a store as the text corpus it already was. Anything that would make
@@ -553,15 +592,35 @@ Module responsibilities:
   loses the file. The runner sleeps on a condition variable to the next due
   time, capped at a minute — not to poll, but because `semlith schedule add` is
   a different process and cannot reach that condvar.
-- **PDF is a renderer, not a second report.** `Report::render` returns a
-  `String` and serves the four text formats; `Report::render_bytes` serves all
-  five over the same blocks. That is why `report::FORMATS` is four and
-  `report::ALL_FORMATS` is five, and why a surface that can only print text
-  calls `check_format` while one that can hand back bytes calls
-  `check_any_format`. A PDF is typeset from the blocks in base-14 Courier, where
-  every glyph is 0.6 em — the width of a line is its length, which is what makes
-  the table arithmetic provable and why no font is embedded. It is not a print
-  of the HTML.
+- **Five renderers, one typed report.** A `Report` is figures (value, unit,
+  currency, over, display), a meta strip, KPIs and blocks (typed tables, facts,
+  notes, a recompute command); `render.rs` draws Markdown, CSV, JSON and HTML and
+  `pdf.rs` the PDF, all from that structure and nothing else, so no format can
+  hold a figure another lacks. Every number goes through `report::num` (`number`
+  is its `i64` face for the CLI), which prints what the portal's `n` and `pct`
+  print; `report::tests` pins app.js to it. `Report::render` returns text for
+  `report::FORMATS` (markdown, json, html); CSV (a zip of one file per table, or
+  one table through `render_table`) and PDF are bytes from `render_bytes`, which
+  is why a text-only surface calls `check_format` and one that hands back bytes
+  `check_any_format`. The HTML's colours are read from `src/portal/style.css`'s
+  tokens at render time — change a token there and every report follows — and it
+  embeds the portal's Plex woff2 and logos, with no script and no URL. The PDF is
+  typeset natively to match the HTML's print rendering, not printed by a browser:
+  IBM Plex (`src/report/fonts`, OFL, cut to Latin and Latin Extended-A) embedded
+  as a per-document subset (`subsetter`) measured with its real advances
+  (`ttf-parser`), and a glyph Plex lacks taken from the OS's CJK fonts at render
+  time, read for that render only and never kept. Every glyph has a ToUnicode
+  entry, so the text layer is the text even where no font had the glyph. Never a
+  base-14 font, never `?`. The portal's preview is that HTML in a sandboxed frame
+  from `/report-preview/<id>` under `report::REPORT_CSP` (no script): the frame
+  cannot send the session token, so the 128-bit id, minted only by the
+  token-guarded `/api/report?preview=1` and kept ten minutes, is the credential.
+- **A report's figures come from the rows inside its window.** Each report
+  gathers through one function (`tally` for the ledger reports) over
+  `store::report_rows_since`, so a window narrows every figure on the page, not
+  only some of them. A redacted query is a blake3 digest keyed with the
+  machine's `report.salt` beside the agent key — an unkeyed digest is a
+  dictionary lookup away from a symbol name.
 - **The ledger records by default, locally, from every surface.** `src/ledger.rs`
   is the one writer, and stdio MCP, the daemon's `/mcp` route, the CLI and the
   portal all call it — a search from the CLI and the same search from an agent
@@ -575,7 +634,12 @@ Module responsibilities:
   `store::ledger_break` finds an edited or deleted row — and the chain is
   versioned *by the row*: `tool` is NULL on every pre-0.15.0 row and set on every
   row since, which is what picks the formula, so a store holding both kinds
-  verifies end to end. Recording and `semlith ledger` are free on every tier,
+  verifies end to end. From 0.42.0 `retrievals.chain = 2` marks chain v2, which
+  also covers `query_id`, the client's version and the whole-file basis; the
+  late columns (usage, `synced_at`) are covered by `seal`, rewritten by
+  `store::reseal` whenever they are written; and the newest v2 row is recorded
+  as a MACed head in meta, so a cut tail fails. v1 rows after the head are an
+  older binary's (a rollback) and allowed; an empty table verifies. Recording and `semlith ledger` are free on every tier,
   permanently; do not put either behind a key.
 - **On by default is the whole point, and the principle that makes it all right
   is narrower than the one it replaced.** 0.12.0 said a local tool that starts
@@ -588,11 +652,54 @@ Module responsibilities:
   script that passes it fails at parse time; `--no-ledger` stops a session and
   `SEMLITH_LEDGER=0` stops a machine. Do not reintroduce an off-by-default.
 - **Both sides of a ratio are counted on the same instrument.** The store's own
-  embedding tokenizer counts excerpt and whole-file tokens — the same
-  `tokenizer.json`, the same cache, the same pinned digest. Four characters per
-  token survives only as the fallback for a session that never loaded a model, and
+  embedding tokenizer counts excerpt tokens — the same `tokenizer.json`, the
+  same cache, the same pinned digest. Four characters per token survives only
+  as the fallback for a session that never loaded a model, and
   `retrievals.tokenizer` records which counted the row, so rows counted two
-  different ways are never summed.
+  different ways are never summed. The whole-file side is what reading the
+  file would cost an agent (`ledger::whole_of`, 0.42.0): a format a reader
+  extracts (PDF, Office, OpenDocument, EPUB, mail, notebooks, HTML) is the text
+  the store holds for it, counted by the same counter as the excerpt; an image
+  holds no text and counts none; plain text is its bytes over four. Never the
+  bytes of an extracted file — a 2.2 MB PDF of 45,849 characters was credited
+  553,811 tokens that way. `retrievals.whole_basis` says which rule a row used.
+- **Every figure comes from `ledger::figures`.** The Ledger page, Home, the
+  store cards, `/api/ledger`, `semlith ledger`, `stats`, the five reports and
+  `semlith_report` render that one function over the rows; none of them adds
+  anything up itself. A retrieval is a row whose tool is not a refund
+  (`raw-read`), a note, a refusal, or an accept or revoke
+  (`ledger::is_retrieval`); a row from `cli` or `portal` is a person's and is
+  kept out of the agents' figures (`ledger::is_human`); rows sharing a
+  `query_id` are one retrieval, counted once in the totals and once in each
+  store's share. A per-store SQL reader that survives takes
+  `store::AGENT_RETRIEVAL`, the same rule as SQL. Net is summed, never clamped;
+  latency is one figure per retrieval that measured work.
+- **A client is named on every request, not only at `initialize`.** MCP
+  2026-07-28 carries `clientInfo` in `params._meta` and no session, so
+  `mcp::client_info` reads either place and the User-Agent stands in when both
+  are absent (it may only confirm a name `clientid` knows). A stateless
+  client's conversation is `State::conversation`: one client, version and
+  transport until 30 minutes of quiet. It is the one place to replace if a
+  revision defines a conversation id.
+- **The daemon's readers share, and a run is answered from before it.**
+  Forwarded MCP calls take a reader from `State::mcp_fleet`, a pool of two to
+  four fleets all opened before the first writer starts; every reader fleet
+  calls `share_vectors`, so one `index::Vectors` per store and generation is
+  held process-wide (`index::shared`, weakly), as are the query session and
+  the counting tokenizer. The writer keeps its own index: it moves under a run.
+  A run over files a store already holds calls `hold_readers` before its first
+  write: every reader's connection opens a read transaction
+  (`store::pin_snapshot`) and answers from the store as it was until `release`
+  ends the run and the pin with it (`Fleet::reconcile`, run before and after
+  every reader call too). A first import is not pinned (keyword answers while
+  it embeds). A pinned connection must not write: `store::record_counted`,
+  `fill_usage` and `mark_synced` go through a connection of their own
+  (`beside`). A reader opened during a run (a store joining mid-run) starts on
+  the run's writes so far; a pin unreleased for six hours is dropped.
+- **Bytes are text only when they read as text.** `chunk::is_binary` is git's
+  NUL rule; `chunk::not_text` refuses a file whose first 8 KiB is over 30 %
+  invalid UTF-8 or control characters, with the share in its reason. Latin-1
+  prose stays well under it and is read.
 - **`mcp::tool_names` is the one tool list.** `routes::agents` reads it rather
   than repeating it, because two hand-written copies is how a tool ends up served
   by the server and invisible in the portal.
@@ -615,6 +722,16 @@ Module responsibilities:
   rather than a grace period.
 - Extraction dispatches on extension *before* looking at bytes — `.docx` and
   friends are ZIP archives and the binary check would reject them all.
+- **Markup is stored as written except in a docs store (0.42.0).**
+  `chunk::MARKUP` (`html`, `htm`, the only two a reader ever stripped) goes
+  down the plain-text arm, so `read` and an exact search answer a template's
+  own lines; the writer swaps in `chunk::markup_text` only when the store's
+  `kind` or `lean` is `docs`, and for a page under the store's `downloads/`.
+  The `markup` meta row (`raw` or `extracted`, absent before 0.42.0 and read as
+  `extracted`) says how a store's markup was last swept; when it differs from
+  the store's rule, the pass drops those files' hashes so they alone are read
+  again, and the row moves only at the end of a full sweep. Additive, so
+  `FORMAT_VERSION` does not move.
 - **Semlith Cloud is reached only after `semlith cloud login`.** With no
   `~/.semlith/cloud.json` nothing opens a socket, starts the sync thread or
   probes a host. `cloud::call` is the only function that calls one: it takes a
@@ -726,7 +843,9 @@ relaxation without an issue like
   agent key as a bearer instead, and is the only route that does.
 - The `Host` header must be `localhost`, `127.0.0.1` or `::1`. Otherwise: 400.
 - Every response carries a `Content-Security-Policy` allowing only `'self'`, and
-  no CORS header is emitted anywhere.
+  no CORS header is emitted anywhere. The one exception is narrower, never
+  wider: a report preview (`/report-preview/<id>`) is served under
+  `report::REPORT_CSP`, which allows no script, no network and no form at all.
 - Every byte the portal loads is `include_bytes!`d into the binary. No CDN, no
   build step, no npm. The page loads with the cable unplugged.
 - No telemetry, no analytics, and no update check Semlith makes on its own.

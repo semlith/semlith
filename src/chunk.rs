@@ -67,6 +67,34 @@ pub fn extract(path: &Path, bytes: &[u8]) -> Result<String, crate::SkipReason> {
     extract_counted(path, bytes).map(|(text, _)| text)
 }
 
+/// Markup a reader would strip to the text a browser shows, and which every
+/// store except a docs store keeps as written (0.42.0).
+///
+/// Only these two, because only these two were ever stripped:
+/// `formats::handles` is the whole of what is extracted, and of
+/// `filter::LANGUAGES` only `html`'s row (`htm`, `html`) is in it. `vue` and
+/// `svelte` (rows of their own there), and `xhtml`, `jinja`, `j2`, `hbs`,
+/// `mustache`, `erb`, `ejs`, `liquid`, `twig` and `njk` (in no row) were
+/// always read as plain text, so they were byte-exact already. A flask Jinja
+/// template is named `.html`, which is the whole of the 2026-10-14 audit's
+/// F13: `read create.html:8-12` printed text that is not in the file and an
+/// exact search found 7 of grep's 9 lines.
+pub const MARKUP: &[&str] = &["html", "htm"];
+
+/// Whether `path` is of an extension in [`MARKUP`].
+pub fn is_markup(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| MARKUP.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// A markup file's text as a browser shows it, line for line with the
+/// source: the reading a docs store keeps.
+pub fn markup_text(text: &str) -> String {
+    guard(|| formats::extract_counted("html", text.as_bytes()).map(|(text, _)| text))
+        .unwrap_or_else(|| text.to_string())
+}
+
 /// Extensions whose files have units `Inside the index` counts: PDF pages,
 /// slides, spreadsheet cells, notebook cells. A stored file of one of these
 /// with no count yet is read again for its count by the next index pass.
@@ -100,13 +128,20 @@ pub fn extract_counted(
     match ext.as_deref() {
         Some("pdf") => extract_pdf(bytes)
             .map(|(text, pages)| (text, Some(pages)))
-            .ok_or(SkipReason::NoText),
-        Some(ext) if formats::handles(ext) => {
-            guard(|| formats::extract_counted(ext, bytes)).ok_or(SkipReason::NoText)
+            .ok_or_else(|| formats::why_no_text("pdf", bytes)),
+        // Markup is read as written (0.42.0) and goes down the plain-text arm
+        // below; a docs store takes the tag-stripped reading in the writer
+        // instead, through [`markup_text`].
+        Some(ext) if formats::handles(ext) && !MARKUP.contains(&ext) => {
+            guard(|| formats::extract_counted(ext, bytes))
+                .ok_or_else(|| formats::why_no_text(ext, bytes))
         }
         other => {
             if is_binary(bytes) {
                 return Err(SkipReason::Binary);
+            }
+            if let Some(share) = not_text(bytes) {
+                return Err(SkipReason::NotText(share));
             }
             let text = String::from_utf8_lossy(bytes).into_owned();
             let units = match other {
@@ -215,6 +250,35 @@ fn guard<T>(extract: impl FnOnce() -> Option<T>) -> Option<T> {
 fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|&b| b == 0)
 }
+
+/// The share, in percent, of the first 8 KiB that is neither valid UTF-8 nor
+/// a printable character, when it is more than [`NOT_TEXT_PERCENT`].
+///
+/// The NUL rule is git's, and compressed data need not hold a NUL: ripgrep's
+/// `tests/data/sherlock.br` (Brotli, 180 bytes) became one chunk of U+FFFD
+/// while its seven siblings were refused. Random bytes are about half
+/// invalid; Latin-1 prose, the encoding a user is likeliest to rely on, stays
+/// well under a fifth even when every word is accented, so it is still read.
+fn not_text(bytes: &[u8]) -> Option<u8> {
+    let sample = &bytes[..bytes.len().min(8192)];
+    if sample.is_empty() {
+        return None;
+    }
+    let mut bad = 0usize;
+    for chunk in sample.utf8_chunks() {
+        bad += chunk.invalid().len();
+        bad += chunk
+            .valid()
+            .bytes()
+            .filter(|b| (*b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r' | 0x0c)) || *b == 0x7f)
+            .count();
+    }
+    let share = bad * 100 / sample.len();
+    (share > NOT_TEXT_PERCENT).then_some(share as u8)
+}
+
+/// Above this share of unreadable bytes a file is not text.
+const NOT_TEXT_PERCENT: usize = 30;
 
 /// Split text into line-aligned chunks of at most [`MAX_CHARS`] characters.
 ///
@@ -442,31 +506,125 @@ fn truncate_chars(text: &str, max: usize) -> String {
 /// otherwise crowd out the chunk it is meant to describe.
 const CONTEXT_CHARS: usize = 200;
 
-/// The lines Markdown headings start on.
+/// One Markdown heading: the line it starts on, its depth and its title.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Heading {
+    pub line: u32,
+    pub level: usize,
+    pub title: String,
+}
+
+/// Every heading in a Markdown text: ATX (`## Title`) and setext, a line of
+/// text underlined with `===` (level 1) or `---` (level 2).
+///
+/// One scanner for the chunk cuts, the heading path and the graph's heading
+/// symbols, so a section is the same section to all three. tree-sitter-md
+/// opens a section only at an ATX heading, which made every setext heading in
+/// ripgrep's CHANGELOG span the whole file (2026-10-14 audit, G6).
 ///
 /// Fenced code is skipped, because a great deal of the prose this indexes is
 /// shell transcripts and `# install semlith` is a comment rather than a
 /// heading. Taken as a heading it would cut a chunk in the middle of a command
 /// and, worse, reset the heading path to a line the section is not about.
-pub fn heading_cuts(text: &str) -> Vec<u32> {
-    let mut cuts = Vec::new();
+/// Front matter is skipped too, and a `---` is an underline only directly
+/// under paragraph text: after a blank line it is a thematic break, and under
+/// a list item or a quote it is not a heading either.
+pub fn headings(text: &str) -> Vec<Heading> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    let mut at = 0;
+    if lines.first().is_some_and(|l| l.trim_end() == "---")
+        && let Some(close) = lines[1..]
+            .iter()
+            .position(|l| matches!(l.trim_end(), "---" | "..."))
+    {
+        at = close + 2;
+    }
     let mut fenced = false;
-    for (at, line) in text.lines().enumerate() {
+    // The first line of the paragraph an underline would make a heading, and
+    // whether the lines since a list item or a quote are its continuation.
+    let mut paragraph: Option<usize> = None;
+    let mut in_block = false;
+    while at < lines.len() {
+        let line = lines[at];
+        let trimmed = line.trim_start();
         if line.starts_with("```") || line.starts_with("~~~") {
             fenced = !fenced;
-            continue;
+            paragraph = None;
+        } else if fenced {
+        } else if let Some(level) = atx_level(line) {
+            out.push(Heading {
+                line: at as u32 + 1,
+                level,
+                title: heading_title(&line[level..]),
+            });
+            paragraph = None;
+        } else if let Some(level) = setext_level(line) {
+            if let Some(first) = paragraph {
+                out.push(Heading {
+                    line: first as u32 + 1,
+                    level,
+                    title: heading_title(&lines[first..at].join(" ")),
+                });
+            }
+            paragraph = None;
+        } else if trimmed.is_empty() {
+            paragraph = None;
+            in_block = false;
+        } else if block_line(line) {
+            paragraph = None;
+            in_block = true;
+        } else if paragraph.is_none() && !in_block {
+            paragraph = Some(at);
         }
-        if !fenced && is_heading(line) {
-            cuts.push(at as u32 + 1);
-        }
+        at += 1;
     }
-    cuts
+    out
 }
 
-/// A line that opens an ATX heading: one to six hashes, then a space.
-fn is_heading(line: &str) -> bool {
+/// The depth of an ATX heading line: one to six hashes, then a space.
+fn atx_level(line: &str) -> Option<usize> {
     let hashes = line.len() - line.trim_start_matches('#').len();
-    (1..=6).contains(&hashes) && line[hashes..].starts_with(' ')
+    ((1..=6).contains(&hashes) && line[hashes..].starts_with(' ')).then_some(hashes)
+}
+
+/// The depth a setext underline gives: `===` 1, `---` 2. Up to three spaces
+/// of indent and any trailing spaces, as CommonMark allows.
+fn setext_level(line: &str) -> Option<usize> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let mark = line.trim();
+    if indent > 3 || mark.is_empty() {
+        return None;
+    }
+    if mark.chars().all(|c| c == '=') {
+        Some(1)
+    } else if mark.chars().all(|c| c == '-') {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// A line that opens a block an underline cannot turn into a heading: a list
+/// item, a quote, a table row, indented code or HTML.
+fn block_line(line: &str) -> bool {
+    let t = line.trim_start();
+    let marker = t.starts_with("- ")
+        || t.starts_with("* ")
+        || t.starts_with("+ ")
+        || t.split_once(". ")
+            .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    marker
+        || t.starts_with('>')
+        || t.starts_with('|')
+        || t.starts_with('<')
+        || line.starts_with("    ")
+        || line.starts_with('\t')
+}
+
+/// The lines Markdown headings start on.
+pub fn heading_cuts(text: &str) -> Vec<u32> {
+    headings(text).into_iter().map(|h| h.line).collect()
 }
 
 /// The heading path a line sits under, as `Store format > Shards`.
@@ -476,21 +634,12 @@ fn is_heading(line: &str) -> bool {
 /// as though the reader has the two above it in mind, because they do.
 pub fn heading_path(text: &str, line: u32) -> String {
     let mut path: Vec<(usize, String)> = Vec::new();
-    let mut fenced = false;
-    for (at, raw) in text.lines().enumerate() {
-        if at as u32 + 1 > line {
+    for h in headings(text) {
+        if h.line > line {
             break;
         }
-        if raw.starts_with("```") || raw.starts_with("~~~") {
-            fenced = !fenced;
-            continue;
-        }
-        if fenced || !is_heading(raw) {
-            continue;
-        }
-        let hashes = raw.len() - raw.trim_start_matches('#').len();
-        path.retain(|(level, _)| *level < hashes);
-        path.push((hashes, heading_title(&raw[hashes..])));
+        path.retain(|(level, _)| *level < h.level);
+        path.push((h.level, h.title));
     }
     path.into_iter()
         .map(|(_, title)| title)
@@ -565,6 +714,23 @@ fn split_chars(s: &str, n: usize) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// Markup is read as written, byte for byte, and the browser's reading
+    /// is still one call away for the stores that keep it (F13).
+    #[test]
+    fn markup_is_read_as_written() {
+        let page = "{% block content %}\n  <form method=\"post\">\n    \
+                    <input name=\"title\" value=\"{{ request.form['title'] }}\">\n  </form>\n";
+        for name in ["create.html", "page.HTM"] {
+            let text = extract(Path::new(name), page.as_bytes()).unwrap();
+            assert_eq!(text, page, "{name}");
+            assert!(is_markup(Path::new(name)));
+        }
+        assert!(!is_markup(Path::new("app.vue")));
+        let stripped = markup_text(page);
+        assert!(!stripped.contains("<form"), "{stripped:?}");
+        assert_eq!(stripped.lines().count(), page.lines().count());
+    }
+
     /// The fuzzer's hang: a page that names itself as its parent. Refused
     /// as no text, at once, rather than handed to pdf-extract.
     #[test]
@@ -622,6 +788,20 @@ mod tests {
     fn binary_is_detected() {
         assert!(is_binary(b"abc\0def"));
         assert!(!is_binary(b"fn main() {}"));
+        // Compressed bytes with no NUL in them are not text (audit F05);
+        // Latin-1 prose, accents and all, still is.
+        let brotli: Vec<u8> = (0..180u32)
+            .map(|i| ((i * 151 + 7) % 255 + 1) as u8)
+            .collect();
+        assert!(!brotli.contains(&0));
+        assert!(not_text(&brotli).is_some(), "{:?}", not_text(&brotli));
+        let latin1: Vec<u8> = "Le café était très agréable, à côté du théâtre élégant. "
+            .repeat(20)
+            .chars()
+            .map(|c| c as u32 as u8)
+            .collect();
+        assert_eq!(not_text(&latin1), None);
+        assert_eq!(not_text("Grüße, 東京, naïve résumé".as_bytes()), None);
     }
 
     /// A forced cut is what Markdown takes, and it does end a chunk wherever it
@@ -740,6 +920,36 @@ Text after the fence.
         }
         let text = "# **Guide** #\n\n## `Store::open`\n\nBody.\n";
         assert_eq!(heading_path(text, 5), "Guide > Store::open");
+    }
+
+    /// ripgrep's CHANGELOG underlines its 42 headings with `===` (2026-10-14
+    /// audit, G6), and a file of setext headings was cut at none of them and
+    /// had no heading path at all.
+    #[test]
+    fn setext_headings_cut_and_name_sections_like_atx_ones() {
+        let text = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/graph-audit/markdown/ripgrep_changelog.md"),
+        )
+        .unwrap();
+        assert_eq!(heading_cuts(&text), vec![1, 6, 36, 54, 66]);
+        assert_eq!(heading_path(&text, 68), "12.1.1 (2020-05-29)");
+        assert_eq!(heading_path(&text, 40), "15.1.0 (2025-10-22)");
+        let chunks = chunk_file(Path::new("CHANGELOG.md"), &text, &[]);
+        assert!(chunks.iter().any(|c| c.start_line == 66), "{chunks:?}");
+
+        let mixed = "Title\n=====\n\n## Sub\n\ntext\n";
+        assert_eq!(heading_cuts(mixed), vec![1, 4]);
+        assert_eq!(heading_path(mixed, 6), "Title > Sub");
+    }
+
+    /// A `---` is a heading's underline only under a line of text: front
+    /// matter and a thematic break after a blank line are not headings.
+    #[test]
+    fn front_matter_and_a_thematic_break_are_not_headings() {
+        let text = "---\ntitle: x\n---\n\nIntro.\n\n---\n\nTitle\n-----\nbody\n";
+        assert_eq!(heading_cuts(text), vec![9]);
+        assert_eq!(heading_path(text, 11), "Title");
     }
 
     #[test]
