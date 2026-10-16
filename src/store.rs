@@ -676,7 +676,7 @@ const FTS_BUILT: &str = "fts_built";
 /// never sees them. That is the whole reason `format_version` does not move —
 /// the same reasoning `docs/compatibility.md` records for the graph tables.
 fn add_columns(db: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 21] = [
+    const ADDITIONS: [(&str, &str, &str); 24] = [
         ("edges", "hint", "TEXT"),
         // 0.16.0: the line the reference was written on.
         ("edges", "line", "INTEGER"),
@@ -734,6 +734,19 @@ fn add_columns(db: &Connection) -> Result<()> {
         // what freshness compares now (see `Stamp::fresh`). NULL on a row an
         // older binary wrote; an older binary ignores the column.
         ("files", "read_mtime", "INTEGER"),
+        // 0.42.0: what the whole-file side of a row was counted from —
+        // `bytes` (the file's size on disk, every row before 0.42.0, NULL
+        // here) or `text` (the text a reader extracted, for a PDF, an Office
+        // file, an image). The Ledger says which, row by row.
+        ("retrievals", "whole_basis", "TEXT"),
+        // 0.42.0: which chain formula hashed the row. NULL is the 0.15.0/0.41.0
+        // formula (or 0.14.0's, told apart by `tool`), 2 is chain v2, which
+        // covers every column a figure reads.
+        ("retrievals", "chain", "INTEGER"),
+        // 0.42.0: the hash over a v2 row's late columns (usage, synced_at),
+        // rewritten whenever they are, so a late column cannot change without
+        // the verify noticing.
+        ("retrievals", "seal", "TEXT"),
     ];
     for (table, column, kind) in ADDITIONS {
         if has_column(db, table, column)? {
@@ -1372,13 +1385,25 @@ fn coverage_by_language_uncached(db: &Connection) -> Result<Vec<LanguageCoverage
     // Counted per file, whether the extractor settled the edge, and how many
     // definitions its target has -- none, one or several, which is all the
     // row needs, so the count stops at two.
+    //
+    // A call through a receiver (`edges.hint` starting `.`) settles only on a
+    // method of the receiver's stated type, as `store::through_receiver`
+    // decides, so for one of those `typed` counts the definitions owned by
+    // that type: one settles it, anything else is ambiguous. `-1` is any
+    // other edge.
     let mut stmt = db.prepare(
         "SELECT s.file_id, e.confidence = 'extracted',
                 (SELECT COUNT(*) FROM (SELECT 1 FROM symbols d WHERE d.name = e.dst LIMIT 2)) AS defs,
+                CASE WHEN substr(e.hint, 1, 1) = '.' THEN
+                  CASE WHEN substr(e.hint, 2, 1) BETWEEN 'A' AND 'Z' THEN
+                    (SELECT COUNT(*) FROM (SELECT 1 FROM symbols d WHERE d.name = e.dst
+                       AND d.qualified = substr(e.hint, 2) || '::' || e.dst LIMIT 2))
+                  ELSE 0 END
+                ELSE -1 END AS typed,
                 COUNT(*)
          FROM edges e JOIN symbols s ON s.id = e.src
          WHERE e.kind = 'calls'
-         GROUP BY s.file_id, 2, defs",
+         GROUP BY s.file_id, 2, defs, typed",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -1386,13 +1411,21 @@ fn coverage_by_language_uncached(db: &Connection) -> Result<Vec<LanguageCoverage
             r.get::<_, bool>(1)?,
             r.get::<_, i64>(2)?,
             r.get::<_, i64>(3)?,
+            r.get::<_, i64>(4)?,
         ))
     })?;
     for row in rows {
-        let (file, extracted, definitions, count) = row?;
+        let (file, extracted, definitions, typed, count) = row?;
         let count = usize::try_from(count).unwrap_or(0);
         let entry = by_language.entry(lang(file)).or_default();
-        if extracted {
+        if typed >= 0 {
+            match (definitions, typed) {
+                (0, _) => entry.unresolved += count,
+                (_, 1) if extracted => entry.extracted += count,
+                (_, 1) => entry.resolved += count,
+                _ => entry.ambiguous += count,
+            }
+        } else if extracted {
             entry.extracted += count;
         } else {
             match definitions {
@@ -1962,9 +1995,13 @@ pub struct SymbolRow {
 }
 
 /// One end of a traversal: the symbol reached, and the edge that reached it.
+///
+/// Serialised flat, as the symbol's fields beside the edge's, with the
+/// symbol's kind as `symbol_kind`: both were `kind`, so `symbol --json` printed
+/// the key twice and a parser kept the edge's (2026-10-14 audit, G7).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EdgeEnd {
-    #[serde(flatten)]
+    #[serde(flatten, serialize_with = "reached_symbol")]
     pub symbol: SymbolRow,
     pub kind: String,
     pub confidence: String,
@@ -2004,6 +2041,26 @@ pub struct EdgeEnd {
     /// `None` when the name has one definition or the call did not settle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub means: Option<String>,
+}
+
+/// A [`SymbolRow`] inside an [`EdgeEnd`]: every field, `kind` as `symbol_kind`.
+fn reached_symbol<S: serde::Serializer>(row: &SymbolRow, s: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+    let mut map = s.serialize_map(None)?;
+    map.serialize_entry("id", &row.id)?;
+    map.serialize_entry("path", &crate::plain(&row.path))?;
+    map.serialize_entry("symbol_kind", &row.kind)?;
+    map.serialize_entry("name", &row.name)?;
+    map.serialize_entry("qualified", &row.qualified)?;
+    map.serialize_entry("start_line", &row.start_line)?;
+    map.serialize_entry("end_line", &row.end_line)?;
+    if let Some(chunk) = row.chunk_id {
+        map.serialize_entry("chunk_id", &chunk)?;
+    }
+    if let Some(store) = &row.store {
+        map.serialize_entry("store", store)?;
+    }
+    map.end()
 }
 
 const SYMBOL_COLUMNS: &str =
@@ -2062,6 +2119,75 @@ pub fn insert_edge(
     Ok(())
 }
 
+/// Write one file's extraction: its symbols, then its edges by source name.
+///
+/// `spans` are the file's chunks as `(start_line, end_line, chunk_id)`, so each
+/// symbol points at the chunk its first line sits in. Returns `(symbols,
+/// edges)` written. The one writer `index_set` and the graph tests share, so a
+/// test of what a file yields is a test of what the store holds.
+pub fn write_extraction(
+    db: &Connection,
+    extraction: &crate::graph::Extraction,
+    file_id: i64,
+    spans: &[(u32, u32, i64)],
+) -> Result<(usize, usize)> {
+    // Name to id, for the edges below. A file may define the same name
+    // twice — two `new` methods on two types — and the first wins, because
+    // an edge out of this file names its source by name and nothing here
+    // can tell them apart either.
+    let mut ids: std::collections::HashMap<&str, (i64, bool)> = std::collections::HashMap::new();
+    // The file's own symbol, which an edge marked `from_module` leaves from
+    // even when a definition shares its name.
+    let mut module_id: Option<i64> = None;
+    for symbol in &extraction.symbols {
+        let chunk_id = spans
+            .iter()
+            .find(|(start, end, _)| symbol.start_line >= *start && symbol.start_line <= *end)
+            .map(|(_, _, id)| *id);
+        let id = insert_symbol(db, file_id, chunk_id, symbol)?;
+        // A definition outranks the file's module symbol of the same name:
+        // `fn brief` in `brief.rs` is where its calls come from, and giving
+        // them to the module put every caller of it at line 1.
+        let module = symbol.kind == "module";
+        if module && module_id.is_none() {
+            module_id = Some(id);
+        }
+        match ids.get(symbol.name.as_str()) {
+            None => {
+                ids.insert(symbol.name.as_str(), (id, module));
+            }
+            Some((_, true)) if !module => {
+                ids.insert(symbol.name.as_str(), (id, false));
+            }
+            _ => {}
+        }
+    }
+    let ids: std::collections::HashMap<&str, i64> =
+        ids.into_iter().map(|(k, (id, _))| (k, id)).collect();
+
+    let mut written = 0;
+    for edge in &extraction.edges {
+        let src = match module_id {
+            Some(id) if edge.from_module => id,
+            _ => match ids.get(edge.from.as_str()) {
+                Some(id) => *id,
+                None => continue,
+            },
+        };
+        insert_edge(
+            db,
+            src,
+            &edge.to,
+            &edge.kind,
+            &edge.confidence,
+            edge.hint.as_deref(),
+            edge.line,
+        )?;
+        written += 1;
+    }
+    Ok((extraction.symbols.len(), written))
+}
+
 /// Every definition of `name`, across the whole store.
 ///
 /// Exact match, not a glob: `semlith symbol acquire` asking about `acquire` and
@@ -2075,6 +2201,30 @@ pub fn symbols_named(db: &Connection, name: &str, limit: usize) -> Result<Vec<Sy
     let mut stmt = db.prepare(&sql)?;
     let rows = stmt.query_map(params![name, limit as i64], symbol_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// [`symbols_named`] with code first — definitions before the headings, keys
+/// and selectors that share the name — and how many there are in all.
+pub fn symbols_named_counted(
+    db: &Connection,
+    name: &str,
+    limit: usize,
+) -> Result<(Vec<SymbolRow>, usize)> {
+    let navigational = crate::graph::not_navigational("s.kind");
+    let sql = format!(
+        "SELECT {SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE s.name = ?1 ORDER BY NOT ({navigational}), f.path, s.start_line LIMIT ?2"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = stmt.query_map(params![name, limit], symbol_row)?;
+    let rows = rows.collect::<Result<Vec<_>, _>>()?;
+    let total: i64 = db.query_row(
+        "SELECT COUNT(*) FROM symbols WHERE name = ?1",
+        [name],
+        |r| r.get(0),
+    )?;
+    Ok((rows, total as usize))
 }
 
 /// Symbols to draw for a scope, newest-defined first within each file.
@@ -2231,7 +2381,8 @@ pub fn edge_counts(db: &Connection, name: &str) -> Result<(usize, usize)> {
     let (out_total, out_sure): (i64, i64) = db.query_row(
         &format!(
             "SELECT COUNT(*), COALESCE(SUM(e.confidence = 'extracted' OR
-                 (SELECT COUNT(*) FROM (SELECT 1 FROM symbols h WHERE h.name = e.dst AND {navigational} LIMIT 2)) = 1), 0)
+                 (substr(COALESCE(e.hint, ''), 1, 1) != '.' AND
+                  (SELECT COUNT(*) FROM (SELECT 1 FROM symbols h WHERE h.name = e.dst AND {navigational} LIMIT 2)) = 1)), 0)
              FROM edges e JOIN symbols src ON src.id = e.src
              WHERE src.name = ?1
                AND EXISTS (SELECT 1 FROM symbols h WHERE h.name = e.dst AND {navigational})"
@@ -2382,43 +2533,56 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
 
     let mut out = Vec::new();
     for key in order {
-        let candidates = groups.remove(&key).unwrap_or_default();
-        let (src_path, _, _, hint) = &key;
-        let definitions = candidates.len();
-
-        if definitions == 1 {
-            // Nothing to choose between. Whatever the syntax tree said stands,
-            // and a bare name that matches exactly one definition in the store
-            // is as resolved as the corpus can make it.
-            let row = candidates.into_iter().next().expect("one candidate");
-            let confidence = if row.confidence == crate::graph::EXTRACTED {
-                crate::graph::EXTRACTED
-            } else {
-                crate::graph::RESOLVED
-            };
-            out.push(EdgeEnd {
-                symbol: row.symbol,
-                kind: row.kind,
-                confidence: confidence.to_string(),
-                definitions,
-                from_path: Some(row.src_path),
-                from_line: Some(row.src_line),
-                line: row.line,
-                means: None,
+        let mut candidates = groups.remove(&key).unwrap_or_default();
+        let (src_path, _, kind, hint) = &key;
+        // A call never means a module, unless nothing else has the name (see
+        // `choose_for`), and an unsettled call does not list one either.
+        if kind == "calls"
+            && candidates.iter().any(|c| c.symbol.kind == "module")
+            && candidates.iter().any(|c| c.symbol.kind != "module")
+        {
+            candidates.retain(|c| c.symbol.kind != "module");
+        }
+        // A structural edge names a definition in its own file, on the line
+        // the edge records; anything elsewhere with that name is not it.
+        if structural(kind) {
+            candidates.retain(|c| {
+                c.symbol.path == c.src_path && c.line.is_none_or(|l| l == c.symbol.start_line)
             });
+            for row in candidates {
+                out.push(EdgeEnd {
+                    symbol: row.symbol,
+                    kind: row.kind,
+                    confidence: row.confidence,
+                    definitions: 1,
+                    from_path: Some(row.src_path),
+                    from_line: Some(row.src_line),
+                    line: row.line,
+                    means: None,
+                });
+            }
             continue;
         }
+        let definitions = candidates.len();
 
-        let picked = {
-            let rows: Vec<&SymbolRow> = candidates.iter().map(|c| &c.symbol).collect();
-            choose(db, &rows, src_path, hint.as_deref(), &mut imports)?
+        let rows: Vec<&SymbolRow> = candidates.iter().map(|c| &c.symbol).collect();
+        let (picked, settled) =
+            choose_for(db, kind, &rows, src_path, hint.as_deref(), &mut imports)?;
+        // A receiver's edge that did not settle lists only what a method call
+        // can mean; any other unsettled edge lists every candidate, as before.
+        let receiver = hint
+            .as_deref()
+            .is_some_and(|h| h.starts_with(crate::graph::RECEIVER));
+        let listed = if settled || receiver {
+            picked.iter().filter(|p| **p).count()
+        } else {
+            definitions
         };
-        let settled = picked.iter().filter(|p| **p).count() == 1;
         for (row, keep) in candidates.into_iter().zip(&picked) {
-            if settled && !*keep {
+            if (settled || receiver) && !*keep {
                 continue;
             }
-            let confidence = if row.confidence == crate::graph::EXTRACTED && settled {
+            let confidence = if settled && row.confidence == crate::graph::EXTRACTED {
                 crate::graph::EXTRACTED
             } else if settled {
                 crate::graph::RESOLVED
@@ -2429,7 +2593,7 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
                 symbol: row.symbol,
                 kind: row.kind,
                 confidence: confidence.to_string(),
-                definitions,
+                definitions: if settled { definitions } else { listed },
                 from_path: Some(row.src_path),
                 from_line: Some(row.src_line),
                 line: row.line,
@@ -2440,10 +2604,43 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
     Ok(out)
 }
 
-/// Which of `candidates` an edge written in `src_path` with `hint` means.
+/// Whether an edge kind says where a definition sits rather than what it uses.
+fn structural(kind: &str) -> bool {
+    matches!(kind, "defines" | "contains")
+}
+
+/// [`choose`] for an edge of `kind`. A call never means a module: ripgrep's
+/// main.rs declares `mod search;` beside `fn search`, and the module made the
+/// bare call `search(&args, mode)` a tie. Modules are candidates only when
+/// nothing else answers to the name.
+fn choose_for(
+    db: &Connection,
+    kind: &str,
+    candidates: &[&SymbolRow],
+    src_path: &str,
+    hint: Option<&str>,
+    imports: &mut std::collections::HashMap<String, Vec<String>>,
+) -> Result<(Vec<bool>, bool)> {
+    let module = |c: &&SymbolRow| c.kind == "module";
+    if kind != "calls" || !candidates.iter().any(module) || candidates.iter().all(module) {
+        return choose(db, candidates, src_path, hint, imports);
+    }
+    let callable: Vec<&SymbolRow> = candidates.iter().filter(|c| !module(c)).copied().collect();
+    let (picked, settled) = choose(db, &callable, src_path, hint, imports)?;
+    let mut picked = picked.into_iter();
+    let keep = candidates
+        .iter()
+        .map(|c| !module(c) && picked.next().unwrap_or(false))
+        .collect();
+    Ok((keep, settled))
+}
+
+/// Which of `candidates` an edge written in `src_path` with `hint` means, and
+/// whether that settled it.
 ///
 /// Every candidate at the best rank is kept, so one `true` is a settled edge
-/// and several are an ambiguous one. The imports of the calling file are read
+/// and several are an ambiguous one — except through a receiver, which
+/// [`through_receiver`] decides. The imports of the calling file are read
 /// only when the first pass left more than one and something unplaced, and
 /// cached in `imports` across calls.
 ///
@@ -2458,7 +2655,13 @@ fn choose(
     src_path: &str,
     hint: Option<&str>,
     imports: &mut std::collections::HashMap<String, Vec<String>>,
-) -> Result<Vec<bool>> {
+) -> Result<(Vec<bool>, bool)> {
+    if let Some(lead) = hint.and_then(|h| h.strip_prefix(crate::graph::RECEIVER)) {
+        return Ok(through_receiver(candidates, src_path, lead));
+    }
+    if candidates.len() == 1 {
+        return Ok((vec![true], true));
+    }
     let mut ranks: Vec<u8> = candidates
         .iter()
         .map(|c| rank(c, src_path, hint, &[]))
@@ -2492,7 +2695,84 @@ fn choose(
             *k = *k && *n == nearest;
         }
     }
-    Ok(keep)
+    let settled = keep.iter().filter(|k| **k).count() == 1;
+    Ok((keep, settled))
+}
+
+/// Whether a definition is a function no receiver can reach: not a method,
+/// and not owned by a type (`main::run`, Python's `helpers::make_response`,
+/// a function in `mod tests`). A method's owner is a type, upper case first.
+fn free_function(c: &SymbolRow) -> bool {
+    c.kind == "function"
+        && owner_of(&c.qualified).is_none_or(|o| !o.chars().next().is_some_and(char::is_uppercase))
+}
+
+/// What a call through a receiver (`x.run()`, `self.flush()`) means.
+///
+/// Never a free function: `.build_parallel().run(||` in ripgrep's main.rs was
+/// settled on `main::run` because that `run` sat in the calling file, which put
+/// a false two-hop chain into `path` (2026-10-14 audit, G1). It settles only
+/// on a method of the receiver's stated type — the ranking signals that place
+/// a bare call, the calling file and its imports, say nothing about which type
+/// a receiver is — and a receiver nothing typed leaves the edge ambiguous
+/// among the methods of that name. Typing it is a type checker's job, which
+/// semlith is not. One exception, for Python only, where `x.f()` is also how a
+/// module's function is called: a lower-case receiver naming the file of
+/// exactly one free function, as `views.render()` names `views.py`.
+fn through_receiver(candidates: &[&SymbolRow], src_path: &str, lead: &str) -> (Vec<bool>, bool) {
+    // What a receiver can call: a method, or a function a type owns. With
+    // none in the store the call leaves the corpus, and the edge lists what
+    // shares the name, never a module (`searcher.search()` is not search.rs).
+    let method = |c: &SymbolRow| c.kind == "method" || (c.kind == "function" && !free_function(c));
+    let methods: Vec<bool> = candidates.iter().map(|c| method(c)).collect();
+    let callable: Vec<bool> = candidates.iter().map(|c| c.kind != "module").collect();
+    let pool = if methods.contains(&true) {
+        methods
+    } else if callable.contains(&true) {
+        callable
+    } else {
+        vec![true; candidates.len()]
+    };
+    let upper = lead.chars().next().is_some_and(char::is_uppercase);
+    let python = |p: &str| p.ends_with(".py") || p.ends_with(".pyi");
+    if python(src_path) && !lead.is_empty() && !upper {
+        let module: Vec<bool> = candidates
+            .iter()
+            .map(|c| free_function(c) && names_file(lead, &c.path, src_path))
+            .collect();
+        if module.iter().filter(|m| **m).count() == 1 {
+            return (module, true);
+        }
+    }
+    if upper {
+        let mut typed: Vec<bool> = candidates
+            .iter()
+            .zip(&pool)
+            .map(|(c, p)| *p && method(c) && owner_of(&c.qualified) == Some(lead))
+            .collect();
+        if typed.iter().filter(|t| **t).count() > 1 {
+            let near: Vec<usize> = candidates
+                .iter()
+                .map(|c| shared_directories(&c.path, src_path))
+                .collect();
+            let nearest = near
+                .iter()
+                .zip(&typed)
+                .filter(|(_, t)| **t)
+                .map(|(n, _)| *n)
+                .max()
+                .unwrap_or(0);
+            for (t, n) in typed.iter_mut().zip(&near) {
+                *t = *t && *n == nearest;
+            }
+        }
+        match typed.iter().filter(|t| **t).count() {
+            1 => return (typed, true),
+            0 => {}
+            _ => return (typed, false),
+        }
+    }
+    (pool, false)
 }
 
 /// How many leading directories two paths share.
@@ -2536,7 +2816,8 @@ pub fn owner_of(qualified: &str) -> Option<&str> {
 ///    hint that reads as a type (upper case first) counts here: a variable
 ///    named `fleet` is a lead about a file, and tier 2 reads it as one.
 /// 1. The same file as the call. A file that defines a name and calls it means
-///    its own.
+///    its own — unless the call went through a module path that names
+///    another file.
 /// 2. A file the hint names. `store::edges_out` in the presence of
 ///    `src/store.rs` is not a coincidence.
 /// 3. A file the calling file imports. Weaker than the hint because an import
@@ -2548,15 +2829,27 @@ fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[St
         return 0;
     }
     let candidate = candidate.path.as_str();
-    if candidate == src_path {
+    // A module path (`flask.Flask`, `index::read`) names where the target
+    // is, so the calling file's own namesake wins only when the path names
+    // the calling file: in flask's test_config.py, `flask.Flask(...)` was
+    // settled on a test's subclass defined a few lines up.
+    let path_hint = hint.filter(|h| {
+        !h.starts_with(crate::graph::RECEIVER) && !h.chars().next().is_some_and(char::is_uppercase)
+    });
+    let names_caller = |h: &str| {
+        std::path::Path::new(src_path)
+            .file_stem()
+            .is_some_and(|stem| stem == h)
+    };
+    if candidate == src_path && path_hint.is_none_or(names_caller) {
         return 1;
     }
-    if hint.is_some_and(|h| names_file(h, candidate)) {
+    if hint.is_some_and(|h| names_file(h, candidate, src_path)) {
         return 2;
     }
     if imports.iter().any(|i| {
         i.split(['/', '.', ':', '\\'])
-            .any(|segment| !segment.is_empty() && names_file(segment, candidate))
+            .any(|segment| !segment.is_empty() && names_file(segment, candidate, src_path))
     }) {
         return 3;
     }
@@ -2573,19 +2866,24 @@ fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[St
 }
 
 /// Whether `word` names the file at `path` — its stem, or one of its
-/// directories.
+/// directories below the ones it shares with `from`, the calling file.
 ///
 /// `store` names `src/store.rs` and `src/store/mod.rs` alike, which is the
 /// point: a module is a file or a directory depending on how the author felt
-/// that day, and a hint knows neither.
-fn names_file(word: &str, path: &str) -> bool {
+/// that day, and a hint knows neither. A directory both files sit in names
+/// nothing: flask's tests call `flask.Flask(...)`, the repository's own folder
+/// is called `flask`, and every candidate under it — a test's subclass of
+/// `Flask` included — read as named by the hint, so the nearest won as
+/// "extracted" (72 such edges in the 2026-10-14 audit's flask store).
+fn names_file(word: &str, path: &str, from: &str) -> bool {
     let path = std::path::Path::new(path);
     if path.file_stem().is_some_and(|stem| stem == word) {
         return true;
     }
+    let shared = shared_directories(&path.to_string_lossy(), from);
     path.parent()
         .into_iter()
-        .flat_map(|parent| parent.components())
+        .flat_map(|parent| parent.components().skip(shared))
         .any(|component| component.as_os_str() == word)
 }
 
@@ -2781,10 +3079,42 @@ pub fn edges_in_resolved(db: &Connection, name: &str, kinds: &[String]) -> Resul
     let mut imports = std::collections::HashMap::new();
     let mut out = Vec::with_capacity(rows.len());
     for (caller, kind, stored, line, hint) in rows {
-        let picked = if refs.len() > 1 {
-            choose(db, &refs, &caller.path, hint.as_deref(), &mut imports)?
+        // A structural edge is the file saying where its own definition sits:
+        // nothing to rank, and nothing in another file it could mean. Ranked,
+        // a YAML `steps` holding its `run:` key read as maybe containing one
+        // of ripgrep's Rust `run`s.
+        if structural(&kind) {
+            let means: Vec<i64> = definitions
+                .iter()
+                .filter(|d| d.path == caller.path && line.is_none_or(|l| l == d.start_line))
+                .map(|d| d.id)
+                .collect();
+            out.push(Incoming {
+                end: EdgeEnd {
+                    symbol: caller,
+                    kind,
+                    confidence: stored,
+                    definitions: definitions.len(),
+                    from_path: None,
+                    from_line: None,
+                    line,
+                    means: None,
+                },
+                means,
+            });
+            continue;
+        }
+        let (picked, settled) = if refs.is_empty() {
+            (Vec::new(), false)
         } else {
-            vec![true; refs.len()]
+            choose_for(
+                db,
+                &kind,
+                &refs,
+                &caller.path,
+                hint.as_deref(),
+                &mut imports,
+            )?
         };
         let means: Vec<i64> = definitions
             .iter()
@@ -2792,13 +3122,16 @@ pub fn edges_in_resolved(db: &Connection, name: &str, kinds: &[String]) -> Resul
             .filter(|(_, p)| **p)
             .map(|(d, _)| d.id)
             .collect();
-        let confidence = match means.len() {
-            1 if stored == crate::graph::EXTRACTED => crate::graph::EXTRACTED,
-            1 => crate::graph::RESOLVED,
+        let confidence = if means.is_empty() {
             // No definition at all: an edge to a name the store holds only as
             // a heading or a key. Kept as stored so nothing is invented.
-            0 => stored.as_str(),
-            _ => crate::graph::AMBIGUOUS,
+            stored.as_str()
+        } else if settled && stored == crate::graph::EXTRACTED {
+            crate::graph::EXTRACTED
+        } else if settled {
+            crate::graph::RESOLVED
+        } else {
+            crate::graph::AMBIGUOUS
         }
         .to_string();
         out.push(Incoming {
@@ -2890,6 +3223,89 @@ pub fn usage_at(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Option<Row
 /// The chain is the point: a row cannot be quietly edited or removed without
 /// every hash after it failing to recompute.
 pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
+    record_counted(db, row, BASIS_BYTES)
+}
+
+/// The connections holding a run's snapshot ([`pin_snapshot`]), by address.
+///
+/// A reader's connection lives inside a `Semlith` inside a fleet behind its
+/// reader's mutex, and does not move between the pin and the release, so its
+/// address names it for exactly as long as the mark matters.
+static PINNED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+fn address(db: &Connection) -> usize {
+    std::ptr::from_ref(db) as usize
+}
+
+/// Hold this reader at the store as it is now, until [`unpin_snapshot`].
+///
+/// A run re-indexing files the store already holds deletes a file's rows and
+/// writes its new ones file by file, and embeds them after; a reader between
+/// those moments answered from half a run — old chunks gone, new ones not yet
+/// embedded (item 17). A WAL reader inside one read transaction sees one
+/// committed state however much is committed after it, so the daemon opens
+/// one on every reader before the run's first write and ends it when the run
+/// commits. The cost is the WAL keeping the run's pages until then.
+pub fn pin_snapshot(db: &Connection) -> Result<()> {
+    if !db.is_autocommit() {
+        return Ok(());
+    }
+    db.execute_batch("BEGIN DEFERRED")?;
+    // A deferred transaction takes its snapshot at its first read.
+    let _: i64 = db.query_row("SELECT COUNT(*) FROM meta", [], |r| r.get(0))?;
+    PINNED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(address(db));
+    Ok(())
+}
+
+/// End [`pin_snapshot`]'s read transaction: the reader sees the run's commit.
+pub fn unpin_snapshot(db: &Connection) -> Result<()> {
+    let mut pinned = PINNED.lock().unwrap_or_else(|e| e.into_inner());
+    let at = address(db);
+    if let Some(i) = pinned.iter().position(|a| *a == at) {
+        pinned.swap_remove(i);
+        drop(pinned);
+        if !db.is_autocommit() {
+            db.execute_batch("COMMIT")?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether this connection is holding a run's snapshot.
+pub fn is_pinned(db: &Connection) -> bool {
+    PINNED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&address(db))
+}
+
+/// A connection of its own for a write a pinned reader must make — a ledger
+/// row, a usage fill — which its read transaction cannot: a write there would
+/// fail as soon as the run had committed anything since the pin.
+fn beside(db: &Connection) -> Result<Option<Connection>> {
+    if !is_pinned(db) {
+        return Ok(None);
+    }
+    match db.path().filter(|p| !p.is_empty()) {
+        Some(path) => Ok(Some(open(Path::new(path))?)),
+        None => Ok(None),
+    }
+}
+
+/// What the whole-file side of a row was counted from: the file's bytes.
+pub const BASIS_BYTES: &str = "bytes";
+/// What the whole-file side of a row was counted from: the text a reader
+/// extracted from it, counted the way the excerpt was.
+pub const BASIS_TEXT: &str = "text";
+
+/// [`record_retrieval`], saying what the whole-file side was counted from.
+pub fn record_counted(db: &Connection, row: &NewRetrieval<'_>, basis: &str) -> Result<()> {
+    if let Some(side) = beside(db)? {
+        return record_counted(&side, row, basis);
+    }
     // A key pasted as a search is text a person typed, and nothing else in the
     // store keeps one in full: every file passes the scan before it is held.
     // The same scan, the same marker, before the row is hashed, so the chain
@@ -2923,15 +3339,12 @@ pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
         .unwrap_or(0);
     let key = ledger_key(db, true);
     append_chained(db, |prev| {
-        let hash = match &key {
-            Some(key) => keyed_chain_hash(key, prev, at, row),
-            None => chain_hash(prev, at, row),
-        };
+        let hash = v2_hash(key.as_ref(), prev, at, row, basis);
         db.execute(
             "INSERT INTO retrievals
              (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
-              session, tool, stale_hits, tokenizer, query_id, client_version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+              session, tool, stale_hits, tokenizer, query_id, client_version, whole_basis, chain)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 2)",
             params![
                 at,
                 client,
@@ -2947,9 +3360,11 @@ pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
                 row.stale_hits,
                 row.tokenizer,
                 row.query_id,
-                (!row.client_version.is_empty()).then_some(row.client_version)
+                (!row.client_version.is_empty()).then_some(row.client_version),
+                basis,
             ],
         )?;
+        set_head(db, key.as_ref(), db.last_insert_rowid(), &hash)?;
         Ok(())
     })?;
     // The one place a retrieval is written, so the one place the portal's
@@ -3049,6 +3464,9 @@ pub struct Filled {
 /// Write a row's usage. Every row sharing its `query_id` is the same call,
 /// written once per store that answered, so all of them are filled.
 pub fn fill_usage(db: &Connection, row: &Unfilled, filled: &Filled) -> Result<()> {
+    if let Some(side) = beside(db)? {
+        return fill_usage(&side, row, filled);
+    }
     let _writing = Writing::begin(db)?;
     let t = filled.tokens;
     db.execute(
@@ -3071,6 +3489,13 @@ pub fn fill_usage(db: &Connection, row: &Unfilled, filled: &Filled) -> Result<()
             row.query_id,
         ],
     )?;
+    let ids: Vec<i64> = {
+        let mut q =
+            db.prepare("SELECT id FROM retrievals WHERE id = ?1 OR (?2 != '' AND query_id = ?2)")?;
+        q.query_map(params![row.id, row.query_id], |r| r.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    reseal(db, &ids)?;
     Ok(())
 }
 
@@ -3119,6 +3544,9 @@ pub fn unsynced_count(db: &Connection, since: i64) -> Result<i64> {
 
 /// Record that these rows reached the org's ledger.
 pub fn mark_synced(db: &Connection, ids: &[i64], at: i64) -> Result<()> {
+    if let Some(side) = beside(db)? {
+        return mark_synced(&side, ids, at);
+    }
     let _writing = Writing::begin(db)?;
     let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
     {
@@ -3127,6 +3555,7 @@ pub fn mark_synced(db: &Connection, ids: &[i64], at: i64) -> Result<()> {
             q.execute(params![at, id])?;
         }
     }
+    reseal(&tx, ids)?;
     tx.commit()?;
     Ok(())
 }
@@ -3260,6 +3689,103 @@ fn chain_payload(prev: &str, at: i64, row: &NewRetrieval<'_>) -> String {
     payload
 }
 
+/// What a v2 row's hash starts with: keyed by the store's ledger key, or
+/// plain where no key could be made (an in-memory database).
+const V2_KEYED: &str = "k2:";
+const V2_PLAIN: &str = "v2:";
+
+/// The meta key holding the chain's head: the newest v2 row's id and hash,
+/// and a MAC over both, so deleting the newest rows fails `--verify`.
+const LEDGER_HEAD: &str = "ledger_head";
+
+/// Chain v2 (0.42.0): every column a figure reads.
+///
+/// v1 left out `query_id`, so rewriting every id collapsed a ledger's
+/// "16 retrievals, coverage 75 %" into "1 of 1, coverage 100 %" and the chain
+/// still read intact. It also had no head, so deleting the newest row
+/// verified. v2 covers the id, the client's version and the whole-file
+/// basis, the row says it is v2 in `chain`, and [`set_head`] records the head.
+/// The late columns (usage, `synced_at`) cannot be in a hash written before
+/// them; [`reseal`] covers them in `seal` whenever they are written.
+///
+/// An older binary does not know the formula and reports the first v2 row as
+/// the break; rows it wrote itself keep verifying here, under v1.
+fn v2_hash(
+    key: Option<&[u8; 32]>,
+    prev: &str,
+    at: i64,
+    row: &NewRetrieval<'_>,
+    basis: &str,
+) -> String {
+    let payload = format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{basis}\u{1f}v2",
+        chain_payload(prev, at, row),
+        row.query_id,
+        row.client_version,
+    );
+    mac(key, V2_KEYED, V2_PLAIN, &payload)
+}
+
+/// A keyed blake3 under the store's key, or a plain one marked as such.
+fn mac(key: Option<&[u8; 32]>, keyed: &str, plain: &str, payload: &str) -> String {
+    match key {
+        Some(key) => format!(
+            "{keyed}{}",
+            blake3::keyed_hash(key, payload.as_bytes()).to_hex()
+        ),
+        None => format!("{plain}{}", blake3::hash(payload.as_bytes()).to_hex()),
+    }
+}
+
+fn head_mac(key: Option<&[u8; 32]>, id: i64, hash: &str) -> String {
+    mac(key, "k:", "p:", &format!("head\u{1f}{id}\u{1f}{hash}"))
+}
+
+/// Record the newest v2 row as the chain's head, in the append's transaction.
+fn set_head(db: &Connection, key: Option<&[u8; 32]>, id: i64, hash: &str) -> Result<()> {
+    set_meta(
+        db,
+        LEDGER_HEAD,
+        &format!("{id}:{hash}:{}", head_mac(key, id, hash)),
+    )
+}
+
+/// The late columns of a v2 row, as `seal` covers them.
+fn seal_payload(r: &rusqlite::Row<'_>) -> rusqlite::Result<String> {
+    let mut payload: String = r.get::<_, String>(0)?;
+    for at in 1..=10 {
+        let value: rusqlite::types::Value = r.get(at)?;
+        payload.push('\u{1f}');
+        payload.push_str(&match value {
+            rusqlite::types::Value::Null => String::from("\u{0}"),
+            rusqlite::types::Value::Integer(n) => n.to_string(),
+            rusqlite::types::Value::Real(f) => format!("{f:?}"),
+            rusqlite::types::Value::Text(t) => t,
+            rusqlite::types::Value::Blob(b) => blake3::hash(&b).to_hex().to_string(),
+        });
+    }
+    Ok(payload)
+}
+
+const SEAL_COLUMNS: &str = "hash, model, input_tokens, output_tokens, cache_read_tokens, \
+     cache_write_tokens, reasoning_tokens, cost_usd, cost_source, usage_source, synced_at";
+
+/// Rewrite `seal` on the v2 rows among `ids`, after their late columns moved.
+fn reseal(db: &Connection, ids: &[i64]) -> Result<()> {
+    let key = ledger_key(db, true);
+    let mut read = db.prepare(&format!(
+        "SELECT {SEAL_COLUMNS} FROM retrievals WHERE id = ?1 AND chain = 2"
+    ))?;
+    let mut write = db.prepare("UPDATE retrievals SET seal = ?1 WHERE id = ?2")?;
+    for id in ids {
+        let Some(payload) = read.query_row([id], seal_payload).optional()? else {
+            continue;
+        };
+        write.execute(params![mac(key.as_ref(), "k:", "p:", &payload), id])?;
+    }
+    Ok(())
+}
+
 /// Append a row in the shape 0.14.0 wrote, for the test that proves a store
 /// holding both kinds still verifies.
 ///
@@ -3308,6 +3834,46 @@ pub fn record_legacy_retrieval(
                 whole_file_tokens,
                 prev,
                 hash
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// Append a row the way 0.15.0 to 0.41.0 wrote it — chain v1, no basis, no
+/// head — for the test that proves a store holding v1 and v2 rows verifies.
+pub fn record_v1_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
+    let _writing = Writing::begin(db)?;
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let key = ledger_key(db, true);
+    append_chained(db, |prev| {
+        let hash = match &key {
+            Some(key) => keyed_chain_hash(key, prev, at, row),
+            None => chain_hash(prev, at, row),
+        };
+        db.execute(
+            "INSERT INTO retrievals
+             (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
+              session, tool, stale_hits, tokenizer, query_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                at,
+                row.client,
+                row.query,
+                row.hits,
+                row.micros,
+                row.excerpt_tokens,
+                row.whole_file_tokens,
+                prev,
+                hash,
+                row.session,
+                row.tool,
+                row.stale_hits,
+                row.tokenizer,
+                row.query_id
             ],
         )?;
         Ok(())
@@ -3393,6 +3959,14 @@ pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// The rows that are an agent's retrievals, as SQL: what `ledger::figures`
+/// counts by default. Not a refund (`raw-read`), not the chain's own
+/// bookkeeping (a note, a refused write, an accept or revoke), and not a
+/// person at the portal or the CLI. Every per-store reader below takes it, so
+/// a store's card and its report say what the Ledger page says.
+pub const AGENT_RETRIEVAL: &str = "COALESCE(tool, '') NOT IN ('raw-read', 'note', 'refused', 'accept', 'revoke') \
+     AND client NOT IN ('cli', 'portal')";
+
 /// Which rows of the ledger a count is about.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LedgerScope {
@@ -3418,15 +3992,19 @@ pub enum LedgerScope {
 pub fn ledger_keys(db: &Connection, store: &str, scope: LedgerScope) -> Result<Vec<String>> {
     let sql = match scope {
         LedgerScope::All => {
-            "SELECT DISTINCT query_id, id FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused')"
+            format!("SELECT DISTINCT query_id, id FROM retrievals WHERE {AGENT_RETRIEVAL}")
         }
-        LedgerScope::Credited => "SELECT DISTINCT query_id, id FROM retrievals WHERE hits > 0",
-        LedgerScope::Estimated => {
+        LedgerScope::Credited => {
+            format!(
+                "SELECT DISTINCT query_id, id FROM retrievals WHERE hits > 0 AND {AGENT_RETRIEVAL}"
+            )
+        }
+        LedgerScope::Estimated => format!(
             "SELECT DISTINCT query_id, id FROM retrievals
-             WHERE hits > 0 AND (tokenizer IS NULL OR tokenizer != 'model')"
-        }
+             WHERE hits > 0 AND (tokenizer IS NULL OR tokenizer != 'model') AND {AGENT_RETRIEVAL}"
+        ),
     };
-    let mut stmt = db.prepare(sql)?;
+    let mut stmt = db.prepare(&sql)?;
     let rows = stmt.query_map([], |r| {
         let id: Option<String> = r.get(0)?;
         let row: i64 = r.get(1)?;
@@ -3447,10 +4025,12 @@ pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
     // stores happened to be open. A row written before 0.20.2 has no id and is
     // its own retrieval, which is what it was.
     Ok(db.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)), COUNT(DISTINCT client),
-                COALESCE(SUM(excerpt_tokens), 0),
-                COALESCE(SUM(whole_file_tokens), 0) FROM retrievals
-         WHERE COALESCE(tool, '') NOT IN ('note', 'refused')",
+        &format!(
+            "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)), COUNT(DISTINCT client),
+                    COALESCE(SUM(CASE WHEN hits > 0 THEN excerpt_tokens ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN hits > 0 THEN whole_file_tokens ELSE 0 END), 0)
+               FROM retrievals WHERE {AGENT_RETRIEVAL}"
+        ),
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?)
@@ -3495,26 +4075,36 @@ pub fn ledger_savings_since(db: &Connection, since: i64) -> Result<Savings> {
     // The token sums stay sums of rows, because each row holds its own store's
     // hits and nothing is double-counted by adding them.
     let (credited, net): (i64, i64) = db.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)),
-                COALESCE(SUM(whole_file_tokens - excerpt_tokens), 0)
-         FROM retrievals WHERE hits > 0 AND at >= ?1",
+        &format!(
+            "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)),
+                    COALESCE(SUM(whole_file_tokens - excerpt_tokens), 0)
+               FROM retrievals WHERE hits > 0 AND at >= ?1 AND {AGENT_RETRIEVAL}"
+        ),
         [since],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let total: i64 = db.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE at >= ?1 AND COALESCE(tool, '') NOT IN ('note', 'refused')",
+        &format!(
+            "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
+              WHERE at >= ?1 AND {AGENT_RETRIEVAL}"
+        ),
         [since],
         |r| r.get(0),
     )?;
     let estimated: i64 = db.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE hits > 0 AND at >= ?1 AND (tokenizer IS NULL OR tokenizer != 'model')",
+        &format!(
+            "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
+              WHERE hits > 0 AND at >= ?1 AND (tokenizer IS NULL OR tokenizer != 'model')
+                AND {AGENT_RETRIEVAL}"
+        ),
         [since],
         |r| r.get(0),
     )?;
+    // Summed as it is, never clamped: a figure a person recomputes from the
+    // rows must come out the same (the tile used to read 18 tokens above the
+    // tables beside it).
     Ok(Savings {
-        net: net.max(0),
+        net,
         credited,
         total,
         measured: credited > 0 && estimated == 0,
@@ -3571,10 +4161,15 @@ pub fn ledger_misses(db: &Connection) -> Result<Misses> {
         params![crate::ledger::RAW_READ],
         |r| r.get(0),
     )?;
+    // A retrieval is a zero hit when none of its rows found anything: one
+    // search over five stores that two answered is not three zero hits.
     let zero_hit: i64 = db.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE hits = 0 AND (tool IS NULL OR tool NOT IN (?1, 'note', 'refused'))",
-        params![crate::ledger::RAW_READ],
+        &format!(
+            "SELECT COUNT(*) FROM (SELECT COALESCE(query_id, 'row:' || id) AS k
+               FROM retrievals WHERE {AGENT_RETRIEVAL}
+              GROUP BY k HAVING MAX(hits) = 0)"
+        ),
+        [],
         |r| r.get(0),
     )?;
     Ok(Misses {
@@ -3597,10 +4192,11 @@ pub struct Misses {
 
 /// How many retrievals each client made, most first.
 pub fn ledger_clients(db: &Connection) -> Result<Vec<(String, i64)>> {
-    let mut stmt = db.prepare(
-        "SELECT client, COUNT(*) FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused')
-         GROUP BY client ORDER BY COUNT(*) DESC, client",
-    )?;
+    let mut stmt = db.prepare(&format!(
+        "SELECT client, COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) AS n FROM retrievals
+          WHERE {AGENT_RETRIEVAL}
+          GROUP BY client ORDER BY n DESC, client"
+    ))?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
@@ -3696,9 +4292,45 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
     let key = ledger_key(db, false);
     let mut stmt = db.prepare(
         "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
-                session, tool, stale_hits, tokenizer
+                session, tool, stale_hits, tokenizer, chain, COALESCE(query_id, ''),
+                COALESCE(client_version, ''), COALESCE(whole_basis, ''), seal
          FROM retrievals ORDER BY id",
     )?;
+    let mut sealed = db.prepare(&format!(
+        "SELECT {SEAL_COLUMNS} FROM retrievals WHERE id = ?1"
+    ))?;
+    // The head: the newest v2 row as it was written. A v2 row after it, or no
+    // row at its id with its hash, is a tail somebody cut or a row somebody
+    // forged; v1 rows after it are an older binary's, and allowed.
+    let head: Option<(i64, String)> = get_meta(db, LEDGER_HEAD)?.and_then(|text| {
+        let mut parts = text.splitn(3, ':');
+        let id: i64 = parts.next()?.parse().ok()?;
+        let rest = parts.next()?;
+        // The hash itself holds a colon (`k2:…`), so it is two parts.
+        let mut tail = parts.next()?.splitn(2, ':');
+        let hash = format!("{rest}:{}", tail.next()?);
+        let mac = tail.next()?;
+        (head_mac(key.as_ref(), id, &hash) == mac).then_some((id, hash))
+    });
+    // Erasing every row is one documented `DELETE`, and an empty ledger has
+    // nothing left to vouch for; a head with no rows under it is that, not a
+    // cut tail.
+    let empty: bool = db.query_row("SELECT NOT EXISTS (SELECT 1 FROM retrievals)", [], |r| {
+        r.get(0)
+    })?;
+    if empty {
+        return Ok(None);
+    }
+    let head_claimed = get_meta(db, LEDGER_HEAD)?.is_some();
+    if head_claimed && head.is_none() {
+        // A head that does not verify is a head somebody wrote by hand.
+        return Ok(Some(db.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM retrievals",
+            [],
+            |r| r.get(0),
+        )?));
+    }
+    let mut head_seen = false;
     let mut rows = stmt.query([])?;
     let mut expected = String::new();
     while let Some(r) = rows.next()? {
@@ -3719,7 +4351,59 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
         // `tool` is NULL on every row written before 0.15.0 and set on every
         // row written since, which is what says which formula wrote this hash.
         let tool: Option<String> = r.get(11)?;
+        let chain: Option<i64> = r.get(14)?;
+        if let Some((head_id, head_hash)) = &head {
+            if id == *head_id {
+                if hash != *head_hash {
+                    return Ok(Some(id));
+                }
+                head_seen = true;
+            } else if id > *head_id && chain == Some(2) && !acked.contains(&id) {
+                return Ok(Some(id));
+            }
+        }
         let recomputed = match tool {
+            Some(tool) if chain == Some(2) => {
+                let session: String = r.get(10)?;
+                let stale: i64 = r.get(12)?;
+                let tokenizer: String = r.get(13)?;
+                let query_id: String = r.get(15)?;
+                let version: String = r.get(16)?;
+                let basis: String = r.get(17)?;
+                let seal: Option<String> = r.get(18)?;
+                let row = NewRetrieval {
+                    client_version: &version,
+                    client: &client,
+                    session: &session,
+                    tool: &tool,
+                    query: &query,
+                    hits,
+                    micros,
+                    excerpt_tokens: excerpt,
+                    whole_file_tokens: whole,
+                    stale_hits: stale,
+                    tokenizer: &tokenizer,
+                    query_id: &query_id,
+                };
+                if hash.starts_with(V2_KEYED) && key.is_none() {
+                    return Ok(Some(id));
+                }
+                let k = if hash.starts_with(V2_KEYED) {
+                    key.as_ref()
+                } else {
+                    None
+                };
+                // The late columns: a seal over what they say now, or none at
+                // all while none of them has been written.
+                let late = sealed.query_row([id], seal_payload)?;
+                let blank = late.split('\u{1f}').skip(1).all(|v| v == "\u{0}");
+                match seal {
+                    Some(seal) if seal != mac(k, "k:", "p:", &late) => return Ok(Some(id)),
+                    None if !blank => return Ok(Some(id)),
+                    _ => {}
+                }
+                v2_hash(k, &prev, at, &row, &basis)
+            }
             Some(tool) => {
                 let session: String = r.get(10)?;
                 let stale: i64 = r.get(12)?;
@@ -3754,7 +4438,106 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
         }
         expected = hash;
     }
+    if let Some((head_id, _)) = head
+        && !head_seen
+        && !acked.contains(&head_id)
+    {
+        // The head's row is gone: the tail was cut.
+        return Ok(Some(head_id));
+    }
     Ok(None)
+}
+
+/// One ledger row, every column a figure is made of.
+///
+/// The input to `ledger::figures`, the one aggregation every surface renders
+/// (0.42.0). Read whole rather than summed here, because the figures union
+/// retrievals across stores (one search over five stores is five rows and one
+/// query), and SQL inside one store cannot see the other four.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LedgerFact {
+    pub id: i64,
+    pub at: i64,
+    pub client: String,
+    pub session: String,
+    /// Empty on a row written before 0.15.0.
+    pub tool: String,
+    pub query: String,
+    pub hits: i64,
+    pub micros: i64,
+    pub excerpt_tokens: i64,
+    pub whole_file_tokens: i64,
+    pub stale_hits: i64,
+    pub tokenizer: String,
+    /// Empty on a row written before 0.20.2, which was its own retrieval.
+    pub query_id: String,
+    pub client_version: String,
+    /// `bytes`, `text`, or empty for a row written before 0.42.0 (bytes).
+    pub whole_basis: String,
+    /// 2 for chain v2, 1 otherwise.
+    pub chain: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<RowUsage>,
+}
+
+/// Every ledger row with `since <= at < until`, oldest first.
+pub fn ledger_facts(db: &Connection, since: i64, until: Option<i64>) -> Result<Vec<LedgerFact>> {
+    let mut stmt = db.prepare(&format!(
+        "SELECT id, at, client, COALESCE(session, ''), COALESCE(tool, ''), query, hits, micros,
+                excerpt_tokens, whole_file_tokens, COALESCE(stale_hits, 0),
+                COALESCE(tokenizer, ''), COALESCE(query_id, ''), COALESCE(client_version, ''),
+                COALESCE(whole_basis, ''), COALESCE(chain, 1), {USAGE_COLUMNS}
+           FROM retrievals WHERE at >= ?1 AND at < ?2 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map(params![since, until.unwrap_or(i64::MAX)], |r| {
+        Ok(LedgerFact {
+            id: r.get(0)?,
+            at: r.get(1)?,
+            client: r.get(2)?,
+            session: r.get(3)?,
+            tool: r.get(4)?,
+            query: r.get(5)?,
+            hits: r.get(6)?,
+            micros: r.get(7)?,
+            excerpt_tokens: r.get(8)?,
+            whole_file_tokens: r.get(9)?,
+            stale_hits: r.get(10)?,
+            tokenizer: r.get(11)?,
+            query_id: r.get(12)?,
+            client_version: r.get(13)?,
+            whole_basis: r.get(14)?,
+            chain: r.get(15)?,
+            usage: usage_at(r, 16)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The text the store holds for `path`, stitched by line from its chunks.
+///
+/// The whole-file side of a row for a file a reader extracted (a PDF, an
+/// Office file): reading the file would have meant reading this text, not its
+/// bytes — 2.2 MB of PDF is 45,849 characters. `None` for a file not held.
+pub fn held_text(db: &Connection, path: &str) -> Result<Option<String>> {
+    let mut stmt = db.prepare(
+        "SELECT c.start_line, c.text FROM chunks c JOIN files f ON f.id = c.file_id
+          WHERE f.path = ?1 ORDER BY c.start_line, c.id",
+    )?;
+    let mut lines: std::collections::BTreeMap<i64, String> = Default::default();
+    let mut any = false;
+    let rows = stmt.query_map(params![path], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (start, text) = row?;
+        any = true;
+        for (offset, line) in text.split('\n').enumerate() {
+            lines
+                .entry(start + offset as i64)
+                .or_insert_with(|| line.to_string());
+        }
+    }
+    Ok(any.then(|| lines.into_values().collect::<Vec<_>>().join("\n")))
 }
 
 /// The total bytes of every file a grep for `name` would have to read.
@@ -4735,9 +5518,13 @@ pub fn ledger_sessions(db: &Connection, limit: usize) -> Result<Vec<SessionRow>>
 /// From the rows themselves rather than from a benchmark, so the figure is
 /// what this machine actually served rather than what it can serve.
 pub fn ledger_latency(db: &Connection) -> Result<(i64, i64)> {
-    let mut stmt = db.prepare(
-        "SELECT micros FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused') ORDER BY micros",
-    )?;
+    // One figure per retrieval and none for a row that measured no work: a
+    // median over raw-read rows' zeros and one row per store per search is
+    // how a report came to say 724 ms where the rows said ~67.
+    let mut stmt = db.prepare(&format!(
+        "SELECT MAX(micros) AS m FROM retrievals WHERE micros > 0 AND {AGENT_RETRIEVAL}
+          GROUP BY COALESCE(query_id, 'row:' || id) ORDER BY m"
+    ))?;
     let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
     let all: Vec<i64> = rows.collect::<rusqlite::Result<_>>()?;
     if all.is_empty() {
@@ -4774,11 +5561,12 @@ pub fn ledger_zero_hit_queries_since(
     since: i64,
     limit: usize,
 ) -> Result<Vec<(String, i64)>> {
-    let mut stmt = db.prepare(
-        "SELECT query, COUNT(*) AS n FROM retrievals WHERE hits = 0 AND at >= ?1
-           AND COALESCE(tool, '') NOT IN ('note', 'refused')
-         GROUP BY query ORDER BY n DESC, query LIMIT ?2",
-    )?;
+    let mut stmt = db.prepare(&format!(
+        "SELECT query, COUNT(*) AS n FROM (
+            SELECT MIN(query) AS query FROM retrievals WHERE at >= ?1 AND {AGENT_RETRIEVAL}
+             GROUP BY COALESCE(query_id, 'row:' || id) HAVING MAX(hits) = 0)
+         GROUP BY query ORDER BY n DESC, query LIMIT ?2"
+    ))?;
     let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {
         Ok((r.get(0)?, r.get(1)?))
     })?;
@@ -4914,33 +5702,80 @@ pub fn where_defined(db: &Connection, names: &[String]) -> Result<Vec<(String, S
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Call targets no definition in this store satisfies, commonest first.
+/// Call targets no definition in this store satisfies, commonest first, and
+/// how many distinct ones there are.
 ///
 /// The names a reader has to recognise as "outside this corpus" before they
-/// read an absent edge as a missing call. Counted rather than listed in full:
-/// on a store that indexes application code every standard-library call is
-/// one of these, and the list is long and uninteresting past the first few.
+/// read an absent edge as a missing call. Counted rather than listed in full.
+/// The language's own builtins and standard library are left out
+/// ([`crate::graph::is_builtin`]) — cobra's list was `Errorf` 198 times,
+/// `len`, `append` and `os` (2026-10-14 audit) — and [`builtin_targets`]
+/// counts what was left out, so a report can say so.
 pub fn unresolved_targets(db: &Connection, limit: usize) -> Result<(Vec<(String, i64)>, i64)> {
-    // One pass, and one existence test per distinct target rather than per
-    // edge; the top list and the count come from the same rows. Two passes of
-    // a per-edge test were most of the Index health report on the 879k-chunk
-    // corpus. Cached per store until its graph changes, as the report is
-    // asked for again and again while it is being read.
-    let mut all = cached_by_graph(db, "unresolved", || {
-        let target = crate::graph::not_navigational("d.kind");
-        let mut stmt = db.prepare(&format!(
-            "WITH t AS (SELECT dst, COUNT(*) AS n FROM edges
-                        WHERE kind IN ('calls', 'imports') GROUP BY dst)
-             SELECT dst, n FROM t
-             WHERE NOT EXISTS (SELECT 1 FROM symbols d WHERE d.name = t.dst AND {target})"
-        ))?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    })?;
+    let (mut all, _) = outside_targets(db)?;
     let distinct = all.len() as i64;
     all.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     all.truncate(limit);
     Ok((all, distinct))
+}
+
+/// How many distinct call and import targets with no definition here are the
+/// language's own builtins or standard library, and so are not in
+/// [`unresolved_targets`].
+pub fn builtin_targets(db: &Connection) -> Result<i64> {
+    Ok(outside_targets(db)?.1)
+}
+
+/// Targets nothing here defines, as `(name, edges)` outside the builtins, and
+/// the count of distinct names that were builtins only.
+fn outside_targets(db: &Connection) -> Result<(Vec<(String, i64)>, i64)> {
+    // One existence test per distinct target rather than per edge, then the
+    // per-file rows of only those targets, because whether a name is a
+    // builtin depends on the calling file's language and the edge's hint.
+    // Cached per store until its graph changes, as the report is asked for
+    // again and again while it is being read.
+    cached_by_graph(db, "unresolved", || {
+        let target = crate::graph::not_navigational("d.kind");
+        let mut stmt = db.prepare(&format!(
+            "WITH t AS (SELECT dst FROM edges WHERE kind IN ('calls', 'imports') GROUP BY dst),
+                  u AS (SELECT dst FROM t
+                        WHERE NOT EXISTS (SELECT 1 FROM symbols d WHERE d.name = t.dst AND {target}))
+             SELECT e.dst, e.kind, e.hint, f.path, COUNT(*)
+             FROM u JOIN edges e ON e.dst = u.dst
+             JOIN symbols s ON s.id = e.src JOIN files f ON f.id = s.file_id
+             WHERE e.kind IN ('calls', 'imports')
+             GROUP BY e.dst, e.kind, e.hint, s.file_id"
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut language: std::collections::HashMap<String, &'static str> =
+            std::collections::HashMap::new();
+        let mut kept: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut builtin: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for row in rows {
+            let (name, kind, hint, path, n) = row?;
+            let lang = *language.entry(path).or_insert_with_key(|p| {
+                crate::graph::language_of(std::path::Path::new(p)).unwrap_or("")
+            });
+            if kind == "imports" && crate::graph::is_relative_import(lang, &name) {
+                continue;
+            }
+            if crate::graph::is_builtin(lang, &name, &kind, hint.as_deref()) {
+                builtin.insert(name);
+            } else {
+                *kept.entry(name).or_insert(0) += n;
+            }
+        }
+        builtin.retain(|name| !kept.contains_key(name));
+        Ok((kept.into_iter().collect::<Vec<_>>(), builtin.len() as i64))
+    })
 }
 
 /// A figure computed over a whole store's graph, kept until the graph's
@@ -5005,6 +5840,137 @@ pub fn chunks_by_month(db: &Connection) -> Result<Vec<(String, i64)>> {
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// One ledger row as the reports count it (0.42.0).
+#[derive(Debug, Clone)]
+pub struct ReportRow {
+    pub id: i64,
+    pub at: i64,
+    pub client: String,
+    pub client_version: String,
+    pub session: String,
+    pub tool: String,
+    pub query: String,
+    /// The retrieval this row is part of: one search over six stores is six
+    /// rows and one key. A row written before 0.20.2 has no id and is its own.
+    pub key: String,
+    pub hits: i64,
+    pub micros: i64,
+    pub excerpt_tokens: i64,
+    pub whole_file_tokens: i64,
+    pub tokenizer: String,
+}
+
+/// Every ledger row recorded at or after `since`, oldest first.
+///
+/// The reports take their figures from the rows rather than from the
+/// aggregates above, so a window narrows every figure a report prints — the
+/// 0.41 savings report narrowed net, credited and total and left whole,
+/// excerpt, refunds and latency lifetime (R5). Nothing is filtered here: what
+/// counts as a query is the report's rule, and a reader that filtered would be
+/// a second copy of it.
+pub fn report_rows_since(db: &Connection, store: &str, since: i64) -> Result<Vec<ReportRow>> {
+    let mut stmt = db.prepare(
+        "SELECT id, at, client, COALESCE(client_version, ''), COALESCE(session, ''),
+                COALESCE(tool, ''), query, query_id, hits, micros, excerpt_tokens,
+                whole_file_tokens, COALESCE(tokenizer, '')
+         FROM retrievals WHERE at >= ?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([since], |r| {
+        let id: i64 = r.get(0)?;
+        let key: Option<String> = r.get(7)?;
+        Ok(ReportRow {
+            id,
+            at: r.get(1)?,
+            client: r.get(2)?,
+            client_version: r.get(3)?,
+            session: r.get(4)?,
+            tool: r.get(5)?,
+            query: r.get(6)?,
+            key: key
+                .filter(|k| !k.is_empty())
+                .unwrap_or_else(|| format!("{store}:row:{id}")),
+            hits: r.get(8)?,
+            micros: r.get(9)?,
+            excerpt_tokens: r.get(10)?,
+            whole_file_tokens: r.get(11)?,
+            tokenizer: r.get(12)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// A file the store read at or after `since`, and what it held before.
+#[derive(Debug, Clone)]
+pub struct ReadFile {
+    pub path: String,
+    pub indexed_at: i64,
+    /// The definitions the first re-index inside the window retired — what
+    /// the file held when the window opened: `(name, kind, start, end)`.
+    /// Empty for a file read for the first time, and for a re-read file that
+    /// held no definitions, which the store cannot tell apart from a first read.
+    pub before: Vec<(String, String, u32, u32)>,
+    /// Its definitions now: `(name, kind, start, end)`.
+    pub now: Vec<(String, String, u32, u32)>,
+}
+
+/// The first and last indexed path in sort order. Their common directory is
+/// the common directory of every path, which is the root a report prints
+/// paths against when the registry names none (a store opened by `--store`).
+pub fn path_bounds(db: &Connection) -> Result<Option<(String, String)>> {
+    Ok(
+        db.query_row("SELECT MIN(path), MAX(path) FROM files", [], |r| {
+            Ok(
+                match (
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ) {
+                    (Some(a), Some(b)) => Some((a, b)),
+                    _ => None,
+                },
+            )
+        })?,
+    )
+}
+
+/// Every file read at or after `since`, newest first, with no cap — the
+/// change brief's "Files re-read" was 200 per store summed (R3).
+pub fn files_read_since(db: &Connection, since: i64) -> Result<Vec<ReadFile>> {
+    let mut stmt = db.prepare(
+        "SELECT id, path, indexed_at FROM files WHERE indexed_at >= ?1
+         ORDER BY indexed_at DESC, path",
+    )?;
+    let files: Vec<(i64, String, i64)> = stmt
+        .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut past = db.prepare_cached(
+        "SELECT name, kind, start_line, end_line FROM symbols_past
+         WHERE path = ?1 AND retired_at = (SELECT MIN(retired_at) FROM symbols_past
+                                           WHERE path = ?1 AND retired_at >= ?2)
+           AND kind != 'module'",
+    )?;
+    let mut live = db.prepare_cached(
+        "SELECT name, kind, start_line, end_line FROM symbols
+         WHERE file_id = ?1 AND kind != 'module' ORDER BY start_line",
+    )?;
+    let mut out = Vec::with_capacity(files.len());
+    for (id, path, indexed_at) in files {
+        let span = |r: &rusqlite::Row| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?));
+        let before = past
+            .query_map(params![path, since], span)?
+            .collect::<rusqlite::Result<_>>()?;
+        let now = live
+            .query_map([id], span)?
+            .collect::<rusqlite::Result<_>>()?;
+        out.push(ReadFile {
+            path,
+            indexed_at,
+            before,
+            now,
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -5305,12 +6271,28 @@ mod tests {
         assert_eq!(out[0].symbol.path, "src/store/mod.rs");
     }
 
-    /// The calling file's own definition wins over one the hint names. A file
-    /// that defines a name and calls it means its own.
+    /// A module path outranks the calling file's own namesake: `store::callee()`
+    /// in caller.rs is store.rs's `callee`, whatever caller.rs defines. Until
+    /// 0.42.0 the calling file won, which in flask's test_config.py settled
+    /// `flask.Flask(...)` on a test's own subclass (2026-10-14 audit). A
+    /// call with no path, or a path naming the calling file, still means its
+    /// own.
     #[test]
-    fn the_calling_file_outranks_the_hint() {
+    fn a_module_path_outranks_the_calling_file() {
         let db = many_definitions(&["src/caller.rs", "src/store.rs"]);
         call(&db, Some("store"));
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].symbol.path, "src/store.rs");
+
+        let db = many_definitions(&["src/caller.rs", "src/store.rs"]);
+        call(&db, None);
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].symbol.path, "src/caller.rs");
+
+        let db = many_definitions(&["src/caller.rs", "src/store.rs"]);
+        call(&db, Some("caller"));
         let out = edges_out(&db, "caller", &[]).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].symbol.path, "src/caller.rs");

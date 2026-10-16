@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Written beside the store's lock while a daemon holds it, so `semlith mcp`
@@ -873,6 +873,16 @@ impl RunState {
             .saturating_sub(held)
     }
 
+    /// How long the run's work has taken: its clock less its wait in the
+    /// queue. The wizard submits a run at the scan, so the minutes a person
+    /// spends on the Review and Index pages were on the clock: ripgrep took
+    /// 41 s by its stages and its history and the card said "done in 1m 31s".
+    /// Every surface — the card, the history, the log's events — reads this.
+    fn work_time(&self) -> Duration {
+        self.elapsed()
+            .saturating_sub(Duration::from_millis(self.queued_ms.unwrap_or(0)))
+    }
+
     /// Bytes per second from the first batch to the last, once there were two.
     fn embed_rate(&self) -> Option<f64> {
         let (t0, _, b0) = self.first_sample?;
@@ -1175,6 +1185,12 @@ impl RunState {
                 self.close_phases();
                 self.indexed = num("indexed").unwrap_or(self.indexed);
                 self.chunks = num("chunks").unwrap_or(self.chunks);
+                // A finished run expected what it did: a catch-up that found
+                // nothing to embed read "0 / 233 chunks" on its card for good,
+                // from an estimate made before it knew every file was unchanged.
+                if !stopped {
+                    self.expected_chunks = self.chunks;
+                }
                 self.unhold();
                 self.ended = Some(self.elapsed());
                 self.finished = Some(now());
@@ -1569,6 +1585,9 @@ pub struct Store {
     /// gained three files. A deadline rather than a flag, so a run that never
     /// arrives costs the watcher a minute rather than the session.
     pub expecting_run_until: AtomicUsize,
+    /// The run holding this store's readers at their state before it, if one
+    /// is (item 17); 0 for none.
+    snapshot_run: AtomicU64,
     /// Why the writer thread ended, when it has. `/api/stores` reports it
     /// beside `watching: false`, so a stopped store says what stopped it.
     pub stopped_because: Mutex<Option<String>>,
@@ -1641,6 +1660,7 @@ impl Store {
             // Set before the watcher thread exists, which is the point: a flag
             // set afterwards is a flag the catch-up may already have run past.
             expecting_run_until: AtomicUsize::new(expecting_run_until),
+            snapshot_run: AtomicU64::new(0),
             stopped_because: Mutex::new(None),
             watch_events: AtomicBool::new(true),
             events_waiting: Arc::new(AtomicBool::new(false)),
@@ -1927,7 +1947,7 @@ impl Store {
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .find(|run| run.id == id)
-            .map(|run| run.elapsed().as_millis() as u64)
+            .map(|run| run.work_time().as_millis() as u64)
             .unwrap_or(0)
     }
 
@@ -2029,7 +2049,8 @@ impl Store {
             "started_at": run.started,
             "finished_at": run.finished,
             "queued_ms": run.queued_ms,
-            "elapsed_ms": run.elapsed().as_millis() as u64,
+            // The work's own time; `queued_ms` is the wait before it.
+            "elapsed_ms": run.work_time().as_millis() as u64,
             // Null until the rate has settled, and whenever the run is not
             // running: the card says `estimating…` rather than guessing.
             "eta_ms": run.eta_ms(),
@@ -3076,19 +3097,32 @@ pub struct State {
     /// there is no disconnect to observe over HTTP either, so a client is
     /// "connected" for as long as it has been heard from recently.
     pub clients: Mutex<BTreeMap<String, Client>>,
-    /// A second reader, for forwarded MCP calls, opened on first use.
+    /// The conversation a stateless MCP client is in, by client, version and
+    /// transport: `(id, last heard)`. See [`State::conversation`].
+    pub conversations: Mutex<BTreeMap<String, (String, u64)>>,
+    /// The readers forwarded MCP calls answer from, each opened on first use.
     ///
     /// Separate from `fleet` on purpose: a forwarded `semlith_index` blocks its
     /// caller until the writer has run it, and sharing one lock would mean an
     /// agent's index freezing the portal for as long as the slice lasts. A
     /// reader that is never used costs a SQLite handle and no vectors.
-    pub mcp_fleet: Mutex<Option<Fleet>>,
+    ///
+    /// Several from 0.42.0 (item 18): one reader behind one lock put a team's
+    /// agents on one store in a queue. A call takes a free reader, opening
+    /// another only when every open one is busy, and every reader shares one
+    /// copy of each store's vectors (`index::Vectors`). The `u64` is the
+    /// reader epoch the fleet was opened at; a store joining or leaving moves
+    /// [`State::reader_epoch`] and each reader is rebuilt on its next use.
+    pub mcp_fleet: Vec<Mutex<(u64, Option<Fleet>)>>,
+    /// Moved when a store joins or leaves; see `mcp_fleet`.
+    reader_epoch: AtomicU64,
+    /// Which reader the next call that finds them all busy waits for.
+    next_reader: AtomicUsize,
     /// Set when a store joins or leaves: the readers are rebuilt on their next
     /// use. A flag rather than taking their locks, which a search or a graph
     /// holds for as long as it runs: a store created during one waited for it,
     /// past 30 s on a busy runner (drive rc4.5, rc4.6 on Ubuntu).
     readers_stale: AtomicBool,
-    mcp_stale: AtomicBool,
     /// Held while a store is looked up and, if absent, opened: two requests
     /// for the same new folder raced, and the second found the first's lock
     /// and was refused with "being indexed by" this daemon (drive rc4.5).
@@ -3126,6 +3160,73 @@ pub struct State {
 
 /// How recently a proxy must have called to count as connected.
 const PROXY_FRESH: u64 = 120;
+
+/// The stores a run is re-indexing, by directory: the run's epoch and when
+/// it began. Every reader holds those stores at their state before the run
+/// until it commits (item 17); see `Fleet::reconcile`.
+static SNAPSHOTS: Mutex<BTreeMap<PathBuf, (u64, u64)>> = Mutex::new(BTreeMap::new());
+static SNAPSHOT_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// The daemon's state, for the writer to reach its readers through.
+static READERS: RwLock<Option<std::sync::Weak<State>>> = RwLock::new(None);
+
+/// A snapshot no run has released in this long is let go of: the run that
+/// held it is gone (its thread died), and a reader must not answer from a
+/// store's past for ever, nor the WAL keep growing.
+const SNAPSHOT_LIMIT: u64 = 6 * 3600;
+
+/// The snapshots readers should hold now.
+pub fn snapshots() -> BTreeMap<PathBuf, u64> {
+    let now = now();
+    SNAPSHOTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(_, (_, since))| now.saturating_sub(*since) < SNAPSHOT_LIMIT)
+        .map(|(dir, (epoch, _))| (dir.clone(), *epoch))
+        .collect()
+}
+
+/// Begin (`on`) or end a run's snapshot of `dir` on every reader.
+///
+/// Idle readers are moved here, before the run's first write and right
+/// after its commit; a reader mid-call is given until its call ends — the
+/// wait is bounded, because a portal call can be waiting on this writer —
+/// and reconciles itself at the start and end of every call regardless.
+fn hold_readers(dir: &Path, on: bool) {
+    {
+        let mut all = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
+        if on {
+            let epoch = SNAPSHOT_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+            all.insert(dir.to_path_buf(), (epoch, now()));
+        } else {
+            all.remove(dir);
+        }
+    }
+    let state = READERS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(std::sync::Weak::upgrade);
+    if let Some(state) = state {
+        let wanted = snapshots();
+        state.each_reader_soon(Duration::from_secs(5), |fleet| fleet.reconcile(&wanted));
+    }
+}
+
+/// How many readers forwarded MCP calls may use at once: half the cores, two
+/// to four. Each beyond the first is opened only when the open ones are all
+/// busy, so a machine with one agent pays for one.
+fn readers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).clamp(2, 4))
+        .unwrap_or(2)
+}
+
+/// How long a stateless client may be quiet and still be in the same
+/// conversation. Half an hour: an agent reading code between calls is quiet
+/// for minutes, and a new task after lunch is a new conversation.
+pub const CONVERSATION_IDLE: u64 = 30 * 60;
 
 /// Each open store's directory beside the name the daemon knows it by.
 ///
@@ -3881,6 +3982,28 @@ impl State {
             .collect()
     }
 
+    /// The conversation id for a call that carries no session.
+    ///
+    /// MCP 2026-07-28 is stateless: no `initialize`, no `Mcp-Session-Id`, and
+    /// nothing in a request says which conversation it belongs to. Until
+    /// 0.42.0 every such call shared one "anonymous" session — 432 of the
+    /// owner's rows in ten days, one session. The derivation is the one fact
+    /// left: one client, one version, one transport, until it has been quiet
+    /// for [`CONVERSATION_IDLE`]. Two windows of the same client at once read
+    /// as one conversation; a revision that defines a conversation id replaces
+    /// this function and nothing else.
+    pub fn conversation(&self, client: &str, version: &str, transport: &str) -> String {
+        let now = now();
+        let key = format!("{transport}\u{1f}{client}\u{1f}{version}");
+        let mut all = self.conversations.lock().unwrap_or_else(|e| e.into_inner());
+        all.retain(|_, (_, seen)| now.saturating_sub(*seen) <= CONVERSATION_IDLE);
+        let entry = all
+            .entry(key)
+            .or_insert_with(|| (crate::routes::new_session(), now));
+        entry.1 = now;
+        entry.0.clone()
+    }
+
     /// Note that a forwarding `semlith mcp` is alive.
     pub fn saw_proxy(&self, pid: u32) {
         let mut proxies = self.proxies.lock().unwrap_or_else(|e| e.into_inner());
@@ -3915,13 +4038,36 @@ impl State {
             .count()
     }
 
-    /// The reader forwarded MCP calls answer from, opened on first use.
-    pub fn open_mcp_fleet(&self) -> Result<()> {
-        let mut fleet = self.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner());
-        if self.mcp_stale.swap(false, Ordering::SeqCst) {
-            *fleet = None;
+    /// A reader for one forwarded MCP call: a free one, or a new one when
+    /// every open one is busy and the pool has room, or else a wait for one.
+    /// The guard's fleet is `None` when no store is open, and the error is why
+    /// a reader could not be opened.
+    pub fn mcp_reader(&self) -> (MutexGuard<'_, (u64, Option<Fleet>)>, Result<()>) {
+        let epoch = self.reader_epoch.load(Ordering::SeqCst);
+        // An open, current, idle reader first: no model to load.
+        let mut free = None;
+        for slot in &self.mcp_fleet {
+            if let Ok(guard) = slot.try_lock() {
+                if guard.1.is_some() && guard.0 == epoch {
+                    return (guard, Ok(()));
+                }
+                free.get_or_insert(guard);
+            }
         }
-        if fleet.is_some() {
+        let mut guard = free.unwrap_or_else(|| {
+            let at = self.next_reader.fetch_add(1, Ordering::Relaxed) % self.mcp_fleet.len();
+            self.mcp_fleet[at].lock().unwrap_or_else(|e| e.into_inner())
+        });
+        let opened = self.fill_reader(&mut guard, epoch);
+        (guard, opened)
+    }
+
+    /// Open `slot`'s fleet if it has none, or one from an older epoch.
+    fn fill_reader(&self, slot: &mut (u64, Option<Fleet>), epoch: u64) -> Result<()> {
+        if slot.0 != epoch {
+            slot.1 = None;
+        }
+        if slot.1.is_some() {
             return Ok(());
         }
         let open = self.stores();
@@ -3934,7 +4080,10 @@ impl State {
         // portal and `/api/stores` do. See `open_fleet`.
         opened.name_from(&named(&open));
         opened.quiet = true;
-        *fleet = Some(opened);
+        opened.share_vectors()?;
+        // A reader opened while a run holds a snapshot starts on the run's
+        // writes so far; said rather than hidden (AGENTS.md, item 17).
+        *slot = (epoch, Some(opened));
         Ok(())
     }
 
@@ -4022,14 +4171,15 @@ impl State {
     /// "Access is denied" renaming a store while the portal searched).
     fn release_readers(&self) {
         *self.fleet.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        for slot in &self.mcp_fleet {
+            slot.lock().unwrap_or_else(|e| e.into_inner()).1 = None;
+        }
         self.readers_stale.store(false, Ordering::SeqCst);
-        self.mcp_stale.store(false, Ordering::SeqCst);
     }
 
     fn reopen_readers(&self) {
         self.readers_stale.store(true, Ordering::SeqCst);
-        self.mcp_stale.store(true, Ordering::SeqCst);
+        self.reader_epoch.fetch_add(1, Ordering::SeqCst);
         // Dropped now when nothing is reading, so the files of a store being
         // deleted are let go of at once (Windows refuses to delete an open one).
         if let Ok(mut fleet) = self.fleet.try_lock()
@@ -4037,10 +4187,64 @@ impl State {
         {
             *fleet = None;
         }
-        if let Ok(mut fleet) = self.mcp_fleet.try_lock()
-            && self.mcp_stale.swap(false, Ordering::SeqCst)
+        for slot in &self.mcp_fleet {
+            if let Ok(mut slot) = slot.try_lock() {
+                slot.1 = None;
+            }
+        }
+    }
+
+    /// [`State::each_reader`], waiting at most `patience` for a busy one,
+    /// which is then left to reconcile itself when its call ends.
+    pub fn each_reader_soon(&self, patience: Duration, mut f: impl FnMut(&mut Fleet)) {
+        let deadline = std::time::Instant::now() + patience;
+        loop {
+            match self.fleet.try_lock() {
+                Ok(mut fleet) => {
+                    if let Some(fleet) = fleet.as_mut() {
+                        f(fleet);
+                    }
+                    break;
+                }
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+        for slot in &self.mcp_fleet {
+            loop {
+                match slot.try_lock() {
+                    Ok(mut slot) => {
+                        if let Some(fleet) = slot.1.as_mut() {
+                            f(fleet);
+                        }
+                        break;
+                    }
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+
+    /// Every open reader fleet, one at a time, waiting for each one's current
+    /// call: the portal's and each MCP reader.
+    pub fn each_reader(&self, mut f: impl FnMut(&mut Fleet)) {
+        if let Some(fleet) = self
+            .fleet
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
         {
-            *fleet = None;
+            f(fleet);
+        }
+        for slot in &self.mcp_fleet {
+            if let Some(fleet) = slot.lock().unwrap_or_else(|e| e.into_inner()).1.as_mut() {
+                f(fleet);
+            }
         }
     }
 
@@ -4075,6 +4279,8 @@ impl State {
         // a chip from naming a store the search route says is not open.
         opened.name_from(&named(&open));
         opened.quiet = true;
+        // The portal's reader shares the MCP readers' vectors too.
+        opened.share_vectors()?;
         *fleet = Some(opened);
         Ok(())
     }
@@ -4388,6 +4594,7 @@ pub fn run(
         // stderr is this process's log, and a model download progress bar in
         // the middle of it is noise; the Stores view reports readiness.
         fleet.quiet = true;
+        fleet.share_vectors()?;
         Some(fleet)
     };
 
@@ -4447,14 +4654,26 @@ pub fn run(
         awaiting: Mutex::new(BTreeMap::new()),
         proxies: Mutex::new(BTreeMap::new()),
         clients: Mutex::new(BTreeMap::new()),
-        mcp_fleet: Mutex::new(None),
+        conversations: Mutex::new(BTreeMap::new()),
+        mcp_fleet: (0..readers()).map(|_| Mutex::new((0, None))).collect(),
+        reader_epoch: AtomicU64::new(0),
+        next_reader: AtomicUsize::new(0),
         readers_stale: AtomicBool::new(false),
-        mcp_stale: AtomicBool::new(false),
         opening: Mutex::new(()),
         ledger,
         schedules: crate::schedule::Runner::new(),
         gone: Mutex::new(Vec::new()),
     });
+    // The writer reaches the readers through this to hold a run's snapshot.
+    *READERS.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(&state));
+    // Every reader opened now, before the first writer starts: a reader
+    // opened under a run that is already writing cannot be given the store as
+    // it was before the run (item 17), and the startup catch-up is such a run.
+    // An unused reader costs a SQLite handle per store and no vectors.
+    for slot in &state.mcp_fleet {
+        let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = state.fill_reader(&mut slot, 0);
+    }
 
     // The timer, over whatever `~/.semlith/schedules.json` holds. A home with
     // no such file is the normal state: nothing is created, nothing is said,
@@ -4991,6 +5210,20 @@ fn perform(
                     Work::Rest(files) => files.iter().map(|p| p.display().to_string()).collect(),
                 };
                 let (files, chunks, _) = writer.stats().unwrap_or((0, 0, 0));
+                // A run over files the store already holds is answered, until
+                // it commits, from the store as it was (item 17). A first
+                // import stays progressive: there is no "before" worth
+                // answering from, and keyword answers while it embeds are
+                // what `tests/progressive.rs` requires.
+                let first_import =
+                    crate::store::get_meta(writer.db(), crate::store::FIRST_IMPORT_KEY)
+                        .ok()
+                        .flatten()
+                        .is_some();
+                if files > 0 && !first_import {
+                    store.snapshot_run.store(run, Ordering::SeqCst);
+                    hold_readers(&store.dir, true);
+                }
                 say(serde_json::json!({
                     "event": "started",
                     "paths": names,
@@ -5220,7 +5453,7 @@ fn perform(
                         }));
                         store.paused.store(false, Ordering::Relaxed);
                         store.cancelled.store(false, Ordering::Relaxed);
-                        release(run, admission);
+                        release(store, run, admission);
                         return Some(store.run_paths(run));
                     }
 
@@ -5368,7 +5601,7 @@ fn perform(
             // The flags belong to a run, and this one is over.
             store.paused.store(false, Ordering::Relaxed);
             store.cancelled.store(false, Ordering::Relaxed);
-            release(run, admission);
+            release(store, run, admission);
             None
         }
         Job::Accept { path, mode, source } => {
@@ -5632,8 +5865,17 @@ fn report_dropped_queue(stores: &[Arc<Store>], report: &(dyn Fn(&str) + Send + S
 /// run", which worked while a store had exactly one; asking for its unfinished
 /// run at the moment a run finishes returns nothing, and the place is never
 /// given back — after `runs at once` runs the daemon admits nothing at all.
-fn release(run: u64, admission: &Arc<Admission>) {
+fn release(store: &Store, run: u64, admission: &Arc<Admission>) {
     admission.finish(run);
+    // The run is over, committed or undone: its readers see the store as it
+    // is now.
+    if store
+        .snapshot_run
+        .compare_exchange(run, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        hold_readers(&store.dir, false);
+    }
 }
 
 /// The daemon standing in as the writer for a forwarded `semlith_index` or
@@ -6040,6 +6282,30 @@ mod tests {
         assert!(second >= 50, "the clock did not span the slice: {second}ms");
     }
 
+    #[test]
+    fn a_finished_run_expects_what_it_did() {
+        // A catch-up that embedded nothing read "0 / 233 chunks" on the
+        // store's last run for good (audit F16).
+        let _held = counters();
+        let store = bare_store("api");
+        store.begin_run(1, Vec::new(), RunKind::CatchUp);
+        store.record(1, &serde_json::json!({ "event": "started", "paths": [] }));
+        store.record(
+            1,
+            &serde_json::json!({ "event": "progress", "scanned": 3, "total": 233, "expected_chunks": 233, "chunks": 0 }),
+        );
+        store.record(
+            1,
+            &serde_json::json!({ "event": "done", "indexed": 0, "chunks": 0, "stopped": false }),
+        );
+        let run = store
+            .run_snapshots(None)
+            .into_iter()
+            .find(|r| r["id"] == 1)
+            .expect("the run is listed");
+        assert_eq!(run["expected_chunks"], 0, "{run}");
+    }
+
     /// Held time is not time anything is happening, and a run that is over
     /// keeps its total rather than counting on.
     #[test]
@@ -6180,7 +6446,7 @@ mod tests {
             // unfinished run to be asked for, so a lookup would find nothing
             // and release nothing.
             assert_eq!(store.current_run(), None);
-            release(*id, &admission);
+            release(store, *id, &admission);
         }
 
         assert_eq!(
@@ -6628,9 +6894,11 @@ mod tests {
             awaiting: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
-            mcp_fleet: Mutex::new(None),
+            conversations: Mutex::new(BTreeMap::new()),
+            mcp_fleet: (0..readers()).map(|_| Mutex::new((0, None))).collect(),
+            reader_epoch: AtomicU64::new(0),
+            next_reader: AtomicUsize::new(0),
             readers_stale: AtomicBool::new(false),
-            mcp_stale: AtomicBool::new(false),
             opening: Mutex::new(()),
             ledger: false,
             schedules: crate::schedule::Runner::new(),

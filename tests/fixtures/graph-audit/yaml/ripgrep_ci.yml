@@ -1,0 +1,34 @@
+# Cut down from ripgrep .github/workflows/ci.yml: the `run:` keys that
+# outnumbered and outranked ripgrep's Rust `run` functions in `semlith symbol
+# run` (2026-10-14 audit, G9 and G10).
+name: ci
+on:
+  pull_request:
+  push:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Build ripgrep and all crates
+      run: cargo build --verbose --workspace
+    - name: Run tests
+      run: cargo test --verbose --workspace
+    - name: Test zsh shell completions
+      run: ci/test-complete
+  rustfmt:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check formatting
+      run: cargo fmt --all --check
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check documentation
+      run: cargo doc --no-deps --document-private-items --workspace
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install Fuzzer
+      run: cargo install cargo-fuzz
+    - name: Verify fuzz targets build
+      run: cargo check

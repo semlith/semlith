@@ -44,6 +44,42 @@ const LEGACY_NEWEST: &str = "2025-11-25";
 const LEGACY_OLDEST: &str = "2024-11-05";
 
 const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+/// Where 2026-07-28 carries the client's name: on every request, since there
+/// is no `initialize` to carry it once.
+const META_CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
+
+/// The `clientInfo` a request carries: the handshake's, or a stateless
+/// request's `_meta` copy. Claude Code 2.1.299 sends only the second, so a
+/// server reading only the first recorded every call as client `mcp`.
+pub fn client_info(params: Option<&Value>) -> Option<&Value> {
+    let params = params?;
+    params
+        .get("clientInfo")
+        .or_else(|| params.get("_meta")?.get(META_CLIENT_INFO))
+}
+
+/// The revision a request asks for: the handshake's `protocolVersion`, or a
+/// stateless request's `_meta` one.
+pub fn revision_of(params: Option<&Value>) -> Option<&str> {
+    let params = params?;
+    params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .or_else(|| declared_version(params))
+}
+
+/// Name `session` from a `clientInfo`, resolved against its host.
+fn name_session(session: &mut Session, info: Option<&Value>) {
+    let name = info.and_then(|c| c.get("name")).and_then(Value::as_str);
+    session.client = crate::clientid::label(name, session.host.as_deref());
+    if let Some(version) = info
+        .and_then(|c| c.get("version"))
+        .and_then(Value::as_str)
+        .filter(|_| !name.is_some_and(crate::clientid::generic))
+    {
+        session.version = version.chars().take(64).collect();
+    }
+}
 const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 
 /// `UnsupportedProtocolVersionError`, from the error range 2026-07-28 reserved
@@ -420,6 +456,14 @@ fn without_stores(
         )));
     }
     let modern = declared == Some(MODERN);
+    // A stateless request names its client every time; the stdio server takes
+    // the name from the first one that does, as it would from `initialize`.
+    if modern
+        && session.client == "mcp"
+        && let Some(info) = params.get("_meta").and_then(|m| m.get(META_CLIENT_INFO))
+    {
+        name_session(session, Some(info));
+    }
 
     Some(match method {
         // Mandatory in the modern era, and the probe a dual-era client opens
@@ -441,19 +485,7 @@ fn without_stores(
             // calls itself in its own configuration.
             // Resolved against the app that started this process, since a
             // stdio client may name only its MCP library (`mcp`, `rmcp`).
-            let info = params.get("clientInfo");
-            session.client = crate::clientid::label(
-                info.and_then(|c| c.get("name")).and_then(Value::as_str),
-                session.host.as_deref(),
-            );
-            let name = info.and_then(|c| c.get("name")).and_then(Value::as_str);
-            if let Some(version) = info
-                .and_then(|c| c.get("version"))
-                .and_then(Value::as_str)
-                .filter(|_| !name.is_some_and(crate::clientid::generic))
-            {
-                session.version = version.chars().take(64).collect();
-            }
+            name_session(session, params.get("clientInfo"));
             let asked = params.get("protocolVersion").and_then(Value::as_str);
             let version = negotiate(asked);
             // "The agent sees no tools" is otherwise undiagnosable from the
@@ -843,7 +875,12 @@ fn all_tool_defs(open: &str) -> Value {
                 "type": "object",
                 "properties": {
                     "kind": { "type": "string" },
-                    "format": { "type": "string", "description": "markdown, csv, json, html." },
+                    "format": { "type": "string", "description": "markdown, json or html; csv with table." },
+                    "table": { "type": "string", "description": "One table as CSV: summary or a table id." },
+                    "window": { "type": "string", "description": "all, day, week, month (default) or quarter." },
+                    "scope": { "type": "array", "items": { "type": "string" } },
+                    "redact": { "type": "boolean" },
+                    "excerpts": { "type": "boolean" },
                     "model": { "type": "string" },
                     "store": { "type": "string" }
                 },
@@ -1019,14 +1056,29 @@ fn call_with_remotes(
 
     let mut parts: Vec<String> = Vec::new();
     let mut failed = false;
+    let mut local_text = None;
     if !skip_local {
         let local = call_local(stores, writer, &local_params(), session, None)?;
         failed = local["isError"] == json!(true);
+        local_text = Some(text_of(&local));
         parts.push(text_of(&local));
     }
     let mut skipped = Vec::new();
     for (store, remote) in &targets {
         match crate::cloud::forward_tool(store, remote, name, &args, &who) {
+            // A mirror of the local checkout answers with the same rows, and
+            // printing them again doubled what an agent paid (F21).
+            Ok(text)
+                if local_text
+                    .as_deref()
+                    .is_some_and(|local| crate::cloud::agrees(local, &text)) =>
+            {
+                parts.push(format!(
+                    "{store} ({}) agreed: the same {} rows as above",
+                    crate::cloud::badge(remote),
+                    crate::cloud::rows_in(&text)
+                ))
+            }
             Ok(text) => parts.push(format!("{store} ({})\n{text}", crate::cloud::badge(remote))),
             Err(why) => skipped.push(why),
         }
@@ -1822,23 +1874,8 @@ fn call_local(
                 match stores.signatures_in(Some(&only), &names, &filter) {
                     Ok(rows) if rows.is_empty() => empty_graph(stores, &names.join(", ")),
                     Ok(rows) => {
-                        let text = crate::graph::render_signatures(&rows, &|p| paths.short(p));
-                        let missing: Vec<&String> = names
-                            .iter()
-                            .filter(|n| !rows.iter().any(|r| r.asked == **n))
-                            .collect();
-                        let text = if missing.is_empty() {
-                            text
-                        } else {
-                            format!(
-                                "{text}\nno definition: {}",
-                                missing
-                                    .iter()
-                                    .map(|m| m.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        };
+                        let text =
+                            crate::graph::render_signatures(&rows, &names, &|p| paths.short(p));
                         paths.with_header(crate::graph::fit(text, "ask for fewer names"))
                     }
                     Err(e) => return Ok(tool_error(&e.to_string())),
@@ -2001,7 +2038,27 @@ fn call_local(
                 .get("model")
                 .and_then(Value::as_str)
                 .unwrap_or(crate::report::DEFAULT_MODEL);
-            match crate::report::generate(stores, kind, model).and_then(|r| r.render(format)) {
+            // The same document the CLI and the portal make for the same
+            // window, scope and toggles — before 0.42.0 this took none of
+            // them, so it matched only at the defaults (R11).
+            let flag = |name: &str| args.get(name).and_then(Value::as_bool).unwrap_or(false);
+            let options = crate::report::Options {
+                excerpts: flag("excerpts"),
+                redact: flag("redact"),
+                salt: None,
+            };
+            let mut only = strings(&args, "scope");
+            only.extend(strings(&args, "store"));
+            let table = args.get("table").and_then(Value::as_str);
+            let rendered = crate::report::window_of(args.get("window").and_then(Value::as_str))
+                .and_then(|window| {
+                    crate::report::generate_with(stores, kind, model, window, &only, options)
+                })
+                .and_then(|r| match table {
+                    Some(id) => r.render_table(id),
+                    None => r.render(format),
+                });
+            match rendered {
                 Ok(text) => text,
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
@@ -2160,15 +2217,43 @@ fn record(
                 elapsed,
             );
         }
-        "semlith_pattern" => {
-            let subject = args.get("query").and_then(Value::as_str).unwrap_or("");
-            let found = !body.starts_with("No match") && !body.starts_with("No indexed");
-            crate::ledger::graph(stores, &who, "pattern", subject, "", found, elapsed);
+        // A read and a pattern name the files they quote, as a search does,
+        // so they are recorded from the reply the same way: the excerpt is
+        // what the agent was handed, the whole side the files it names. Until
+        // 0.42.0 both went through `graph` with the target as a name to grep:
+        // a `path:range` read greps to nothing and wrote no row, a symbol read
+        // wrote an excerpt of 0 and credited the whole file, and a pattern
+        // recorded its reply as "".
+        "semlith_pattern" | "semlith_read" => {
+            let key = if tool == "semlith_read" {
+                "target"
+            } else {
+                "query"
+            };
+            let subject = args.get(key).and_then(Value::as_str).unwrap_or("");
+            crate::ledger::reply(
+                stores,
+                &who,
+                tool.trim_start_matches("semlith_"),
+                subject,
+                body,
+                &strings(args, "store"),
+                elapsed,
+            );
         }
-        "semlith_read" => {
-            let subject = args.get("target").and_then(Value::as_str).unwrap_or("");
-            let found = !body.starts_with("Nothing indexed");
-            crate::ledger::graph(stores, &who, "read", subject, "", found, elapsed);
+        "semlith_impact" | "semlith_trace" => {
+            let Some(subject) = args
+                .get("name")
+                .or_else(|| args.get("from"))
+                .and_then(Value::as_str)
+            else {
+                return;
+            };
+            let short = tool.trim_start_matches("semlith_");
+            let found = !body.contains("not connected")
+                && !body.contains("nothing")
+                && !body.starts_with("No ");
+            crate::ledger::graph(stores, &who, short, subject, body, found, elapsed);
         }
         "semlith_neighbors" | "semlith_path" | "semlith_symbol" => {
             // `path` is asked about two names and the first is the one the
@@ -2288,31 +2373,7 @@ fn render_ends(ends: &[crate::store::EdgeEnd], shorten: &dyn Fn(&str) -> String)
         return "  none".to_string();
     }
     ends.iter()
-        .map(|e| {
-            // A collapsed row stands for several definitions and must not name
-            // one of them: an agent reading `get  src/a.rs:12` will quote that
-            // file, and it is one of four the call could have meant.
-            if e.confidence == crate::graph::AMBIGUOUS {
-                return format!(
-                    "  {} via {} ({}) · {} definitions{}",
-                    e.symbol.name,
-                    e.kind,
-                    e.confidence,
-                    e.definitions,
-                    crate::graph::call_site(e, shorten)
-                );
-            }
-            format!(
-                "  {} via {} ({})  {}{}:{}{}",
-                e.symbol.name,
-                e.kind,
-                e.confidence,
-                label_of(&e.symbol.store),
-                shorten(&e.symbol.path),
-                e.symbol.start_line,
-                crate::graph::call_site(e, shorten)
-            )
-        })
+        .map(|e| crate::graph::render_end(e, shorten))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -2610,6 +2671,9 @@ fn locate_row(hit: &crate::Hit, terms: &[String], shorten: &dyn Fn(&str) -> Stri
             copies.join(", ")
         ));
     }
+    if !hit.agreed.is_empty() {
+        marks.push(format!("agreed: {}", hit.agreed.join(", ")));
+    }
     let at = match hit.symbol_line {
         Some(line) => format!(" @{line}"),
         None => String::new(),
@@ -2696,6 +2760,7 @@ fn tokens(text: &str) -> usize {
 /// tell them apart treats a neighbour as an answer.
 fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -> String {
     let mut out = String::new();
+    let untexted = crate::brief::untexted_note(&brief.spans);
     for span in &brief.spans {
         let via = if span.lists.is_empty() {
             String::new()
@@ -2708,11 +2773,10 @@ fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -
             _ => String::new(),
         };
         out.push_str(&format!(
-            "{}{}:{}-{}{what}{via}\n",
+            "{}{}{}{what}{via}\n",
             label_of(&span.store),
             shorten(&span.path),
-            span.start_line,
-            span.end_line
+            span.range(),
         ));
         match &span.text {
             Some(text) => {
@@ -2723,7 +2787,7 @@ fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -
                 }
             }
             None if span.over_budget => out.push_str("    (text left out for the budget)\n"),
-            None => out.push_str("    (text: top span only)\n"),
+            None => out.push_str(&format!("    {untexted}\n")),
         }
     }
     for symbol in &brief.symbols {
@@ -2757,13 +2821,7 @@ fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -
         brief.tokens, brief.budget, brief.counted_with
     ));
     if !brief.cut.is_empty() {
-        let mut dropped = Vec::new();
-        if brief.cut.span_text > 0 {
-            dropped.push(format!("{} spans left without text", brief.cut.span_text));
-        }
-        if brief.cut.symbols > 0 {
-            dropped.push(format!("{} symbols' edges", brief.cut.symbols));
-        }
+        let dropped = crate::brief::dropped(&brief.cut);
         out.push_str(&format!(" -- dropped: {}", dropped.join(", ")));
     }
     out.push('\n');
@@ -2930,28 +2988,16 @@ pub fn tool_catalog(seen: &mut std::collections::BTreeMap<String, Vec<i64>>) -> 
         .collect()
 }
 
-/// What the tool list costs a session, in tokens, counted by `counter`.
+/// What the tool list costs a session, in tokens: its bytes over four.
 ///
-/// Once per session, before the agent has asked anything: it is the standing
-/// charge for having semlith connected at all, and a user should be able to
-/// read it rather than capture traffic to discover it.
-pub fn tool_list_tokens(counter: &crate::ledger::Counter) -> i64 {
-    // The listed tools only: their bytes are what `tool_list_bytes` counts,
-    // and a ratio of sixteen tools' prose to eight tools' bytes is neither.
-    let listed = listed_names();
-    let text = tool_list()
-        .into_iter()
-        .filter(|(name, _)| listed.contains(name))
-        .map(|(name, about)| format!("{name} {about}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let count = counter.count(&text);
-    // The whole payload, not only the prose: the schemas are what an agent is
-    // sent. The prose is what a tokenizer can be run over honestly, so the
-    // count is scaled by the payload's share of it rather than estimated twice.
-    let bytes = tool_list_bytes() as i64;
-    let prose = text.len().max(1) as i64;
-    count * bytes / prose
+/// One count, the one the gate in `tests/retrieval.rs` asserts and the Agents
+/// page prints. Until 0.42.0 the page ran the store's tokenizer over the
+/// tools' prose and scaled it to the payload (765) while the gate counted
+/// bytes (659 < 675), so the docs' claim and the page disagreed by a sixth.
+/// Neither is the agent's own tokenizer, which no local count can be; four
+/// bytes a token is the stated rule, and it is said to be one.
+pub fn tool_list_tokens() -> i64 {
+    (tool_list_bytes() as i64 + 3) / 4
 }
 
 #[cfg(test)]
@@ -3050,6 +3096,7 @@ mod tests {
             symbol_kind: Some("fn".to_string()),
             symbol_line: None,
             copies: Vec::new(),
+            agreed: Vec::new(),
         }
     }
 

@@ -138,6 +138,40 @@ fn the_four_verbs_reach_the_one_file_the_daemon_owns() {
 }
 
 #[test]
+fn a_schedule_keeps_every_option_it_was_given() {
+    // A schedule saved with "Hash the query text" on wrote plain queries (R8):
+    // the record had nowhere to keep it, and `schedule add` no flag to say it.
+    let (dir, home) = sandbox("options");
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let args = [
+        "add",
+        "access",
+        "--every",
+        "3600",
+        "--to",
+        out.to_str().unwrap(),
+        "--window",
+        "week",
+        "--redact",
+        "--excerpts",
+    ];
+    let added = schedule(&home, &args);
+    assert!(added.status.success(), "{}", text(&added));
+    let raw = std::fs::read_to_string(home.join("schedules.json")).unwrap();
+    let file: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let held = file["schedules"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap();
+    assert_eq!(held["window"], "week", "{raw}");
+    assert_eq!(held["redact"], true, "{raw}");
+    assert_eq!(held["excerpts"], true, "{raw}");
+}
+
+#[test]
 fn a_destination_the_daemon_could_not_find_is_refused_at_the_terminal() {
     let (dir, home) = sandbox("relative");
     let out = dir.path().join("out");

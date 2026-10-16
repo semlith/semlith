@@ -65,6 +65,10 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
     if get && let Some((kind, bytes)) = crate::portal::asset(path) {
         return Response::asset(kind, bytes);
     }
+    // Credential-free like the assets: the id is the credential (`keep_preview`).
+    if get && path.starts_with(PREVIEW_PREFIX) {
+        return report_preview(path);
+    }
 
     // A write naming a remote store is refused here, once, with the sentence
     // that says why, rather than by each route finding no such store open.
@@ -145,7 +149,7 @@ fn dispatch(state: &Arc<State>, request: &Request) -> Response {
         (_, _, "/api/prices") if get || post => prices(request),
         (true, _, "/api/graph") => graph(state, request),
         (true, _, "/api/corpus") => corpus(state),
-        (true, _, "/api/ledger") => ledger(state),
+        (true, _, "/api/ledger") => ledger(state, request),
         (true, _, "/api/image") => image_file(state, request),
         (true, _, "/api/setup") => setup(),
         (true, _, "/api/doctor") => doctor(state),
@@ -157,7 +161,7 @@ fn dispatch(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/refused") if request.query("decisions") == Some("1") => {
             decisions(state, request)
         }
-        (true, _, "/api/refused") => refused(state),
+        (true, _, "/api/refused") => refused(state, request),
         (true, _, "/api/decisions") => decisions(state, request),
 
         (_, true, "/api/index") => index(state, request),
@@ -498,7 +502,12 @@ fn with_remotes(state: &Arc<State>, request: &Request) -> Option<Response> {
 /// while the terminal showed another.
 fn schedules(_state: &Arc<State>) -> Response {
     match crate::schedule::Schedules::load() {
-        Ok(file) => Response::json(&serde_json::json!({ "schedules": file.schedules })),
+        // The file's own path, so the card names it rather than a
+        // `~/.semlith` a `SEMLITH_HOME` moved elsewhere.
+        Ok(file) => Response::json(&serde_json::json!({
+            "schedules": file.schedules,
+            "path": crate::home::schedules_path().ok().map(|p| crate::plain(&p.to_string_lossy())),
+        })),
         // A schedules file this binary cannot read is a report that will not be
         // written, not a reason for the page to fail to draw.
         Err(e) => error_response(&e),
@@ -561,6 +570,11 @@ fn schedule_write(state: &Arc<State>, request: &Request) -> Response {
                         .collect()
                 })
                 .unwrap_or_default();
+            // Every option the builder set: a schedule saved with "Hash the
+            // query text" on wrote plain queries in 0.41 (R8).
+            let flag = |name: &str| body.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
+            schedule.redact = flag("redact");
+            schedule.excerpts = flag("excerpts");
             // Refused before anything is written, naming what would have
             // worked. Half a schedules file is worse than none.
             if let Err(e) = schedule.check() {
@@ -1638,7 +1652,7 @@ fn ledger_recording(request: &Request) -> Response {
     Response::json(&json!({ "recording": crate::ledger::recording_state() }))
 }
 
-fn ledger(state: &Arc<State>) -> Response {
+fn ledger(state: &Arc<State>, request: &Request) -> Response {
     let empty = json!({
         "recording": crate::ledger::recording_state(),
         "queries": 0,
@@ -1650,6 +1664,8 @@ fn ledger(state: &Arc<State>) -> Response {
     });
     let recording = crate::ledger::recording_state();
     let usage_on = crate::usage::enabled();
+    // `?rows=all` is the Retrievals export: every row, not the page's newest.
+    let all_rows = request.query("rows") == Some("all");
     with_fleet(state, empty, move |fleet| {
         // Usage filled in before the rows are read, so the page shows what the
         // clients' logs say about the calls it lists. Opens nothing while the
@@ -1661,25 +1677,26 @@ fn ledger(state: &Arc<State>) -> Response {
                 let _ = crate::usage::enrich(store.db(), now);
             }
         }
-        let (mut clients, mut excerpt, mut whole) = (0, 0, 0);
+        let members: Vec<(&str, &rusqlite::Connection)> = fleet
+            .each()
+            .map(|(label, store)| (label, store.db()))
+            .collect();
+        // Every figure on the page, from the one aggregation the CLI and the
+        // reports read (0.42.0). The page draws these; it adds nothing up.
+        let f = crate::ledger::figures(&members, crate::ledger::Window::ALL, false)?;
         let mut intact = true;
         // The first row that does not verify, so the page can name it.
         let mut first_break: Option<Value> = None;
-        // Unioned rather than summed: one search over six stores writes a row
-        // in each that answered it, under one query id, and adding six stores'
-        // own counts is what made this page report sixty-three queries for
-        // about a dozen searches.
-        let mut seen: std::collections::BTreeSet<String> = Default::default();
+        let mut usage_seen: std::collections::BTreeSet<String> = Default::default();
+        // One model request can issue several calls; its tokens and cost are
+        // counted once, under the first of them.
+        let mut requests_seen: std::collections::BTreeSet<String> = Default::default();
+        let mut usage_totals: std::collections::BTreeMap<(String, String), UsageTotal> =
+            Default::default();
+        let mut rows: Vec<Value> = Vec::new();
+        let mut rows_total = 0usize;
+        let mut legacy_rows = false;
         for (label, store) in fleet.each() {
-            let (_, c, e, w) = store::ledger_totals(store.db())?;
-            seen.extend(store::ledger_keys(
-                store.db(),
-                label,
-                store::LedgerScope::All,
-            )?);
-            clients = clients.max(c);
-            excerpt += e;
-            whole += w;
             if let Some(row) = store::ledger_break(store.db())?
                 && intact
             {
@@ -1690,31 +1707,6 @@ fn ledger(state: &Arc<State>) -> Response {
                     "at": store::retrieval_at(store.db(), row)?,
                 }));
             }
-        }
-        let queries = seen.len() as i64;
-        // Summed across stores the same way the totals are, and reported with
-        // the denominators that make them readable: a ratio on its own is a
-        // marketing number, and the Ledger page is told not to draw one.
-        let mut net = 0;
-        let mut measured = true;
-        let mut credited_keys: std::collections::BTreeSet<String> = Default::default();
-        let mut estimated_keys: std::collections::BTreeSet<String> = Default::default();
-        let mut by_client: std::collections::BTreeMap<String, i64> = Default::default();
-        // The newest rows across every store, merged, for the table this page
-        // owes the CLI's `semlith ledger --last 20`. Read here rather than
-        // from a second route so the tiles and the rows cannot disagree.
-        let mut rows: Vec<Value> = Vec::new();
-        let mut sessions: Vec<Value> = Vec::new();
-        let mut refunds = 0;
-        let mut zero_hit = 0;
-        let mut refunds_measured = false;
-        let mut usage_seen: std::collections::BTreeSet<String> = Default::default();
-        // One model request can issue several calls; its tokens and cost are
-        // counted once, under the first of them.
-        let mut requests_seen: std::collections::BTreeSet<String> = Default::default();
-        let mut usage_totals: std::collections::BTreeMap<(String, String), UsageTotal> =
-            Default::default();
-        for (label, store) in fleet.each() {
             for (key, client, usage) in store::usage_rows(store.db(), label)? {
                 if !usage_seen.insert(key) {
                     continue;
@@ -1726,106 +1718,108 @@ fn ledger(state: &Arc<State>) -> Response {
                     .or_default()
                     .add(&usage, first);
             }
-            let savings = store::ledger_savings(store.db())?;
-            net += savings.net;
-            measured = measured && savings.measured;
-            let misses = store::ledger_misses(store.db())?;
-            refunds += misses.refunds;
-            zero_hit += misses.zero_hit;
-            // One hooked store is enough to make the figure a measurement for
-            // that store, and the page says which kind it is rather than
-            // averaging two different things into one word.
-            refunds_measured = refunds_measured || misses.measured;
-            credited_keys.extend(store::ledger_keys(
-                store.db(),
-                label,
-                store::LedgerScope::Credited,
-            )?);
-            estimated_keys.extend(store::ledger_keys(
-                store.db(),
-                label,
-                store::LedgerScope::Estimated,
-            )?);
-            for (client, count) in store::ledger_clients(store.db())? {
-                *by_client.entry(client).or_default() += count;
+            for row in store::ledger_facts(store.db(), 0, None)? {
+                if matches!(row.tool.as_str(), store::NOTE_TOOL | store::REFUSED_TOOL) {
+                    continue;
+                }
+                rows_total += 1;
+                legacy_rows |= row.query_id.is_empty();
+                rows.push(ledger_row(label, &row));
             }
-            // One row per session per store, grouped by SQL rather than by
-            // the browser: a page adding up six stores' rows is a second
-            // opinion about a number the store can state.
-            for session in store::ledger_sessions(store.db(), LEDGER_SESSIONS)? {
-                sessions.push(json!({
-                    "session": session.session,
-                    "client": session.client,
-                    "store": label,
-                    "first": session.first,
-                    "last": session.last,
-                    "when": crate::clock::local_stamp(session.last),
-                    "retrievals": session.retrievals,
-                    "zero_hit": session.zero_hit,
-                    "excerpt_tokens": session.excerpt_tokens,
-                    "whole_file_tokens": session.whole_file_tokens,
-                    "net_tokens": session.net,
-                    "tier": session.tier(),
+        }
+        rows.sort_by_key(|row| {
+            std::cmp::Reverse((
+                row["at"].as_i64().unwrap_or(0),
+                row["id"].as_i64().unwrap_or(0),
+            ))
+        });
+        if !all_rows {
+            rows.truncate(LEDGER_ROWS);
+        }
+        let sessions: Vec<Value> = f
+            .per_session
+            .iter()
+            .take(LEDGER_SESSIONS)
+            .map(|s| {
+                json!({
+                    "session": s.session,
+                    "client": s.client,
+                    "client_version": s.client_version,
+                    "store": s.stores.join(", "),
+                    "stores": s.stores,
+                    "first": s.first,
+                    "last": s.last,
+                    "when": crate::clock::local_stamp(s.last),
+                    "retrievals": s.queries,
+                    "zero_hit": s.zero_hit,
+                    "excerpt_tokens": s.excerpt_tokens,
+                    "whole_file_tokens": s.whole_file_tokens,
+                    "net_tokens": s.net_tokens,
+                    "tier": if s.excerpt_counter == crate::ledger::MODEL { "measured" } else { "modelled" },
+                    "model": s.model,
                     // The saving priced at the model this session actually
                     // ran on, from its client's log; none when that is not
                     // known, rather than a price for a model it never used.
-                    "model": session.model,
-                    "saved_usd": session.model.as_deref()
+                    "saved_usd": s.model.as_deref()
                         .and_then(crate::report::price_named)
-                        .map(|(_, input)| session.net.max(0) as f64 * input / 1_000_000.0),
-                }));
+                        .map(|(_, input)| s.net_tokens.max(0) as f64 * input / 1_000_000.0),
+                })
+            })
+            .collect();
+        // Savings by agent, from the conversations; by store, from each
+        // store's share. Both computed here so the tables cannot disagree
+        // with the tiles above them.
+        let mut by_agent: std::collections::BTreeMap<String, (i64, i64, i64, f64, bool, bool)> =
+            Default::default();
+        for s in &f.per_session {
+            let g = by_agent
+                .entry(s.client.clone())
+                .or_insert((0, 0, 0, 0.0, false, true));
+            g.0 += 1;
+            g.1 += s.queries;
+            g.2 += s.net_tokens;
+            if let Some((_, input)) = s.model.as_deref().and_then(crate::report::price_named) {
+                g.3 += s.net_tokens.max(0) as f64 * input / 1_000_000.0;
+                g.4 = true;
             }
-            for row in store::retrievals(store.db(), LEDGER_ROWS)? {
-                rows.push(json!({
-                    "at": row.at,
-                    // Local time with the offset, the same string `semlith
-                    // ledger` prints. One dataset, one clock.
-                    "when": crate::clock::local_stamp(row.at),
-                    "store": label,
-                    "client": row.client,
-                    "query": row.query,
-                    "hits": row.hits,
-                    "ms": row.micros / 1000,
-                    "excerpt_tokens": row.excerpt_tokens,
-                    "whole_file_tokens": row.whole_file_tokens,
-                    "query_id": row.query_id,
-                    "usage": row.usage,
-                }));
-            }
+            g.5 &= s.excerpt_counter == crate::ledger::MODEL;
         }
-        rows.sort_by_key(|row| std::cmp::Reverse(row["at"].as_i64().unwrap_or(0)));
-        rows.truncate(LEDGER_ROWS);
-        sessions.sort_by_key(|row| std::cmp::Reverse(row["last"].as_i64().unwrap_or(0)));
-        sessions.truncate(LEDGER_SESSIONS);
-        let credited = credited_keys.len() as i64;
-        let measured = measured && estimated_keys.is_empty();
-        let coverage = if queries == 0 {
-            0
-        } else {
-            credited * 100 / queries
-        };
-        let ratio = (excerpt > 0).then(|| whole as f64 / excerpt as f64);
         Ok(json!({
             "recording": recording,
-            "queries": queries,
-            "clients": clients,
-            "excerpt_tokens": excerpt,
-            "whole_file_tokens": whole,
-            "ratio": ratio,
+            "queries": f.queries,
+            "clients": f.clients.len(),
+            "client_names": f.clients,
+            "excerpt_tokens": f.excerpt_tokens,
+            "whole_file_tokens": f.whole_file_tokens,
+            "ratio": f.ratio,
             "intact": intact,
             "break": first_break,
-            "net_tokens": net,
-            "credited": credited,
-            "coverage": coverage,
-            "tier": if measured && credited > 0 { "measured" } else { "modelled" },
+            "net_tokens": f.net_tokens,
+            "credited": f.credited,
+            "coverage": f.coverage,
+            "tier": f.tier.word,
+            // What each side of the saving was counted with.
+            "counted": { "excerpt": f.tier.excerpt, "whole": f.tier.whole },
             // What semlith did not answer, in two figures rather than one.
             // A refund is an agent that did not reach for semlith; a zero hit
             // is semlith that did not reach the answer. They call for opposite
             // things, so they are never added together.
-            "refunds": refunds,
-            "refunds_measured": refunds_measured,
-            "zero_hit": zero_hit,
-            "by_client": by_client,
+            "refunds": f.refunds,
+            "refunds_measured": f.refunds > 0,
+            "zero_hit": f.zero_hit,
+            "p50_ms": f.p50_micros as f64 / 1000.0,
+            "p95_ms": f.p95_micros as f64 / 1000.0,
+            "by_client": f.by_client,
+            "human": f.human,
+            "sessions_total": f.sessions,
+            "by_agent": by_agent.into_iter().map(|(name, g)| json!({
+                "name": name, "sessions": g.0, "retrievals": g.1, "net": g.2,
+                "saved": g.4.then_some(g.3), "measured": g.5,
+            })).collect::<Vec<_>>(),
+            "by_store": f.stores.iter().map(|s| json!({
+                "name": s.store, "retrievals": s.queries, "credited": s.credited,
+                "zero_hit": s.zero_hit, "net": s.net_tokens, "refunds": s.refunds,
+            })).collect::<Vec<_>>(),
             "usage": {
                 "enabled": usage_on,
                 "prices": prices_json(),
@@ -1842,14 +1836,46 @@ fn ledger(state: &Arc<State>) -> Response {
                 })).collect::<Vec<_>>(),
             },
             "rows": rows,
+            "rows_total": rows_total,
             "sessions": sessions,
-            // Rows written before this version were one per open store, so the
+            // Rows written before 0.20.2 were one per open store, so the
             // figures they contribute to may be over-counted. Said on the page
             // rather than corrected in place: the chain is not rewritten.
-            "legacy_rows": rows.iter().any(|row| {
-                row["query_id"].as_str().unwrap_or_default().is_empty()
-            }),
+            "legacy_rows": legacy_rows,
         }))
+    })
+}
+
+/// One ledger row as the Ledger page and its exports carry it.
+fn ledger_row(label: &str, row: &store::LedgerFact) -> Value {
+    json!({
+        "id": row.id,
+        "at": row.at,
+        // Local time with the offset, the same string `semlith ledger`
+        // prints. One dataset, one clock.
+        "when": crate::clock::local_stamp(row.at),
+        "store": label,
+        "client": row.client,
+        "client_version": row.client_version,
+        "session": row.session,
+        "tool": if row.tool.is_empty() { "—" } else { row.tool.as_str() },
+        "query": row.query,
+        "hits": row.hits,
+        "stale_hits": row.stale_hits,
+        "ms": row.micros / 1000,
+        "excerpt_tokens": row.excerpt_tokens,
+        "whole_file_tokens": row.whole_file_tokens,
+        // What counted each side: the excerpt's counter, and the whole
+        // side's basis — `text` from 0.42.0, `bytes` before it.
+        "tier": format!(
+            "{} · {}",
+            if row.tokenizer == crate::ledger::MODEL { "tokenizer" } else { "chars÷4" },
+            if row.whole_basis == store::BASIS_TEXT { "text" } else { "bytes" },
+        ),
+        "basis": if row.whole_basis.is_empty() { store::BASIS_BYTES } else { row.whole_basis.as_str() },
+        "chain": row.chain,
+        "query_id": row.query_id,
+        "usage": row.usage,
     })
 }
 
@@ -2292,7 +2318,7 @@ fn privacy(state: &Arc<State>) -> Response {
         // when. The GPU components are fetched only when a hardware GPU was
         // found with the GPU lane on, and the CUDA pack only after an explicit
         // turn-on; `--airgap` refuses all of them unless they were pre-seeded.
-        "downloads": downloads(&cache),
+        "downloads": downloads(&cache, &open_stores(state)),
         // What this machine sends Semlith Cloud, if it signed in: the Privacy
         // page's Cloud row reads it.
         "cloud": crate::cloud::local_view(),
@@ -2300,10 +2326,46 @@ fn privacy(state: &Arc<State>) -> Response {
 }
 
 /// The downloads the Privacy page lists, each with whether it is here already.
-fn downloads(cache: &Path) -> Value {
+fn downloads(cache: &Path, stores: &[(String, PathBuf)]) -> Value {
     let webgpu =
         crate::accel::component_dir(cache, &format!("webgpu-{}", crate::gpu::WEBGPU_VERSION));
-    json!([
+    // And every file `semlith add` fetched, from where, which is on disk
+    // because a person asked for it: the page listed the binary's own
+    // downloads only, so a 2.2 MB PDF fetched from arxiv.org was absent.
+    let mut fetched = Vec::new();
+    for (name, dir) in stores {
+        let root = crate::add::downloads_dir(dir);
+        let mut stack = vec![root.clone()];
+        while let Some(at) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&at) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = entry.metadata() else { continue };
+                if meta.is_dir() {
+                    stack.push(path);
+                } else if fetched.len() < 1_000 {
+                    let rel = path.strip_prefix(&root).unwrap_or(&path);
+                    let host = rel
+                        .components()
+                        .next()
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    fetched.push(json!({
+                        "what": crate::plain(&rel.display().to_string()),
+                        "source": host,
+                        "bytes": meta.len(),
+                        "when": format!("fetched by semlith add into {name}"),
+                        "cached": true,
+                        "store": name,
+                        "path": crate::plain(&path.display().to_string()),
+                    }));
+                }
+            }
+        }
+    }
+    let mut out = json!([
         {
             "what": "the embedding model (granite-embedding-small-english-r2, int8)",
             "source": "huggingface.co",
@@ -2325,7 +2387,11 @@ fn downloads(cache: &Path) -> Value {
             "when": "only after CUDA is turned on, on Linux",
             "cached": crate::cuda::pack_installed(cache).is_some(),
         },
-    ])
+    ]);
+    if let Some(list) = out.as_array_mut() {
+        list.extend(fetched);
+    }
+    out
 }
 
 /// Every rule 0.14.0 added, and the daemon's own check of it.
@@ -2854,14 +2920,8 @@ fn agent_scope(request: &Request) -> Response {
 /// Once per session, before the agent has asked anything: it is the standing
 /// charge for having semlith connected at all, and a user should be able to
 /// read it rather than capture traffic to discover it.
-fn tool_list_tokens(state: &Arc<State>) -> (i64, &'static str) {
-    let guard = state.fleet.lock().ok();
-    let counter = guard
-        .as_ref()
-        .and_then(|f| f.as_ref())
-        .map(|f| f.counter())
-        .unwrap_or(crate::ledger::Counter::Chars4);
-    (crate::mcp::tool_list_tokens(&counter), counter.label())
+fn tool_list_tokens(_state: &Arc<State>) -> (i64, &'static str) {
+    (crate::mcp::tool_list_tokens(), crate::ledger::CHARS4)
 }
 
 /// The live connections, one row per app and transport. Every Claude Code
@@ -3046,7 +3106,12 @@ fn with_fleet(
     let Some(fleet) = fleet.as_ref() else {
         return Response::json(&empty);
     };
-    match read(fleet) {
+    // A run's snapshot held, moved or let go of before and after the call:
+    // see `Fleet::reconcile`.
+    fleet.reconcile(&daemon::snapshots());
+    let answer = read(fleet);
+    fleet.reconcile(&daemon::snapshots());
+    match answer {
         Ok(mut value) => {
             failures_beside(fleet, &mut value);
             Response::json(&value)
@@ -3072,7 +3137,12 @@ fn on_fleet(
     }
     let mut guard = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
     match guard.as_mut() {
-        Some(fleet) => route(fleet, request),
+        Some(fleet) => {
+            fleet.reconcile(&daemon::snapshots());
+            let answer = route(fleet, request);
+            fleet.reconcile(&daemon::snapshots());
+            answer
+        }
         None => {
             let refused = route(&mut crate::fleet::Fleet::empty(), request);
             if (400..500).contains(&refused.status()) {
@@ -3181,8 +3251,20 @@ fn pattern_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
         let only = (!only.is_empty()).then_some(only);
         // A bad pattern or an unknown language is the caller's to correct, and
         // comes back as the parser's own words rather than an empty list.
+        let started = std::time::Instant::now();
         match fleet.pattern_in(only.as_deref(), lang, query, &filter, offset) {
-            Ok(found) => Ok(serde_json::to_value(found)?),
+            Ok(found) => {
+                let answer = serde_json::to_value(&found)?;
+                record_graph(
+                    fleet,
+                    "pattern",
+                    query,
+                    &answer,
+                    !found.matches.is_empty(),
+                    started,
+                );
+                Ok(answer)
+            }
             Err(e) => Ok(json!({
                 "language": lang,
                 "matches": [],
@@ -3207,14 +3289,67 @@ fn read_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     };
     let target = crate::Target::parse(raw);
     let only = request.query_all("store");
+    let subject = raw.to_string();
     answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
-        match fleet.read_in(only.as_deref(), &target, &crate::filter::Filter::default())? {
+        let started = std::time::Instant::now();
+        let read = fleet.read_in(only.as_deref(), &target, &crate::filter::Filter::default())?;
+        // Recorded as the agent's read is: the span is the reply, its file
+        // the whole side (item 2 — every surface records the same tools).
+        let reply = match &read {
+            Some(crate::Read::One(span)) => format!(
+                "{}:{}-{}\n{}",
+                crate::plain(&span.path),
+                span.start_line,
+                span.end_line,
+                span.text
+            ),
+            _ => String::new(),
+        };
+        crate::ledger::reply(
+            fleet,
+            &PORTAL,
+            "read",
+            &subject,
+            &reply,
+            &[],
+            started.elapsed(),
+        );
+        match read {
             None => Ok(json!({ "span": null, "definitions": [] })),
             Some(crate::Read::One(span)) => Ok(json!({ "span": span, "definitions": [] })),
             Some(crate::Read::Choose(rows)) => Ok(json!({ "span": null, "definitions": rows })),
         }
     })
+}
+
+/// Who the portal's own retrievals are recorded as.
+const PORTAL: crate::ledger::Who<'static> = crate::ledger::Who {
+    client: "portal",
+    session: "portal",
+    version: env!("CARGO_PKG_VERSION"),
+};
+
+/// Record a portal graph answer the way an agent's is: one row, the answer
+/// the page was sent as its excerpt.
+fn record_graph(
+    fleet: &crate::fleet::Fleet,
+    tool: &str,
+    subject: &str,
+    answer: &Value,
+    found: bool,
+    started: std::time::Instant,
+) {
+    let reply = answer.to_string();
+    crate::ledger::graph(
+        fleet,
+        &PORTAL,
+        tool,
+        subject,
+        &reply,
+        found,
+        started.elapsed(),
+    );
 }
 
 fn symbol(state: &Arc<State>, request: &Request) -> Response {
@@ -3385,12 +3520,22 @@ fn impact_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
         .is_some_and(|v| v == "1" || v == "true");
     answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
+        let started = std::time::Instant::now();
         let impact = fleet.impact_in(only.as_deref(), &name, &kinds, depth, all_edges, &filter)?;
-        Ok(json!({
+        let answer = json!({
             "impact": impact,
             "headline": impact.headline(),
             "limit": crate::graph::IMPACT_LIMIT,
-        }))
+        });
+        record_graph(
+            fleet,
+            "impact",
+            &name,
+            &answer,
+            !impact.reached.is_empty(),
+            started,
+        );
+        Ok(answer)
     })
 }
 
@@ -3419,11 +3564,21 @@ fn trace_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
         .is_some_and(|v| v == "1" || v == "true");
     answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
+        let started = std::time::Instant::now();
         let trace = fleet.trace_in(only.as_deref(), &from, &to, depth, all_edges, &crate::plain)?;
-        Ok(json!({
+        let answer = json!({
             "trace": trace,
             "evidence": trace.evidence(&crate::plain),
-        }))
+        });
+        record_graph(
+            fleet,
+            "trace",
+            &from,
+            &answer,
+            trace.chain.is_some(),
+            started,
+        );
+        Ok(answer)
     })
 }
 
@@ -3629,15 +3784,13 @@ static MEASURING: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
 /// One of the five reports, in one of the five formats, over a window and a
 /// scope.
 ///
-/// The same bytes `semlith report` writes, from the same generator: the
+/// The same document `semlith report` writes, from the same generator: the
 /// portal's export is not a second renderer, so a file downloaded from the
-/// page and one written in a terminal are the same file.
-///
-/// `window` and `scope` are both optional and both omitted means exactly what
-/// it meant in 0.26.x — every open store, and each report's own span. `scope`
-/// is the store filter the route took as `store` and discarded; `store` is
-/// still read, as its own alias, because a caller that was already sending it
-/// meant it.
+/// page and one written in a terminal are the same file. No `window` is
+/// `report::DEFAULT_WINDOW`, as in the terminal. `scope` narrows by store
+/// label (`store` is read as its alias). CSV is a zip of one file per table,
+/// unless `table` names one. With `preview=1` an HTML report is also kept for
+/// the page's sandboxed frame and its address returned as `preview`.
 fn report(state: &Arc<State>, request: &Request) -> Response {
     let Some(kind) = request.query("kind") else {
         return Response::error(400, "missing kind");
@@ -3648,15 +3801,10 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(400, &e.to_string());
     }
     let format = request.query("format").unwrap_or("markdown").to_string();
-    if !crate::report::ALL_FORMATS.contains(&format.as_str()) && format != "md" {
-        return Response::error(
-            400,
-            &format!(
-                "unknown format {format:?}; the formats are {}",
-                crate::report::ALL_FORMATS.join(", ")
-            ),
-        );
+    if let Err(e) = crate::report::check_any_format(&format) {
+        return Response::error(400, &e.to_string());
     }
+    let table = request.query("table").map(str::to_string);
     let window = match crate::report::window_of(request.query("window")) {
         Ok(window) => window,
         Err(e) => return Response::error(400, &e.to_string()),
@@ -3679,19 +3827,18 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
     }
     let mut only = request.query_all("scope");
     only.extend(request.query_all("store"));
-
-    // The builder's two content toggles. Absent is off, which is what every
-    // 0.26.x caller sends.
     let flag = |name: &str| matches!(request.query(name), Some("1" | "true" | "on"));
     let options = crate::report::Options {
         excerpts: flag("excerpts"),
         redact: flag("redact"),
+        salt: None,
     };
+    let preview = flag("preview");
 
-    // A PDF is bytes and cannot ride inside the JSON envelope the other four
-    // use, so this one format answers as the file itself. Same generator, same
-    // blocks, same window and scope — only the wrapper differs.
-    if format == crate::report::PDF {
+    // A PDF and a CSV zip are bytes and cannot ride inside the JSON envelope
+    // the text formats use, so they answer as the file itself. Same
+    // generator, same window and scope — only the wrapper differs.
+    if format == crate::report::PDF || (format == crate::report::CSV && table.is_none()) {
         if let Err(e) = state.open_fleet() {
             return Response::error(500, &e.to_string());
         }
@@ -3699,10 +3846,15 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
         let Some(fleet) = fleet.as_ref() else {
             return Response::error(409, "no store is open to report on");
         };
+        let content_type = if format == crate::report::PDF {
+            "application/pdf"
+        } else {
+            "application/zip"
+        };
         return match crate::report::generate_with(fleet, &kind, &model, window, &only, options)
             .and_then(|report| report.render_bytes(&format))
         {
-            Ok(bytes) => Response::new(200, "application/pdf", bytes),
+            Ok(bytes) => Response::new(200, content_type, bytes),
             Err(e) => Response::error(400, &e.to_string()),
         };
     }
@@ -3712,15 +3864,72 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
     // deciding to save it.
     with_fleet(state, json!({ "report": null }), move |fleet| {
         let report = crate::report::generate_with(fleet, &kind, &model, window, &only, options)?;
+        let text = match &table {
+            Some(id) => report.render_table(id)?,
+            None => report.render(&format)?,
+        };
+        let preview = if preview {
+            Some(keep_preview(report.render("html")?))
+        } else {
+            None
+        };
         Ok(json!({
             "kind": report.kind,
             "title": report.title,
             "generated": report.generated,
             "format": format,
-            "text": report.render(&format)?,
+            "text": text,
+            "preview": preview,
             "report": report,
         }))
     })
+}
+
+/// Rendered HTML reports the Reports page's frame may load, by a random id.
+///
+/// The frame cannot send the session token — a document a page frames is
+/// fetched with no header of the page's choosing — so the route that serves it
+/// is credential-free like the page's own assets, and the id is the
+/// credential: 128 random bits, minted only by the token-guarded
+/// `/api/report`, kept for ten minutes, and never more than eight at once.
+static PREVIEWS: std::sync::Mutex<Vec<(String, std::time::Instant, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+const PREVIEW_PREFIX: &str = "/report-preview/";
+const PREVIEW_LIFE: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn keep_preview(html: String) -> String {
+    let mut bytes = [0u8; 16];
+    let id: String = match getrandom::fill(&mut bytes) {
+        Ok(()) => bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        // No random source: no preview rather than a guessable one.
+        Err(_) => return String::new(),
+    };
+    let mut kept = PREVIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    kept.retain(|(_, at, _)| at.elapsed() < PREVIEW_LIFE);
+    if kept.len() >= 8 {
+        kept.remove(0);
+    }
+    kept.push((id.clone(), std::time::Instant::now(), html));
+    format!("{PREVIEW_PREFIX}{id}")
+}
+
+/// `/report-preview/<id>`: one kept report, under a policy that allows its
+/// own inline stylesheet and data-URI fonts and logos, and no script, no
+/// network, no form — `report::REPORT_CSP`.
+fn report_preview(path: &str) -> Response {
+    let id = path.trim_start_matches(PREVIEW_PREFIX);
+    let kept = PREVIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    match kept
+        .iter()
+        .find(|(k, at, _)| k == id && at.elapsed() < PREVIEW_LIFE)
+    {
+        Some((_, _, html)) => {
+            Response::new(200, "text/html; charset=utf-8", html.clone().into_bytes())
+                .with_csp(crate::report::REPORT_CSP)
+        }
+        None => Response::error(404, "this preview has expired; generate the report again"),
+    }
 }
 
 /// The nodes and edges the Graph page draws.
@@ -4487,11 +4696,7 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
     // tick, and runs-at-once admits or holds at once.
     let limits = daemon::Limits::in_force();
     limits.apply();
-    for fleet in [&state.fleet, &state.mcp_fleet] {
-        if let Some(fleet) = fleet.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-            fleet.follow_budget();
-        }
-    }
+    state.each_reader(|fleet| fleet.follow_budget());
     state.admission.set_limit(limits.runs_at_once.value);
     let applied = format!(
         "now running with {} run(s) at once, {} thread(s) each, {} MiB of vectors per store, and a {} % CPU cap",
@@ -4899,11 +5104,17 @@ fn upgrade(request: &Request) -> Response {
 /// Per store, because a decision about a file is a decision in one store.
 /// Values are never here: a content row carries its masked matches, their
 /// confidence and the signals behind it.
-fn refused(state: &Arc<State>) -> Response {
+fn refused(state: &Arc<State>, request: &Request) -> Response {
+    // `?store=` narrows to the stores named, which is how `semlith refused
+    // --store X` asks: it used to list every store whenever a daemon ran.
+    let only = request.query_all("store");
     with_fleet(state, json!({ "stores": [] }), move |fleet| {
         let mut stores = Vec::new();
         let (mut total, mut review) = (0usize, 0usize);
         for (label, store) in fleet.each() {
+            if !only.is_empty() && !only.iter().any(|o| o == label) {
+                continue;
+            }
             let rows = crate::store::refusals(store.db())?;
             let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
             let mut accepted: std::collections::BTreeMap<String, usize> = Default::default();
@@ -5627,17 +5838,28 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     };
     let method = body.get("method").and_then(Value::as_str).unwrap_or("");
     let params = body.get("params");
-    let name = params
-        .and_then(|p| p.get("clientInfo"))
+    // MCP 2026-07-28 has no handshake: the client names itself in `_meta` on
+    // every request, and Claude Code also says who it is in its User-Agent
+    // (`claude-code/2.1.299 (sdk-cli)`), which names a client that sends
+    // neither. Read at `initialize` only, every such call was "unnamed client".
+    let info = crate::mcp::client_info(params);
+    let agent = request
+        .header("user-agent")
+        .and_then(crate::clientid::user_agent);
+    let name = info
         .and_then(|c| c.get("name"))
-        .and_then(Value::as_str);
-    let version = params
-        .and_then(|p| p.get("clientInfo"))
+        .and_then(Value::as_str)
+        .or(agent.map(|(n, _)| n));
+    let version = info
         .and_then(|c| c.get("version"))
-        .and_then(Value::as_str);
-    let revision = params
-        .and_then(|p| p.get("protocolVersion"))
-        .and_then(Value::as_str);
+        .and_then(Value::as_str)
+        .or(agent.and_then(|(n, v)| (name == Some(n)).then_some(v)));
+    let revision = crate::mcp::revision_of(params).or_else(|| {
+        request
+            .header("mcp-protocol-version")
+            .filter(|v| crate::mcp::SUPPORTED.contains(v))
+    });
+    let stateless = revision == Some("2026-07-28");
     // What the proxy read from its own ancestry: one of `clientid`'s names or
     // a dash. Anything else is ignored rather than recorded, since the header
     // comes from whatever holds the token.
@@ -5663,6 +5885,10 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
         .unwrap_or_else(|| {
             if method == "initialize" {
                 new_session()
+            } else if stateless || name.is_some() {
+                // No session in the protocol, so the conversation is derived:
+                // one client on one transport, until it goes quiet.
+                state.conversation(name.unwrap_or(""), version.unwrap_or(""), transport)
             } else {
                 String::from("anonymous")
             }
@@ -5705,25 +5931,28 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     // A method that is about the server rather than about a corpus is answered
     // whether or not anything is indexed: an agent connecting to a fresh
     // install should be told which tools exist, not that the daemon is broken.
-    let corpus_free = matches!(method, "initialize" | "tools/list" | "ping")
+    let corpus_free = matches!(method, "initialize" | "server/discover" | "tools/list" | "ping")
         || method.starts_with("notifications/")
         // A machine whose only stores are remote still answers from them.
         || !crate::cloud::remote_stores().is_empty();
-    if let Err(e) = state.open_mcp_fleet()
+    let (mut reader, opened) = state.mcp_reader();
+    if let Err(e) = opened
         && !corpus_free
     {
         return Response::error(409, &e.to_string());
     }
 
-    let mut fleet = state.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner());
     let mut nothing = crate::fleet::Fleet::empty();
-    let fleet = match fleet.as_mut() {
+    let fleet = match reader.1.as_mut() {
         Some(fleet) => fleet,
         None if corpus_free => &mut nothing,
         None => return Response::error(409, "this daemon has no store open"),
     };
 
-    let response = match crate::mcp::answer(fleet, Some(&writer), &body, &mut mcp_session) {
+    fleet.reconcile(&daemon::snapshots());
+    let answered = crate::mcp::answer(fleet, Some(&writer), &body, &mut mcp_session);
+    fleet.reconcile(&daemon::snapshots());
+    let response = match answered {
         Some(value) => Response::json(&value),
         // A notification. Answered with an empty 200 rather than an empty JSON
         // object, so the proxy writes nothing to a client that expects nothing.
@@ -5732,7 +5961,7 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     // The session id is handed back at `initialize`, which is where the MCP
     // HTTP transport says a server may assign one. A client that echoes it is
     // counted as itself on every later call; one that does not still works.
-    if method == "initialize" {
+    if method == "initialize" && !stateless {
         return response.header("Mcp-Session-Id", session);
     }
     response
@@ -5745,7 +5974,7 @@ fn is_session_id(value: &str) -> bool {
 }
 
 /// A session id, which identifies a client and guards nothing.
-fn new_session() -> String {
+pub(crate) fn new_session() -> String {
     let mut bytes = [0u8; 8];
     getrandom::fill(&mut bytes).expect("the OS random source");
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -5931,6 +6160,23 @@ fn drop_resolve(state: &Arc<State>, request: &Request) -> Response {
 
 #[cfg(test)]
 mod tests {
+    /// The Reports page's frame loads a kept report under the report-only
+    /// policy (no script), by an id nobody can guess; an unknown id is a 404.
+    #[test]
+    fn a_report_preview_is_served_under_the_report_policy() {
+        let path = super::keep_preview("<!doctype html><p>kept</p>".into());
+        assert!(path.starts_with(super::PREVIEW_PREFIX), "{path}");
+        assert_eq!(path.len(), super::PREVIEW_PREFIX.len() + 32, "{path}");
+        let found = super::report_preview(&path);
+        assert_eq!(found.status(), 200);
+        assert_eq!(found.csp(), crate::report::REPORT_CSP);
+        assert!(!crate::report::REPORT_CSP.contains("script-src"));
+        assert!(crate::report::REPORT_CSP.contains("default-src 'none'"));
+        let missing =
+            super::report_preview(&format!("{}{}", super::PREVIEW_PREFIX, "0".repeat(32)));
+        assert_eq!(missing.status(), 404);
+    }
+
     /// Three Claude Code windows are one app with three sessions, not three
     /// apps; versions seen are listed once each.
     #[test]

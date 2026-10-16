@@ -891,42 +891,48 @@ enum Command {
 
         /// markdown, csv, json, html or pdf.
         ///
-        /// A PDF is bytes rather than text, so it needs `--out`: writing it to
-        /// a terminal would be a screenful of binary and a file nobody has.
+        /// A PDF, and a CSV (a zip of one file per table), are bytes rather
+        /// than text, so they need `--out`; `--table` prints one CSV table.
         #[arg(long, short, default_value = "markdown")]
         format: String,
+
+        /// With `--format csv`: print one table as a plain CSV instead of
+        /// the zip — `summary`, or a table's id (the error lists them).
+        #[arg(long)]
+        table: Option<String>,
 
         /// Which model's prices the savings report costs tokens at.
         #[arg(long, default_value = semlith::report::DEFAULT_MODEL)]
         model: String,
 
-        /// Narrow the report to a period: all, day, week, month or quarter.
+        /// The period: all, day, week, month or quarter. Month when not named,
+        /// as on the portal's Reports page.
         ///
-        /// Three of the five reports are lifetime aggregates with no date to
-        /// narrow by. They say so under their title rather than printing a
-        /// span they did not apply.
+        /// The health report is the index as it stands and says so rather
+        /// than printing a span it did not apply.
         #[arg(long)]
         window: Option<String>,
 
         /// Narrow the report to these stores, by label. Repeatable.
         ///
-        /// Every open store when none is named, which is what this command has
-        /// always done.
+        /// Every open store when none is named.
         #[arg(long)]
         scope: Vec<String>,
 
-        /// Attach the individual retrievals, not only the session totals.
+        /// Attach the per-retrieval rows behind the session totals: who asked,
+        /// when, with which tool, how many hits and what they cost.
         ///
-        /// A session line says an agent asked forty times; this is which forty.
-        /// Access report only.
+        /// The ledger keeps counts, not the lines an agent was shown, so this
+        /// attaches rows, never lines. Access report only.
         #[arg(long)]
         excerpts: bool,
 
-        /// Replace every query text with a digest of it.
+        /// Replace every query text with a digest keyed to this machine.
         ///
-        /// Keeps the who, the when and the which-file, and drops what was
-        /// asked. Applies wherever a query reaches the page, not only to the
-        /// attachment above.
+        /// Keeps the who, the when and the cost, and drops what was asked,
+        /// wherever a query reaches the page. The key is
+        /// `~/.semlith/report.salt`, so a digest cannot be recomputed from a
+        /// guess elsewhere.
         #[arg(long)]
         redact: bool,
 
@@ -1694,6 +1700,7 @@ fn run() -> Result<()> {
                 // estimate is one where a line per file is the noise the estimate
                 // is trying to cut through.
                 let mut spoke = Instant::now();
+                let mut recent = std::collections::VecDeque::new();
                 let report = store.index_paths(roots, |path, p| {
                     if quiet {
                         return;
@@ -1730,7 +1737,7 @@ fn run() -> Result<()> {
                     }
                     if spoke.elapsed() >= PROGRESS_INTERVAL {
                         spoke = Instant::now();
-                        eprintln!("    {}", predict(p, started.elapsed()));
+                        eprintln!("    {}", predict(p, started.elapsed(), &mut recent));
                     }
                 })?;
 
@@ -2215,6 +2222,9 @@ fn run() -> Result<()> {
                         display(std::path::Path::new(&h.path)),
                         reset()
                     )?;
+                    if !h.agreed.is_empty() {
+                        writeln!(out, "   (agreed: {})", h.agreed.join(", "))?;
+                    }
                     for line in h.text.lines() {
                         writeln!(out, "   {line}")?;
                     }
@@ -2334,12 +2344,14 @@ fn run() -> Result<()> {
                         }
                         None => println!("{label}: the chain is intact"),
                     }
-                    // What the chain is a chain of. A verify that says only
-                    // "intact" proves the record was not edited and says
-                    // nothing about what it records, which is the question
-                    // somebody defending a savings figure is actually asked.
-                    print_savings(store, "  ")?;
                 }
+                // What the chain is a chain of. A verify that says only
+                // "intact" proves the record was not edited and says nothing
+                // about what it records, which is the question somebody
+                // defending a savings figure is actually asked.
+                let members: Vec<(&str, &rusqlite::Connection)> =
+                    fleet.each().map(|(l, s)| (l, s.db())).collect();
+                print_savings(&members, "  ")?;
                 // Non-zero so a script can act on it. A verify that reported a
                 // broken chain and exited 0 would be worse than no verify.
                 if broken {
@@ -2394,15 +2406,13 @@ fn run() -> Result<()> {
                 }
             }
             if any && !json {
-                for (label, store) in fleet.each() {
-                    if many {
-                        println!();
-                        println!("{}{label}{}", bold(), reset());
-                    } else {
-                        println!();
-                    }
-                    print_savings(store, "  ")?;
+                println!();
+                if many {
+                    println!("{}all stores{}", bold(), reset());
                 }
+                let members: Vec<(&str, &rusqlite::Connection)> =
+                    fleet.each().map(|(l, s)| (l, s.db())).collect();
+                print_savings(&members, "  ")?;
             }
             if !any && !json {
                 eprintln!(
@@ -2460,6 +2470,23 @@ fn run() -> Result<()> {
                 table.fetched,
                 table.models.len()
             );
+            // With no model named, the table itself: it printed its header
+            // line and nothing under it.
+            if model.is_none() {
+                println!(
+                    "{:<52} {:>10} {:>10} {:>11}",
+                    "model", "input $/M", "output $/M", "cache rd $/M"
+                );
+                for (key, price) in &table.models {
+                    let r = &price.rates;
+                    println!(
+                        "{key:<52} {:>10} {:>10} {:>11}",
+                        r.input,
+                        r.output,
+                        r.cache_read.map_or("—".to_string(), |v| v.to_string()),
+                    );
+                }
+            }
             if let (Some(name), Some(priced)) = (model, priced) {
                 match priced {
                     Some((key, price)) => {
@@ -2515,7 +2542,7 @@ fn run() -> Result<()> {
                 } else {
                     println!(
                         "{}",
-                        semlith::graph::render_signatures(&rows, &|p| display(
+                        semlith::graph::render_signatures(&rows, &names, &|p| display(
                             std::path::Path::new(p)
                         ))
                     );
@@ -2638,7 +2665,9 @@ fn run() -> Result<()> {
                         if span.fresh { "" } else { "  · stale" },
                         reset(),
                     )?;
-                    for line in span.text.lines() {
+                    // Every line of the span, a blank one included: `lines()`
+                    // printed nothing for a blank line on its own (G14).
+                    for line in span.text.split('\n') {
                         writeln!(out, "{line}")?;
                     }
                 }
@@ -2661,7 +2690,7 @@ fn run() -> Result<()> {
                 &CLI_LEDGER,
                 "pattern",
                 &query,
-                "",
+                &serde_json::to_string(&found).unwrap_or_default(),
                 !found.matches.is_empty(),
                 started.elapsed(),
             );
@@ -2806,7 +2835,7 @@ fn run() -> Result<()> {
                 &CLI_LEDGER,
                 "impact",
                 &name,
-                "",
+                &serde_json::to_string(&impact).unwrap_or_default(),
                 !impact.reached.is_empty(),
                 started.elapsed(),
             );
@@ -2839,7 +2868,7 @@ fn run() -> Result<()> {
                 &CLI_LEDGER,
                 "trace",
                 &from,
-                &to,
+                &serde_json::to_string(&trace).unwrap_or_default(),
                 trace.chain.is_some(),
                 started.elapsed(),
             );
@@ -2855,6 +2884,7 @@ fn run() -> Result<()> {
         Command::Report {
             kind,
             format,
+            table,
             model,
             window,
             scope,
@@ -2882,6 +2912,15 @@ fn run() -> Result<()> {
             if format == semlith::report::PDF && out.is_none() {
                 anyhow::bail!("a pdf is bytes rather than text — name a file with --out");
             }
+            if table.is_some() && format != semlith::report::CSV {
+                anyhow::bail!("--table picks one CSV table; add --format csv");
+            }
+            if format == semlith::report::CSV && table.is_none() && out.is_none() {
+                anyhow::bail!(
+                    "a report's csv is a zip of one file per table — name a file with --out, \
+                     or print one table with --table (summary, or the table's id)"
+                );
+            }
             let fleet = read_fleet(&cli.store, &cwd, false)?;
             let report = semlith::report::generate_with(
                 &fleet,
@@ -2889,14 +2928,25 @@ fn run() -> Result<()> {
                 &model,
                 window,
                 &scope,
-                semlith::report::Options { excerpts, redact },
+                semlith::report::Options {
+                    excerpts,
+                    redact,
+                    salt: None,
+                },
             )?;
+            let bytes = match &table {
+                Some(id) => report.render_table(id)?.into_bytes(),
+                None => report.render_bytes(&format)?,
+            };
             match out {
                 Some(path) => {
-                    std::fs::write(&path, report.render_bytes(&format)?)?;
+                    std::fs::write(&path, bytes)?;
                     println!("{} written to {}", report.title, display(&path));
                 }
-                None => print!("{}", report.render(&format)?),
+                None => {
+                    use std::io::Write;
+                    std::io::stdout().write_all(&bytes)?;
+                }
             }
         }
 
@@ -3150,16 +3200,20 @@ fn run() -> Result<()> {
                 // One line, and never a number without its denominator. A
                 // store that has recorded nothing prints nothing here rather
                 // than a zero that reads like a measurement.
-                let savings = semlith::store::ledger_savings(store.db())?;
-                if savings.total > 0 {
+                let f = semlith::ledger::figures(
+                    &[(label, store.db())],
+                    semlith::ledger::Window::ALL,
+                    false,
+                )?;
+                if f.queries > 0 {
                     println!(
                         "saved    {} tokens not read, over {} of {} retrievals \
                          ({}% coverage, {})",
-                        savings.net,
-                        savings.credited,
-                        savings.total,
-                        savings.coverage(),
-                        savings.tier(),
+                        semlith::report::number(f.net_tokens),
+                        semlith::report::number(f.credited),
+                        semlith::report::number(f.queries),
+                        f.coverage,
+                        f.tier.word,
                     );
                 }
                 if many {
@@ -3321,7 +3375,37 @@ fn run() -> Result<()> {
             match action {
                 None => {
                     let listing: serde_json::Value = match &upstream {
-                        Some(daemon) => serde_json::from_str(&daemon.get("/api/refused")?)?,
+                        Some(daemon) => {
+                            // The stores named, by the labels the daemon uses
+                            // for them; every store when none was named.
+                            let path = if cli.store.is_empty() {
+                                "/api/refused".to_string()
+                            } else {
+                                let named = read_fleet(&cli.store, &cwd, true)?;
+                                let labels = named.labels();
+                                let query: Vec<String> = labels
+                                    .iter()
+                                    .map(|l| {
+                                        let encoded: String = l
+                                            .bytes()
+                                            .map(|b| match b {
+                                                b'A'..=b'Z'
+                                                | b'a'..=b'z'
+                                                | b'0'..=b'9'
+                                                | b'-'
+                                                | b'_'
+                                                | b'.'
+                                                | b'~' => (b as char).to_string(),
+                                                _ => format!("%{b:02X}"),
+                                            })
+                                            .collect();
+                                        format!("store={encoded}")
+                                    })
+                                    .collect();
+                                format!("/api/refused?{}", query.join("&"))
+                            };
+                            serde_json::from_str(&daemon.get(&path)?)?
+                        }
                         None => {
                             let fleet = read_fleet(&cli.store, &cwd, true)?;
                             let mut stores = Vec::new();
@@ -4286,9 +4370,27 @@ const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2)
 /// Where the run is, how fast it is going, and how much longer it has: the
 /// engine's own share done and time left ([`semlith::progress`]), the same
 /// figures the portal shows.
-fn predict(p: semlith::IndexProgress, elapsed: std::time::Duration) -> String {
+/// How far back the printed rate looks, in seconds.
+const RATE_WINDOW: f32 = 20.0;
+
+/// One progress line. `recent` is the caller's `(seconds, chunks)` readings,
+/// so the rate printed is the last twenty seconds', not chunks over the whole
+/// run: cobra printed 3 chunks/s rising to 13 while the lane ran at ~75 once
+/// it had started, because the lane's wait was in the denominator.
+fn predict(
+    p: semlith::IndexProgress,
+    elapsed: std::time::Duration,
+    recent: &mut std::collections::VecDeque<(f32, u64)>,
+) -> String {
     let secs = elapsed.as_secs_f32().max(0.001);
-    let rate = p.chunks as f32 / secs;
+    recent.push_back((secs, p.chunks as u64));
+    while recent.len() > 2 && recent.front().is_some_and(|(t, _)| secs - t > RATE_WINDOW) {
+        recent.pop_front();
+    }
+    let rate = match (recent.front(), recent.back()) {
+        (Some((t0, c0)), Some((t1, c1))) if t1 > t0 => (c1.saturating_sub(*c0)) as f32 / (t1 - t0),
+        _ => p.chunks as f32 / secs,
+    };
     let images = if p.images_total > 0 {
         format!(", {}/{} images", p.images, p.images_total)
     } else {
@@ -4500,31 +4602,10 @@ fn print_ends(out: &mut impl Write, heading: &str, ends: &[semlith::store::EdgeE
         return Ok(());
     }
     for end in ends {
-        // A collapsed row stands for every definition of the name, so it says
-        // how many rather than pointing at whichever one came back first —
-        // which would read as a fact about where the call goes.
-        if end.confidence == semlith::graph::AMBIGUOUS {
-            writeln!(
-                out,
-                "  {} via {} ({}) · {} definitions{}",
-                end.symbol.name,
-                end.kind,
-                end.confidence,
-                end.definitions,
-                semlith::graph::call_site(end, &|p| display(std::path::Path::new(p))),
-            )?;
-            continue;
-        }
         writeln!(
             out,
-            "  {} via {} ({})  {}{}:{}{}",
-            end.symbol.name,
-            end.kind,
-            end.confidence,
-            store_prefix(&end.symbol.store),
-            display(std::path::Path::new(&end.symbol.path)),
-            end.symbol.start_line,
-            semlith::graph::call_site(end, &|p| display(std::path::Path::new(p))),
+            "{}",
+            semlith::graph::render_end(end, &|p| display(std::path::Path::new(p)))
         )?;
     }
     Ok(())
@@ -4560,7 +4641,10 @@ fn human_time(at: i64) -> String {
     // while the portal printed the browser's local clock, and neither said
     // which zone it meant — so the same retrieval read 13:40:32 in one place
     // and 19:00:18 in the other and nothing on either screen admitted it.
-    semlith::clock::local_clock(at)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    semlith::clock::local_when(at, now)
 }
 
 /// The four steps, and the first one that failed.
@@ -4832,35 +4916,55 @@ fn steering_line(client: &semlith::doctor::ClientReport) -> Option<String> {
 /// computed over and tier says how the tokens were counted, and a figure
 /// printed without both is a figure a reader cannot check — which is how the
 /// double-counted README paragraph of 0.17.2 came to exist.
-fn print_savings(store: &semlith::Semlith, indent: &str) -> Result<()> {
-    let savings = semlith::store::ledger_savings(store.db())?;
-    let misses = semlith::store::ledger_misses(store.db())?;
-    let clients = semlith::store::ledger_clients(store.db())?;
-
+/// The ledger's figures for `members`, as every surface prints them: the one
+/// aggregation (`ledger::figures`), so this block, the Ledger page and the
+/// reports cannot disagree.
+fn print_savings(members: &[(&str, &rusqlite::Connection)], indent: &str) -> Result<()> {
+    let f = semlith::ledger::figures(members, semlith::ledger::Window::ALL, false)?;
+    let n = semlith::report::number;
     println!(
         "{indent}saved {} tokens over {} of {} retrievals — coverage {} %, tier {}",
-        savings.net,
-        savings.credited,
-        savings.total,
-        savings.coverage(),
-        savings.tier(),
+        n(f.net_tokens),
+        n(f.credited),
+        n(f.queries),
+        f.coverage,
+        f.tier.word,
     );
     println!(
-        "{indent}what reading those files whole would have cost, counted with the store's tokenizer"
+        "{indent}counted: excerpts {}, whole files {}",
+        match f.tier.excerpt {
+            "model" => "with the store's tokenizer",
+            "chars4" => "at four characters a token",
+            _ => "two ways",
+        },
+        match f.tier.whole {
+            "text" => "as the text they hold (bytes ÷ 4 for plain text)",
+            "bytes" => "as their bytes ÷ 4 (rows before 0.42.0)",
+            _ => "two ways (rows before 0.42.0 by their bytes)",
+        },
     );
     println!(
-        "{indent}refunds {} ({}) · zero-hit {} of {}",
-        misses.refunds,
-        if misses.measured {
+        "{indent}refunds {} ({}), not in the saving · zero-hit {} of {}",
+        n(f.refunds),
+        if f.refunds > 0 {
             "measured: a steering hook reports the reads semlith never served"
         } else {
             "a floor: no steering hook has reported here, so reads semlith never \
              served are not counted"
         },
-        misses.zero_hit,
-        savings.total,
+        n(f.zero_hit),
+        n(f.queries),
     );
-    if !clients.is_empty() {
+    if f.queries > 0 {
+        println!(
+            "{indent}latency p50 {} ms · p95 {} ms",
+            n(f.p50_micros / 1000),
+            n(f.p95_micros / 1000)
+        );
+    }
+    if !f.by_client.is_empty() {
+        let mut clients: Vec<(&String, &i64)> = f.by_client.iter().collect();
+        clients.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
         println!(
             "{indent}clients: {}",
             clients
@@ -4868,6 +4972,13 @@ fn print_savings(store: &semlith::Semlith, indent: &str) -> Result<()> {
                 .map(|(name, count)| format!("{name} {count}"))
                 .collect::<Vec<_>>()
                 .join(" · ")
+        );
+    }
+    if f.human.queries > 0 {
+        println!(
+            "{indent}by hand (cli, portal): {} retrievals, {} tokens, not in the saving",
+            n(f.human.queries),
+            n(f.human.net_tokens)
         );
     }
     Ok(())
@@ -5031,6 +5142,7 @@ fn brief(
     }
 
     let mut out = std::io::stdout().lock();
+    let untexted = semlith::brief::untexted_note(&brief.spans);
     for (i, span) in brief.spans.iter().enumerate() {
         let from = match &span.store {
             Some(label) => format!("[{label}] "),
@@ -5056,12 +5168,11 @@ fn brief(
         };
         writeln!(
             out,
-            "{}{}. {via:<3} {from}{}:{}-{}{what}{}",
+            "{}{}. {via:<3} {from}{}{}{what}{}",
             bold(),
             i + 1,
             display(std::path::Path::new(&span.path)),
-            span.start_line,
-            span.end_line,
+            span.range(),
             reset()
         )?;
         match &span.text {
@@ -5073,7 +5184,7 @@ fn brief(
             // Said rather than left blank: a span with no text under it
             // looks like a span with no text in it.
             None if span.over_budget => writeln!(out, "   (text left out for the budget)")?,
-            None => writeln!(out, "   (text: top span only)")?,
+            None => writeln!(out, "   {untexted}")?,
         }
         writeln!(out)?;
     }
@@ -5106,13 +5217,7 @@ fn brief(
         brief.tokens, brief.counted_with
     );
     if !brief.cut.is_empty() {
-        let mut dropped = Vec::new();
-        if brief.cut.span_text > 0 {
-            dropped.push(format!("{} spans left without text", brief.cut.span_text));
-        }
-        if brief.cut.symbols > 0 {
-            dropped.push(format!("{} symbols' edges", brief.cut.symbols));
-        }
+        let dropped = semlith::brief::dropped(&brief.cut);
         tail.push_str(&format!(" -- dropped: {}", dropped.join(", ")));
     }
     writeln!(out, "{tail}")?;
@@ -5162,6 +5267,16 @@ enum ScheduleCommand {
         /// Narrow to these stores, by label. Repeatable.
         #[arg(long)]
         scope: Vec<String>,
+
+        /// Replace every query text with a digest keyed to this machine, as
+        /// `semlith report --redact` does.
+        #[arg(long)]
+        redact: bool,
+
+        /// Attach the per-retrieval rows (counts, never lines), as `semlith
+        /// report --excerpts` does. Access report only.
+        #[arg(long)]
+        excerpts: bool,
     },
 
     /// Remove a schedule by its id.
@@ -5240,6 +5355,8 @@ fn run_schedule(what: ScheduleCommand) -> anyhow::Result<()> {
             model,
             window,
             scope,
+            redact,
+            excerpts,
         } => {
             // Absolute here rather than in `check`, so a relative path typed at
             // a terminal means what the person typing it meant. The daemon has
@@ -5253,6 +5370,8 @@ fn run_schedule(what: ScheduleCommand) -> anyhow::Result<()> {
             let mut schedule = Schedule::new(&kind, &format, &model, every, &to);
             schedule.window = window;
             schedule.stores = scope;
+            schedule.redact = redact;
+            schedule.excerpts = excerpts;
             // Refused before anything is written, naming what would have
             // worked: half a schedules file is worse than none.
             schedule.check()?;

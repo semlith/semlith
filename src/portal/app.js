@@ -372,7 +372,9 @@ function dayClock(unix) {
   const time = d.toTimeString().slice(0, 5);
   if (same) return `today ${time}`;
   if (yesterday) return `yesterday ${time}`;
-  return `${d.toISOString().slice(5, 10)} ${time}`;
+  // The local date, beside the local time: `toISOString` is the UTC date, so
+  // in IST a row at 10-10 03:00 local printed "10-09 03:00".
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${time}`;
 }
 
 function spellTook(ms) {
@@ -398,6 +400,14 @@ function perSecond(value) {
 }
 
 /** The tail of a path, for a store root in a narrow column. */
+// Where this daemon keeps its stores, as the page prints it. The daemon's own
+// answer, not `~/.semlith`: SEMLITH_HOME moves it, and the page used to name
+// the default while the store landed somewhere else.
+function semHome() {
+  const h = data.about?.store_home;
+  return h && !String(h).startsWith("unresolved") ? tilde(h) : "~/.semlith";
+}
+
 function tilde(path, home) {
   const p = String(path || "");
   const h = home || state.home;
@@ -1777,7 +1787,7 @@ function runLeftMs(run) {
   if (truthRun(run)) return run.eta_ms ?? null;
   const done = runPct(run) / 100;
   if (done < 0.05 || !run.elapsed_ms) return run.eta_ms ?? null;
-  return Math.round((run.elapsed_ms - (run.queued_ms || 0)) * (1 - done) / done);
+  return Math.round(run.elapsed_ms * (1 - done) / done);
 }
 
 /** "about 12 min", the way an estimate is said: never to the second. */
@@ -2348,8 +2358,15 @@ function connectedCount() {
   return (data.agents?.connections || []).length;
 }
 
+// A client counts as registered only when its registration reaches this
+// daemon: one that names another binary or home is "cannot reach semlith"
+// in Needs attention, and must not also tick "Connect an agent" (F08).
+function cannotReach(c) {
+  return !!(c.registered && (c.repair || c.why || c.fault));
+}
+
 function registeredClients() {
-  return (data.agents?.doctor || []).filter((c) => c.registered);
+  return (data.agents?.doctor || []).filter((c) => c.registered && !cannotReach(c));
 }
 
 /** The ledger's state, in the word the daemon card uses. */
@@ -2397,7 +2414,7 @@ function welcomeScreen() {
             "div",
             { class: "col gap6" },
             el("div", { class: "welcome-h", text: "Give your agents a memory of your code, kept on this machine." }),
-            el("div", { class: "welcome-lead", text: "Semlith reads your folders once, keeps a searchable index under ~/.semlith, and answers every agent over one local endpoint. Your first store takes a few minutes." }),
+            el("div", { class: "welcome-lead", text: `Semlith reads your folders once, keeps a searchable index under ${semHome()}, and answers every agent over one local endpoint. Your first store takes a few minutes.` }),
           ),
           el(
             "div",
@@ -2724,7 +2741,9 @@ function wizardScreen() {
     const items = held.flatMap((r) => (r.plan.review || []).map((it) => ({ ...it, store: r.store, risk: riskOf(it) })));
     const notIndexed = {};
     const paths = {};
+    const why = {};
     for (const r of held) {
+      Object.assign(why, r.plan.not_indexed_why || {});
       for (const [cls, count] of Object.entries(r.plan.not_indexed || {})) notIndexed[cls] = (notIndexed[cls] || 0) + count;
       for (const [cls, list] of Object.entries(r.plan.not_indexed_paths || {})) paths[cls] = (paths[cls] || []).concat(list);
       if (r.plan.credential && r.plan.credential.length) paths.credential = (paths.credential || []).concat(r.plan.credential);
@@ -2740,6 +2759,7 @@ function wizardScreen() {
     const chunks = held.length && held.every((r) => r.plan.chunks != null) ? held.reduce((a, r) => a + r.plan.chunks, 0) + decided.filter((d) => w.decisions[d.path] !== "out").reduce((a, d) => a + (d.chunks || 0), 0) : null;
     const images = held.reduce((a, r) => a + (r.plan.images || 0), 0);
     return {
+      why,
       held,
       items,
       undecided: items.length - decided.length,
@@ -2813,7 +2833,7 @@ function wizardScreen() {
         ? ["Use lowercase letters, digits and dashes — for example research-notes.", "bad"]
         : taken
           ? [`“${nm}” is already a store on this machine. Pick another name.`, "bad"]
-          : [`Available · kept at ~/.semlith/stores/${nm}`, "ok"];
+          : [`Available · kept at ${semHome()}/stores/${nm}`, "ok"];
     return { nm, ok, msg };
   }
 
@@ -3413,7 +3433,7 @@ function wizardScreen() {
         type = "folder";
       } catch (e) {
         if (/outside the home/.test(e.message)) {
-          toast(`${p} is outside your home folder, which the portal may not read`, true);
+          toast(`${p} is outside your home folder, which the portal may not read. From a terminal, semlith index ${p} indexes it.`, true);
           continue;
         }
       }
@@ -3902,7 +3922,7 @@ function wizardScreen() {
             ? el(
                 "div",
                 { class: "group-paths" },
-                g.paths.length ? g.paths.slice(0, 50).map((p) => pathSpan(rel(p), "", p)) : el("span", { text: "The list is written when the run ends; the count is the scan's." }),
+                g.paths.length ? g.paths.slice(0, 50).map((p) => (P.why && P.why[p] ? el("span", { class: "row gap6 min0" }, pathSpan(rel(p), "", p), el("span", { class: "muted t-xs nowrap", text: P.why[p] })) : pathSpan(rel(p), "", p))) : el("span", { text: "The list is written when the run ends; the count is the scan's." }),
                 g.count > g.paths.length && g.paths.length ? el("span", { text: `…and ${n(g.count - g.paths.length)} more` }) : null,
               )
             : null,
@@ -4377,7 +4397,7 @@ function wizardScreen() {
       spin = w.busy;
       label = w.busy ? (w.created ? "Saving…" : "Creating…") : w.created ? (w.created === ns.nm ? "Continue" : "Rename and continue") : "Create store";
       on = ns.ok && !w.busy;
-      hint = ns.ok ? `Creates an empty store at ~/.semlith/stores/${ns.nm}` : "Pick a name to continue";
+      hint = ns.ok ? `Creates an empty store at ${semHome()}/stores/${ns.nm}` : "Pick a name to continue";
       nextFn = createOrRename;
     } else if (step === 2) {
       const k = w.sources.length;
@@ -5340,7 +5360,7 @@ function attentionItems() {
   const reclaim = stores.filter((s) => reclaimable(s) > 1024 * 1024);
   if (reclaim.length) out.push({ tone: "blue", title: `${bytes(reclaim.reduce((a, s) => a + reclaimable(s), 0))} reclaimable in ${plural(reclaim.length, "store")}`, sub: reclaim.map((s) => s.name).join(", "), label: "Compact", onclick: () => compactStores(reclaim.map((s) => s.name)) });
   if (data.agents && !registeredClients().length && !connectedCount()) out.push({ tone: "amber", title: "No agent is connected yet", sub: "Register the clients found on this machine in one step", label: "Connect", onclick: () => go("agents", "add") });
-  const broken = (data.agents?.doctor || []).filter((c) => c.registered && (c.repair || c.why || (c.disabled_in || []).length));
+  const broken = (data.agents?.doctor || []).filter((c) => cannotReach(c) || (c.registered && (c.disabled_in || []).length));
   if (broken.length) out.push({ tone: "grey", title: `${broken[0].name}${broken.length > 1 ? ` and ${broken.length - 1} more` : ""} cannot reach semlith`, sub: broken[0].why || broken[0].repair || "registered but switched off in some folders", label: "Details", onclick: () => go("agents", "health") });
   const finished = (data.runs?.runs || []).filter((r) => r.status === "done" && r.finished_at && Date.now() / 1000 - r.finished_at < 3600 && r.kind !== "catch-up" && !state.dismissed.has(r.id));
   for (const r of finished.slice(0, 2))
@@ -6659,7 +6679,8 @@ function runLine(h) {
     const total = (f) => (f ? f.database + f.exact + f.vectors : 0);
     return `${bytes(total(c.before))} → ${bytes(total(c.after))}`;
   }
-  const ms = h.elapsed_ms ? h.elapsed_ms - (h.queued_ms || 0) : h.started && h.finished ? (h.finished - h.started) * 1000 : 0;
+  // `elapsed_ms` is the work's own time from 0.42.0; the queue is apart.
+  const ms = h.elapsed_ms ? h.elapsed_ms : h.started && h.finished ? (h.finished - h.started) * 1000 : 0;
   // History keeps whole seconds; a run inside one second says so rather than
   // claiming a time it did not measure.
   const took = ms ? ` · took ${spellTook(ms)}` : h.finished || h.finished_at ? " · took under a second" : "";
@@ -8654,7 +8675,7 @@ function agConnected(a) {
     el(
       "div",
       { class: "stack" },
-      el("div", { class: "card pad" }, el("span", { class: "eyebrow", text: "What the tool list costs" }), el("span", { class: "mono t-b big18", text: `${n(a.tool_list_tokens)} tokens` }), el("span", { class: "muted t-xs", text: `per session, read once before the agent asks anything · ${plural((a.tools || []).filter((t) => t.listed !== false).length, "tool")} listed · ${n(a.tool_list_bytes)} bytes · counted ${a.tool_list_tier === "tokenizer" ? "by the model's tokenizer" : `as ${a.tool_list_tier}`}` })),
+      el("div", { class: "card pad" }, el("span", { class: "eyebrow", text: "What the tool list costs" }), el("span", { class: "mono t-b big18", text: `${n(a.tool_list_tokens)} tokens` }), el("span", { class: "muted t-xs", text: `per session, read once before the agent asks anything · ${plural((a.tools || []).filter((t) => t.listed !== false).length, "tool")} listed · ${n(a.tool_list_bytes)} bytes · counted as bytes ÷ 4, the figure the release gate asserts` })),
       el("div", { class: "card pad" }, el("span", { class: "card-t", text: "After you register a client" }), el("span", { class: "muted t-sm pretty", text: "Restart it. Ask it something about your code — “use semlith to find where X happens”. The call lands in the Ledger with what it was sent." }), lnk("Open the ledger →", () => go("ledger"))),
     ),
   );
@@ -8759,7 +8780,7 @@ function agTools(a) {
   return el(
     "div",
     { class: "card" },
-    el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "What an agent can call" }), meta(`${listed} of ${plural(all.length, "tool")} offered to agents · ${n(a.tool_list_bytes)} bytes · ${n(a.tool_list_tokens)} tokens per session, counted ${a.tool_list_tier === "tokenizer" ? "by the model" : `as ${a.tool_list_tier || "an estimate"}`}`)),
+    el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "What an agent can call" }), meta(`${listed} of ${plural(all.length, "tool")} offered to agents · ${n(a.tool_list_bytes)} bytes · ${n(a.tool_list_tokens)} tokens per session, counted as bytes ÷ 4`)),
     el(
       "div",
       { class: "tw" },
@@ -8906,7 +8927,7 @@ VIEWS.ledger = {
       el(
         "div",
         { class: "q4" },
-        kpi("Queries recorded", n(L.queries), `${plural(L.clients || byClient.length, "client")}${lastRow ? ` · last ${ago(lastRow.at)}` : ""}`),
+        kpi("Queries recorded", n(L.queries), `${plural(L.clients || 0, "client")}${lastRow ? ` · last ${ago(lastRow.at)}` : ""}${L.human?.queries ? ` · ${n(L.human.queries)} by hand, not counted` : ""}`),
         kpi("Fewer tokens", L.ratio ? `${L.ratio.toFixed(1)}×` : "—", L.ratio ? `than reading those files whole · coverage ${L.coverage}% · ${L.tier}` : "counted once an agent asks", { accent: !!L.ratio }),
         kpi("Net tokens not read", n(L.net_tokens), "whole-file less excerpt, rows with a hit"),
         kpi("Zero-hit", `${zeroShare.toFixed(0)}%`, `${n(L.zero_hit)} queries the corpus could not answer`),
@@ -8925,7 +8946,7 @@ VIEWS.ledger = {
         el(
           "div",
           { class: "card pad" },
-          el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "What agents read, against reading whole files" }), el("span", { class: "t-mono-sm", text: "store tokenizer · modelled" })),
+          el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "What agents read, against reading whole files" }), el("span", { class: "t-mono-sm", text: countedWords(L.counted) })),
           [
             ["Reading every file a retrieval answered from", whole, "line"],
             ["What agents were actually sent", sent, "accent"],
@@ -8937,7 +8958,7 @@ VIEWS.ledger = {
             b.setAttribute("data-tip-rows", rows([["tokens", n(v)], tone === "accent" ? ["against whole files", whole ? `${Math.round((sent / whole) * 100)}%` : "—"] : ["that is", "the baseline"], tone === "accent" && L.ratio ? ["that is", `${L.ratio.toFixed(1)}× fewer`] : null].filter(Boolean)));
             return el("div", { class: "col gap4" }, el("div", { class: "row base t-sm" }, el("span", { class: "grow ink2", text: k }), el("span", { class: "mono t-b", text: n(v) })), b);
           }),
-          el("div", { class: "row gap6 tb-line" }, [`coverage ${L.coverage || 0}%`, `refunds ${n(L.refunds)} · ${L.refunds_measured ? "measured" : "a floor"}`, `tier ${L.tier || "modelled"}`].map((f) => el("span", { class: "factchip", text: f }))),
+          el("div", { class: "row gap6 tb-line" }, [`coverage ${L.coverage || 0}%`, `refunds ${n(L.refunds)} · ${L.refunds_measured ? "measured" : "a floor"}, not in the saving`, `p50 ${L.p50_ms != null ? `${n(Math.round(L.p50_ms))} ms` : "—"} · p95 ${L.p95_ms != null ? `${n(Math.round(L.p95_ms))} ms` : "—"}`, `tier ${L.tier || "modelled"}`].map((f) => el("span", { class: "factchip", text: f }))),
         ),
         el(
           "div",
@@ -8957,23 +8978,12 @@ VIEWS.ledger = {
         ),
       ),
     );
-    // Savings by agent and by store, summed from the sessions the daemon
-    // sends (its newest, capped), so the tables say how many they cover.
-    const savings = (title, key, col) => {
-      const groups = new Map();
-      for (const s of sessionsAll) {
-        const k = s[key] || "—";
-        const g = groups.get(k) || { name: k, sessions: 0, retrievals: 0, net: 0, saved: 0, priced: false, measured: true };
-        g.sessions += 1;
-        g.retrievals += s.retrievals || 0;
-        g.net += s.net_tokens || 0;
-        if (s.saved_usd != null) (g.saved += s.saved_usd), (g.priced = true);
-        g.measured = g.measured && s.tier === "measured";
-        groups.set(k, g);
-      }
-      const list = [...groups.values()];
+    // Savings by agent and by store, as the daemon's one aggregation counts
+    // them: a session is one conversation however many stores answered it,
+    // and a store's share counts a search it answered once in that store.
+    const savings = (title, list, col, perStore) => {
       const g = grid({
-        key: `lg:by-${key}`,
+        key: `lg:by-${perStore ? "store" : "client"}`,
         caption: title,
         rows: list,
         sort: "net",
@@ -8981,16 +8991,19 @@ VIEWS.ledger = {
         empty: "Nothing recorded yet.",
         columns: [
           { key: "name", label: col, cls: "m t-b", sort: (r) => r.name, render: (r) => r.name },
-          { key: "sessions", label: "Sessions", cls: "m r", firstDir: "desc", sort: (r) => r.sessions, render: (r) => n(r.sessions) },
+          perStore
+            ? { key: "refunds", label: "Refunds", cls: "m r", firstDir: "desc", sort: (r) => r.refunds, render: (r) => n(r.refunds) }
+            : { key: "sessions", label: "Sessions", cls: "m r", firstDir: "desc", sort: (r) => r.sessions, render: (r) => n(r.sessions) },
           { key: "reads", label: "Retrievals", cls: "m r", firstDir: "desc", sort: (r) => r.retrievals, render: (r) => n(r.retrievals) },
           { key: "net", label: "Net tokens", cls: "m r", firstDir: "desc", sort: (r) => r.net, render: (r) => n(r.net) },
-          { key: "saved", label: "Saved", cls: "m r", firstDir: "desc", sort: (r) => r.saved, render: (r) => (r.priced ? el("span", { "data-tip": "at each session's own model input price; sessions with no known model are not priced" }, dollars(r.saved)) : "—") },
-          { key: "tier", label: "Tier", sort: (r) => (r.measured ? 1 : 0), render: (r) => pill(r.measured ? "measured" : "modelled", r.measured ? "blue" : "grey", { dot: false, tip: r.measured ? "Every session measured from the agent's own session log" : "Modelled with the store tokenizer, not observed" }) },
+          perStore
+            ? { key: "credited", label: "Credited", cls: "m r", firstDir: "desc", sort: (r) => r.credited, render: (r) => n(r.credited) }
+            : { key: "saved", label: "Saved", cls: "m r", firstDir: "desc", sort: (r) => r.saved || 0, render: (r) => (r.saved != null ? el("span", { "data-tip": "at each session's own model input price; sessions with no known model are not priced" }, dollars(r.saved)) : "—") },
         ],
       });
-      return el("div", { class: "card" }, el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: title }), meta(sessionsAll.length ? `newest ${plural(sessionsAll.length, "session")}` : "no sessions yet")), g.node);
+      return el("div", { class: "card" }, el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: title }), meta(perStore ? plural(list.length, "store") : plural(L.sessions_total || 0, "session"))), g.node);
     };
-    parts.push(el("div", { class: "split s-1-1" }, savings("Savings by agent", "client", "Agent"), savings("Savings by store", "store", "Store")));
+    parts.push(el("div", { class: "split s-1-1" }, savings("Savings by agent", L.by_agent || [], "Agent", false), savings("Savings by store", L.by_store || [], "Store", true)));
     // Usage from the clients' own logs: their tokens and cost beside ours.
     const usage = L.usage || {};
     const tabsNode = tabs(
@@ -9031,7 +9044,7 @@ VIEWS.ledger = {
           ["semlith start --no-ledger", "Run without recording, for this session only"],
         ].map(([c, tipText]) => btn({ class: "cmdchip", "data-tip": tipText, onclick: () => copy(c) }, c, icon(I.copy, 11, { w: 2 }))),
         el("span", { class: "spacer" }),
-        el("span", { class: "t-mono-sm", text: "~/.semlith/stores/<name>/store.db · table retrievals" }),
+        el("span", { class: "t-mono-sm", text: `${semHome()}/stores/<name>/store.db · table retrievals` }),
       ),
     );
     // The chain and retention foot.
@@ -9151,8 +9164,10 @@ function ledgerRetrievals(list) {
       { key: "client", label: "Client", cls: "t13 nowrap", sort: (r) => r.client, render: (r) => r.client },
       { key: "store", label: "Store", cls: "ms", sort: (r) => r.store, render: (r) => r.store },
       { key: "q", label: "Query", cls: "m cap", sort: (r) => r.query, render: (r) => el("span", { "data-tip": r.query, "data-tip-full": "", text: r.query }) },
+      { key: "tool", label: "Tool", cls: "ms", sort: (r) => r.tool, render: (r) => r.tool },
       { key: "hits", label: "Hits", cls: "m r", sort: (r) => r.hits, render: (r) => n(r.hits) },
       { key: "sent", label: "Sent", cls: "m r", sort: (r) => r.excerpt_tokens, render: (r) => `${n(r.excerpt_tokens)} tok` },
+      { key: "tier", label: "Tier", cls: "ms nowrap", sort: (r) => r.tier, render: (r) => el("span", { "data-tip": `excerpt counted by ${r.tier.split(" · ")[0]}; whole file counted from its ${r.tier.split(" · ")[1]}${r.basis === "bytes" ? " (a row an older semlith wrote)" : ""}`, text: r.tier }) },
       { key: "ms", label: "ms", cls: "ms r", sort: (r) => r.ms, render: (r) => n(r.ms) },
     ],
   });
@@ -9240,10 +9255,26 @@ function plainWhat(what) {
   return String(what || "").replace(/\s*\([^)]*\)/g, "");
 }
 
-function exportLedger(format) {
+/** What each side of the saving was counted with, in words. */
+function countedWords(c) {
+  if (!c) return "store tokenizer";
+  const ex = { model: "excerpt by the store tokenizer", chars4: "excerpt at 4 chars a token", mixed: "excerpt counted two ways" }[c.excerpt] || "";
+  const wh = { text: "whole files as their text", bytes: "whole files as bytes ÷ 4", mixed: "whole files two ways (older rows by their bytes)" }[c.whole] || "";
+  return [ex, wh].filter(Boolean).join(" · ");
+}
+
+async function exportLedger(format) {
   const sessions = lg.tab === "sessions";
-  const list = lg.shown ? lg.shown() : sessions ? data.ledger?.sessions || [] : data.ledger?.rows || [];
-  const cols = sessions ? ["when", "session", "client", "store", "retrievals", "net_tokens", "tier", "model"] : ["when", "client", "store", "query", "hits", "excerpt_tokens", "whole_file_tokens", "ms"];
+  // The Retrievals export is every row, not the newest the page loaded: the
+  // daemon is asked for all of them, then the page's filters are applied.
+  let list = lg.shown ? lg.shown() : sessions ? data.ledger?.sessions || [] : data.ledger?.rows || [];
+  if (!sessions && (data.ledger?.rows_total || 0) > (data.ledger?.rows || []).length) {
+    const all = await fetchJson("/api/ledger?rows=all");
+    const keep = new Set(list.map((r) => `${r.store}:${r.id}`));
+    const filtered = !!(lg.q || lg.zero || lg.filter || lg.store !== "all");
+    list = (all.rows || []).filter((r) => (filtered ? keep.has(`${r.store}:${r.id}`) || ((lg.store === "all" || r.store === lg.store) && (!lg.zero || r.hits === 0) && (!lg.q || String(r.query).toLowerCase().includes(lg.q.toLowerCase())) && (!lg.filter || sameClient(r.client, lg.filter))) : true));
+  }
+  const cols = sessions ? ["when", "session", "client", "client_version", "store", "retrievals", "zero_hit", "net_tokens", "tier", "model"] : ["when", "client", "client_version", "session", "store", "tool", "query", "hits", "stale_hits", "excerpt_tokens", "whole_file_tokens", "tier", "ms"];
   const stamp = localDay();
   const name = `ledger-${sessions ? "sessions" : "retrievals"}-${stamp}`;
   if (format === "JSON") return download(`${name}.json`, JSON.stringify(list, null, 2), "application/json");
@@ -9267,7 +9298,7 @@ function exportLedger(format) {
     const neutral = (v) => (v.length > 1 && /^[=+\-@\t\r]/.test(v) && !Number.isFinite(Number(v)) ? `'${v}` : v);
     const esc = (v) => {
       const s = neutral(cell(v));
-      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      return (/[",\n\r]/).test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
     return download(`${name}.csv`, [cols.join(","), ...list.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n"), "text/csv");
   }
@@ -9279,14 +9310,15 @@ function exportLedger(format) {
 
 const REPORTS = [
   ["savings", "Retrieval savings", "Tokens agents did not read, counted from the ledger.", "for whoever approves the spend", "What retrieval actually saved, per client, with the arithmetic shown."],
-  ["access", "AI access audit", "Which agent read which file, when — from a hash-chained record.", "for security review", "Every file an agent was shown, by client, in the window."],
+  ["access", "AI access audit", "Which agent asked what, when — from a hash-chained record.", "for security review", "Every agent session and what it asked, in the window."],
   ["change", "Change brief", "Blast radius for what changed, as a note to paste in the PR.", "for the reviewer", "What the change reaches."],
   ["health", "Index health", "Stale files, skipped formats and graph coverage.", "for whoever owns the store", "What the index holds, skipped, and let go stale."],
   ["gaps", "Knowledge gaps", "Questions the corpus could not answer well — a docs to-do list.", "for whoever writes the docs", "The questions that came back empty or thin."],
 ];
 const REPORT_FORMATS = [
   ["markdown", "Markdown", "md", "text/markdown"],
-  ["csv", "CSV", "csv", "text/csv"],
+  // A report's CSV is one file per table, so it saves as a zip of them.
+  ["csv", "CSV", "zip", "application/zip"],
   ["json", "JSON", "json", "application/json"],
   ["html", "HTML", "html", "text/html"],
   ["pdf", "PDF", "pdf", "application/pdf"],
@@ -9297,7 +9329,8 @@ const REPORT_WINDOWS = [
   ["month", "30 days"],
   ["quarter", "Quarter"],
 ];
-const WINDOWED = ["access", "change"];
+// Every report but the index's health narrows to a window (report::Window).
+const WINDOWED = ["savings", "access", "change", "gaps"];
 const CADENCES = [
   ["day", 86400],
   ["week", 604800],
@@ -9318,7 +9351,9 @@ VIEWS.reports = {
     const inert = !WINDOWED.includes(rp.kind);
     const fmt = REPORT_FORMATS.find((f) => f[0] === rp.format);
     const fileName = `${rp.kind}-${localDay()}.${fmt[2]}`;
-    const preview = el("div", { class: "preview", "data-scroll-keep": "rp-preview" });
+    // The rendered HTML, in a frame with no script, no same-origin access and a
+    // report-only policy from its own route; Copy stays Markdown.
+    const preview = el("div", { class: "preview report-preview", "data-scroll-keep": "rp-preview" });
     const previewMeta = el("div", { class: "card-foot" });
     const savingsCard = el("div", {});
     holder.onData = () => {};
@@ -9334,17 +9369,16 @@ VIEWS.reports = {
         if (rp.seq !== mine || !preview.isConnected) return clearInterval(tick);
         setText(preview, `Generating on this machine… ${Math.round((Date.now() - began) / 1000)} s — a report over a large store reads all of it`);
       }, 1000);
-      const p = new URLSearchParams({ kind: rp.kind, format: rp.format === "pdf" ? "markdown" : rp.format, model: rp.model });
-      if (!inert) p.set("window", rp.window);
-      for (const s of rp.stores) p.append("scope", s);
-      if (rp.hash) p.set("redact", "1");
-      if (rp.excerpts) p.set("excerpts", "1");
+      const p = reportParams("markdown");
+      p.set("preview", "1");
       try {
         const out = await api(`/api/report?${p}`);
         if (rp.seq !== mine) return;
         rp.out = out;
-        setText(preview, rp.out.text || "");
-        fill(previewMeta, `${def[4]} · ${rp.format} · ${rp.out.report ? rp.out.report.window : ""} · generated ${rp.out.generated || ""} · nothing uploaded`);
+        if (out.preview) fill(preview, el("iframe", { class: "report-frame", sandbox: "", title: `${def[1]} preview`, src: out.preview }));
+        else setText(preview, out.text || "");
+        const w = out.report ? out.report.window : null;
+        fill(previewMeta, `${def[4]} · ${w ? (w.applies ? w.label : "the index as it stands") : ""} · generated ${out.generated || ""} · nothing uploaded`);
         paintSavings();
       } catch (e) {
         if (rp.seq !== mine) return;
@@ -9355,12 +9389,18 @@ VIEWS.reports = {
         if (rp.seq === mine) rp.busy = false;
       }
     };
-    const save = async () => {
-      const p = new URLSearchParams({ kind: rp.kind, format: rp.format, model: rp.model });
+    // Only what this report reads: the copy-command and the request agree.
+    function reportParams(format) {
+      const p = new URLSearchParams({ kind: rp.kind, format });
+      if (rp.kind === "savings") p.set("model", rp.model);
       if (!inert) p.set("window", rp.window);
       for (const s of rp.stores) p.append("scope", s);
-      if (rp.hash) p.set("redact", "1");
-      if (rp.excerpts) p.set("excerpts", "1");
+      if (rp.hash && QUERIED.includes(rp.kind)) p.set("redact", "1");
+      if (rp.excerpts && rp.kind === "access") p.set("excerpts", "1");
+      return p;
+    }
+    const save = async () => {
+      const p = reportParams(rp.format);
       try {
         const out = await api(`/api/report?${p}`);
         if (out instanceof Blob) download(fileName, out, fmt[3]);
@@ -9372,11 +9412,14 @@ VIEWS.reports = {
     };
     function paintSavings() {
       if (rp.kind !== "savings" || !rp.out || !rp.out.report) return fill(savingsCard);
-      const blocks = rp.out.report.blocks || [];
-      const table = blocks.find((b) => b.block === "table");
-      const facts = (blocks.find((b) => b.block === "facts") || {}).facts || [];
-      const net = facts.find((f) => f[0] === "Net") || [];
-      const netCost = facts.find((f) => /cost avoided/i.test(f[0])) || [];
+      // The typed report (semlith.report/2): the not-read table's rows carry
+      // raw tokens and dollars, the KPIs carry what the page prints.
+      const report = rp.out.report;
+      const table = (report.blocks || []).find((b) => b.block === "table" && b.id === "not_read");
+      const facts = ((report.blocks || []).find((b) => b.block === "facts") || {}).facts || [];
+      const kpi = (label) => (report.kpis || []).find((k) => k.label === label) || {};
+      const net = kpi("Net tokens not read");
+      const netCost = kpi("Net cost avoided");
       const model = models.find((m) => m.name === rp.model);
       fill(
         savingsCard,
@@ -9394,21 +9437,30 @@ VIEWS.reports = {
             btn({ class: "btn xs", onclick: updatePrices, "data-tip": `One request to ${prices.url || "models.dev"}, made now because you asked` }, "Update prices"),
           ),
           table
-            ? table.rows.map((r) => el("div", { class: "save-line" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: r[0] }), el("span", { class: "muted t-xs", text: r[3] || "" })), el("span", { class: "tok", text: r[1] }), el("span", { class: "cost", text: r[2] || "—" })))
+            ? table.rows.map((r) => el("div", { class: "save-line" }, el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: r[0] }), el("span", { class: "muted t-xs", text: r[3] || "" })), el("span", { class: "tok", text: n(r[1]) }), el("span", { class: "cost", text: r[2] == null ? "—" : `$${Number(r[2]).toFixed(2)}` })))
             : empty("No savings recorded yet."),
           el(
             "div",
             { class: "save-line net" },
-            el("span", { class: "row gap6" }, el("span", { class: "t-b big14", text: "Net" }), facts.filter((f) => !/^Net/.test(f[0])).map((f) => el("span", { class: "factchip sm", text: `${f[0].toLowerCase()} ${f[1]}` })), data.ledger ? el("span", { class: `factchip sm${data.ledger.intact === false ? " red" : ""}`, "data-tip": data.ledger.intact === false ? "A ledger row does not match its parent; see the Ledger page" : "Every ledger row matches its parent in the hash chain", text: data.ledger.intact === false ? "chain broken" : "chain verified" }) : null),
-            el("span", { class: "tok", text: net[1] || "—" }),
-            el("span", { class: "cost", text: netCost[1] || "—" }),
+            el("span", { class: "row gap6" }, el("span", { class: "t-b big14", text: "Net" }), [kpi("Coverage"), kpi("Fewer tokens")].filter((k) => k.label).concat(facts).map((f) => el("span", { class: "factchip sm", text: `${f.label.toLowerCase()} ${f.display}` })), data.ledger ? el("span", { class: `factchip sm${data.ledger.intact === false ? " red" : ""}`, "data-tip": data.ledger.intact === false ? "A ledger row does not match its parent; see the Ledger page" : "Every ledger row matches its parent in the hash chain", text: data.ledger.intact === false ? "chain broken" : "chain verified" }) : null),
+            el("span", { class: "tok", text: net.display || "—" }),
+            el("span", { class: "cost", text: netCost.display || "—" }),
           ),
         ),
       );
     }
     const optRow = (key, title, sub) => toggleRow(rp[key], title, sub, (v) => ((rp[key] = v), repaint(), generate()));
     const schedules = Object.entries((data.schedules || {}).schedules || {});
-    const cli = `semlith report ${rp.kind} \\\n  --format ${rp.format} \\\n  ${inert ? "" : `--window ${rp.window} \\\n  `}--model "${rp.model}"${rp.stores.length ? ` \\\n  ${rp.stores.map((s) => `--store ${s}`).join(" ")}` : ""}${rp.hash ? " \\\n  --redact" : ""}${rp.excerpts ? " \\\n  --excerpts" : ""}`;
+    // The command that writes this document: `--scope`, not `--store` (L13),
+    // and only the flags this report reads — no `--model` outside savings.
+    const flags = [`--format ${rp.format}`];
+    if (!inert) flags.push(`--window ${rp.window}`);
+    if (rp.kind === "savings") flags.push(`--model ${rp.model}`);
+    for (const s of rp.stores) flags.push(`--scope ${s}`);
+    if (rp.hash && QUERIED.includes(rp.kind)) flags.push("--redact");
+    if (rp.excerpts && rp.kind === "access") flags.push("--excerpts");
+    if (rp.format === "pdf" || rp.format === "csv") flags.push(`--out ${fileName}`);
+    const cli = [`semlith report ${rp.kind}`, ...flags].join(" \\\n  ");
     const node = el(
       "div",
       { class: "page" },
@@ -9423,7 +9475,7 @@ VIEWS.reports = {
           el(
             "div",
             { class: "card pad auto-fit m320 gap14" },
-            el("div", { class: "col gap6" }, el("span", { class: "eyebrow sm", text: "WINDOW" }), seg(REPORT_WINDOWS, inert ? "" : rp.window, (v) => ((rp.window = v), repaint()), { disabled: () => inert }), inert ? el("span", { class: "muted t-xs", text: "This report counts the whole history." }) : null),
+            el("div", { class: "col gap6" }, el("span", { class: "eyebrow sm", text: "WINDOW" }), seg(REPORT_WINDOWS, inert ? "" : rp.window, (v) => ((rp.window = v), repaint()), { disabled: () => inert }), inert ? el("span", { class: "muted t-xs", text: "The index as it stands: no window applies." }) : null),
             el("div", { class: "col gap6" }, el("span", { class: "eyebrow sm", text: "FORMAT" }), seg(REPORT_FORMATS.map((f) => [f[0], f[1]]), rp.format, (v) => ((rp.format = v), repaint()))),
             el(
               "div",
@@ -9436,7 +9488,7 @@ VIEWS.reports = {
                 liveStores().map((s) => btn({ class: "chip sm mono", "aria-pressed": String(rp.stores.includes(s.name)), onclick: () => ((rp.stores = rp.stores.includes(s.name) ? rp.stores.filter((x) => x !== s.name) : rp.stores.concat(s.name)), repaint()) }, s.name)),
               ),
             ),
-            el("div", { class: "row gap8 full-row" }, optRow("hash", "Hash the query text", "Keeps who, when and which file; drops what was asked."), optRow("excerpts", "Attach the excerpts", "The exact lines each agent was shown. A larger file.")),
+            el("div", { class: "row gap8 full-row" }, optRow("hash", "Hash the query text", "A digest keyed to this machine: keeps who, when and the cost; drops what was asked. Access and gaps."), optRow("excerpts", "Attach the per-retrieval rows", "Who asked, when, with which tool and what it cost — counts, not the lines shown. Access only.")),
           ),
           el(
             "div",
@@ -9462,13 +9514,13 @@ VIEWS.reports = {
         el(
           "div",
           { class: "card flexcol" },
-          el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Schedules" }), el("span", { class: "t-mono-sm", text: "run by the daemon · ~/.semlith/schedules.json" })),
+          el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Schedules" }), el("span", { class: "t-mono-sm anywhere", text: `run by the daemon · ${tilde((data.schedules || {}).path || "schedules.json")}` })),
           !schedules.length && !rp.picking ? empty("None yet. Set a report up above and press Schedule — the daemon writes the file in place, so it can be a tracked file with a readable diff.") : null,
           schedules.map(([id, s]) =>
             el(
               "div",
               { class: "sched-row" },
-              el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: (REPORTS.find((r) => r[0] === s.kind) || [, s.kind])[1] }), el("span", { class: "txt-dim", text: `${tilde(s.dir)} · ${s.format}${s.last_error ? ` · last run failed: ${s.last_error}` : s.next_run ? ` · next ${until(s.next_run)}` : ""}` })),
+              el("span", { class: "col" }, el("span", { class: "t-m t-sm", text: (REPORTS.find((r) => r[0] === s.kind) || [, s.kind])[1] }), el("span", { class: "txt-dim", text: `${tilde(s.last_path || s.dir)} · ${s.format}${s.window ? ` · ${s.window}` : ""}${s.redact ? " · hashed" : ""}${s.excerpts ? " · rows" : ""}${s.last_error ? ` · last run failed: ${s.last_error}` : s.next_run ? ` · next ${until(s.next_run)}` : ""}` })),
               pill(everyWord(s.every_seconds), s.last_error ? "red" : "blue", { dot: false }),
               btn({ class: "x-btn", "aria-label": "Remove schedule", onclick: () => removeSchedule(id) }, icon(I.x, 12, { w: 2 })),
             ),
@@ -9498,25 +9550,34 @@ VIEWS.reports = {
   },
 };
 
+// The reports that print query text, so hashing it means something there.
+const QUERIED = ["access", "gaps"];
+
 function until(unix) {
   const s = unix - Math.floor(Date.now() / 1000);
   if (s <= 0) return "due now";
+  if (s < 60) return "in under a minute";
   if (s < 3600) return `in ${Math.round(s / 60)}m`;
   if (s < 86400) return `in ${Math.round(s / 3600)}h`;
   return `in ${Math.round(s / 86400)}d`;
 }
 
+/** `every 1 minute`, `every 90 seconds`, `every 2 hours`: any cadence, as
+ * the CLI's `every_words` says it (a 60 s schedule read "every 0 h"). */
 function everyWord(seconds) {
   const hit = CADENCES.find(([, s]) => s === seconds);
   if (hit) return `every ${hit[0]}`;
-  if (seconds % 86400 === 0) return `every ${seconds / 86400} days`;
-  return `every ${Math.round(seconds / 3600)} h`;
+  const unit = (count, word) => `every ${count} ${word}${count === 1 ? "" : "s"}`;
+  if (seconds >= 86400 && seconds % 86400 === 0) return unit(seconds / 86400, "day");
+  if (seconds >= 3600 && seconds % 3600 === 0) return unit(seconds / 3600, "hour");
+  if (seconds >= 60 && seconds % 60 === 0) return unit(seconds / 60, "minute");
+  return unit(seconds, "second");
 }
 
 async function addSchedule(every) {
   const dir = await pickFolder({ title: "Where should the daemon write it?", ok: "Write it here", hint: "The file is replaced in place on each run, so a tracked folder shows a readable diff." });
   if (!dir) return;
-  const out = await act(() => post("/api/schedules", { action: "add", kind: rp.kind, format: rp.format, model: rp.model, every_seconds: every, dir, window: WINDOWED.includes(rp.kind) ? rp.window : undefined, stores: rp.stores }), `Scheduled ${everyWord(every)}`);
+  const out = await act(() => post("/api/schedules", { action: "add", kind: rp.kind, format: rp.format, model: rp.model, every_seconds: every, dir, window: WINDOWED.includes(rp.kind) ? rp.window : undefined, stores: rp.stores, redact: rp.hash && QUERIED.includes(rp.kind), excerpts: rp.excerpts && rp.kind === "access" }), `Scheduled ${everyWord(every)}`);
   rp.picking = false;
   if (out) await load("schedules", true);
   repaint();
@@ -9574,7 +9635,7 @@ VIEWS.privacy = {
       ["Watch every interface but loopback while you search. Nothing should appear.", "sudo tcpdump -i any -n 'not host 127.0.0.1 and not host ::1'"],
       ["Arm the refusal: anything that would reach the network exits instead, naming it.", "semlith start --airgap"],
       ["Or pull the cable. The portal loads and searches with no network at all.", "networksetup -setairportpower en0 off"],
-      ["See the ledger for what it is: one local table.", "sqlite3 ~/.semlith/stores/<name>/store.db 'select * from retrievals'"],
+      ["See the ledger for what it is: one local table.", `sqlite3 ${semHome()}/stores/<name>/store.db 'select * from retrievals'`],
     ];
     const nDone = verifyCmds.filter((_, i) => pvUi.done[i]).length;
     return el(
@@ -10097,11 +10158,14 @@ async function loadCloudStatus(force) {
   repaint();
 }
 
+// When the cloud last looked at the source, not how far behind the branch the
+// index is; floored, as `cloud::lag` floors it.
 function lagWord(s) {
-  if (s === null || s === undefined) return "no lag known";
-  if (s < 120) return `${s} s behind`;
-  if (s < 7200) return `${Math.round(s / 60)} min behind`;
-  return `${Math.round(s / 3600)} h behind`;
+  if (s === null || s === undefined) return "not checked yet";
+  if (s < 120) return `checked ${s} s ago`;
+  if (s < 7200) return `checked ${Math.floor(s / 60)} min ago`;
+  if (s < 172800) return `checked ${Math.floor(s / 3600)} h ago`;
+  return `checked ${Math.floor(s / 86400)} d ago`;
 }
 
 function cloudFact(C) {
@@ -10145,7 +10209,7 @@ function seCloudOff() {
       "div",
       { class: "card-b" },
       [
-        ["semlith cloud login <org>", "Approve a code in the browser. The org token is kept in ~/.semlith/cloud.json and sent to that host only."],
+        ["semlith cloud login <org>", "Approve a code in the browser. The org token is kept in " + semHome() + "/cloud.json and sent to that host only."],
         ["semlith cloud connect <org>", "Adds the org's stores beside the local ones, with a remote badge. Nothing in them is written from here."],
       ].map(([c, note]) => el("div", { class: "col gap4" }, copyField(c), el("span", { class: "muted t-xs", text: note }))),
     ),

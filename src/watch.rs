@@ -194,6 +194,9 @@ pub fn run_held(
         if let Some(raised) = &raised {
             raised.store(true, Ordering::Relaxed);
         }
+        // The lanes start now, while the change is still being debounced,
+        // rather than when its chunks are ready to embed (item 29).
+        crate::accel::prewarm();
         // A send failure means the loop is gone, which is a shutdown, not an
         // error worth reporting from inside the backend's thread.
         let _ = tx.send(res);

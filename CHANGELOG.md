@@ -5,7 +5,273 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.42.0] - 2026-10-17
+
+### Added
+
+- **Many agents, one consistent store.** Forwarded MCP calls take a free
+  reader from a pool of two to four (half the cores) instead of queueing
+  behind one lock, and every reader shares one copy of each store's vector
+  index, one query session and one counting tokenizer: four agents searching
+  one store took 88.7 ms at once against 243.3 ms one after another, and the
+  daemon's resident memory did not grow (397 MB before, 381 MB after).
+- **A run is answered from before it until it commits.** A run over files a
+  store already holds pins every reader's SQLite snapshot before its first
+  write and releases it when the run commits or is undone, so search, exact,
+  symbol, neighbors, impact and read answer from one committed generation;
+  on 0.41.0 one exact search answered 86 files old and 64 new. A first import
+  stays progressive. The WAL keeps the run's pages until the commit.
+- **MCP 2026-07-28 clients are named.** Claude Code 2.1.299 sends no
+  `initialize` and no session: its name and version are read from
+  `params._meta` on every request (the User-Agent when that is absent), and a
+  stateless client's conversation is one client, version and transport until
+  it has been quiet for 30 minutes, not one shared "anonymous" session.
+  `server/discover` answers on a daemon with no store open.
+- **Chain v2.** Rows written from 0.42.0 hash `query_id`, the client's version
+  and the whole-file basis as well, seal the usage and sync columns when they
+  are filled, and record a keyed head, so rewriting every query id or deleting
+  the newest row fails `--verify` (both verified on 0.41.0). v1 and 0.14.0 rows
+  keep verifying. A binary older than 0.42.0 reports the first v2 row as the
+  break.
+- **The watcher wakes the embedding lanes on the first change**, before the
+  change is debounced, and keeps them loaded for ten minutes after the last
+  one, so a save is not charged the Neural Engine worker's cold start.
+
+### Changed
+
+- **Break, 2026-10-16: the whole-file side of a saving is what reading the
+  file costs.** A PDF, an Office or OpenDocument file, an EPUB, mail, a
+  notebook or HTML is counted as the text the store holds for it, by the same
+  counter as the excerpt; an image holds no text and is counted as none; plain
+  text keeps its bytes over four. An arXiv PDF of 2,215,244 bytes and 45,849
+  characters had been credited 553,811 tokens. Rows already written keep their
+  numbers; `retrievals.whole_basis` says `text` on every row from 0.42.0, and
+  the Ledger's Tier column says which basis a row used. Published savings for
+  document stores fall.
+- **One aggregation behind every figure.** `ledger::figures` is what
+  `/api/ledger`, the Ledger page, Home, the store cards, `semlith ledger`,
+  `semlith stats`, the reports and `semlith_report` print. Refunds, notes,
+  refusals and accept or revoke rows are no query, no coverage, no zero hit
+  and no gap; a search several stores answered is one retrieval; clients are
+  the union; sessions are conversations, not conversations times stores; net
+  tokens are summed without a clamp; p50 and p95 are over retrievals that
+  measured work (the audit's report said 724 ms where the rows said ~67 ms).
+  The portal's and the CLI's own retrievals are recorded and kept out of the
+  agents' saving.
+- `semlith_read`, `semlith_pattern`, `semlith_impact` and `semlith_trace` are
+  recorded with what they returned, from MCP, the CLI and the portal; a graph
+  answer is one row, in the store that answered.
+- The tool-list cost is one count, bytes over four: the gate in
+  `tests/retrieval.rs` and the Agents page print the same number.
+- **Every report looks like Semlith, in every format.** The five reports are one
+  typed structure drawn by five renderers to the reports-v1 design: HTML with the
+  portal's own tokens, IBM Plex and logos embedded (no script, no URL), light and
+  dark, A4 print and a 390 px layout; a PDF typeset natively with IBM Plex
+  embedded as a subset, full Unicode (`Résumé café 東京` comes back out of the
+  text layer exactly; CJK glyphs come from the system's fonts), page x of y, the
+  ledger head, bookmarks, metadata and tags; Markdown for a PR body. Two
+  dependencies are new, for the PDF only: `subsetter` (typst's, without default
+  features) and `ttf-parser` (already in the tree under lopdf), with five IBM
+  Plex TrueType subsets of about 26 KB each. The macOS arm64 release binary grew
+  from 127,745,888 to 128,906,832 bytes (+1,160,944, +0.9 %).
+- **Break: CSV and JSON are data.** CSV is one file per table, numbers
+  unformatted, saved as a zip (`--table` prints one); JSON is the schema
+  `semlith.report/2` with typed figures (value, unit, currency, over, display),
+  documented in docs/portal.md.
+- **Break: one default window, and it applies to every figure.** Reports open at
+  30 days on the CLI, the portal, `semlith_report` and schedules alike, and a
+  windowed savings report narrows whole, excerpt, refunds, zero-hit and latency
+  too, so Whole less Excerpt is Net; the access audit counts each row by its own
+  time, not by its session's last.
+- **Break: a schedule replaces one file in place** (`semlith-savings-week.md`)
+  instead of writing a dated file per run, and keeps every option it was given:
+  `schedule add` takes `--redact` and `--excerpts`, and the portal sends them.
+- Numbers in reports print `736,397`, as the portal does, through one formatter.
+- The change brief counts every file it re-read (no per-store cap of 200), does
+  not call a first index a re-read, and carries the blast radius of the changed
+  definitions from the impact walk; paths print relative to the store's root.
+- The Reports page previews the rendered HTML in a sandboxed frame under a
+  report-only policy; Copy stays Markdown. Its command uses `--scope` and only the
+  flags a report reads; "Attach the excerpts" is "Attach the per-retrieval rows"
+  and says it attaches counts, not lines. The Schedules card names the real
+  schedules file and says any cadence (a 60 s schedule read "every 0 h").
+- `semlith_report` takes `window`, `scope`, `redact`, `excerpts` and `table`.
+
+**The settled share drops, and that is the honest number.** Untyped method
+calls are ambiguous now rather than guessed, so `semlith stats` and the health
+report settle fewer call edges: ripgrep 36 % to 31 % (resolved 1,827 to 1,652,
+ambiguous 3,917 to 4,283), flask 64 % to 39 % (resolved 758 to 289, ambiguous
+672 to 1,166), cobra 85 % to 88 %. Stores keep their pre-0.42.0 hints, without
+the receiver mark, until their files are re-indexed.
+
+### Fixed
+
+- Clocks: a row is printed with the UTC offset in force when it was written,
+  `semlith ledger` prints the date on rows older than today, and the portal
+  pairs the local date with the local time (an IST row at 03:00 on 10-10 read
+  "10-09 03:00").
+- A run's card, history and log events give the work's own time, not the time
+  the wizard sat on its Review page (41 s of work read "done in 1m 31s"); a
+  time left that had counted down to a second rises again when the rate falls;
+  the CLI prints the last twenty seconds' chunks/s; a catch-up that found
+  nothing to embed no longer leaves the store's last run reading "0 / 233
+  chunks".
+- `cloud status` and the portal say when the cloud last checked a source
+  ("checked 14 h ago"), floored the same way, never "behind" for an index at
+  the branch head.
+- `semlith refused --store X` lists X only with a daemon running;
+  `semlith prices` lists its table.
+- The portal prints the daemon's real store home, the Privacy page lists files
+  `semlith add` fetched, a registration that cannot reach this daemon is not
+  counted as registered, Review lists every dotfile the hidden rule skipped,
+  and an encrypted document or an archive past the 32 MiB budget says so
+  rather than "no text layer".
+- A Neural Engine worker waiting on the Core ML compile lock leaves when the
+  process that started it has gone. One compile wedged inside Core ML held the
+  lock for minutes, and every daemon killed meanwhile left a worker waiting
+  behind it for good. The worker's protocol number moves to 4, so the first
+  Neural Engine run after upgrading compiles its models once more.
+- A Core ML worker removes only earlier protocols' worker copies, never a
+  later one's. With two versions on one machine (a 0.41.0 daemon beside a
+  0.42.0 CLI) each removed the other's, and the newer one compiled every Neural
+  Engine model again, about four minutes on the M1, on every run. A 0.41.0
+  binary still removes 0.42.0's copy, so that pairing recompiles until the
+  daemon is upgraded too.
+- A file whose first 8 KiB is mostly invalid UTF-8 or control characters is
+  refused as binary with the share in its reason (ripgrep's `sherlock.br`, a
+  Brotli file with no NUL, became one chunk of U+FFFD). Latin-1 prose is still
+  read.
+
+
+From the graph ground-truth pass of the 2026-10-14 audit (G1-G11 and the gaps
+list), each with a test on a cut-down copy of the file the audit read.
+
+**No call edge claims a call that does not exist (G1).** ripgrep's
+`.build_parallel().run(||` was "resolved" to the free function `main::run`
+because that `run` sat in the calling file, which gave `path files_parallel
+search_parallel` a two-hop chain and `trace` a "supporting fact" at main.rs:301;
+`clone`, `clear` and `unwrap` resolved to unrelated methods. A call through a
+receiver is now marked in `edges.hint` (a leading `.`), is never settled on a
+free function or a module, and is settled at all only on a method of the
+receiver's stated type (a declared Rust binding or field, or `self`'s class).
+A receiver nothing types leaves the edge `ambiguous`, so path and trace do not
+cross it. A call never means a module either (`mod search;` beside `fn search`
+tied every `search(...)`), a module path such as `flask.Flask` outranks the
+calling file's namesake unless it names that file, and a folder the caller and
+the candidate share names neither (72 of flask's `flask.Flask(...)` calls were
+settled on a test's subclass).
+
+**Missed callers and mislabelled edges (G2, G3, G8).** `crate::search_parallel(...)`
+(and `self::`, `super::`) calls are captured; helpers.py's `make_response`
+calling `current_app.make_response(args)` is no longer dropped as recursion. A
+file's `defines` edges stay on the file's module when a function shares its
+name (`main.rs`, `fn main`), and a structural edge reads "defined on line N",
+never "call at line N". `neighbors` keeps an unsettled caller `ambiguous`, as
+`impact` does, instead of rewording it `inferred`.
+
+**Python owners and alias spans (G4, G5).** A top-level class is owned by its
+module, never by a neighbouring import alias (`BaseResponse::Flask`,
+`t::Config`, `ft::Blueprint`), and an alias row is its import line
+(`__init__.py:2`, not `1-40` for a 39-line file). A Go `const ( ... )` block
+gives each name its own line too, rather than the whole block qualified by a
+sibling.
+
+**Setext Markdown headings (G6).** A line underlined with `===` or `---` is a
+heading for the chunk cuts, the heading path and the graph: ripgrep's
+CHANGELOG has 42 heading symbols with spans inside the file (they were all
+`1-1871`), and `files --tree` prints "42 headings" for a document instead of
+"0 symbols".
+
+**`symbol` counts and orders (G7, G9, G10, G11).** "N definitions of this name"
+is the real total and says how many are shown (`run -k 3`: "52 definitions of
+this name, 3 shown"); code definitions are listed before headings, keys and
+selectors, so `symbol run` leads with ripgrep's six Rust `run`s, not twenty YAML
+`run:` keys. Several names at once give the rows each name gives alone,
+headings included, and name the ones with no definition. In `--json` an edge
+end has one `kind` (the edge's) and the symbol's kind as `symbol_kind`.
+
+**"Called and not found" is code the corpus does not hold.** The language's
+builtins and standard library (Go, Rust, Python, JavaScript, TypeScript) and
+relative imports are left out: cobra's list was `Errorf` 198, `len`, `append`,
+`os`. `store::builtin_targets` counts what was left out.
+
+From the same audit's search, read and brief pass (G12-G16, F13, F21), each with
+a test in `tests/fidelity.rs` or `tests/cloud.rs` on copies of the files the
+audit asked about (`tests/fixtures/fidelity/`).
+
+**Asking for fewer results only cuts the answer (G12).** Every list was searched
+`4 * k` deep, so ripgrep's "how does ripgrep detect binary files" scored
+GUIDE.md 723-736 at 0.077 with `-k 5` and 0.089 with `-k 8`, and 754-765 was
+third at `-k 5` and gone at `-k 3`. Lists are now searched and fused 32 deep
+whatever `k` is, then cut; a `k` above 32 widens the pool.
+
+**A question about code is answered with code (G13).** A picture that cleared
+CLIP's floor was weighted as three lists, and a screenshot of text clears it
+for almost any sentence: flask's "register a blueprint url prefix" opened with
+two tutorial PNGs at 0.231 and 0.214 above every chunk (0.088 at best), and
+brief led with `debugger.png:0-0`. The image list is now asked only for a
+query that describes something seen — a picture word, a colour or a shape —
+and holds only images at or above the floor, weighted as the two lists a chunk
+can be found by (the graph list that made it three left in 0.36.0). CLIP reads
+the words in a screenshot, so no cosine could tell "how does flask dispatch a
+request to a view" (flaskr_index.png, 0.355) from "a green triangle" (the
+triangle, 0.359). "where does flask register a blueprint" now has
+`Flask.register_blueprint` (sansio/app.py:569) fifth, where the audit found it
+outside the first eight. The image class still finds 7 of 8 pictures at k=1, 3
+and 8. No surface prints an image's span as `0-0`.
+
+**`read` prints every line of its range (G14).** A chunk that ends on a blank
+line ends in a newline, and both the stitching and the CLI split with
+`lines()`, which drops it: `read main.rs:8-10` printed two lines of three and
+`read main.rs:6`, a blank line, printed nothing.
+
+**brief spends its budget in the order its help states and names every drop
+(G15, G16).** The top locator and the text span's locator come first, then that
+definition's edges one by one, then the other locators, then text — none once
+an edge is left out. Locators were counted with their absolute path, so eight
+of them took a 600-token budget and the edges were dropped. `-- dropped:`
+names locators, edges, symbols' edges and spans' text (`-b 150` dropped five
+locators and printed nothing after the colon). The edges are those of the
+definition the span sits in, by its owner: `View.dispatch_request` no longer
+lists `MethodView`, which holds a `dispatch_request` of its own, as a caller.
+A row prints once, and a span without text names the span that has it rather
+than saying "(text: top span only)" under spans whose text was another's.
+
+**Markup is read and searched as written (F13).** `.html` and `.htm` were stored
+tag-stripped in every store, so flask's Jinja template `create.html` lost its
+`<form>` and `<input name="title" value="{{ request.form['title'] }}">`:
+`read create.html:8-12` printed text that is not in the file and
+`search --exact "request.form\[.title.\]"` found 7 of grep's 9 lines. Outside a
+store whose `kind` or `lean` is `docs` (and a page `semlith add` fetched),
+markup is now stored as written and chunked as text; those two extensions are
+the only ones a reader ever stripped. A store re-reads its markup files, and
+only those, on its next full pass. The extracted reading's emptied lines are
+empty rather than runs of spaces.
+
+**A local store and its remote mirror answer once (F21).** With a local checkout
+and its copy in Semlith Cloud, every search printed each hit twice and an exact
+search printed both blocks ("16 matching lines in 965 files", then "16 in 337").
+A remote hit naming the same span of the same repository is merged into the
+local one — the fresher kept, the other named in `agreed` — and a forwarded
+exact or symbol answer whose rows the local answer holds is one line saying
+it agreed. Two local stores over one checkout merge the same way.
+
+### Security
+
+- A redacted report's query digest is keyed with a per-machine salt
+  (`~/.semlith/report.salt`); the unkeyed digest could be reversed by hashing a
+  corpus's own symbol names.
+
+**What a code store holds of an HTML file.** It is the file as written, so a
+page with a credential-shaped string in a `<script>` is now refused or listed
+for review in such a store, as the same line in a `.js` file always was. A docs
+store keeps the text a browser shows. The retrieval harness reads the same with
+markup as written, fusion at a fixed depth and the image gate: development set
+hit@1 58/77 (75%), hit@3 61/77 (79%), hit@8 69/77 (89%) before (three runs)
+and after (six), no spread; sealed 25/30 (83%), 27/30 (90%), 29/30 (96%)
+before and after; wrong-yes 0; median bytes per answer 1,570 to 1,574 (dev)
+and 1,611 to 1,610 (sealed); the image class 7 of 8 at k=1, 3 and 8 before and
+after.
 
 ## [0.41.0] - 2026-10-15
 

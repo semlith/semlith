@@ -294,8 +294,26 @@ pub struct Response {
     status: u16,
     content_type: &'static str,
     extra: Vec<(String, String)>,
+    /// A Content-Security-Policy in place of [`PAGE_CSP`]. Only ever a
+    /// narrower one: the report preview, which allows no script at all.
+    csp: Option<&'static str>,
     body: Body,
 }
+
+/// The policy every response carries unless it names a narrower one.
+///
+/// Everything the page loads is served by this server, nothing may frame it,
+/// and no form may post anywhere else. There is no origin this server wants to
+/// be readable from, so there is no CORS header here or anywhere.
+const PAGE_CSP: &str = "default-src 'self'; \
+     img-src 'self' data:; \
+     style-src 'self'; \
+     script-src 'self'; \
+     font-src 'self'; \
+     connect-src 'self'; \
+     form-action 'none'; \
+     frame-ancestors 'none'; \
+     base-uri 'none'";
 
 impl Response {
     pub fn new(status: u16, content_type: &'static str, body: Vec<u8>) -> Self {
@@ -303,6 +321,7 @@ impl Response {
             status,
             content_type,
             extra: Vec::new(),
+            csp: None,
             body: Body::Bytes(body),
         }
     }
@@ -349,6 +368,7 @@ impl Response {
             status: 200,
             content_type: "application/x-ndjson; charset=utf-8",
             extra: Vec::new(),
+            csp: None,
             body: Body::Stream(Box::new(f)),
         }
     }
@@ -356,6 +376,19 @@ impl Response {
     pub fn header(mut self, name: &str, value: impl Into<String>) -> Self {
         self.extra.push((name.to_string(), value.into()));
         self
+    }
+
+    /// Serve under `csp` instead of the page's policy. A second
+    /// Content-Security-Policy header could only narrow the first, so a
+    /// document with a policy of its own replaces it rather than adding one.
+    pub fn with_csp(mut self, csp: &'static str) -> Self {
+        self.csp = Some(csp);
+        self
+    }
+
+    /// The policy this response will be sent under.
+    pub fn csp(&self) -> &'static str {
+        self.csp.unwrap_or(PAGE_CSP)
     }
 }
 
@@ -1531,25 +1564,16 @@ fn write_whole(stream: &mut TcpStream, response: Response) -> std::io::Result<()
         status,
         content_type,
         extra,
+        csp,
         body,
     } = response;
 
     let mut head = format!("HTTP/1.1 {status} {}\r\n", reason(status));
     head.push_str(&format!("Content-Type: {content_type}\r\n"));
-    // Everything the page loads is served by this server, nothing may frame
-    // it, and no form may post anywhere else. There is no origin this server
-    // wants to be readable from, so there is no CORS header here or anywhere.
-    head.push_str(
-        "Content-Security-Policy: default-src 'self'; \
-         img-src 'self' data:; \
-         style-src 'self'; \
-         script-src 'self'; \
-         font-src 'self'; \
-         connect-src 'self'; \
-         form-action 'none'; \
-         frame-ancestors 'none'; \
-         base-uri 'none'\r\n",
-    );
+    head.push_str(&format!(
+        "Content-Security-Policy: {}\r\n",
+        csp.unwrap_or(PAGE_CSP)
+    ));
     head.push_str("X-Content-Type-Options: nosniff\r\n");
     head.push_str("Referrer-Policy: no-referrer\r\n");
     // The token lives in the first URL. Nothing here may be stored by a proxy

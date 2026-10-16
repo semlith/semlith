@@ -59,6 +59,7 @@ import os
 import re
 import time
 import urllib.parse
+import urllib.request
 
 import cdp
 import fixtures
@@ -702,12 +703,14 @@ def _(d):
             % (len(open_stores), ", ".join(sorted(r["name"] for r in open_stores)))
         )
 
-    before = d.api("/api/ledger")["queries"]
+    # The portal's own search is a person's (0.42.0): it is counted under
+    # `human`, apart from the agents' queries, with the same one-per-search rule.
+    before = d.api("/api/ledger")["human"]["queries"]
     d.api("/api/search?query=release%20record%20sealed%20immutable&k=8")
     # The write is on the request's own path, but the ledger read below is a
     # separate connection; one short settle beats a retry loop nobody reads.
     time.sleep(1.0)
-    after = d.api("/api/ledger")["queries"]
+    after = d.api("/api/ledger")["human"]["queries"]
 
     if after != before + 1:
         fail(
@@ -731,6 +734,55 @@ def _(d):
     now = d.api("/api/ledger")["queries"]
     if shown != now:
         fail("the Queries recorded tile reads %r while /api/ledger counts %d" % (tile, now))
+
+
+@finding("0.42.1", "the Ledger page's tiles and its tables add up to /api/ledger")
+def _(d):
+    # 0.42.0 item 5: one aggregation behind every surface. The audit found the
+    # Net tile at 711,781 beside tables summing to 711,763, and a clients tile
+    # of 2 beside 3 clients listed.
+    a_store(d)
+    d.api("/api/search?query=release%20record%20sealed&k=8")
+    time.sleep(1.0)
+    ledger = d.api("/api/ledger")
+    d.open_view("ledger")
+
+    def tile(label):
+        return d.eval(
+            "(() => { const k = [...document.querySelectorAll('#main .kpi')].find(k =>"
+            " new RegExp(%s, 'i').test((k.querySelector('.eyebrow') || {}).textContent || ''));"
+            " return k ? (k.querySelector('.v') || {}).textContent : null; })()" % json.dumps(label)
+        )
+
+    queries = tile("queries recorded")
+    net = tile("net tokens not read")
+    if queries is None or net is None:
+        fail("the Ledger page has no Queries recorded or Net tokens tile")
+    if int(re.sub(r"[^\d]", "", queries) or "-1") != ledger["queries"]:
+        fail("the Queries recorded tile reads %r while /api/ledger counts %d" % (queries, ledger["queries"]))
+    shown_net = int(re.sub(r"[^\d-]", "", net) or "0")
+    if shown_net != ledger["net_tokens"]:
+        fail("the Net tokens tile reads %r while /api/ledger says %d" % (net, ledger["net_tokens"]))
+    by_store = sum(row["net"] for row in ledger.get("by_store", []))
+    if by_store != ledger["net_tokens"]:
+        fail("Savings by store sums to %d against the tile's %d" % (by_store, ledger["net_tokens"]))
+    if ledger["clients"] != len(ledger.get("by_client", {})):
+        fail("the clients figure %d is not the %d clients listed" % (ledger["clients"], len(ledger.get("by_client", {}))))
+
+
+@finding("0.42.2", "a run's card, its history and its stage line give one duration")
+def _(d):
+    # 0.42.0 item 9: the card counted the time the wizard sat on its Review page
+    # (41 s of work read "done in 1m 31s").
+    run_id, store_name = start_index(d, d.fixtures.second())
+    run = wait_for_run(d, store_name, run_id=run_id)
+    elapsed = run.get("elapsed_ms") or 0
+    wall = ((run.get("stages") or {}).get("wall_ms")) or 0
+    took = ((run.get("finished_at") or 0) - (run.get("started_at") or 0)) * 1000
+    if wall and abs(elapsed - wall) > 1000:
+        fail("the card's %d ms is not the stage line's %d ms" % (elapsed, wall))
+    if took and abs(elapsed - took) > 1500:
+        fail("the card's %d ms is not the run's own %d ms, started to finished" % (elapsed, took))
 
 
 @finding("1.3", "a URL fetched into a store is indexed, not left orphaned")
@@ -3370,18 +3422,20 @@ def _(d):
     types = d.eval("document.querySelectorAll('#main .kind-card').length")
     if types != 5:
         fail("the Reports picker offers %d report types, expected 5" % types)
-    d.wait_for("((document.querySelector('#main .preview') || {}).textContent || '').length > 40",
-               what="the selected report to generate")
-    first = d.eval("document.querySelector('#main .preview').textContent")
+    # From 0.42.0 the preview is the rendered HTML in a sandboxed frame, one
+    # preview route per generated report, rather than a Markdown <pre>.
+    frame = "(document.querySelector('#main .preview iframe.report-frame') || {}).src || ''"
+    d.wait_for("(%s).length > 0" % frame, what="the selected report to generate")
+    first = d.eval(frame)
     press_text(d, "#main .kind-card .t", "Index health")
-    d.wait_for("((document.querySelector('#main .preview') || {}).textContent || '') !== %s"
-               " && !/Generating/.test(document.querySelector('#main .preview').textContent)" % json.dumps(first),
+    d.wait_for("(%s) !== %s && (%s).length > 0" % (frame, json.dumps(first), frame),
                what="the preview to follow the selected report")
     name = text_of(d, "#main .card.flexcol .card-h .mono", "the preview's file name")
     if not name.startswith("health-") or not name.endswith(".md"):
         fail("the preview names %r, which is not the chosen report in the chosen Markdown format" % name)
     press_text(d, "#main .seg button", "CSV")
-    d.wait_for("(document.querySelector('#main .card.flexcol .card-h .mono').textContent || '').endsWith('.csv')",
+    # CSV is one file per table from 0.42.0, saved together as a .zip.
+    d.wait_for("/\\.(csv|zip)$/.test(document.querySelector('#main .card.flexcol .card-h .mono').textContent || '')",
                what="the format to change the file written")
 
 
@@ -5041,6 +5095,13 @@ def _(d):
     for name in ("callee", "caller"):
         if name not in nodes:
             fail("asking for 'callee, caller' drew no %s node: %r" % (name, nodes))
+    # The definitions table arrives after the graph, on its own request.
+    try:
+        d.wait_for("(() => { const t = (document.querySelector('.g-sel') || {}).innerText || '';"
+                   " return /\\b2 definitions\\b/.test(t) || (t.includes('callee') && t.includes('caller')); })()",
+                   timeout=15, what="the definitions of both names")
+    except cdp.ProtocolError:
+        pass
     side = d.eval("document.querySelector('.g-sel').innerText")
     if not re.search(r"\b2 definitions\b", side) and not ("callee" in side and "caller" in side):
         fail("the selection names neither both definitions nor how many there are: %r" % side[:300])
@@ -5454,7 +5515,8 @@ def _(d):
         fail("the name of an existing store, %s, is not refused: %r" % (taken, state()["hint"]))
     name = "wz-name-%d" % random.randint(1000, 99999)
     d.type(box, name)
-    if ("~/.semlith/stores/%s" % name) not in state()["hint"]:
+    # The daemon's own store home, which in this drive is not ~/.semlith.
+    if ("/stores/%s" % name) not in state()["hint"] or "kept at" not in state()["hint"]:
         fail("a free name does not say where the store will be kept: %r" % state()["hint"])
     press_text(d, ".wz-foot button", "Create store")
     wz_step(d, 2)
@@ -5933,10 +5995,12 @@ def _(d):
         rec = ledger.get("recording")
         if not isinstance(rec, dict) or rec.get("on") is not False or rec.get("reason") != "paused":
             fail("/api/ledger reports recording %r after the switch paused it" % rec)
-        before = ledger["queries"]
+        # The portal's search is counted under `human` (0.42.0), so that is
+        # the figure a paused ledger must hold still.
+        before = ledger["human"]["queries"]
         d.api("/api/search?query=paused%20recording%20probe&k=2")
         time.sleep(0.8)
-        if d.api("/api/ledger")["queries"] != before:
+        if d.api("/api/ledger")["human"]["queries"] != before:
             fail("a retrieval while recording is paused was recorded")
         if "ledger paused" not in text_of(d, ".nav .daemon .facts", "the daemon card"):
             fail("the sidebar does not say the ledger is paused")
@@ -5954,13 +6018,22 @@ def _(d):
 def _(d):
     a_store(d)
     open_clean(d, "reports", fresh=True)
-    d.wait_for("((document.querySelector('#main .preview') || {}).textContent || '').length > 40", what="the preview")
-    model = d.eval("[...document.querySelectorAll('#main .seg button[aria-pressed=\"true\"]')].map(b => b.textContent).find(t => /claude|gpt|gemini/i.test(t)) || ''")
-    answer = d.api("/api/report?kind=savings&format=markdown%s" % ("&model=" + urllib.parse.quote(model) if model else ""))
-    shown = d.eval("document.querySelector('#main .preview').textContent")
-    if (answer.get("text") or "").splitlines()[:1] != shown.splitlines()[:1]:
-        fail("the preview opens %r and the daemon's savings report opens %r"
-             % (shown.splitlines()[:1], (answer.get("text") or "").splitlines()[:1]))
+    frame = "(document.querySelector('#main .preview iframe.report-frame') || {}).src || ''"
+    d.wait_for("(%s).length > 0" % frame, what="the preview")
+    src = d.eval(frame)
+    # The frame is the daemon's own rendering, served under a report-only
+    # policy: what it shows is the savings report the route generates.
+    with urllib.request.urlopen(src, timeout=30) as response:
+        page = response.read().decode("utf-8", "replace")
+        policy = response.headers.get("Content-Security-Policy") or ""
+    if "script-src" in policy and "'none'" not in policy.split("script-src", 1)[1].split(";", 1)[0]:
+        fail("the preview is served with a policy that allows script: %r" % policy)
+    if "<script" in page.lower():
+        fail("the preview carries a script")
+    answer = d.api("/api/report?kind=savings&format=json")
+    title = (answer.get("report") or {}).get("title") or "Retrieval savings"
+    if title not in page:
+        fail("the preview does not show the daemon's %r report" % title)
     want("the schedules listed", d.eval("document.querySelectorAll('#main .sched-row').length"),
          len(d.api("/api/schedules").get("schedules") or {}))
     no_console_errors(d, "Reports")

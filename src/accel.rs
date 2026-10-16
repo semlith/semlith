@@ -86,6 +86,30 @@ pub fn keep_warm(for_: Duration) {
     WARM_UNTIL.fetch_max(until, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// How long a watched folder's last change keeps the lanes loaded.
+///
+/// A save is a few chunks, and a worker that has exited costs it a cold
+/// start: one save of cobra's command.go took 39.5 s while the Neural
+/// Engine's worker started, against 0.2 s warm (audit, item 29). Ten minutes
+/// covers a person editing in bursts; after it the worker goes as before.
+pub const WATCH_WARM: Duration = Duration::from_secs(600);
+
+/// A file in a watched folder changed: start every lane a run would embed on
+/// now, before the change is debounced and chunked, and keep them for
+/// [`WATCH_WARM`]. A no-op outside a process that uses the lanes.
+pub fn prewarm() {
+    if !MANAGED.load(Ordering::Relaxed) {
+        return;
+    }
+    keep_warm(WATCH_WARM);
+    let on = enabled();
+    for lane in lanes() {
+        if on.lane(lane.id) && unavailable_here(lane.id).is_none() && lane.usable() {
+            lane.wake();
+        }
+    }
+}
+
 fn kept_warm() -> bool {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1881,8 +1905,9 @@ fn worker_args(lane: &Arc<Lane>) -> Result<Vec<String>> {
 
 /// The Core ML worker's protocol: bump it whenever the `__embed-worker ane`
 /// or `gpu-coreml` code, its arguments or its frames change, and a fresh copy
-/// of the binary becomes the worker (see [`coreml_worker`]).
-pub const COREML_WORKER: u32 = 3;
+/// of the binary becomes the worker (see [`coreml_worker`]). 4 (0.42.0): a
+/// worker waiting on the compile lock leaves when its parent has gone.
+pub const COREML_WORKER: u32 = 4;
 
 /// Run the Core ML lanes' worker from the binary that is running now rather
 /// than the stable copy: for developing the worker itself.
@@ -1922,11 +1947,18 @@ pub fn coreml_worker(cache: &Path) -> Result<PathBuf> {
             .with_context(|| format!("copying this binary to {}", temp.display()))?;
     }
     std::fs::rename(&temp, &exe).with_context(|| format!("placing {}", exe.display()))?;
-    // Earlier protocols' workers are nobody's any more.
+    // Earlier protocols' workers are nobody's any more. A later one is: an
+    // older binary that removed it sent the newer one back to compiling every
+    // model, minutes on the M1, each time the two took turns (0.42.0's
+    // throughput A/B against a 0.41.0 daemon recompiled on every 0.42.0 run).
     if let Ok(entries) = std::fs::read_dir(cache.join("accel")) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with("coreml-worker-v") && entry.path() != dir {
+            let earlier = name
+                .strip_prefix("coreml-worker-v")
+                .and_then(|v| v.parse::<u32>().ok())
+                .is_some_and(|v| v < COREML_WORKER);
+            if earlier {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
@@ -1981,8 +2013,26 @@ pub fn coreml_compile_lock() -> Option<std::fs::File> {
         .write(true)
         .open(dir.join("coreml-compile.lock"))
         .ok()?;
-    file.lock().ok()?;
-    Some(file)
+    // Waited for in turns rather than blocked on: a worker queued behind a
+    // compile that never ends (one wedged inside Core ML for twelve minutes on
+    // the M1) outlived the process that started it, and every test daemon
+    // killed meanwhile left another one waiting here for good. A worker whose
+    // parent has gone is not wanted by anyone, so it leaves.
+    #[cfg(unix)]
+    let parent = std::os::unix::process::parent_id();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                #[cfg(unix)]
+                if std::os::unix::process::parent_id() != parent {
+                    std::process::exit(0);
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 /// Whether a Core ML worker holds the compile lock, which it does until the
@@ -2691,6 +2741,11 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let old = component_dir(cache.path(), "coreml-worker-v0");
         std::fs::create_dir_all(&old).unwrap();
+        let later = component_dir(
+            cache.path(),
+            &format!("coreml-worker-v{}", COREML_WORKER + 1),
+        );
+        std::fs::create_dir_all(&later).unwrap();
         let made = coreml_worker(cache.path()).unwrap();
         assert!(made.is_file());
         assert!(made.starts_with(cache.path()));
@@ -2705,6 +2760,7 @@ mod tests {
             !old.exists(),
             "the earlier protocol's worker is still there"
         );
+        assert!(later.exists(), "a later protocol's worker was removed");
         let modified = std::fs::metadata(&made).unwrap().modified().unwrap();
         let again = coreml_worker(cache.path()).unwrap();
         assert_eq!(again, made);

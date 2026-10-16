@@ -73,6 +73,51 @@ pub(crate) fn extract_counted(ext: &str, bytes: &[u8]) -> Option<(String, Option
     (!text.trim().is_empty()).then_some((text, units))
 }
 
+/// Why a reader got no text out of a file, as precisely as the bytes say.
+///
+/// A password-protected Office file is not a ZIP at all but an OLE compound
+/// file holding an `EncryptedPackage`; an encrypted OpenDocument names its
+/// cipher in the manifest; a PDF that needs a password carries `/Encrypt`.
+/// An archive whose entries declare more than [`MAX_ARCHIVE_TEXT`] is the zip
+/// bomb the budget exists for. Anything else is a document with no text.
+pub(crate) fn why_no_text(ext: &str, bytes: &[u8]) -> crate::SkipReason {
+    use crate::SkipReason;
+    const OLE: &[u8] = &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+    match ext {
+        "docx" | "pptx" | "xlsx" if bytes.starts_with(OLE) => return SkipReason::Encrypted,
+        "pdf" if has(b"/Encrypt") => return SkipReason::Encrypted,
+        _ => {}
+    }
+    if let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(bytes)) {
+        let mut declared: u64 = 0;
+        let mut manifests = Vec::new();
+        for i in 0..archive.len() {
+            let Ok(entry) = archive.by_index_raw(i) else {
+                continue;
+            };
+            if entry.name() == "META-INF/manifest.xml" || entry.name().ends_with("encryption.xml") {
+                manifests.push(i);
+            } else {
+                declared = declared.saturating_add(entry.size());
+            }
+        }
+        for i in manifests {
+            let mut text = String::new();
+            if let Ok(e) = archive.by_index(i) {
+                let _ = e.take(1 << 20).read_to_string(&mut text);
+            }
+            if text.contains("encryption-data") || text.contains("EncryptedData") {
+                return SkipReason::Encrypted;
+            }
+        }
+        if declared > MAX_ARCHIVE_TEXT {
+            return SkipReason::ArchiveTooLarge;
+        }
+    }
+    SkipReason::NoText
+}
+
 /// Non-empty fields of a comma- or tab-separated file, quotes honoured: a
 /// comma inside `"a, b"` is text, and `""` is an empty field.
 pub(crate) fn delimited_cells(text: &str, delimiter: char) -> i64 {
@@ -239,7 +284,15 @@ fn html_text(source: &str) -> String {
         rest = &rest[skipped..];
     }
     out.push_str(rest);
+    // A line the markup emptied is empty, not the indentation it was written
+    // with: page.html came out as runs of space-only lines that a read printed
+    // and an excerpt spent tokens on (0.42.0). Each keeps its place, because
+    // the line map above is what every `file:line` stands on.
     decode_entities(&out)
+        .split('\n')
+        .map(|line| if line.trim().is_empty() { "" } else { line })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// How far to the end of `needle`, or to the end of the input when a document
@@ -1740,6 +1793,28 @@ mod tests {
         assert_eq!(line, source_line, "line numbers drifted:\n{text}");
     }
 
+    /// A line the markup emptied comes out empty, not as the indentation it
+    /// was written with, and in its own place: page.html read as runs of
+    /// space-only lines (0.42.0).
+    #[test]
+    fn a_line_the_markup_emptied_is_empty_and_keeps_its_place() {
+        let page = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/page.html"),
+        )
+        .unwrap();
+        let text = html(&page).unwrap();
+        let source = String::from_utf8_lossy(&page);
+        assert_eq!(text.lines().count(), source.lines().count(), "{text:?}");
+        for (n, line) in text.lines().enumerate() {
+            assert!(
+                line.is_empty() || !line.trim().is_empty(),
+                "line {} is only whitespace: {line:?}",
+                n + 1
+            );
+        }
+        assert!(text.contains("The wombat migration corridor"), "{text:?}");
+    }
+
     /// A `<` that no tag name follows is text, as a browser reads it. The
     /// zstd manual's `input.pos < input.size` was read as the start of a tag
     /// that ran to the next `>`, thirteen lines on, and those lines were never
@@ -1928,5 +2003,42 @@ mod tests {
         assert_eq!((pages, cells), (0, 7), "{text}");
         assert_eq!(extract_counted("ods", &buf).unwrap().1, Some(7));
         assert_eq!(extract_counted("odt", &buf).unwrap().1, None);
+    }
+
+    /// A zip bomb and a password-protected document say what they are rather
+    /// than "no text layer" (audit F14).
+    #[test]
+    fn a_bomb_and_an_encrypted_file_say_why() {
+        use crate::SkipReason;
+        let mut ole = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+        ole.extend_from_slice(b"EncryptedPackage");
+        assert_eq!(extract_counted("docx", &ole), None);
+        assert_eq!(why_no_text("docx", &ole), SkipReason::Encrypted);
+
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut buf));
+            zip.start_file(
+                "word/document.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            let zeros = vec![b' '; 1 << 20];
+            for _ in 0..33 {
+                std::io::Write::write_all(&mut zip, &zeros).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        assert!(
+            buf.len() < 1 << 20,
+            "the bomb is small on disk: {}",
+            buf.len()
+        );
+        assert_eq!(extract_counted("docx", &buf), None);
+        assert_eq!(why_no_text("docx", &buf), SkipReason::ArchiveTooLarge);
+        assert_eq!(
+            why_no_text("docx", b"PK\x03\x04 nothing"),
+            SkipReason::NoText
+        );
     }
 }
