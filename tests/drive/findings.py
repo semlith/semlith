@@ -702,12 +702,14 @@ def _(d):
             % (len(open_stores), ", ".join(sorted(r["name"] for r in open_stores)))
         )
 
-    before = d.api("/api/ledger")["queries"]
+    # The portal's own search is a person's (0.42.0): it is counted under
+    # `human`, apart from the agents' queries, with the same one-per-search rule.
+    before = d.api("/api/ledger")["human"]["queries"]
     d.api("/api/search?query=release%20record%20sealed%20immutable&k=8")
     # The write is on the request's own path, but the ledger read below is a
     # separate connection; one short settle beats a retry loop nobody reads.
     time.sleep(1.0)
-    after = d.api("/api/ledger")["queries"]
+    after = d.api("/api/ledger")["human"]["queries"]
 
     if after != before + 1:
         fail(
@@ -731,6 +733,55 @@ def _(d):
     now = d.api("/api/ledger")["queries"]
     if shown != now:
         fail("the Queries recorded tile reads %r while /api/ledger counts %d" % (tile, now))
+
+
+@finding("0.42.1", "the Ledger page's tiles and its tables add up to /api/ledger")
+def _(d):
+    # 0.42.0 item 5: one aggregation behind every surface. The audit found the
+    # Net tile at 711,781 beside tables summing to 711,763, and a clients tile
+    # of 2 beside 3 clients listed.
+    a_store(d)
+    d.api("/api/search?query=release%20record%20sealed&k=8")
+    time.sleep(1.0)
+    ledger = d.api("/api/ledger")
+    d.open_view("ledger")
+
+    def tile(label):
+        return d.eval(
+            "(() => { const k = [...document.querySelectorAll('#main .kpi')].find(k =>"
+            " new RegExp(%s, 'i').test((k.querySelector('.eyebrow') || {}).textContent || ''));"
+            " return k ? (k.querySelector('.v') || {}).textContent : null; })()" % json.dumps(label)
+        )
+
+    queries = tile("queries recorded")
+    net = tile("net tokens not read")
+    if queries is None or net is None:
+        fail("the Ledger page has no Queries recorded or Net tokens tile")
+    if int(re.sub(r"[^\d]", "", queries) or "-1") != ledger["queries"]:
+        fail("the Queries recorded tile reads %r while /api/ledger counts %d" % (queries, ledger["queries"]))
+    shown_net = int(re.sub(r"[^\d-]", "", net) or "0")
+    if shown_net != ledger["net_tokens"]:
+        fail("the Net tokens tile reads %r while /api/ledger says %d" % (net, ledger["net_tokens"]))
+    by_store = sum(row["net"] for row in ledger.get("by_store", []))
+    if by_store != ledger["net_tokens"]:
+        fail("Savings by store sums to %d against the tile's %d" % (by_store, ledger["net_tokens"]))
+    if ledger["clients"] != len(ledger.get("by_client", {})):
+        fail("the clients figure %d is not the %d clients listed" % (ledger["clients"], len(ledger.get("by_client", {}))))
+
+
+@finding("0.42.2", "a run's card, its history and its stage line give one duration")
+def _(d):
+    # 0.42.0 item 9: the card counted the time the wizard sat on its Review page
+    # (41 s of work read "done in 1m 31s").
+    run_id, store_name = start_index(d, d.fixtures.second())
+    run = wait_for_run(d, store_name, run_id=run_id)
+    elapsed = run.get("elapsed_ms") or 0
+    wall = ((run.get("stages") or {}).get("wall_ms")) or 0
+    took = ((run.get("finished_at") or 0) - (run.get("started_at") or 0)) * 1000
+    if wall and abs(elapsed - wall) > 1000:
+        fail("the card's %d ms is not the stage line's %d ms" % (elapsed, wall))
+    if took and abs(elapsed - took) > 1500:
+        fail("the card's %d ms is not the run's own %d ms, started to finished" % (elapsed, took))
 
 
 @finding("1.3", "a URL fetched into a store is indexed, not left orphaned")
@@ -5933,10 +5984,12 @@ def _(d):
         rec = ledger.get("recording")
         if not isinstance(rec, dict) or rec.get("on") is not False or rec.get("reason") != "paused":
             fail("/api/ledger reports recording %r after the switch paused it" % rec)
-        before = ledger["queries"]
+        # The portal's search is counted under `human` (0.42.0), so that is
+        # the figure a paused ledger must hold still.
+        before = ledger["human"]["queries"]
         d.api("/api/search?query=paused%20recording%20probe&k=2")
         time.sleep(0.8)
-        if d.api("/api/ledger")["queries"] != before:
+        if d.api("/api/ledger")["human"]["queries"] != before:
             fail("a retrieval while recording is paused was recorded")
         if "ledger paused" not in text_of(d, ".nav .daemon .facts", "the daemon card"):
             fail("the sidebar does not say the ledger is paused")

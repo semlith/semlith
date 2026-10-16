@@ -761,7 +761,7 @@ fn a_search_naming_remote_stores_is_one_list_by_score_with_provenance() {
         "{text}"
     );
     assert!(
-        text.contains("remote · acme · a41c9e2 · 38 s behind"),
+        text.contains("remote · acme · a41c9e2 · checked 38 s ago"),
         "{text}"
     );
 
@@ -1023,7 +1023,7 @@ fn the_cli_searches_remote_stores_with_no_local_one() {
         "{text}"
     );
     assert!(
-        text.contains("[acme/platform (remote · acme · a41c9e2 · 38 s behind)]"),
+        text.contains("[acme/platform (remote · acme · a41c9e2 · checked 38 s ago)]"),
         "{text}"
     );
     let asked = host.to("/v1/orgs/acme/search");
