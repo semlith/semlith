@@ -1738,3 +1738,17 @@ mod tests {
         assert!(html.contains("@media print"), "no print stylesheet");
     }
 }
+
+/// A whole number with thousands separators, as the portal prints it.
+// ponytail: stub until the export redesign's one formatter lands; same signature.
+pub fn number(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}

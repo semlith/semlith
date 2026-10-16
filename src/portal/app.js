@@ -372,7 +372,9 @@ function dayClock(unix) {
   const time = d.toTimeString().slice(0, 5);
   if (same) return `today ${time}`;
   if (yesterday) return `yesterday ${time}`;
-  return `${d.toISOString().slice(5, 10)} ${time}`;
+  // The local date, beside the local time: `toISOString` is the UTC date, so
+  // in IST a row at 10-10 03:00 local printed "10-09 03:00".
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${time}`;
 }
 
 function spellTook(ms) {
@@ -8906,7 +8908,7 @@ VIEWS.ledger = {
       el(
         "div",
         { class: "q4" },
-        kpi("Queries recorded", n(L.queries), `${plural(L.clients || byClient.length, "client")}${lastRow ? ` · last ${ago(lastRow.at)}` : ""}`),
+        kpi("Queries recorded", n(L.queries), `${plural(L.clients || 0, "client")}${lastRow ? ` · last ${ago(lastRow.at)}` : ""}${L.human?.queries ? ` · ${n(L.human.queries)} by hand, not counted` : ""}`),
         kpi("Fewer tokens", L.ratio ? `${L.ratio.toFixed(1)}×` : "—", L.ratio ? `than reading those files whole · coverage ${L.coverage}% · ${L.tier}` : "counted once an agent asks", { accent: !!L.ratio }),
         kpi("Net tokens not read", n(L.net_tokens), "whole-file less excerpt, rows with a hit"),
         kpi("Zero-hit", `${zeroShare.toFixed(0)}%`, `${n(L.zero_hit)} queries the corpus could not answer`),
@@ -8925,7 +8927,7 @@ VIEWS.ledger = {
         el(
           "div",
           { class: "card pad" },
-          el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "What agents read, against reading whole files" }), el("span", { class: "t-mono-sm", text: "store tokenizer · modelled" })),
+          el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "What agents read, against reading whole files" }), el("span", { class: "t-mono-sm", text: countedWords(L.counted) })),
           [
             ["Reading every file a retrieval answered from", whole, "line"],
             ["What agents were actually sent", sent, "accent"],
@@ -8937,7 +8939,7 @@ VIEWS.ledger = {
             b.setAttribute("data-tip-rows", rows([["tokens", n(v)], tone === "accent" ? ["against whole files", whole ? `${Math.round((sent / whole) * 100)}%` : "—"] : ["that is", "the baseline"], tone === "accent" && L.ratio ? ["that is", `${L.ratio.toFixed(1)}× fewer`] : null].filter(Boolean)));
             return el("div", { class: "col gap4" }, el("div", { class: "row base t-sm" }, el("span", { class: "grow ink2", text: k }), el("span", { class: "mono t-b", text: n(v) })), b);
           }),
-          el("div", { class: "row gap6 tb-line" }, [`coverage ${L.coverage || 0}%`, `refunds ${n(L.refunds)} · ${L.refunds_measured ? "measured" : "a floor"}`, `tier ${L.tier || "modelled"}`].map((f) => el("span", { class: "factchip", text: f }))),
+          el("div", { class: "row gap6 tb-line" }, [`coverage ${L.coverage || 0}%`, `refunds ${n(L.refunds)} · ${L.refunds_measured ? "measured" : "a floor"}, not in the saving`, `p50 ${L.p50_ms != null ? `${n(Math.round(L.p50_ms))} ms` : "—"} · p95 ${L.p95_ms != null ? `${n(Math.round(L.p95_ms))} ms` : "—"}`, `tier ${L.tier || "modelled"}`].map((f) => el("span", { class: "factchip", text: f }))),
         ),
         el(
           "div",
@@ -8957,23 +8959,12 @@ VIEWS.ledger = {
         ),
       ),
     );
-    // Savings by agent and by store, summed from the sessions the daemon
-    // sends (its newest, capped), so the tables say how many they cover.
-    const savings = (title, key, col) => {
-      const groups = new Map();
-      for (const s of sessionsAll) {
-        const k = s[key] || "—";
-        const g = groups.get(k) || { name: k, sessions: 0, retrievals: 0, net: 0, saved: 0, priced: false, measured: true };
-        g.sessions += 1;
-        g.retrievals += s.retrievals || 0;
-        g.net += s.net_tokens || 0;
-        if (s.saved_usd != null) (g.saved += s.saved_usd), (g.priced = true);
-        g.measured = g.measured && s.tier === "measured";
-        groups.set(k, g);
-      }
-      const list = [...groups.values()];
+    // Savings by agent and by store, as the daemon's one aggregation counts
+    // them: a session is one conversation however many stores answered it,
+    // and a store's share counts a search it answered once in that store.
+    const savings = (title, list, col, perStore) => {
       const g = grid({
-        key: `lg:by-${key}`,
+        key: `lg:by-${perStore ? "store" : "client"}`,
         caption: title,
         rows: list,
         sort: "net",
@@ -8981,16 +8972,19 @@ VIEWS.ledger = {
         empty: "Nothing recorded yet.",
         columns: [
           { key: "name", label: col, cls: "m t-b", sort: (r) => r.name, render: (r) => r.name },
-          { key: "sessions", label: "Sessions", cls: "m r", firstDir: "desc", sort: (r) => r.sessions, render: (r) => n(r.sessions) },
+          perStore
+            ? { key: "refunds", label: "Refunds", cls: "m r", firstDir: "desc", sort: (r) => r.refunds, render: (r) => n(r.refunds) }
+            : { key: "sessions", label: "Sessions", cls: "m r", firstDir: "desc", sort: (r) => r.sessions, render: (r) => n(r.sessions) },
           { key: "reads", label: "Retrievals", cls: "m r", firstDir: "desc", sort: (r) => r.retrievals, render: (r) => n(r.retrievals) },
           { key: "net", label: "Net tokens", cls: "m r", firstDir: "desc", sort: (r) => r.net, render: (r) => n(r.net) },
-          { key: "saved", label: "Saved", cls: "m r", firstDir: "desc", sort: (r) => r.saved, render: (r) => (r.priced ? el("span", { "data-tip": "at each session's own model input price; sessions with no known model are not priced" }, dollars(r.saved)) : "—") },
-          { key: "tier", label: "Tier", sort: (r) => (r.measured ? 1 : 0), render: (r) => pill(r.measured ? "measured" : "modelled", r.measured ? "blue" : "grey", { dot: false, tip: r.measured ? "Every session measured from the agent's own session log" : "Modelled with the store tokenizer, not observed" }) },
+          perStore
+            ? { key: "credited", label: "Credited", cls: "m r", firstDir: "desc", sort: (r) => r.credited, render: (r) => n(r.credited) }
+            : { key: "saved", label: "Saved", cls: "m r", firstDir: "desc", sort: (r) => r.saved || 0, render: (r) => (r.saved != null ? el("span", { "data-tip": "at each session's own model input price; sessions with no known model are not priced" }, dollars(r.saved)) : "—") },
         ],
       });
-      return el("div", { class: "card" }, el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: title }), meta(sessionsAll.length ? `newest ${plural(sessionsAll.length, "session")}` : "no sessions yet")), g.node);
+      return el("div", { class: "card" }, el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: title }), meta(perStore ? plural(list.length, "store") : plural(L.sessions_total || 0, "session"))), g.node);
     };
-    parts.push(el("div", { class: "split s-1-1" }, savings("Savings by agent", "client", "Agent"), savings("Savings by store", "store", "Store")));
+    parts.push(el("div", { class: "split s-1-1" }, savings("Savings by agent", L.by_agent || [], "Agent", false), savings("Savings by store", L.by_store || [], "Store", true)));
     // Usage from the clients' own logs: their tokens and cost beside ours.
     const usage = L.usage || {};
     const tabsNode = tabs(
@@ -9151,8 +9145,10 @@ function ledgerRetrievals(list) {
       { key: "client", label: "Client", cls: "t13 nowrap", sort: (r) => r.client, render: (r) => r.client },
       { key: "store", label: "Store", cls: "ms", sort: (r) => r.store, render: (r) => r.store },
       { key: "q", label: "Query", cls: "m cap", sort: (r) => r.query, render: (r) => el("span", { "data-tip": r.query, "data-tip-full": "", text: r.query }) },
+      { key: "tool", label: "Tool", cls: "ms", sort: (r) => r.tool, render: (r) => r.tool },
       { key: "hits", label: "Hits", cls: "m r", sort: (r) => r.hits, render: (r) => n(r.hits) },
       { key: "sent", label: "Sent", cls: "m r", sort: (r) => r.excerpt_tokens, render: (r) => `${n(r.excerpt_tokens)} tok` },
+      { key: "tier", label: "Tier", cls: "ms nowrap", sort: (r) => r.tier, render: (r) => el("span", { "data-tip": `excerpt counted by ${r.tier.split(" · ")[0]}; whole file counted from its ${r.tier.split(" · ")[1]}${r.basis === "bytes" ? " (rows before 0.42.0)" : ""}`, text: r.tier }) },
       { key: "ms", label: "ms", cls: "ms r", sort: (r) => r.ms, render: (r) => n(r.ms) },
     ],
   });
@@ -9240,10 +9236,26 @@ function plainWhat(what) {
   return String(what || "").replace(/\s*\([^)]*\)/g, "");
 }
 
-function exportLedger(format) {
+/** What each side of the saving was counted with, in words. */
+function countedWords(c) {
+  if (!c) return "store tokenizer";
+  const ex = { model: "excerpt by the store tokenizer", chars4: "excerpt at 4 chars a token", mixed: "excerpt counted two ways" }[c.excerpt] || "";
+  const wh = { text: "whole files as their text", bytes: "whole files as bytes ÷ 4", mixed: "whole files two ways (bytes before 0.42.0)" }[c.whole] || "";
+  return [ex, wh].filter(Boolean).join(" · ");
+}
+
+async function exportLedger(format) {
   const sessions = lg.tab === "sessions";
-  const list = lg.shown ? lg.shown() : sessions ? data.ledger?.sessions || [] : data.ledger?.rows || [];
-  const cols = sessions ? ["when", "session", "client", "store", "retrievals", "net_tokens", "tier", "model"] : ["when", "client", "store", "query", "hits", "excerpt_tokens", "whole_file_tokens", "ms"];
+  // The Retrievals export is every row, not the newest the page loaded: the
+  // daemon is asked for all of them, then the page's filters are applied.
+  let list = lg.shown ? lg.shown() : sessions ? data.ledger?.sessions || [] : data.ledger?.rows || [];
+  if (!sessions && (data.ledger?.rows_total || 0) > (data.ledger?.rows || []).length) {
+    const all = await fetchJson("/api/ledger?rows=all");
+    const keep = new Set(list.map((r) => `${r.store}:${r.id}`));
+    const filtered = !!(lg.q || lg.zero || lg.filter || lg.store !== "all");
+    list = (all.rows || []).filter((r) => (filtered ? keep.has(`${r.store}:${r.id}`) || ((lg.store === "all" || r.store === lg.store) && (!lg.zero || r.hits === 0) && (!lg.q || String(r.query).toLowerCase().includes(lg.q.toLowerCase())) && (!lg.filter || sameClient(r.client, lg.filter))) : true));
+  }
+  const cols = sessions ? ["when", "session", "client", "client_version", "store", "retrievals", "zero_hit", "net_tokens", "tier", "model"] : ["when", "client", "client_version", "session", "store", "tool", "query", "hits", "stale_hits", "excerpt_tokens", "whole_file_tokens", "tier", "ms"];
   const stamp = localDay();
   const name = `ledger-${sessions ? "sessions" : "retrievals"}-${stamp}`;
   if (format === "JSON") return download(`${name}.json`, JSON.stringify(list, null, 2), "application/json");

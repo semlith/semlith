@@ -145,7 +145,7 @@ fn dispatch(state: &Arc<State>, request: &Request) -> Response {
         (_, _, "/api/prices") if get || post => prices(request),
         (true, _, "/api/graph") => graph(state, request),
         (true, _, "/api/corpus") => corpus(state),
-        (true, _, "/api/ledger") => ledger(state),
+        (true, _, "/api/ledger") => ledger(state, request),
         (true, _, "/api/image") => image_file(state, request),
         (true, _, "/api/setup") => setup(),
         (true, _, "/api/doctor") => doctor(state),
@@ -1638,7 +1638,7 @@ fn ledger_recording(request: &Request) -> Response {
     Response::json(&json!({ "recording": crate::ledger::recording_state() }))
 }
 
-fn ledger(state: &Arc<State>) -> Response {
+fn ledger(state: &Arc<State>, request: &Request) -> Response {
     let empty = json!({
         "recording": crate::ledger::recording_state(),
         "queries": 0,
@@ -1650,6 +1650,8 @@ fn ledger(state: &Arc<State>) -> Response {
     });
     let recording = crate::ledger::recording_state();
     let usage_on = crate::usage::enabled();
+    // `?rows=all` is the Retrievals export: every row, not the page's newest.
+    let all_rows = request.query("rows") == Some("all");
     with_fleet(state, empty, move |fleet| {
         // Usage filled in before the rows are read, so the page shows what the
         // clients' logs say about the calls it lists. Opens nothing while the
@@ -1661,25 +1663,26 @@ fn ledger(state: &Arc<State>) -> Response {
                 let _ = crate::usage::enrich(store.db(), now);
             }
         }
-        let (mut clients, mut excerpt, mut whole) = (0, 0, 0);
+        let members: Vec<(&str, &rusqlite::Connection)> = fleet
+            .each()
+            .map(|(label, store)| (label, store.db()))
+            .collect();
+        // Every figure on the page, from the one aggregation the CLI and the
+        // reports read (0.42.0). The page draws these; it adds nothing up.
+        let f = crate::ledger::figures(&members, crate::ledger::Window::ALL, false)?;
         let mut intact = true;
         // The first row that does not verify, so the page can name it.
         let mut first_break: Option<Value> = None;
-        // Unioned rather than summed: one search over six stores writes a row
-        // in each that answered it, under one query id, and adding six stores'
-        // own counts is what made this page report sixty-three queries for
-        // about a dozen searches.
-        let mut seen: std::collections::BTreeSet<String> = Default::default();
+        let mut usage_seen: std::collections::BTreeSet<String> = Default::default();
+        // One model request can issue several calls; its tokens and cost are
+        // counted once, under the first of them.
+        let mut requests_seen: std::collections::BTreeSet<String> = Default::default();
+        let mut usage_totals: std::collections::BTreeMap<(String, String), UsageTotal> =
+            Default::default();
+        let mut rows: Vec<Value> = Vec::new();
+        let mut rows_total = 0usize;
+        let mut legacy_rows = false;
         for (label, store) in fleet.each() {
-            let (_, c, e, w) = store::ledger_totals(store.db())?;
-            seen.extend(store::ledger_keys(
-                store.db(),
-                label,
-                store::LedgerScope::All,
-            )?);
-            clients = clients.max(c);
-            excerpt += e;
-            whole += w;
             if let Some(row) = store::ledger_break(store.db())?
                 && intact
             {
@@ -1690,31 +1693,6 @@ fn ledger(state: &Arc<State>) -> Response {
                     "at": store::retrieval_at(store.db(), row)?,
                 }));
             }
-        }
-        let queries = seen.len() as i64;
-        // Summed across stores the same way the totals are, and reported with
-        // the denominators that make them readable: a ratio on its own is a
-        // marketing number, and the Ledger page is told not to draw one.
-        let mut net = 0;
-        let mut measured = true;
-        let mut credited_keys: std::collections::BTreeSet<String> = Default::default();
-        let mut estimated_keys: std::collections::BTreeSet<String> = Default::default();
-        let mut by_client: std::collections::BTreeMap<String, i64> = Default::default();
-        // The newest rows across every store, merged, for the table this page
-        // owes the CLI's `semlith ledger --last 20`. Read here rather than
-        // from a second route so the tiles and the rows cannot disagree.
-        let mut rows: Vec<Value> = Vec::new();
-        let mut sessions: Vec<Value> = Vec::new();
-        let mut refunds = 0;
-        let mut zero_hit = 0;
-        let mut refunds_measured = false;
-        let mut usage_seen: std::collections::BTreeSet<String> = Default::default();
-        // One model request can issue several calls; its tokens and cost are
-        // counted once, under the first of them.
-        let mut requests_seen: std::collections::BTreeSet<String> = Default::default();
-        let mut usage_totals: std::collections::BTreeMap<(String, String), UsageTotal> =
-            Default::default();
-        for (label, store) in fleet.each() {
             for (key, client, usage) in store::usage_rows(store.db(), label)? {
                 if !usage_seen.insert(key) {
                     continue;
@@ -1726,106 +1704,108 @@ fn ledger(state: &Arc<State>) -> Response {
                     .or_default()
                     .add(&usage, first);
             }
-            let savings = store::ledger_savings(store.db())?;
-            net += savings.net;
-            measured = measured && savings.measured;
-            let misses = store::ledger_misses(store.db())?;
-            refunds += misses.refunds;
-            zero_hit += misses.zero_hit;
-            // One hooked store is enough to make the figure a measurement for
-            // that store, and the page says which kind it is rather than
-            // averaging two different things into one word.
-            refunds_measured = refunds_measured || misses.measured;
-            credited_keys.extend(store::ledger_keys(
-                store.db(),
-                label,
-                store::LedgerScope::Credited,
-            )?);
-            estimated_keys.extend(store::ledger_keys(
-                store.db(),
-                label,
-                store::LedgerScope::Estimated,
-            )?);
-            for (client, count) in store::ledger_clients(store.db())? {
-                *by_client.entry(client).or_default() += count;
+            for row in store::ledger_facts(store.db(), 0, None)? {
+                if matches!(row.tool.as_str(), store::NOTE_TOOL | store::REFUSED_TOOL) {
+                    continue;
+                }
+                rows_total += 1;
+                legacy_rows |= row.query_id.is_empty();
+                rows.push(ledger_row(label, &row));
             }
-            // One row per session per store, grouped by SQL rather than by
-            // the browser: a page adding up six stores' rows is a second
-            // opinion about a number the store can state.
-            for session in store::ledger_sessions(store.db(), LEDGER_SESSIONS)? {
-                sessions.push(json!({
-                    "session": session.session,
-                    "client": session.client,
-                    "store": label,
-                    "first": session.first,
-                    "last": session.last,
-                    "when": crate::clock::local_stamp(session.last),
-                    "retrievals": session.retrievals,
-                    "zero_hit": session.zero_hit,
-                    "excerpt_tokens": session.excerpt_tokens,
-                    "whole_file_tokens": session.whole_file_tokens,
-                    "net_tokens": session.net,
-                    "tier": session.tier(),
+        }
+        rows.sort_by_key(|row| {
+            std::cmp::Reverse((
+                row["at"].as_i64().unwrap_or(0),
+                row["id"].as_i64().unwrap_or(0),
+            ))
+        });
+        if !all_rows {
+            rows.truncate(LEDGER_ROWS);
+        }
+        let sessions: Vec<Value> = f
+            .per_session
+            .iter()
+            .take(LEDGER_SESSIONS)
+            .map(|s| {
+                json!({
+                    "session": s.session,
+                    "client": s.client,
+                    "client_version": s.client_version,
+                    "store": s.stores.join(", "),
+                    "stores": s.stores,
+                    "first": s.first,
+                    "last": s.last,
+                    "when": crate::clock::local_stamp(s.last),
+                    "retrievals": s.queries,
+                    "zero_hit": s.zero_hit,
+                    "excerpt_tokens": s.excerpt_tokens,
+                    "whole_file_tokens": s.whole_file_tokens,
+                    "net_tokens": s.net_tokens,
+                    "tier": if s.excerpt_counter == crate::ledger::MODEL { "measured" } else { "modelled" },
+                    "model": s.model,
                     // The saving priced at the model this session actually
                     // ran on, from its client's log; none when that is not
                     // known, rather than a price for a model it never used.
-                    "model": session.model,
-                    "saved_usd": session.model.as_deref()
+                    "saved_usd": s.model.as_deref()
                         .and_then(crate::report::price_named)
-                        .map(|(_, input)| session.net.max(0) as f64 * input / 1_000_000.0),
-                }));
+                        .map(|(_, input)| s.net_tokens.max(0) as f64 * input / 1_000_000.0),
+                })
+            })
+            .collect();
+        // Savings by agent, from the conversations; by store, from each
+        // store's share. Both computed here so the tables cannot disagree
+        // with the tiles above them.
+        let mut by_agent: std::collections::BTreeMap<String, (i64, i64, i64, f64, bool, bool)> =
+            Default::default();
+        for s in &f.per_session {
+            let g = by_agent
+                .entry(s.client.clone())
+                .or_insert((0, 0, 0, 0.0, false, true));
+            g.0 += 1;
+            g.1 += s.queries;
+            g.2 += s.net_tokens;
+            if let Some((_, input)) = s.model.as_deref().and_then(crate::report::price_named) {
+                g.3 += s.net_tokens.max(0) as f64 * input / 1_000_000.0;
+                g.4 = true;
             }
-            for row in store::retrievals(store.db(), LEDGER_ROWS)? {
-                rows.push(json!({
-                    "at": row.at,
-                    // Local time with the offset, the same string `semlith
-                    // ledger` prints. One dataset, one clock.
-                    "when": crate::clock::local_stamp(row.at),
-                    "store": label,
-                    "client": row.client,
-                    "query": row.query,
-                    "hits": row.hits,
-                    "ms": row.micros / 1000,
-                    "excerpt_tokens": row.excerpt_tokens,
-                    "whole_file_tokens": row.whole_file_tokens,
-                    "query_id": row.query_id,
-                    "usage": row.usage,
-                }));
-            }
+            g.5 &= s.excerpt_counter == crate::ledger::MODEL;
         }
-        rows.sort_by_key(|row| std::cmp::Reverse(row["at"].as_i64().unwrap_or(0)));
-        rows.truncate(LEDGER_ROWS);
-        sessions.sort_by_key(|row| std::cmp::Reverse(row["last"].as_i64().unwrap_or(0)));
-        sessions.truncate(LEDGER_SESSIONS);
-        let credited = credited_keys.len() as i64;
-        let measured = measured && estimated_keys.is_empty();
-        let coverage = if queries == 0 {
-            0
-        } else {
-            credited * 100 / queries
-        };
-        let ratio = (excerpt > 0).then(|| whole as f64 / excerpt as f64);
         Ok(json!({
             "recording": recording,
-            "queries": queries,
-            "clients": clients,
-            "excerpt_tokens": excerpt,
-            "whole_file_tokens": whole,
-            "ratio": ratio,
+            "queries": f.queries,
+            "clients": f.clients.len(),
+            "client_names": f.clients,
+            "excerpt_tokens": f.excerpt_tokens,
+            "whole_file_tokens": f.whole_file_tokens,
+            "ratio": f.ratio,
             "intact": intact,
             "break": first_break,
-            "net_tokens": net,
-            "credited": credited,
-            "coverage": coverage,
-            "tier": if measured && credited > 0 { "measured" } else { "modelled" },
+            "net_tokens": f.net_tokens,
+            "credited": f.credited,
+            "coverage": f.coverage,
+            "tier": f.tier.word,
+            // What each side of the saving was counted with.
+            "counted": { "excerpt": f.tier.excerpt, "whole": f.tier.whole },
             // What semlith did not answer, in two figures rather than one.
             // A refund is an agent that did not reach for semlith; a zero hit
             // is semlith that did not reach the answer. They call for opposite
             // things, so they are never added together.
-            "refunds": refunds,
-            "refunds_measured": refunds_measured,
-            "zero_hit": zero_hit,
-            "by_client": by_client,
+            "refunds": f.refunds,
+            "refunds_measured": f.refunds > 0,
+            "zero_hit": f.zero_hit,
+            "p50_ms": f.p50_micros as f64 / 1000.0,
+            "p95_ms": f.p95_micros as f64 / 1000.0,
+            "by_client": f.by_client,
+            "human": f.human,
+            "sessions_total": f.sessions,
+            "by_agent": by_agent.into_iter().map(|(name, g)| json!({
+                "name": name, "sessions": g.0, "retrievals": g.1, "net": g.2,
+                "saved": g.4.then_some(g.3), "measured": g.5,
+            })).collect::<Vec<_>>(),
+            "by_store": f.stores.iter().map(|s| json!({
+                "name": s.store, "retrievals": s.queries, "credited": s.credited,
+                "zero_hit": s.zero_hit, "net": s.net_tokens, "refunds": s.refunds,
+            })).collect::<Vec<_>>(),
             "usage": {
                 "enabled": usage_on,
                 "prices": prices_json(),
@@ -1842,14 +1822,46 @@ fn ledger(state: &Arc<State>) -> Response {
                 })).collect::<Vec<_>>(),
             },
             "rows": rows,
+            "rows_total": rows_total,
             "sessions": sessions,
-            // Rows written before this version were one per open store, so the
+            // Rows written before 0.20.2 were one per open store, so the
             // figures they contribute to may be over-counted. Said on the page
             // rather than corrected in place: the chain is not rewritten.
-            "legacy_rows": rows.iter().any(|row| {
-                row["query_id"].as_str().unwrap_or_default().is_empty()
-            }),
+            "legacy_rows": legacy_rows,
         }))
+    })
+}
+
+/// One ledger row as the Ledger page and its exports carry it.
+fn ledger_row(label: &str, row: &store::LedgerFact) -> Value {
+    json!({
+        "id": row.id,
+        "at": row.at,
+        // Local time with the offset, the same string `semlith ledger`
+        // prints. One dataset, one clock.
+        "when": crate::clock::local_stamp(row.at),
+        "store": label,
+        "client": row.client,
+        "client_version": row.client_version,
+        "session": row.session,
+        "tool": if row.tool.is_empty() { "—" } else { row.tool.as_str() },
+        "query": row.query,
+        "hits": row.hits,
+        "stale_hits": row.stale_hits,
+        "ms": row.micros / 1000,
+        "excerpt_tokens": row.excerpt_tokens,
+        "whole_file_tokens": row.whole_file_tokens,
+        // What counted each side: the excerpt's counter, and the whole
+        // side's basis — `text` from 0.42.0, `bytes` before it.
+        "tier": format!(
+            "{} · {}",
+            if row.tokenizer == crate::ledger::MODEL { "tokenizer" } else { "chars÷4" },
+            if row.whole_basis == store::BASIS_TEXT { "text" } else { "bytes" },
+        ),
+        "basis": if row.whole_basis.is_empty() { store::BASIS_BYTES } else { row.whole_basis.as_str() },
+        "chain": row.chain,
+        "query_id": row.query_id,
+        "usage": row.usage,
     })
 }
 

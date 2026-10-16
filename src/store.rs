@@ -3561,6 +3561,14 @@ pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// The rows that are an agent's retrievals, as SQL: what `ledger::figures`
+/// counts by default. Not a refund (`raw-read`), not the chain's own
+/// bookkeeping (a note, a refused write, an accept or revoke), and not a
+/// person at the portal or the CLI. Every per-store reader below takes it, so
+/// a store's card and its report say what the Ledger page says.
+pub const AGENT_RETRIEVAL: &str = "COALESCE(tool, '') NOT IN ('raw-read', 'note', 'refused', 'accept', 'revoke') \
+     AND client NOT IN ('cli', 'portal')";
+
 /// Which rows of the ledger a count is about.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LedgerScope {
@@ -3586,15 +3594,19 @@ pub enum LedgerScope {
 pub fn ledger_keys(db: &Connection, store: &str, scope: LedgerScope) -> Result<Vec<String>> {
     let sql = match scope {
         LedgerScope::All => {
-            "SELECT DISTINCT query_id, id FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused')"
+            format!("SELECT DISTINCT query_id, id FROM retrievals WHERE {AGENT_RETRIEVAL}")
         }
-        LedgerScope::Credited => "SELECT DISTINCT query_id, id FROM retrievals WHERE hits > 0",
-        LedgerScope::Estimated => {
+        LedgerScope::Credited => {
+            format!(
+                "SELECT DISTINCT query_id, id FROM retrievals WHERE hits > 0 AND {AGENT_RETRIEVAL}"
+            )
+        }
+        LedgerScope::Estimated => format!(
             "SELECT DISTINCT query_id, id FROM retrievals
-             WHERE hits > 0 AND (tokenizer IS NULL OR tokenizer != 'model')"
-        }
+             WHERE hits > 0 AND (tokenizer IS NULL OR tokenizer != 'model') AND {AGENT_RETRIEVAL}"
+        ),
     };
-    let mut stmt = db.prepare(sql)?;
+    let mut stmt = db.prepare(&sql)?;
     let rows = stmt.query_map([], |r| {
         let id: Option<String> = r.get(0)?;
         let row: i64 = r.get(1)?;
@@ -3615,10 +3627,12 @@ pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
     // stores happened to be open. A row written before 0.20.2 has no id and is
     // its own retrieval, which is what it was.
     Ok(db.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)), COUNT(DISTINCT client),
-                COALESCE(SUM(excerpt_tokens), 0),
-                COALESCE(SUM(whole_file_tokens), 0) FROM retrievals
-         WHERE COALESCE(tool, '') NOT IN ('note', 'refused')",
+        &format!(
+            "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)), COUNT(DISTINCT client),
+                    COALESCE(SUM(CASE WHEN hits > 0 THEN excerpt_tokens ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN hits > 0 THEN whole_file_tokens ELSE 0 END), 0)
+               FROM retrievals WHERE {AGENT_RETRIEVAL}"
+        ),
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?)
@@ -3663,26 +3677,36 @@ pub fn ledger_savings_since(db: &Connection, since: i64) -> Result<Savings> {
     // The token sums stay sums of rows, because each row holds its own store's
     // hits and nothing is double-counted by adding them.
     let (credited, net): (i64, i64) = db.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)),
-                COALESCE(SUM(whole_file_tokens - excerpt_tokens), 0)
-         FROM retrievals WHERE hits > 0 AND at >= ?1",
+        &format!(
+            "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)),
+                    COALESCE(SUM(whole_file_tokens - excerpt_tokens), 0)
+               FROM retrievals WHERE hits > 0 AND at >= ?1 AND {AGENT_RETRIEVAL}"
+        ),
         [since],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let total: i64 = db.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE at >= ?1 AND COALESCE(tool, '') NOT IN ('note', 'refused')",
+        &format!(
+            "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
+              WHERE at >= ?1 AND {AGENT_RETRIEVAL}"
+        ),
         [since],
         |r| r.get(0),
     )?;
     let estimated: i64 = db.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE hits > 0 AND at >= ?1 AND (tokenizer IS NULL OR tokenizer != 'model')",
+        &format!(
+            "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
+              WHERE hits > 0 AND at >= ?1 AND (tokenizer IS NULL OR tokenizer != 'model')
+                AND {AGENT_RETRIEVAL}"
+        ),
         [since],
         |r| r.get(0),
     )?;
+    // Summed as it is, never clamped: a figure a person recomputes from the
+    // rows must come out the same (the tile used to read 18 tokens above the
+    // tables beside it).
     Ok(Savings {
-        net: net.max(0),
+        net,
         credited,
         total,
         measured: credited > 0 && estimated == 0,
@@ -3739,10 +3763,15 @@ pub fn ledger_misses(db: &Connection) -> Result<Misses> {
         params![crate::ledger::RAW_READ],
         |r| r.get(0),
     )?;
+    // A retrieval is a zero hit when none of its rows found anything: one
+    // search over five stores that two answered is not three zero hits.
     let zero_hit: i64 = db.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE hits = 0 AND (tool IS NULL OR tool NOT IN (?1, 'note', 'refused'))",
-        params![crate::ledger::RAW_READ],
+        &format!(
+            "SELECT COUNT(*) FROM (SELECT COALESCE(query_id, 'row:' || id) AS k
+               FROM retrievals WHERE {AGENT_RETRIEVAL}
+              GROUP BY k HAVING MAX(hits) = 0)"
+        ),
+        [],
         |r| r.get(0),
     )?;
     Ok(Misses {
@@ -3765,10 +3794,11 @@ pub struct Misses {
 
 /// How many retrievals each client made, most first.
 pub fn ledger_clients(db: &Connection) -> Result<Vec<(String, i64)>> {
-    let mut stmt = db.prepare(
-        "SELECT client, COUNT(*) FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused')
-         GROUP BY client ORDER BY COUNT(*) DESC, client",
-    )?;
+    let mut stmt = db.prepare(&format!(
+        "SELECT client, COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) AS n FROM retrievals
+          WHERE {AGENT_RETRIEVAL}
+          GROUP BY client ORDER BY n DESC, client"
+    ))?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
@@ -5090,9 +5120,13 @@ pub fn ledger_sessions(db: &Connection, limit: usize) -> Result<Vec<SessionRow>>
 /// From the rows themselves rather than from a benchmark, so the figure is
 /// what this machine actually served rather than what it can serve.
 pub fn ledger_latency(db: &Connection) -> Result<(i64, i64)> {
-    let mut stmt = db.prepare(
-        "SELECT micros FROM retrievals WHERE COALESCE(tool, '') NOT IN ('note', 'refused') ORDER BY micros",
-    )?;
+    // One figure per retrieval and none for a row that measured no work: a
+    // median over raw-read rows' zeros and one row per store per search is
+    // how a report came to say 724 ms where the rows said ~67.
+    let mut stmt = db.prepare(&format!(
+        "SELECT MAX(micros) AS m FROM retrievals WHERE micros > 0 AND {AGENT_RETRIEVAL}
+          GROUP BY COALESCE(query_id, 'row:' || id) ORDER BY m"
+    ))?;
     let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
     let all: Vec<i64> = rows.collect::<rusqlite::Result<_>>()?;
     if all.is_empty() {
@@ -5129,11 +5163,12 @@ pub fn ledger_zero_hit_queries_since(
     since: i64,
     limit: usize,
 ) -> Result<Vec<(String, i64)>> {
-    let mut stmt = db.prepare(
-        "SELECT query, COUNT(*) AS n FROM retrievals WHERE hits = 0 AND at >= ?1
-           AND COALESCE(tool, '') NOT IN ('note', 'refused')
-         GROUP BY query ORDER BY n DESC, query LIMIT ?2",
-    )?;
+    let mut stmt = db.prepare(&format!(
+        "SELECT query, COUNT(*) AS n FROM (
+            SELECT MIN(query) AS query FROM retrievals WHERE at >= ?1 AND {AGENT_RETRIEVAL}
+             GROUP BY COALESCE(query_id, 'row:' || id) HAVING MAX(hits) = 0)
+         GROUP BY query ORDER BY n DESC, query LIMIT ?2"
+    ))?;
     let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {
         Ok((r.get(0)?, r.get(1)?))
     })?;

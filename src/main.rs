@@ -2334,12 +2334,14 @@ fn run() -> Result<()> {
                         }
                         None => println!("{label}: the chain is intact"),
                     }
-                    // What the chain is a chain of. A verify that says only
-                    // "intact" proves the record was not edited and says
-                    // nothing about what it records, which is the question
-                    // somebody defending a savings figure is actually asked.
-                    print_savings(store, "  ")?;
                 }
+                // What the chain is a chain of. A verify that says only
+                // "intact" proves the record was not edited and says nothing
+                // about what it records, which is the question somebody
+                // defending a savings figure is actually asked.
+                let members: Vec<(&str, &rusqlite::Connection)> =
+                    fleet.each().map(|(l, s)| (l, s.db())).collect();
+                print_savings(&members, "  ")?;
                 // Non-zero so a script can act on it. A verify that reported a
                 // broken chain and exited 0 would be worse than no verify.
                 if broken {
@@ -2394,15 +2396,13 @@ fn run() -> Result<()> {
                 }
             }
             if any && !json {
-                for (label, store) in fleet.each() {
-                    if many {
-                        println!();
-                        println!("{}{label}{}", bold(), reset());
-                    } else {
-                        println!();
-                    }
-                    print_savings(store, "  ")?;
+                println!();
+                if many {
+                    println!("{}all stores{}", bold(), reset());
                 }
+                let members: Vec<(&str, &rusqlite::Connection)> =
+                    fleet.each().map(|(l, s)| (l, s.db())).collect();
+                print_savings(&members, "  ")?;
             }
             if !any && !json {
                 eprintln!(
@@ -3150,16 +3150,20 @@ fn run() -> Result<()> {
                 // One line, and never a number without its denominator. A
                 // store that has recorded nothing prints nothing here rather
                 // than a zero that reads like a measurement.
-                let savings = semlith::store::ledger_savings(store.db())?;
-                if savings.total > 0 {
+                let f = semlith::ledger::figures(
+                    &[(label, store.db())],
+                    semlith::ledger::Window::ALL,
+                    false,
+                )?;
+                if f.queries > 0 {
                     println!(
                         "saved    {} tokens not read, over {} of {} retrievals \
                          ({}% coverage, {})",
-                        savings.net,
-                        savings.credited,
-                        savings.total,
-                        savings.coverage(),
-                        savings.tier(),
+                        semlith::report::number(f.net_tokens),
+                        semlith::report::number(f.credited),
+                        semlith::report::number(f.queries),
+                        f.coverage,
+                        f.tier.word,
                     );
                 }
                 if many {
@@ -4560,7 +4564,10 @@ fn human_time(at: i64) -> String {
     // while the portal printed the browser's local clock, and neither said
     // which zone it meant — so the same retrieval read 13:40:32 in one place
     // and 19:00:18 in the other and nothing on either screen admitted it.
-    semlith::clock::local_clock(at)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    semlith::clock::local_when(at, now)
 }
 
 /// The four steps, and the first one that failed.
@@ -4832,35 +4839,55 @@ fn steering_line(client: &semlith::doctor::ClientReport) -> Option<String> {
 /// computed over and tier says how the tokens were counted, and a figure
 /// printed without both is a figure a reader cannot check — which is how the
 /// double-counted README paragraph of 0.17.2 came to exist.
-fn print_savings(store: &semlith::Semlith, indent: &str) -> Result<()> {
-    let savings = semlith::store::ledger_savings(store.db())?;
-    let misses = semlith::store::ledger_misses(store.db())?;
-    let clients = semlith::store::ledger_clients(store.db())?;
-
+/// The ledger's figures for `members`, as every surface prints them: the one
+/// aggregation (`ledger::figures`), so this block, the Ledger page and the
+/// reports cannot disagree.
+fn print_savings(members: &[(&str, &rusqlite::Connection)], indent: &str) -> Result<()> {
+    let f = semlith::ledger::figures(members, semlith::ledger::Window::ALL, false)?;
+    let n = semlith::report::number;
     println!(
         "{indent}saved {} tokens over {} of {} retrievals — coverage {} %, tier {}",
-        savings.net,
-        savings.credited,
-        savings.total,
-        savings.coverage(),
-        savings.tier(),
+        n(f.net_tokens),
+        n(f.credited),
+        n(f.queries),
+        f.coverage,
+        f.tier.word,
     );
     println!(
-        "{indent}what reading those files whole would have cost, counted with the store's tokenizer"
+        "{indent}counted: excerpts {}, whole files {}",
+        match f.tier.excerpt {
+            "model" => "with the store's tokenizer",
+            "chars4" => "at four characters a token",
+            _ => "two ways",
+        },
+        match f.tier.whole {
+            "text" => "as the text they hold (bytes ÷ 4 for plain text)",
+            "bytes" => "as their bytes ÷ 4 (rows before 0.42.0)",
+            _ => "two ways (rows before 0.42.0 by their bytes)",
+        },
     );
     println!(
-        "{indent}refunds {} ({}) · zero-hit {} of {}",
-        misses.refunds,
-        if misses.measured {
+        "{indent}refunds {} ({}), not in the saving · zero-hit {} of {}",
+        n(f.refunds),
+        if f.refunds > 0 {
             "measured: a steering hook reports the reads semlith never served"
         } else {
             "a floor: no steering hook has reported here, so reads semlith never \
              served are not counted"
         },
-        misses.zero_hit,
-        savings.total,
+        n(f.zero_hit),
+        n(f.queries),
     );
-    if !clients.is_empty() {
+    if f.queries > 0 {
+        println!(
+            "{indent}latency p50 {} ms · p95 {} ms",
+            n(f.p50_micros / 1000),
+            n(f.p95_micros / 1000)
+        );
+    }
+    if !f.by_client.is_empty() {
+        let mut clients: Vec<(&String, &i64)> = f.by_client.iter().collect();
+        clients.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
         println!(
             "{indent}clients: {}",
             clients
@@ -4868,6 +4895,13 @@ fn print_savings(store: &semlith::Semlith, indent: &str) -> Result<()> {
                 .map(|(name, count)| format!("{name} {count}"))
                 .collect::<Vec<_>>()
                 .join(" · ")
+        );
+    }
+    if f.human.queries > 0 {
+        println!(
+            "{indent}by hand (cli, portal): {} retrievals, {} tokens, not in the saving",
+            n(f.human.queries),
+            n(f.human.net_tokens)
         );
     }
     Ok(())
