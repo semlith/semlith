@@ -305,7 +305,7 @@ fn supplement(lang: &str) -> &'static str {
             r#"
             ; `const MaxHolders = 4`, and every name in a parenthesised
             ; `const (...)` block, which is one `const_spec` each.
-            (const_declaration (const_spec name: (identifier) @name)) @definition.constant
+            (const_declaration (const_spec name: (identifier) @name) @definition.constant)
             (import_spec path: (interpreted_string_literal) @reference.import)
             ; `import fp "path/filepath"` — the alias is what the file then
             ; writes, and the path is what it stands for.
@@ -994,7 +994,10 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         if let Some(owner) = at.and_then(|i| defs[i].owner.clone()) {
             return Some(owner);
         }
-        while let Some(i) = at {
+        // Bounded: two definitions over one range are each other's parent,
+        // and a cycle there hung the whole file (cobra completions.go).
+        for _ in 0..defs.len() {
+            let i = at?;
             if defs[i].kind == "class" {
                 return Some(defs[i].name.clone());
             }
@@ -1869,11 +1872,82 @@ pub fn is_builtin(language: &str, name: &str, kind: &str, hint: Option<&str>) ->
     match language {
         "go" => {
             const BUILTINS: &[&str] = &[
-                "append", "cap", "clear", "close", "complex", "copy", "delete", "imag", "len",
-                "make", "max", "min", "new", "panic", "print", "println", "real", "recover",
-                "bool", "byte", "error", "float32", "float64", "int", "int8", "int16", "int32",
-                "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64",
-                "uintptr", "any",
+                "append",
+                "cap",
+                "clear",
+                "close",
+                "complex",
+                "copy",
+                "delete",
+                "imag",
+                "len",
+                "make",
+                "max",
+                "min",
+                "new",
+                "panic",
+                "print",
+                "println",
+                "real",
+                "recover",
+                "bool",
+                "byte",
+                "error",
+                "float32",
+                "float64",
+                "int",
+                "int8",
+                "int16",
+                "int32",
+                "int64",
+                "rune",
+                "string",
+                "uint",
+                "uint8",
+                "uint16",
+                "uint32",
+                "uint64",
+                "uintptr",
+                "any",
+                // The standard types' methods every Go file calls through a
+                // variable: `t.Errorf` on a `*testing.T` was 171 of cobra's.
+                "Errorf",
+                "Error",
+                "Fatal",
+                "Fatalf",
+                "Log",
+                "Logf",
+                "Helper",
+                "Run",
+                "Skip",
+                "Skipf",
+                "Cleanup",
+                "TempDir",
+                "Setenv",
+                "Parallel",
+                "Name",
+                "String",
+                "Close",
+                "Write",
+                "WriteString",
+                "Read",
+                "Len",
+                "Lock",
+                "Unlock",
+                "RLock",
+                "RUnlock",
+                "Add",
+                "Done",
+                "Wait",
+                "Unwrap",
+                "Is",
+                "As",
+                "Bytes",
+                "Reset",
+                "Sum",
+                "Contains",
+                "HasPrefix",
+                "Sprintf",
             ];
             const PACKAGES: &[&str] = &[
                 "fmt",
@@ -2325,12 +2399,10 @@ pub fn is_builtin(language: &str, name: &str, kind: &str, hint: Option<&str>) ->
                 "path",
             ];
             if kind == "imports" {
-                let top = name
-                    .trim_start_matches('.')
-                    .split('.')
-                    .next()
-                    .unwrap_or(name);
-                return !name.starts_with('.') && list(MODULES, top);
+                // `import typing as t` is recorded with its alias.
+                let module = name.split_whitespace().next().unwrap_or(name);
+                let top = module.split('.').next().unwrap_or(module);
+                return !module.starts_with('.') && list(MODULES, top);
             }
             list(BUILTINS, name) || hint.is_some_and(|h| list(MODULES, h))
         }
@@ -2464,6 +2536,26 @@ pub fn is_builtin(language: &str, name: &str, kind: &str, hint: Option<&str>) ->
                 return module.starts_with("node:") || list(MODULES, module);
             }
             list(BUILTINS, name) || hint.is_some_and(|h| list(MODULES, h))
+        }
+        _ => false,
+    }
+}
+
+/// Whether an import names the importing project itself — `crate::`,
+/// `super::`, Python's `from . import`, `./x` — and so is never code the
+/// corpus does not hold, whatever its text resolves to by name.
+pub fn is_relative_import(language: &str, name: &str) -> bool {
+    match language {
+        "rust" => {
+            ["crate::", "super::", "self::"]
+                .iter()
+                .any(|p| name.starts_with(p))
+                || matches!(name, "crate" | "super" | "self")
+        }
+        "python" => name.starts_with('.'),
+        "javascript" | "typescript" | "tsx" => {
+            let n = name.trim_matches(|c| c == '"' || c == '\'');
+            n.starts_with("./") || n.starts_with("../")
         }
         _ => false,
     }
@@ -6282,6 +6374,7 @@ mod audit_tests {
             ("crates/core/main.rs", "rust/ripgrep_main.rs"),
             ("crates/ignore/src/walk.rs", "rust/ripgrep_walk.rs"),
             ("crates/core/index/enabled.rs", "rust/ripgrep_enabled.rs"),
+            ("crates/core/search.rs", "rust/ripgrep_search.rs"),
         ])
     }
 
@@ -6316,6 +6409,11 @@ mod audit_tests {
                     );
                 }
             }
+            // `searcher.search(&result)` is a method, never the module search.rs.
+            assert!(
+                out.iter().all(|e| e.symbol.kind != "module"),
+                "{from}: {out:?}"
+            );
         }
     }
 
@@ -6339,6 +6437,26 @@ mod audit_tests {
             t.lines.iter().all(|l| l.mark != "supporting fact"),
             "{:?}",
             t.lines
+        );
+    }
+
+    /// `mod search;` beside `fn search` in main.rs made the bare call
+    /// `search(&args, mode)` a tie: a call never means a module.
+    #[test]
+    fn a_call_never_means_a_module() {
+        let db = ripgrep();
+        let out = crate::store::edges_out(&db, "run", &dependency_kinds()).unwrap();
+        let search: Vec<_> = out.iter().filter(|e| e.symbol.name == "search").collect();
+        assert_eq!(search.len(), 1, "{search:?}");
+        assert_eq!(search[0].confidence, RESOLVED, "{search:?}");
+        assert_eq!(search[0].symbol.kind, "function", "{search:?}");
+        let n = neighbours(&db, "search", &[], false, &Scope::all()).unwrap();
+        assert!(
+            n.callers
+                .iter()
+                .any(|c| c.symbol.name == "run" && c.confidence == RESOLVED),
+            "{:?}",
+            n.callers
         );
     }
 
@@ -6525,6 +6643,71 @@ mod audit_tests {
         assert!(out.iter().all(|e| e.confidence == AMBIGUOUS), "{out:?}");
     }
 
+    /// flask's tests call `flask.Flask(...)`, and the checkout's own folder
+    /// is `flask`: the folder named every candidate, so a test's subclass of
+    /// `Flask` won as "extracted" on 72 edges of the audit's store.
+    #[test]
+    fn a_folder_both_files_sit_in_names_no_candidate() {
+        let db = store(&[
+            ("/w/flask/src/flask/app.py", "python/flask_app.py"),
+            ("/w/flask/src/flask/__init__.py", "python/flask_init.py"),
+            (
+                "/w/flask/tests/test_config.py",
+                "python/flask_test_config.py",
+            ),
+            ("/w/flask/tests/test_basic.py", "python/flask_test_basic.py"),
+        ]);
+        // The 17 left after that: `flask.Flask(...)` beside the subclass, in
+        // test_config.py itself. The module path names flask, not this file.
+        for from in ["test_response_type_errors", "test_config_from_object"] {
+            let out = crate::store::edges_out(&db, from, &[]).unwrap();
+            let flask: Vec<_> = out.iter().filter(|e| e.symbol.name == "Flask").collect();
+            assert!(!flask.is_empty(), "{from}");
+            for e in flask {
+                assert!(
+                    e.confidence == AMBIGUOUS || e.symbol.path.contains("/src/flask/"),
+                    "{from}: {e:?}"
+                );
+            }
+        }
+        // A bare `Flask(__name__)` beside the subclass still means it.
+        let out = crate::store::edges_out(&db, "test_custom_config_class", &[]).unwrap();
+        let own: Vec<_> = out
+            .iter()
+            .filter(|e| e.symbol.name == "Flask" && e.kind == "calls")
+            .collect();
+        assert_eq!(own.len(), 1, "{own:?}");
+        assert_eq!(own[0].symbol.path, "/w/flask/tests/test_config.py");
+    }
+
+    /// A structural edge is the file saying where its own definition sits:
+    /// `steps` holding a `run:` key is not a maybe-caller of a Rust `run`,
+    /// and a struct's `contains` edge means its own method.
+    #[test]
+    fn a_structural_edge_means_its_own_file() {
+        let db = store(&[
+            (".github/workflows/ci.yml", "yaml/ripgrep_ci.yml"),
+            ("crates/core/main.rs", "rust/ripgrep_main.rs"),
+            ("crates/ignore/src/walk.rs", "rust/ripgrep_walk.rs"),
+        ]);
+        let n = neighbours(&db, "run", &[], false, &Scope::all()).unwrap();
+        let structural: Vec<_> = n
+            .callers
+            .iter()
+            .filter(|c| c.kind == "contains" || c.kind == "defines")
+            .collect();
+        assert!(!structural.is_empty());
+        for c in structural {
+            assert_eq!(c.confidence, EXTRACTED, "{c:?}");
+        }
+        let out = crate::store::edges_out(&db, "steps", &["contains".to_string()]).unwrap();
+        assert!(
+            out.iter()
+                .all(|e| e.symbol.path == ".github/workflows/ci.yml"),
+            "{out:?}"
+        );
+    }
+
     /// G9, G10: `symbol run -k 3` said "3 definitions" of 52, with nothing
     /// saying the list was cut, and the default list was YAML `run:` keys
     /// ahead of every Rust `run`.
@@ -6597,6 +6780,21 @@ mod audit_tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["symbol_kind"], "function", "{value}");
         assert_eq!(value["kind"], "calls", "{value}");
+    }
+
+    /// cobra's completions.go: every name in a `const ( ... )` block spanned
+    /// the whole block, so each was qualified by another, and the two being
+    /// each other's parent hung the receiver pass until the file was given up
+    /// as unparsed. Each name is its own line now.
+    #[test]
+    fn a_go_const_block_gives_each_name_its_own_line() {
+        let text = "package cobra\n\nconst (\n\t// ShellCompRequestCmd is the name of the hidden command.\n\tShellCompRequestCmd = \"__complete\"\n\t// ShellCompNoDescRequestCmd is the name of the other one.\n\tShellCompNoDescRequestCmd = \"__completeNoDesc\"\n)\n\nfunc (c *Command) initCompleteCmd() {\n\tc.AddCommand(ShellCompRequestCmd)\n}\n";
+        let e = extract(Path::new("completions.go"), text).unwrap().unwrap();
+        for (name, line) in [("ShellCompRequestCmd", 5), ("ShellCompNoDescRequestCmd", 7)] {
+            let s = e.symbols.iter().find(|s| s.name == name).unwrap();
+            assert_eq!(s.qualified, format!("completions::{name}"), "{s:?}");
+            assert_eq!((s.start_line, s.end_line), (line, line), "{s:?}");
+        }
     }
 
     /// Item 30: "Called and not found" was cobra's builtins and standard

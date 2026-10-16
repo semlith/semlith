@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use crate::flags::{HiArgs, SearchMode};
 
 mod index;
+mod search;
 
 /// Then, as it was, then again it will be.
 fn main() -> ExitCode {
@@ -20,10 +21,16 @@ fn run(result: crate::flags::ParseResult<HiArgs>) -> anyhow::Result<ExitCode> {
     let args = result.ok();
     let matched = match args.mode() {
         Mode::Search(mode) if args.index() > 0 => index::read(&args, mode)?,
+        Mode::Search(mode) if args.threads() == 1 => search(&args, mode)?,
         Mode::Search(mode) => search_parallel(&args, mode)?,
         Mode::Files => files_parallel(&args)?,
     };
     Ok(ExitCode::from(matched as u8))
+}
+
+/// The top-level entry point for single-threaded search.
+fn search(args: &HiArgs, mode: SearchMode) -> anyhow::Result<bool> {
+    Ok(args.quiet())
 }
 
 /// The top-level entry point for multi-threaded search.

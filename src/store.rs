@@ -2520,12 +2520,41 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
 
     let mut out = Vec::new();
     for key in order {
-        let candidates = groups.remove(&key).unwrap_or_default();
-        let (src_path, _, _, hint) = &key;
+        let mut candidates = groups.remove(&key).unwrap_or_default();
+        let (src_path, _, kind, hint) = &key;
+        // A call never means a module, unless nothing else has the name (see
+        // `choose_for`), and an unsettled call does not list one either.
+        if kind == "calls"
+            && candidates.iter().any(|c| c.symbol.kind == "module")
+            && candidates.iter().any(|c| c.symbol.kind != "module")
+        {
+            candidates.retain(|c| c.symbol.kind != "module");
+        }
+        // A structural edge names a definition in its own file, on the line
+        // the edge records; anything elsewhere with that name is not it.
+        if structural(kind) {
+            candidates.retain(|c| {
+                c.symbol.path == c.src_path && c.line.is_none_or(|l| l == c.symbol.start_line)
+            });
+            for row in candidates {
+                out.push(EdgeEnd {
+                    symbol: row.symbol,
+                    kind: row.kind,
+                    confidence: row.confidence,
+                    definitions: 1,
+                    from_path: Some(row.src_path),
+                    from_line: Some(row.src_line),
+                    line: row.line,
+                    means: None,
+                });
+            }
+            continue;
+        }
         let definitions = candidates.len();
 
         let rows: Vec<&SymbolRow> = candidates.iter().map(|c| &c.symbol).collect();
-        let (picked, settled) = choose(db, &rows, src_path, hint.as_deref(), &mut imports)?;
+        let (picked, settled) =
+            choose_for(db, kind, &rows, src_path, hint.as_deref(), &mut imports)?;
         // A receiver's edge that did not settle lists only what a method call
         // can mean; any other unsettled edge lists every candidate, as before.
         let receiver = hint
@@ -2560,6 +2589,37 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
         }
     }
     Ok(out)
+}
+
+/// Whether an edge kind says where a definition sits rather than what it uses.
+fn structural(kind: &str) -> bool {
+    matches!(kind, "defines" | "contains")
+}
+
+/// [`choose`] for an edge of `kind`. A call never means a module: ripgrep's
+/// main.rs declares `mod search;` beside `fn search`, and the module made the
+/// bare call `search(&args, mode)` a tie. Modules are candidates only when
+/// nothing else answers to the name.
+fn choose_for(
+    db: &Connection,
+    kind: &str,
+    candidates: &[&SymbolRow],
+    src_path: &str,
+    hint: Option<&str>,
+    imports: &mut std::collections::HashMap<String, Vec<String>>,
+) -> Result<(Vec<bool>, bool)> {
+    let module = |c: &&SymbolRow| c.kind == "module";
+    if kind != "calls" || !candidates.iter().any(module) || candidates.iter().all(module) {
+        return choose(db, candidates, src_path, hint, imports);
+    }
+    let callable: Vec<&SymbolRow> = candidates.iter().filter(|c| !module(c)).copied().collect();
+    let (picked, settled) = choose(db, &callable, src_path, hint, imports)?;
+    let mut picked = picked.into_iter();
+    let keep = candidates
+        .iter()
+        .map(|c| !module(c) && picked.next().unwrap_or(false))
+        .collect();
+    Ok((keep, settled))
 }
 
 /// Which of `candidates` an edge written in `src_path` with `hint` means, and
@@ -2647,9 +2707,16 @@ fn free_function(c: &SymbolRow) -> bool {
 /// module's function is called: a lower-case receiver naming the file of
 /// exactly one free function, as `views.render()` names `views.py`.
 fn through_receiver(candidates: &[&SymbolRow], src_path: &str, lead: &str) -> (Vec<bool>, bool) {
-    let methods: Vec<bool> = candidates.iter().map(|c| !free_function(c)).collect();
+    // What a receiver can call: a method, or a function a type owns. With
+    // none in the store the call leaves the corpus, and the edge lists what
+    // shares the name, never a module (`searcher.search()` is not search.rs).
+    let method = |c: &SymbolRow| c.kind == "method" || (c.kind == "function" && !free_function(c));
+    let methods: Vec<bool> = candidates.iter().map(|c| method(c)).collect();
+    let callable: Vec<bool> = candidates.iter().map(|c| c.kind != "module").collect();
     let pool = if methods.contains(&true) {
         methods
+    } else if callable.contains(&true) {
+        callable
     } else {
         vec![true; candidates.len()]
     };
@@ -2658,7 +2725,7 @@ fn through_receiver(candidates: &[&SymbolRow], src_path: &str, lead: &str) -> (V
     if python(src_path) && !lead.is_empty() && !upper {
         let module: Vec<bool> = candidates
             .iter()
-            .map(|c| free_function(c) && names_file(lead, &c.path))
+            .map(|c| free_function(c) && names_file(lead, &c.path, src_path))
             .collect();
         if module.iter().filter(|m| **m).count() == 1 {
             return (module, true);
@@ -2668,7 +2735,7 @@ fn through_receiver(candidates: &[&SymbolRow], src_path: &str, lead: &str) -> (V
         let mut typed: Vec<bool> = candidates
             .iter()
             .zip(&pool)
-            .map(|(c, p)| *p && !free_function(c) && owner_of(&c.qualified) == Some(lead))
+            .map(|(c, p)| *p && method(c) && owner_of(&c.qualified) == Some(lead))
             .collect();
         if typed.iter().filter(|t| **t).count() > 1 {
             let near: Vec<usize> = candidates
@@ -2736,7 +2803,8 @@ pub fn owner_of(qualified: &str) -> Option<&str> {
 ///    hint that reads as a type (upper case first) counts here: a variable
 ///    named `fleet` is a lead about a file, and tier 2 reads it as one.
 /// 1. The same file as the call. A file that defines a name and calls it means
-///    its own.
+///    its own — unless the call went through a module path that names
+///    another file.
 /// 2. A file the hint names. `store::edges_out` in the presence of
 ///    `src/store.rs` is not a coincidence.
 /// 3. A file the calling file imports. Weaker than the hint because an import
@@ -2748,15 +2816,27 @@ fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[St
         return 0;
     }
     let candidate = candidate.path.as_str();
-    if candidate == src_path {
+    // A module path (`flask.Flask`, `index::read`) names where the target
+    // is, so the calling file's own namesake wins only when the path names
+    // the calling file: in flask's test_config.py, `flask.Flask(...)` was
+    // settled on a test's subclass defined a few lines up.
+    let path_hint = hint.filter(|h| {
+        !h.starts_with(crate::graph::RECEIVER) && !h.chars().next().is_some_and(char::is_uppercase)
+    });
+    let names_caller = |h: &str| {
+        std::path::Path::new(src_path)
+            .file_stem()
+            .is_some_and(|stem| stem == h)
+    };
+    if candidate == src_path && path_hint.is_none_or(names_caller) {
         return 1;
     }
-    if hint.is_some_and(|h| names_file(h, candidate)) {
+    if hint.is_some_and(|h| names_file(h, candidate, src_path)) {
         return 2;
     }
     if imports.iter().any(|i| {
         i.split(['/', '.', ':', '\\'])
-            .any(|segment| !segment.is_empty() && names_file(segment, candidate))
+            .any(|segment| !segment.is_empty() && names_file(segment, candidate, src_path))
     }) {
         return 3;
     }
@@ -2773,19 +2853,24 @@ fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[St
 }
 
 /// Whether `word` names the file at `path` — its stem, or one of its
-/// directories.
+/// directories below the ones it shares with `from`, the calling file.
 ///
 /// `store` names `src/store.rs` and `src/store/mod.rs` alike, which is the
 /// point: a module is a file or a directory depending on how the author felt
-/// that day, and a hint knows neither.
-fn names_file(word: &str, path: &str) -> bool {
+/// that day, and a hint knows neither. A directory both files sit in names
+/// nothing: flask's tests call `flask.Flask(...)`, the repository's own folder
+/// is called `flask`, and every candidate under it — a test's subclass of
+/// `Flask` included — read as named by the hint, so the nearest won as
+/// "extracted" (72 such edges in the 2026-10-14 audit's flask store).
+fn names_file(word: &str, path: &str, from: &str) -> bool {
     let path = std::path::Path::new(path);
     if path.file_stem().is_some_and(|stem| stem == word) {
         return true;
     }
+    let shared = shared_directories(&path.to_string_lossy(), from);
     path.parent()
         .into_iter()
-        .flat_map(|parent| parent.components())
+        .flat_map(|parent| parent.components().skip(shared))
         .any(|component| component.as_os_str() == word)
 }
 
@@ -2981,10 +3066,42 @@ pub fn edges_in_resolved(db: &Connection, name: &str, kinds: &[String]) -> Resul
     let mut imports = std::collections::HashMap::new();
     let mut out = Vec::with_capacity(rows.len());
     for (caller, kind, stored, line, hint) in rows {
+        // A structural edge is the file saying where its own definition sits:
+        // nothing to rank, and nothing in another file it could mean. Ranked,
+        // a YAML `steps` holding its `run:` key read as maybe containing one
+        // of ripgrep's Rust `run`s.
+        if structural(&kind) {
+            let means: Vec<i64> = definitions
+                .iter()
+                .filter(|d| d.path == caller.path && line.is_none_or(|l| l == d.start_line))
+                .map(|d| d.id)
+                .collect();
+            out.push(Incoming {
+                end: EdgeEnd {
+                    symbol: caller,
+                    kind,
+                    confidence: stored,
+                    definitions: definitions.len(),
+                    from_path: None,
+                    from_line: None,
+                    line,
+                    means: None,
+                },
+                means,
+            });
+            continue;
+        }
         let (picked, settled) = if refs.is_empty() {
             (Vec::new(), false)
         } else {
-            choose(db, &refs, &caller.path, hint.as_deref(), &mut imports)?
+            choose_for(
+                db,
+                &kind,
+                &refs,
+                &caller.path,
+                hint.as_deref(),
+                &mut imports,
+            )?
         };
         let means: Vec<i64> = definitions
             .iter()
@@ -5179,6 +5296,9 @@ fn outside_targets(db: &Connection) -> Result<(Vec<(String, i64)>, i64)> {
             let lang = *language.entry(path).or_insert_with_key(|p| {
                 crate::graph::language_of(std::path::Path::new(p)).unwrap_or("")
             });
+            if kind == "imports" && crate::graph::is_relative_import(lang, &name) {
+                continue;
+            }
             if crate::graph::is_builtin(lang, &name, &kind, hint.as_deref()) {
                 builtin.insert(name);
             } else {
@@ -5552,12 +5672,28 @@ mod tests {
         assert_eq!(out[0].symbol.path, "src/store/mod.rs");
     }
 
-    /// The calling file's own definition wins over one the hint names. A file
-    /// that defines a name and calls it means its own.
+    /// A module path outranks the calling file's own namesake: `store::callee()`
+    /// in caller.rs is store.rs's `callee`, whatever caller.rs defines. Until
+    /// 0.42.0 the calling file won, which in flask's test_config.py settled
+    /// `flask.Flask(...)` on a test's own subclass (2026-10-14 audit). A
+    /// call with no path, or a path naming the calling file, still means its
+    /// own.
     #[test]
-    fn the_calling_file_outranks_the_hint() {
+    fn a_module_path_outranks_the_calling_file() {
         let db = many_definitions(&["src/caller.rs", "src/store.rs"]);
         call(&db, Some("store"));
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].symbol.path, "src/store.rs");
+
+        let db = many_definitions(&["src/caller.rs", "src/store.rs"]);
+        call(&db, None);
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].symbol.path, "src/caller.rs");
+
+        let db = many_definitions(&["src/caller.rs", "src/store.rs"]);
+        call(&db, Some("caller"));
         let out = edges_out(&db, "caller", &[]).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].symbol.path, "src/caller.rs");
