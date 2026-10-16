@@ -1185,6 +1185,12 @@ impl RunState {
                 self.close_phases();
                 self.indexed = num("indexed").unwrap_or(self.indexed);
                 self.chunks = num("chunks").unwrap_or(self.chunks);
+                // A finished run expected what it did: a catch-up that found
+                // nothing to embed read "0 / 233 chunks" on its card for good,
+                // from an estimate made before it knew every file was unchanged.
+                if !stopped {
+                    self.expected_chunks = self.chunks;
+                }
                 self.unhold();
                 self.ended = Some(self.elapsed());
                 self.finished = Some(now());
@@ -6274,6 +6280,30 @@ mod tests {
         let second = store.run_elapsed_ms(1);
         assert!(second >= first, "{second} went backwards from {first}");
         assert!(second >= 50, "the clock did not span the slice: {second}ms");
+    }
+
+    #[test]
+    fn a_finished_run_expects_what_it_did() {
+        // A catch-up that embedded nothing read "0 / 233 chunks" on the
+        // store's last run for good (audit F16).
+        let _held = counters();
+        let store = bare_store("api");
+        store.begin_run(1, Vec::new(), RunKind::CatchUp);
+        store.record(1, &serde_json::json!({ "event": "started", "paths": [] }));
+        store.record(
+            1,
+            &serde_json::json!({ "event": "progress", "scanned": 3, "total": 233, "expected_chunks": 233, "chunks": 0 }),
+        );
+        store.record(
+            1,
+            &serde_json::json!({ "event": "done", "indexed": 0, "chunks": 0, "stopped": false }),
+        );
+        let run = store
+            .run_snapshots(None)
+            .into_iter()
+            .find(|r| r["id"] == 1)
+            .expect("the run is listed");
+        assert_eq!(run["expected_chunks"], 0, "{run}");
     }
 
     /// Held time is not time anything is happening, and a run that is over

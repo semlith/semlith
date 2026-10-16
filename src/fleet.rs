@@ -1337,6 +1337,19 @@ impl Fleet {
     }
 }
 
+/// A reader dropped mid-run (a store joined and the readers were rebuilt)
+/// ends its snapshots, so the pin registry holds only live connections.
+impl Drop for Fleet {
+    fn drop(&mut self) {
+        let pinned = std::mem::take(&mut *self.pinned.borrow_mut());
+        for member in &self.members {
+            if pinned.contains_key(member.store.dir()) {
+                let _ = crate::store::unpin_snapshot(member.store.db());
+            }
+        }
+    }
+}
+
 type QuerySessions = Vec<(Model, Arc<Mutex<TextEmbedding>>)>;
 
 /// Query sessions, one per model, shared by every reader in the process.

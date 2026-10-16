@@ -173,7 +173,9 @@ fn a_paused_ledger_writes_nothing_and_a_resume_chains_on() {
         at: 0,
         source: "portal".to_string(),
     };
-    let count = || semlith::store::ledger_totals(store.db()).unwrap().0;
+    // Rows in the chain: an accept is a row of its own, and from 0.42.0 not a
+    // retrieval, so `ledger_totals` would not count it.
+    let count = || semlith::store::ledger_rows(store.db()).unwrap();
 
     semlith::ledger::acceptance(store.db(), &row("/a"), "accept").unwrap();
     assert_eq!(count(), 1);

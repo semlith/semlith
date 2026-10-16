@@ -73,7 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A run's card, history and log events give the work's own time, not the time
   the wizard sat on its Review page (41 s of work read "done in 1m 31s"); a
   time left that had counted down to a second rises again when the rate falls;
-  the CLI prints the last twenty seconds' chunks/s.
+  the CLI prints the last twenty seconds' chunks/s; a catch-up that found
+  nothing to embed no longer leaves the store's last run reading "0 / 233
+  chunks".
 - `cloud status` and the portal say when the cloud last checked a source
   ("checked 14 h ago"), floored the same way, never "behind" for an index at
   the branch head.
