@@ -1496,20 +1496,6 @@ fn md_cell(v: &str) -> String {
         .replace(['\n', '\r'], " ")
 }
 
-/// A whole number with thousands separators, as the portal prints it.
-// ponytail: stub until the export redesign's one formatter lands; same signature.
-pub fn number(n: i64) -> String {
-    let digits = n.unsigned_abs().to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    if n < 0 { format!("-{out}") } else { out }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
