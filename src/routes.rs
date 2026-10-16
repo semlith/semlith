@@ -3227,8 +3227,20 @@ fn pattern_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
         let only = (!only.is_empty()).then_some(only);
         // A bad pattern or an unknown language is the caller's to correct, and
         // comes back as the parser's own words rather than an empty list.
+        let started = std::time::Instant::now();
         match fleet.pattern_in(only.as_deref(), lang, query, &filter, offset) {
-            Ok(found) => Ok(serde_json::to_value(found)?),
+            Ok(found) => {
+                let answer = serde_json::to_value(&found)?;
+                record_graph(
+                    fleet,
+                    "pattern",
+                    query,
+                    &answer,
+                    !found.matches.is_empty(),
+                    started,
+                );
+                Ok(answer)
+            }
             Err(e) => Ok(json!({
                 "language": lang,
                 "matches": [],
@@ -3253,14 +3265,67 @@ fn read_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
     };
     let target = crate::Target::parse(raw);
     let only = request.query_all("store");
+    let subject = raw.to_string();
     answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
-        match fleet.read_in(only.as_deref(), &target, &crate::filter::Filter::default())? {
+        let started = std::time::Instant::now();
+        let read = fleet.read_in(only.as_deref(), &target, &crate::filter::Filter::default())?;
+        // Recorded as the agent's read is: the span is the reply, its file
+        // the whole side (item 2 — every surface records the same tools).
+        let reply = match &read {
+            Some(crate::Read::One(span)) => format!(
+                "{}:{}-{}\n{}",
+                crate::plain(&span.path),
+                span.start_line,
+                span.end_line,
+                span.text
+            ),
+            _ => String::new(),
+        };
+        crate::ledger::reply(
+            fleet,
+            &PORTAL,
+            "read",
+            &subject,
+            &reply,
+            &[],
+            started.elapsed(),
+        );
+        match read {
             None => Ok(json!({ "span": null, "definitions": [] })),
             Some(crate::Read::One(span)) => Ok(json!({ "span": span, "definitions": [] })),
             Some(crate::Read::Choose(rows)) => Ok(json!({ "span": null, "definitions": rows })),
         }
     })
+}
+
+/// Who the portal's own retrievals are recorded as.
+const PORTAL: crate::ledger::Who<'static> = crate::ledger::Who {
+    client: "portal",
+    session: "portal",
+    version: env!("CARGO_PKG_VERSION"),
+};
+
+/// Record a portal graph answer the way an agent's is: one row, the answer
+/// the page was sent as its excerpt.
+fn record_graph(
+    fleet: &crate::fleet::Fleet,
+    tool: &str,
+    subject: &str,
+    answer: &Value,
+    found: bool,
+    started: std::time::Instant,
+) {
+    let reply = answer.to_string();
+    crate::ledger::graph(
+        fleet,
+        &PORTAL,
+        tool,
+        subject,
+        &reply,
+        found,
+        started.elapsed(),
+    );
 }
 
 fn symbol(state: &Arc<State>, request: &Request) -> Response {
@@ -3431,12 +3496,22 @@ fn impact_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
         .is_some_and(|v| v == "1" || v == "true");
     answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
+        let started = std::time::Instant::now();
         let impact = fleet.impact_in(only.as_deref(), &name, &kinds, depth, all_edges, &filter)?;
-        Ok(json!({
+        let answer = json!({
             "impact": impact,
             "headline": impact.headline(),
             "limit": crate::graph::IMPACT_LIMIT,
-        }))
+        });
+        record_graph(
+            fleet,
+            "impact",
+            &name,
+            &answer,
+            !impact.reached.is_empty(),
+            started,
+        );
+        Ok(answer)
     })
 }
 
@@ -3465,11 +3540,21 @@ fn trace_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
         .is_some_and(|v| v == "1" || v == "true");
     answer_with(fleet, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
+        let started = std::time::Instant::now();
         let trace = fleet.trace_in(only.as_deref(), &from, &to, depth, all_edges, &crate::plain)?;
-        Ok(json!({
+        let answer = json!({
             "trace": trace,
             "evidence": trace.evidence(&crate::plain),
-        }))
+        });
+        record_graph(
+            fleet,
+            "trace",
+            &from,
+            &answer,
+            trace.chain.is_some(),
+            started,
+        );
+        Ok(answer)
     })
 }
 
