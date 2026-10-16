@@ -1046,6 +1046,37 @@ fn the_cli_and_the_portal_share_one_default_window() {
 }
 
 #[test]
+fn semlith_report_takes_the_window_scope_and_options() {
+    // semlith_report took no window or scope, so "the same document over
+    // MCP" held only at the defaults (R11).
+    let dir = tempfile::tempdir().unwrap();
+    aged_store(dir.path());
+    let mut fleet = Fleet::open(&[dir.path().to_path_buf()]).unwrap();
+    let label = labels(&fleet)[0].clone();
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "semlith_report", "arguments": {
+            "kind": "savings", "format": "json", "window": "week", "scope": [label],
+        }}
+    });
+    let mut session = semlith::mcp::Session::new("t");
+    let reply = semlith::mcp::answer(&mut fleet, None, &call, &mut session).unwrap();
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    let json: serde_json::Value = serde_json::from_str(text).unwrap_or_else(|_| panic!("{reply}"));
+    assert_eq!(json["window"]["name"], "week", "{json}");
+    assert_eq!(figure(&json, "Net tokens not read"), 2880, "{json}");
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "semlith_report", "arguments": {
+            "kind": "savings", "format": "csv", "table": "not_read", "window": "all",
+        }}
+    });
+    let reply = semlith::mcp::answer(&mut fleet, None, &call, &mut session).unwrap();
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("line,tokens,cost_usd,counts\n"), "{text}");
+}
+
+#[test]
 fn the_pdf_embeds_plex_and_is_tagged_titled_and_bookmarked() {
     // 0.41: base-14 Courier, not embedded, US Letter, no page numbers, no
     // metadata, no tags (R2, item 16).
