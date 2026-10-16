@@ -1047,7 +1047,11 @@ fn the_pdf_text_layer_is_the_text() {
     {
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(text.contains("Résumé café 東京"), "pdftotext: {text}");
-        let fonts = Command::new("pdffonts").arg(&file).output().unwrap();
+        // pdftotext without pdffonts beside it (a Windows runner's Git ships
+        // only the one): the font check is skipped, the text check stands.
+        let Ok(fonts) = Command::new("pdffonts").arg(&file).output() else {
+            return;
+        };
         let fonts = String::from_utf8_lossy(&fonts.stdout);
         assert!(fonts.contains("+IBMPlexSans"), "{fonts}");
         for line in fonts.lines().skip(2) {
