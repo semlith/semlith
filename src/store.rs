@@ -5007,6 +5007,137 @@ pub fn chunks_by_month(db: &Connection) -> Result<Vec<(String, i64)>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// One ledger row as the reports count it (0.42.0).
+#[derive(Debug, Clone)]
+pub struct ReportRow {
+    pub id: i64,
+    pub at: i64,
+    pub client: String,
+    pub client_version: String,
+    pub session: String,
+    pub tool: String,
+    pub query: String,
+    /// The retrieval this row is part of: one search over six stores is six
+    /// rows and one key. A row written before 0.20.2 has no id and is its own.
+    pub key: String,
+    pub hits: i64,
+    pub micros: i64,
+    pub excerpt_tokens: i64,
+    pub whole_file_tokens: i64,
+    pub tokenizer: String,
+}
+
+/// Every ledger row recorded at or after `since`, oldest first.
+///
+/// The reports take their figures from the rows rather than from the
+/// aggregates above, so a window narrows every figure a report prints — the
+/// 0.41 savings report narrowed net, credited and total and left whole,
+/// excerpt, refunds and latency lifetime (R5). Nothing is filtered here: what
+/// counts as a query is the report's rule, and a reader that filtered would be
+/// a second copy of it.
+pub fn report_rows_since(db: &Connection, store: &str, since: i64) -> Result<Vec<ReportRow>> {
+    let mut stmt = db.prepare(
+        "SELECT id, at, client, COALESCE(client_version, ''), COALESCE(session, ''),
+                COALESCE(tool, ''), query, query_id, hits, micros, excerpt_tokens,
+                whole_file_tokens, COALESCE(tokenizer, '')
+         FROM retrievals WHERE at >= ?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([since], |r| {
+        let id: i64 = r.get(0)?;
+        let key: Option<String> = r.get(7)?;
+        Ok(ReportRow {
+            id,
+            at: r.get(1)?,
+            client: r.get(2)?,
+            client_version: r.get(3)?,
+            session: r.get(4)?,
+            tool: r.get(5)?,
+            query: r.get(6)?,
+            key: key
+                .filter(|k| !k.is_empty())
+                .unwrap_or_else(|| format!("{store}:row:{id}")),
+            hits: r.get(8)?,
+            micros: r.get(9)?,
+            excerpt_tokens: r.get(10)?,
+            whole_file_tokens: r.get(11)?,
+            tokenizer: r.get(12)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// A file the store read at or after `since`, and what it held before.
+#[derive(Debug, Clone)]
+pub struct ReadFile {
+    pub path: String,
+    pub indexed_at: i64,
+    /// The definitions the first re-index inside the window retired — what
+    /// the file held when the window opened: `(name, kind, start, end)`.
+    /// Empty for a file read for the first time, and for a re-read file that
+    /// held no definitions, which the store cannot tell apart from a first read.
+    pub before: Vec<(String, String, u32, u32)>,
+    /// Its definitions now: `(name, kind, start, end)`.
+    pub now: Vec<(String, String, u32, u32)>,
+}
+
+/// The first and last indexed path in sort order. Their common directory is
+/// the common directory of every path, which is the root a report prints
+/// paths against when the registry names none (a store opened by `--store`).
+pub fn path_bounds(db: &Connection) -> Result<Option<(String, String)>> {
+    Ok(
+        db.query_row("SELECT MIN(path), MAX(path) FROM files", [], |r| {
+            Ok(
+                match (
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ) {
+                    (Some(a), Some(b)) => Some((a, b)),
+                    _ => None,
+                },
+            )
+        })?,
+    )
+}
+
+/// Every file read at or after `since`, newest first, with no cap — the
+/// change brief's "Files re-read" was 200 per store summed (R3).
+pub fn files_read_since(db: &Connection, since: i64) -> Result<Vec<ReadFile>> {
+    let mut stmt = db.prepare(
+        "SELECT id, path, indexed_at FROM files WHERE indexed_at >= ?1
+         ORDER BY indexed_at DESC, path",
+    )?;
+    let files: Vec<(i64, String, i64)> = stmt
+        .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut past = db.prepare_cached(
+        "SELECT name, kind, start_line, end_line FROM symbols_past
+         WHERE path = ?1 AND retired_at = (SELECT MIN(retired_at) FROM symbols_past
+                                           WHERE path = ?1 AND retired_at >= ?2)
+           AND kind != 'module'",
+    )?;
+    let mut live = db.prepare_cached(
+        "SELECT name, kind, start_line, end_line FROM symbols
+         WHERE file_id = ?1 AND kind != 'module' ORDER BY start_line",
+    )?;
+    let mut out = Vec::with_capacity(files.len());
+    for (id, path, indexed_at) in files {
+        let span = |r: &rusqlite::Row| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?));
+        let before = past
+            .query_map(params![path, since], span)?
+            .collect::<rusqlite::Result<_>>()?;
+        let now = live
+            .query_map([id], span)?
+            .collect::<rusqlite::Result<_>>()?;
+        out.push(ReadFile {
+            path,
+            indexed_at,
+            before,
+            now,
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

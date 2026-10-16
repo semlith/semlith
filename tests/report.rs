@@ -34,7 +34,11 @@ fn cli(store: &Path, args: &[&str]) -> String {
 /// equality is about. Everything else is.
 fn without_the_stamp(text: &str) -> String {
     text.lines()
-        .filter(|line| !line.contains("Generated 2") && !line.contains("\"generated\""))
+        .filter(|line| {
+            !line.contains("Generated 2")
+                && !line.contains("\"generated")
+                && !line.contains("\"to\":")
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -158,7 +162,6 @@ fn the_savings_report_states_coverage_tier_and_the_trust_strip() {
         "Coverage",
         "Tier",
         "Zero-hit",
-        "Refund rate",
         "p50",
         "p95",
         "Ledger chain",
@@ -179,14 +182,11 @@ fn the_savings_report_states_coverage_tier_and_the_trust_strip() {
     // A different model is a different price on the same tokens, and the
     // report says which model it priced at rather than leaving a bare dollar
     // figure on the page.
-    let dearer = semlith::report::generate(&fleet, "savings", "Opus 5")
-        .unwrap()
-        .render("markdown")
-        .unwrap();
-    assert!(dearer.contains("Opus 5"), "{dearer}");
+    let cheaper = semlith::report::generate(&fleet, "savings", "Sonnet 5").unwrap();
+    let dearer = semlith::report::generate(&fleet, "savings", "Opus 5").unwrap();
+    assert!(dearer.render("markdown").unwrap().contains("Opus 5"));
     assert_ne!(
-        text.lines().find(|l| l.contains("Net cost avoided")),
-        dearer.lines().find(|l| l.contains("Net cost avoided")),
+        cheaper.kpis[1].figure.value, dearer.kpis[1].figure.value,
         "the same tokens cost the same at two different prices"
     );
 }
@@ -209,7 +209,7 @@ fn an_unknown_report_names_the_ones_there_are() {
 
 // --------------------------------------------- the window and the scope
 
-use semlith::report::{Block, Report, Window};
+use semlith::report::{Block, Cell, Kind, Report, Table, Window};
 
 /// A store with one recorded retrieval and nothing indexed.
 ///
@@ -252,12 +252,9 @@ fn labels(fleet: &Fleet) -> Vec<String> {
     fleet.each().map(|(label, _)| label.to_string()).collect()
 }
 
-/// A caller that names neither gets the report 0.26.x wrote.
-///
-/// This is the whole of the minor-release promise: a script written against
-/// the old route keeps working, byte for byte.
+/// A caller that names neither gets the default window over every store.
 #[test]
-fn a_report_with_no_window_and_no_scope_is_the_one_before_it() {
+fn a_report_with_no_window_and_no_scope_is_the_default() {
     let one = tempfile::tempdir().unwrap();
     let two = tempfile::tempdir().unwrap();
     ledger_store(one.path(), "recent", 0);
@@ -267,8 +264,8 @@ fn a_report_with_no_window_and_no_scope_is_the_one_before_it() {
 
     for (kind, _) in semlith::report::KINDS {
         let old = semlith::report::generate(&fleet, kind, "Sonnet 5").unwrap();
-        let new =
-            semlith::report::generate_over(&fleet, kind, "Sonnet 5", Window::Unset, &[]).unwrap();
+        let default = semlith::report::window_of(None).unwrap();
+        let new = semlith::report::generate_over(&fleet, kind, "Sonnet 5", default, &[]).unwrap();
         assert_eq!(
             without_the_stamp(&old.render("markdown").unwrap()),
             without_the_stamp(&new.render("markdown").unwrap()),
@@ -340,9 +337,9 @@ fn each_window_changes_the_report() {
             .iter()
             .map(|(name, _)| {
                 let window = semlith::report::window_of(Some(name)).unwrap();
-                semlith::report::generate_over(&fleet, kind, "Sonnet 5", window, &[])
-                    .unwrap()
-                    .window
+                let report =
+                    semlith::report::generate_over(&fleet, kind, "Sonnet 5", window, &[]).unwrap();
+                report.window.label
             })
             .collect();
         assert_eq!(
@@ -366,7 +363,7 @@ fn each_scope_changes_the_report() {
     assert_eq!(open.len(), 2, "two stores did not open: {open:?}");
 
     let audit = |only: &[String]| {
-        semlith::report::generate_over(&fleet, "access", "Sonnet 5", Window::Unset, only).unwrap()
+        semlith::report::generate_over(&fleet, "access", "Sonnet 5", Window::All, only).unwrap()
     };
     let both = audit(&[]);
     assert_eq!(both.stores, open);
@@ -398,7 +395,7 @@ fn each_scope_changes_the_report() {
         &fleet,
         "access",
         "Sonnet 5",
-        Window::Unset,
+        Window::All,
         &["not-a-store".to_string()],
     )
     .unwrap_err()
@@ -414,40 +411,51 @@ fn each_scope_changes_the_report() {
 
 /// A report long enough to need more than one page.
 fn long_report() -> Report {
-    let rows: Vec<Vec<String>> = (0..240)
+    let rows: Vec<Vec<Cell>> = (0..240)
         .map(|i| {
             vec![
-                format!("2026-09-{:02} 10:00:00", (i % 28) + 1),
-                format!("/a/very/long/path/without/spaces/module-{i}/generated-source-file.rs"),
-                "semlith".to_string(),
+                Cell::text(format!("2026-09-{:02} 10:00:00", (i % 28) + 1)),
+                Cell::text(format!(
+                    "/a/very/long/path/without/spaces/module-{i}/generated-source-file.rs"
+                )),
+                Cell::text("semlith"),
             ]
         })
         .collect();
-    Report {
-        kind: "change",
-        title: "Change brief".into(),
-        generated: "2026-09-20 10:00:00 +05:30".into(),
-        stores: vec!["semlith".into()],
-        window: "the last 7 days".into(),
-        blocks: vec![
-            Block::Text {
-                text: "Files this machine re-read, newest first — re-read, not rewritten.".into(),
-            },
-            Block::Facts {
-                facts: vec![(
-                    "Files re-read".into(),
-                    "240".into(),
-                    "the last 7 days".into(),
-                )],
-            },
-            Block::Table {
-                title: "Re-read".into(),
-                columns: vec!["when".into(), "file".into(), "store".into()],
-                rows,
-            },
-        ],
-        origin: None,
-    }
+    let column = |key: &'static str, label: &str, kind: Kind| semlith::report::Column {
+        key,
+        label: label.into(),
+        kind,
+    };
+    let mut report = Report::new("change", "Change brief");
+    report.stores = vec!["semlith".into()];
+    report.window.label = "Last 7 days".into();
+    report.kpis = vec![semlith::report::Kpi {
+        label: "Files re-read".into(),
+        figure: semlith::report::Figure::count(240, "files", "Last 7 days"),
+        lead: true,
+    }];
+    report.blocks = vec![
+        Block::Note {
+            text: "Files this machine re-read, newest first — re-read, not rewritten.".into(),
+        },
+        Block::Table(Table {
+            id: "re_read",
+            title: "Re-read".into(),
+            meta: "newest first".into(),
+            columns: vec![
+                column("when", "When", Kind::Id),
+                column("file", "File", Kind::Id),
+                column("store", "Store", Kind::Text),
+            ],
+            rows,
+            total: None,
+            more: 0,
+            note: None,
+            empty: "Nothing.".into(),
+        }),
+    ];
+    report
 }
 
 /// The number of pages the document's own page tree claims.
@@ -469,14 +477,17 @@ fn all_five_formats_render_from_the_one_structure() {
     for format in semlith::report::ALL_FORMATS {
         let bytes = report.render_bytes(format).unwrap();
         assert!(!bytes.is_empty(), "{format} rendered nothing");
-        if format == semlith::report::PDF {
+        if format == semlith::report::PDF || format == semlith::report::CSV {
             continue;
         }
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains("Change brief"), "{format} lost the title");
         assert!(text.contains("module-239"), "{format} lost the last row");
-        assert!(text.contains("the last 7 days"), "{format} lost the window");
+        assert!(text.contains("Last 7 days"), "{format} lost the window");
     }
+    let csv = report.render_table("re_read").unwrap();
+    assert!(csv.starts_with("when,file,store\n"), "{csv}");
+    assert!(csv.contains("module-239"));
 }
 
 #[test]
@@ -503,29 +514,16 @@ fn the_pdf_is_valid_paginated_and_its_text_comes_back_out() {
     let text = pdf_extract::extract_text_from_mem(&pdf).expect("the PDF parses");
     for wanted in [
         "Change brief",
-        "the last 7 days",
-        "Files re-read",
+        "FILES RE-READ",
         "module-0/",
         "module-239/",
         "Re-read",
+        "page 1 of",
     ] {
         assert!(
             text.contains(wanted),
             "the PDF does not say {wanted:?}:\n{}",
             &text[..text.len().min(1200)]
-        );
-    }
-
-    // Nothing ran off the page. 105 is the widest line the geometry allows:
-    // 504pt of content, and the smallest face on the page is Courier at 8pt,
-    // which is 4.8pt a glyph. A line longer than that would have been drawn
-    // past the right margin. The body's own 93-column bound is asserted where
-    // the columns are computed, in `report::tests`.
-    for line in text.lines() {
-        assert!(
-            line.len() <= 105,
-            "{} characters on one line: {line}",
-            line.len()
         );
     }
 }
@@ -574,23 +572,26 @@ fn the_two_content_toggles_each_change_the_generated_document() {
             .unwrap()
     };
 
+    let salt = Some([7u8; 32]);
     let plain = audit(semlith::report::Options::default());
     let attached = audit(semlith::report::Options {
         excerpts: true,
         redact: false,
+        salt,
     });
     let hidden = audit(semlith::report::Options {
         excerpts: true,
         redact: true,
+        salt,
     });
 
     // Off is the 0.26.x document: the session totals and nothing under them.
     assert!(
-        !plain.contains("## Retrievals"),
+        !plain.contains("## What each agent asked"),
         "an access report with no toggles set grew a Retrievals table:\n{plain}"
     );
     assert!(
-        attached.contains("## Retrievals"),
+        attached.contains("## What each agent asked"),
         "`Attach retrieved excerpts` did not attach anything:\n{attached}"
     );
     assert!(
@@ -655,9 +656,433 @@ fn the_two_content_toggles_each_change_the_generated_document() {
         !gaps(semlith::report::Options {
             excerpts: false,
             redact: true,
+            salt: Some([7u8; 32]),
         })
         .contains("a question nothing answers"),
         "redaction reaches the access report and not the gaps report, so a query text \
          survives in the second document a reader opens"
+    );
+}
+
+// ------------------------------------------- 0.42.0: what the reports claim
+
+/// One ledger row with every field named, backdated by `days_ago`.
+#[allow(clippy::too_many_arguments)]
+fn row(
+    dir: &Path,
+    days_ago: i64,
+    client: &str,
+    session: &str,
+    tool: &str,
+    query: &str,
+    hits: i64,
+    excerpt: i64,
+    whole: i64,
+    micros: i64,
+) {
+    let s = Semlith::open(dir, None).unwrap();
+    semlith::store::record_retrieval(
+        s.db(),
+        &semlith::store::NewRetrieval {
+            client_version: "1.0.0",
+            client,
+            session,
+            tool,
+            query,
+            hits,
+            micros,
+            excerpt_tokens: excerpt,
+            whole_file_tokens: whole,
+            stale_hits: 0,
+            tokenizer: semlith::ledger::MODEL,
+            query_id: &format!("{session}:{query}:{days_ago}"),
+        },
+    )
+    .unwrap();
+    if days_ago > 0 {
+        semlith::store::read_only(s.db(), false).unwrap();
+        s.db()
+            .execute(
+                "UPDATE retrievals SET at = at - ?1 WHERE id = (SELECT MAX(id) FROM retrievals)",
+                [days_ago * 86_400],
+            )
+            .unwrap();
+        semlith::store::read_only(s.db(), true).unwrap();
+    }
+}
+
+/// The audit's aged-store shape (R5): inside a week, one credited query and
+/// one that found nothing; forty days back, a credited query, a refund and a
+/// slow call. A savings report over a week counts the first two and nothing
+/// else, on every line.
+fn aged_store(dir: &Path) {
+    row(
+        dir,
+        0,
+        "claude-code",
+        "s1",
+        "search",
+        "recent",
+        2,
+        120,
+        3_000,
+        5_000,
+    );
+    row(
+        dir,
+        0,
+        "claude-code",
+        "s1",
+        "search",
+        "nothing",
+        0,
+        0,
+        0,
+        7_000,
+    );
+    row(
+        dir,
+        40,
+        "claude-code",
+        "s0",
+        "search",
+        "ancient",
+        1,
+        50,
+        9_000,
+        900_000,
+    );
+    let refund = semlith::ledger::RAW_READ;
+    row(
+        dir,
+        40,
+        "claude-code",
+        "s0",
+        refund,
+        "src/old.rs",
+        0,
+        0,
+        4_000,
+        0,
+    );
+}
+
+/// A headline or secondary figure's value, by label.
+fn figure(json: &serde_json::Value, label: &str) -> serde_json::Value {
+    let kpi = json["kpis"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["label"] == label);
+    let fact = json["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["facts"].as_array().cloned().unwrap_or_default())
+        .find(|f| f["label"] == label);
+    kpi.cloned()
+        .or(fact)
+        .unwrap_or_else(|| panic!("no figure {label} in {json}"))["value"]
+        .clone()
+}
+
+/// One cell of a table, by the table's id, the row and the column's key.
+fn cell(json: &serde_json::Value, table: &str, row: usize, key: &str) -> serde_json::Value {
+    let t = json["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == table)
+        .unwrap_or_else(|| panic!("no table {table} in {json}"));
+    let at = t["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|c| c["key"] == key)
+        .unwrap_or_else(|| panic!("no column {key} in {t}"));
+    t["rows"][row][at].clone()
+}
+
+#[test]
+fn a_windowed_savings_report_counts_only_rows_inside_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    aged_store(dir.path());
+    let fleet = Fleet::open(&[dir.path().to_path_buf()]).unwrap();
+    let report =
+        semlith::report::generate_over(&fleet, "savings", "Sonnet 5", Window::Days(7), &[])
+            .unwrap();
+    let json: serde_json::Value = serde_json::to_value(&report).unwrap();
+    // Whole less excerpt is net, on the rows the window holds: 3 000 - 120.
+    assert_eq!(cell(&json, "not_read", 0, "tokens"), 3000, "{json}");
+    assert_eq!(cell(&json, "not_read", 1, "tokens"), 120, "{json}");
+    assert_eq!(figure(&json, "Net tokens not read"), 2880, "{json}");
+    assert_eq!(
+        figure(&json, "Refunds"),
+        0,
+        "the refund is 40 days old: {json}"
+    );
+    assert_eq!(figure(&json, "Zero-hit"), 1, "{json}");
+    // The 900 ms call is outside the window, so it is not the p95.
+    assert_eq!(figure(&json, "Latency p95"), 7.0, "{json}");
+}
+
+#[test]
+fn a_windowed_access_report_counts_rows_by_their_own_time() {
+    // One session, one row today and one three days ago: a day's window holds
+    // one read, not the session's lifetime two (R4, L12).
+    let dir = tempfile::tempdir().unwrap();
+    row(
+        dir.path(),
+        0,
+        "claude-code",
+        "s1",
+        "search",
+        "today",
+        1,
+        10,
+        100,
+        1_000,
+    );
+    row(
+        dir.path(),
+        3,
+        "claude-code",
+        "s1",
+        "search",
+        "earlier",
+        1,
+        10,
+        900,
+        1_000,
+    );
+    let fleet = Fleet::open(&[dir.path().to_path_buf()]).unwrap();
+    let report =
+        semlith::report::generate_over(&fleet, "access", "Sonnet 5", Window::Days(1), &[]).unwrap();
+    let json: serde_json::Value = serde_json::to_value(&report).unwrap();
+    assert_eq!(cell(&json, "sessions", 0, "queries"), 1, "{json}");
+    assert_eq!(cell(&json, "sessions", 0, "net_tokens"), 90, "{json}");
+}
+
+#[test]
+fn a_redacted_query_is_not_its_unsalted_digest() {
+    // `detect_binary` was reversed by guessing (R7): an unkeyed digest of a
+    // symbol name is a dictionary lookup away from the name.
+    let dir = tempfile::tempdir().unwrap();
+    row(
+        dir.path(),
+        0,
+        "claude-code",
+        "s1",
+        "search",
+        "detect_binary",
+        0,
+        0,
+        0,
+        1_000,
+    );
+    let fleet = Fleet::open(&[dir.path().to_path_buf()]).unwrap();
+    let options = semlith::report::Options {
+        excerpts: true,
+        redact: true,
+        salt: Some([9u8; 32]),
+    };
+    let text =
+        semlith::report::generate_with(&fleet, "access", "Sonnet 5", Window::All, &[], options)
+            .unwrap()
+            .render("json")
+            .unwrap();
+    let unsalted = blake3::hash(b"detect_binary").to_hex()[..16].to_string();
+    assert!(!text.contains("detect_binary"), "{text}");
+    assert!(
+        !text.contains(&unsalted),
+        "the digest is the unsalted blake3 of the query: {text}"
+    );
+}
+
+#[test]
+fn the_change_brief_counts_every_file_and_a_first_index_is_not_a_re_read() {
+    // 476 = 200 + 200 + 58 + 14 + 4 per-store caps over 511 files (R3).
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let s = Semlith::open(dir.path(), None).unwrap();
+        semlith::store::read_only(s.db(), false).unwrap();
+        for i in 0..250 {
+            s.db()
+                .execute(
+                    "INSERT INTO files (path, hash, bytes, indexed_at) \
+                     VALUES (?1, 'h', 10, CAST(strftime('%s','now') AS INTEGER))",
+                    [format!("/corpus/f{i}.md")],
+                )
+                .unwrap();
+        }
+        semlith::store::read_only(s.db(), true).unwrap();
+    }
+    let fleet = Fleet::open(&[dir.path().to_path_buf()]).unwrap();
+    let report =
+        semlith::report::generate_over(&fleet, "change", "Sonnet 5", Window::Days(7), &[]).unwrap();
+    let json: serde_json::Value = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        figure(&json, "Files re-read"),
+        0,
+        "250 files indexed for the first time are not re-reads: {json}"
+    );
+    assert!(
+        report
+            .lede_plain()
+            .contains("250 files read for the first time"),
+        "{}",
+        report.lede_plain()
+    );
+}
+
+#[test]
+fn a_figure_prints_with_the_portals_grouping() {
+    // The portal prints 736,397; the reports printed 736 397.
+    let dir = tempfile::tempdir().unwrap();
+    row(
+        dir.path(),
+        0,
+        "claude-code",
+        "s1",
+        "search",
+        "q",
+        1,
+        0,
+        736_397,
+        1_000,
+    );
+    let fleet = Fleet::open(&[dir.path().to_path_buf()]).unwrap();
+    let text = semlith::report::generate_over(&fleet, "savings", "Sonnet 5", Window::All, &[])
+        .unwrap()
+        .render("markdown")
+        .unwrap();
+    assert!(text.contains("736,397"), "{text}");
+    assert!(!text.contains("736 397"), "{text}");
+}
+
+#[test]
+fn csv_and_json_carry_numbers_as_numbers() {
+    let dir = tempfile::tempdir().unwrap();
+    row(
+        dir.path(),
+        0,
+        "claude-code",
+        "s1",
+        "search",
+        "q",
+        1,
+        3,
+        736_397,
+        1_000,
+    );
+    let fleet = Fleet::open(&[dir.path().to_path_buf()]).unwrap();
+    let report =
+        semlith::report::generate_over(&fleet, "savings", "Sonnet 5", Window::All, &[]).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&report.render("json").unwrap()).unwrap();
+    assert_eq!(json["schema"], "semlith.report/2", "{json}");
+    // One table per file: the zip holds summary.csv and each table, and every
+    // file has one header row.
+    let zip = report.render_bytes("csv").unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
+    let names: Vec<String> = archive.file_names().map(str::to_string).collect();
+    for wanted in [
+        "savings-summary.csv",
+        "savings-not_read.csv",
+        "savings-by_agent.csv",
+    ] {
+        assert!(names.iter().any(|n| n == wanted), "{names:?}");
+    }
+    let mut summary = String::new();
+    std::io::Read::read_to_string(
+        &mut archive.by_name("savings-summary.csv").unwrap(),
+        &mut summary,
+    )
+    .unwrap();
+    assert_eq!(summary, report.render_table("summary").unwrap());
+    assert!(
+        summary
+            .lines()
+            .any(|l| l.split(',').any(|cell| cell == "736394")),
+        "no unformatted net figure in the CSV:\n{summary}"
+    );
+    let not_read = report.render_table("not_read").unwrap();
+    assert!(
+        not_read.starts_with("line,tokens,cost_usd,counts\n"),
+        "{not_read}"
+    );
+    assert!(
+        not_read.contains("Whole files not read,736397,"),
+        "{not_read}"
+    );
+}
+
+#[test]
+fn the_pdf_text_layer_is_the_text() {
+    // "Résumé café 東京" printed "R?sum? caf? ??" in 0.41.
+    let mut report = long_report();
+    report.blocks.insert(
+        0,
+        Block::Note {
+            text: "Résumé café 東京".into(),
+        },
+    );
+    let pdf = report.render_bytes(semlith::report::PDF).unwrap();
+    let text = pdf_extract::extract_text_from_mem(&pdf).expect("the PDF parses");
+    assert!(
+        text.contains("Résumé café 東京"),
+        "{}",
+        &text[..text.len().min(400)]
+    );
+}
+
+#[test]
+fn the_cli_and_the_portal_share_one_default_window() {
+    // The portal opened at 30 days and the CLI at everything (R11).
+    assert_eq!(
+        semlith::report::window_of(None).unwrap(),
+        Window::Days(30),
+        "no window named is not the portal's default"
+    );
+}
+
+#[test]
+fn the_pdf_embeds_plex_and_is_tagged_titled_and_bookmarked() {
+    // 0.41: base-14 Courier, not embedded, US Letter, no page numbers, no
+    // metadata, no tags (R2, item 16).
+    let pdf = long_report().render_bytes(semlith::report::PDF).unwrap();
+    let raw = String::from_utf8_lossy(&pdf);
+    assert!(!raw.contains("/Courier"), "a base-14 face");
+    for wanted in [
+        "IBMPlexSans",
+        "IBMPlexMono",
+        "/FontFile2",
+        "/ToUnicode",
+        "/Identity-H",
+        "/StructTreeRoot",
+        "/ParentTree",
+        "/MarkInfo",
+        "/Outlines",
+        "/Title ",
+        "/Author (Semlith)",
+        "/Producer (semlith ",
+        "/CreationDate",
+        "/Lang (en)",
+    ] {
+        assert!(raw.contains(wanted), "the PDF lacks {wanted}");
+    }
+    // Every font is a subset: a six-letter tag before the name.
+    let tagged = raw.match_indices("/BaseFont /").all(|(at, _)| {
+        raw[at + 11..]
+            .chars()
+            .take(7)
+            .collect::<String>()
+            .ends_with('+')
+    });
+    assert!(tagged, "a font is embedded whole rather than as a subset");
+    let text = pdf_extract::extract_text_from_mem(&pdf).unwrap();
+    let pages = page_count(&pdf);
+    assert!(
+        text.contains(&format!("page {pages} of {pages}")),
+        "no page x of y"
     );
 }

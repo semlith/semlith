@@ -132,7 +132,7 @@ fn a_due_schedule_writes_a_real_report_where_it_was_told_to() {
     let files = written(&out);
     assert_eq!(files.len(), 1, "one report, at {}", out.display());
     let name = files[0].file_name().unwrap().to_string_lossy().to_string();
-    assert!(name.starts_with("semlith-health-"), "{name}");
+    assert_eq!(name, "semlith-health.md", "one file, named by the schedule");
     assert!(name.ends_with(".md"), "{name}");
 
     let body = std::fs::read_to_string(&files[0]).unwrap();
@@ -251,6 +251,8 @@ fn two_schedules_due_at_once_do_not_run_concurrently() {
     let at = now();
     let mut one = due_now(&out, at);
     let mut two = due_now(&out, at);
+    // Its own report, so its own file: one schedule replaces one file.
+    two.kind = "gaps".into();
 
     // The slot every generator takes. Held here, a `fire` on another thread
     // must wait for it — which is what stops a scheduled run and a clicked one
@@ -333,4 +335,23 @@ fn a_restart_loses_nothing() {
     );
     assert!(restarted.due(at).is_empty());
     assert_eq!(restarted.due(at + 3600), ["s1"]);
+}
+
+#[test]
+fn a_schedule_replaces_its_one_file_in_place() {
+    // Three runs wrote three dated files (R8); the dialog and docs/portal.md
+    // say the file is replaced in place, so a tracked folder shows a diff.
+    let temp = tempfile::tempdir().unwrap();
+    let store = temp.path().join("store");
+    let out = temp.path().join("reports");
+    std::fs::create_dir_all(&out).unwrap();
+    let fleet = store_at(&store);
+    let at = now();
+    let mut schedule = due_now(&out, at);
+    fire(&mut schedule, &fleet, at);
+    fire(&mut schedule, &fleet, at + 61);
+    fire(&mut schedule, &fleet, at + 122);
+    let files = written(&out);
+    assert_eq!(files.len(), 1, "one file per schedule: {files:?}");
+    assert_eq!(schedule.last_path.as_deref(), Some(files[0].as_path()));
 }

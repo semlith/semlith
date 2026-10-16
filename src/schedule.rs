@@ -64,32 +64,41 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// `2026-09-17-190018` — the same clock [`crate::clock::local_stamp`] prints,
-/// reduced to what a filename may hold.
+/// The one file a schedule writes, replaced in place on every run:
+/// `semlith-savings-week.md`, `semlith-access-month-flask.pdf`.
 ///
-/// Derived from that one stamp rather than computed again, so the time in a
-/// report's name and the time inside the report cannot disagree, and so there
-/// is no second piece of calendar arithmetic in this crate.
-fn file_stamp(at: i64) -> String {
-    let stamp = crate::clock::local_stamp(at);
-    let (date, rest) = stamp.split_once(' ').unwrap_or((stamp.as_str(), ""));
-    let time: String = rest
-        .chars()
-        .take_while(|c| *c != ' ')
-        .filter(char::is_ascii_digit)
-        .collect();
-    format!("{date}-{time}")
-}
-
-/// The file extension one of [`crate::report::ALL_FORMATS`] is written under.
-fn extension(format: &str) -> &'static str {
-    match format {
-        "csv" => "csv",
-        "json" => "json",
-        "html" => "html",
-        crate::report::PDF => "pdf",
-        _ => "md",
+/// The Schedule dialog and docs/portal.md promise a file replaced in place, so
+/// a tracked folder shows a readable diff; 0.41 wrote a new dated file per run
+/// (three files in three minutes, R8). The name is the schedule's own
+/// options, so two schedules over different windows or stores into one
+/// folder keep apart. ponytail: two schedules identical in kind, window,
+/// scope and format into one folder share a file, which is one report written
+/// twice; give them different folders if that is ever wanted.
+fn file_name(schedule: &Schedule) -> String {
+    let mut name = format!("semlith-{}", schedule.kind);
+    if schedule.kind != "health" {
+        name.push('-');
+        name.push_str(
+            schedule
+                .window
+                .as_deref()
+                .unwrap_or(crate::report::DEFAULT_WINDOW),
+        );
     }
+    for store in &schedule.stores {
+        name.push('-');
+        name.extend(store.chars().map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        }));
+    }
+    format!(
+        "{name}.{}",
+        crate::report::Report::extension(&schedule.format)
+    )
 }
 
 /// One schedule, exactly as the file holds it.
@@ -112,6 +121,15 @@ pub struct Schedule {
     pub stores: Vec<String>,
     /// One of [`crate::report::FORMATS`].
     pub format: String,
+    /// Replace every query text with a keyed digest, as the builder's "Hash
+    /// the query text" does. 0.41 had nowhere to keep it, so a schedule saved
+    /// with it on wrote plain queries (R8).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub redact: bool,
+    /// Attach the per-retrieval rows, as the builder's "Attach the
+    /// per-retrieval rows" does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub excerpts: bool,
     /// The model the savings report prices at — the one builder toggle that
     /// changes a figure in money, which is why an unknown one is refused rather
     /// than defaulted.
@@ -159,6 +177,8 @@ impl Schedule {
             kind: kind.to_string(),
             window: None,
             stores: Vec::new(),
+            redact: false,
+            excerpts: false,
             format: format.to_string(),
             model: model.to_string(),
             every_seconds,
@@ -406,7 +426,7 @@ pub fn generating() -> MutexGuard<'static, ()> {
 pub fn fire(schedule: &mut Schedule, fleet: &crate::fleet::Fleet, now: i64) {
     let _slot = generating();
     schedule.advance(now);
-    match write_report(schedule, fleet, now) {
+    match write_report(schedule, fleet) {
         Ok(path) => {
             schedule.last_path = Some(path);
             schedule.last_error = None;
@@ -423,15 +443,20 @@ pub fn fire(schedule: &mut Schedule, fleet: &crate::fleet::Fleet, now: i64) {
 }
 
 /// The work [`fire`] records the outcome of.
-fn write_report(schedule: &Schedule, fleet: &crate::fleet::Fleet, now: i64) -> Result<PathBuf> {
+fn write_report(schedule: &Schedule, fleet: &crate::fleet::Fleet) -> Result<PathBuf> {
     schedule.check()?;
     let window = crate::report::window_of(schedule.window.as_deref())?;
-    let report = crate::report::generate_over(
+    let report = crate::report::generate_with(
         fleet,
         &schedule.kind,
         &schedule.model,
         window,
         &schedule.stores,
+        crate::report::Options {
+            excerpts: schedule.excerpts,
+            redact: schedule.redact,
+            salt: None,
+        },
     )?;
     // Bytes, not a string: a scheduled PDF is a file like any other, and
     // `render_bytes` is the one renderer over the same blocks for all five
@@ -449,17 +474,15 @@ fn write_report(schedule: &Schedule, fleet: &crate::fleet::Fleet, now: i64) -> R
             schedule.dir.display()
         );
     }
-    let name = format!(
-        "semlith-{}-{}.{}",
-        schedule.kind,
-        file_stamp(now),
-        extension(&schedule.format)
-    );
-    let path = schedule.dir.join(name);
-    // A new file, 0600, renamed into place: a name somebody planted as a
-    // symbolic link in a shared folder is replaced, not followed, and the
-    // report — query text included — is not left world-readable (audit S23).
-    let temp = schedule.dir.join(format!(".{}.part", std::process::id()));
+    let name = file_name(schedule);
+    let path = schedule.dir.join(&name);
+    // A new file, 0600, renamed over the last run's: a reader never sees half
+    // a report, a name somebody planted as a symbolic link in a shared folder
+    // is replaced rather than followed, and the report — query text included —
+    // is not left world-readable (audit S23).
+    let temp = schedule
+        .dir
+        .join(format!(".{name}.{}.part", std::process::id()));
     let _ = std::fs::remove_file(&temp);
     {
         let mut options = std::fs::OpenOptions::new();
@@ -692,13 +715,19 @@ mod tests {
     }
 
     #[test]
-    fn a_file_stamp_is_the_clock_stamp_without_the_punctuation() {
-        let stamp = file_stamp(1_789_653_120);
-        assert_eq!(stamp.len(), "2026-09-17-135200".len(), "{stamp}");
-        assert!(
-            stamp.chars().all(|c| c.is_ascii_digit() || c == '-'),
-            "{stamp}"
-        );
+    fn a_schedule_names_its_one_file_by_its_options() {
+        let mut s = weekly();
+        s.kind = "savings".into();
+        assert_eq!(file_name(&s), "semlith-savings-month.md");
+        s.window = Some("week".into());
+        s.stores = vec!["flask".into(), "my store".into()];
+        s.format = "pdf".into();
+        assert_eq!(file_name(&s), "semlith-savings-week-flask-my-store.pdf");
+        s.format = "csv".into();
+        assert!(file_name(&s).ends_with(".zip"));
+        s.kind = "health".into();
+        s.stores.clear();
+        assert_eq!(file_name(&s), "semlith-health.zip");
     }
 
     #[test]

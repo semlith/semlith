@@ -3686,6 +3686,7 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
     let options = crate::report::Options {
         excerpts: flag("excerpts"),
         redact: flag("redact"),
+        ..Default::default()
     };
 
     // A PDF is bytes and cannot ride inside the JSON envelope the other four
