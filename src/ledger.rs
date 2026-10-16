@@ -862,6 +862,29 @@ pub struct Tier {
     pub word: &'static str,
 }
 
+/// One client's share of the retrievals.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ClientFigures {
+    pub client: String,
+    /// The newest version this client recorded under.
+    pub version: String,
+    pub queries: i64,
+    pub credited: i64,
+    pub net_tokens: i64,
+}
+
+/// A question nothing answered.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct GapFigures {
+    pub query: String,
+    /// Retrievals that asked it.
+    pub asked: i64,
+    /// When it was last asked, unix seconds.
+    pub last: i64,
+    /// The stores it asked.
+    pub stores: Vec<String>,
+}
+
 /// Person-made retrievals, kept beside the agents' figures rather than in them.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct HumanFigures {
@@ -899,9 +922,13 @@ pub struct Figures {
     pub clients: Vec<String>,
     /// Retrievals per client.
     pub by_client: std::collections::BTreeMap<String, i64>,
+    /// Each client's share, as the reports print it.
+    pub client_figures: Vec<ClientFigures>,
     pub sessions: i64,
     /// Whole-file reads the steering hook saw instead of a retrieval.
     pub refunds: i64,
+    /// How many retrievals measured work, which the percentiles are over.
+    pub timed: i64,
     /// Median and 95th percentile, over retrievals that measured work.
     pub p50_micros: i64,
     pub p95_micros: i64,
@@ -909,8 +936,8 @@ pub struct Figures {
     pub human: HumanFigures,
     pub stores: Vec<StoreFigures>,
     pub per_session: Vec<SessionFigures>,
-    /// The questions that found nothing, by how many retrievals asked them.
-    pub zero_hit_queries: Vec<(String, i64)>,
+    /// The questions that found nothing, most asked first.
+    pub gaps: Vec<GapFigures>,
 }
 
 /// The figures over `members` (each store's label and database) in `window`.
@@ -954,7 +981,11 @@ pub fn figures(
         BTreeMap<String, i64>,
     );
     let mut sessions: BTreeMap<(String, String), Conversation> = BTreeMap::new();
-    let mut questions: BTreeMap<String, (String, bool)> = BTreeMap::new();
+    // Per retrieval: its text, whether anything answered, when, which stores.
+    let mut questions: BTreeMap<String, (String, bool, i64, BTreeSet<String>)> = BTreeMap::new();
+    // Per client: version, retrievals, credited, net.
+    type Client = (String, BTreeSet<String>, BTreeSet<String>, i64);
+    let mut clients: BTreeMap<String, Client> = BTreeMap::new();
     for (label, _) in members {
         stores.entry(label.to_string()).or_default().2.store = label.to_string();
     }
@@ -986,8 +1017,19 @@ pub fn figures(
         }
         let q = questions
             .entry(k.clone())
-            .or_insert_with(|| (f.query.clone(), false));
+            .or_insert_with(|| (f.query.clone(), false, 0, BTreeSet::new()));
         q.1 |= f.hits > 0;
+        q.2 = q.2.max(f.at);
+        q.3.insert(label.clone());
+        let c = clients.entry(f.client.clone()).or_default();
+        if !f.client_version.is_empty() {
+            c.0 = f.client_version.clone();
+        }
+        c.1.insert(k.clone());
+        if f.hits > 0 {
+            c.2.insert(k.clone());
+            c.3 += f.whole_file_tokens - f.excerpt_tokens;
+        }
         let st = stores.entry(label.clone()).or_default();
         st.0.insert(k.clone());
         let conversation = sessions
@@ -1053,6 +1095,17 @@ pub fn figures(
     out.sessions = sessions.len() as i64;
     let mut spent: Vec<i64> = micros.into_values().collect();
     spent.sort_unstable();
+    out.timed = spent.len() as i64;
+    out.client_figures = clients
+        .into_iter()
+        .map(|(client, (version, keys, credited, net))| ClientFigures {
+            client,
+            version,
+            queries: keys.len() as i64,
+            credited: credited.len() as i64,
+            net_tokens: net,
+        })
+        .collect();
     out.p50_micros = quantile(&spent, 0.50);
     out.p95_micros = quantile(&spent, 0.95);
     let one = |set: &BTreeSet<&'static str>, none: &'static str| match set.len() {
@@ -1096,15 +1149,26 @@ pub fn figures(
         .collect();
     per_session.sort_by_key(|s| std::cmp::Reverse(s.last));
     out.per_session = per_session;
-    let mut gaps: BTreeMap<String, i64> = BTreeMap::new();
-    for (query, found) in questions.into_values() {
-        if !found {
-            *gaps.entry(query).or_default() += 1;
+    let mut gaps: BTreeMap<String, GapFigures> = BTreeMap::new();
+    for (query, found, last, asked_of) in questions.into_values() {
+        if found {
+            continue;
+        }
+        let gap = gaps.entry(query.clone()).or_insert_with(|| GapFigures {
+            query,
+            ..Default::default()
+        });
+        gap.asked += 1;
+        gap.last = gap.last.max(last);
+        for store in asked_of {
+            if !gap.stores.contains(&store) {
+                gap.stores.push(store);
+            }
         }
     }
-    let mut gaps: Vec<(String, i64)> = gaps.into_iter().collect();
-    gaps.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    out.zero_hit_queries = gaps;
+    let mut gaps: Vec<GapFigures> = gaps.into_values().collect();
+    gaps.sort_by(|a, b| b.asked.cmp(&a.asked).then_with(|| a.query.cmp(&b.query)));
+    out.gaps = gaps;
     Ok(out)
 }
 
@@ -1462,7 +1526,8 @@ mod tests {
         assert_eq!(f.sessions, 2);
         assert_eq!(f.human.queries, 1);
         assert_eq!(f.human.net_tokens, 300 - 30);
-        assert_eq!(f.zero_hit_queries, vec![("none".to_string(), 1)]);
+        let gaps: Vec<(&str, i64)> = f.gaps.iter().map(|g| (g.query.as_str(), g.asked)).collect();
+        assert_eq!(gaps, vec![("none", 1)]);
         assert_eq!(f.p50_micros, 1000);
         assert_eq!(f.tier.excerpt, MODEL);
         assert_eq!(f.tier.whole, store::BASIS_TEXT);

@@ -1128,179 +1128,43 @@ fn recompute(ctx: &Ctx<'_>, kind: &str, verify: bool) -> Block {
 
 // ------------------------------------------------------- the ledger tally
 
-/// Tools whose rows are not queries: a refund (the hook saw a whole-file
-/// read), a note, a refusal, and an acceptance or its revocation. They stay
-/// out of every query count, coverage, the saving and the gaps; refunds are
-/// counted on their own line.
-const NOT_QUERIES: [&str; 5] = [
-    crate::ledger::RAW_READ,
-    "note",
-    "refused",
-    "accept",
-    "revoke",
-];
-
-/// Clients that are a person rather than an agent: recorded, listed as human
-/// searches, and kept out of what agents did not read.
-const HUMAN: [&str; 2] = ["cli", "portal"];
-
-/// A question nothing answered: times asked, last asked, the stores asked.
-type Unanswered = (i64, i64, BTreeSet<String>);
-
-/// Every figure a ledger report prints, from the rows inside the window.
+/// Every figure a ledger report prints, and the rows it may attach.
 ///
-/// The one place the reports count the ledger. ponytail: a report-local
-/// aggregation over the rows; when `ledger.rs` grows the shared aggregation
-/// every surface renders (0.42.0 item 5), this function is re-pointed at it
-/// and nothing that renders a figure changes.
-#[derive(Default)]
+/// The figures are `ledger::figures` — the one aggregation the Ledger page,
+/// Home, `semlith ledger` and `semlith_report` print (0.42.0 item 5) — over
+/// the report's window and scope, so a report cannot count differently from
+/// the page it was exported from.
 struct Tally {
-    queries: BTreeSet<String>,
-    credited: BTreeSet<String>,
-    whole: i64,
-    excerpt: i64,
-    refunds: i64,
-    human: BTreeSet<String>,
-    micros: Vec<i64>,
-    estimated: bool,
-    clients: BTreeMap<String, ClientTally>,
-    sessions: BTreeMap<(String, String), SessionTally>,
-    /// Zero-hit agent queries by their text: times, last asked, stores.
-    unanswered: BTreeMap<String, Unanswered>,
-    /// Every agent row, newest first, for the attachment.
+    f: crate::ledger::Figures,
+    /// Every agent retrieval row in the window, newest first, for the
+    /// attachment: a listing, not a figure.
     rows: Vec<(String, crate::store::ReportRow)>,
 }
 
-#[derive(Default)]
-struct ClientTally {
-    version: String,
-    queries: BTreeSet<String>,
-    credited: BTreeSet<String>,
-    net: i64,
-}
-
-#[derive(Default)]
-struct SessionTally {
-    last: i64,
-    version: String,
-    stores: BTreeSet<String>,
-    queries: BTreeSet<String>,
-    credited: BTreeSet<String>,
-    net: i64,
-}
-
 fn tally(ctx: &Ctx<'_>) -> Result<Tally> {
-    let mut t = Tally::default();
+    let members: Vec<(&str, &rusqlite::Connection)> = ctx
+        .scope
+        .iter()
+        .map(|(label, store)| (*label, store.db()))
+        .collect();
+    let f = crate::ledger::figures(
+        &members,
+        crate::ledger::Window {
+            since: ctx.since,
+            until: None,
+        },
+        false,
+    )?;
+    let mut rows = Vec::new();
     for (label, store) in ctx.scope {
         for row in crate::store::report_rows_since(store.db(), label, ctx.since)? {
-            if row.tool == crate::ledger::RAW_READ {
-                t.refunds += 1;
-                continue;
+            if crate::ledger::is_retrieval(&row.tool) && !crate::ledger::is_human(&row.client) {
+                rows.push((label.to_string(), row));
             }
-            if NOT_QUERIES.contains(&row.tool.as_str()) {
-                continue;
-            }
-            if HUMAN.contains(&row.client.as_str()) {
-                t.human.insert(row.key.clone());
-                continue;
-            }
-            t.queries.insert(row.key.clone());
-            if row.micros > 0 {
-                t.micros.push(row.micros);
-            }
-            let net = if row.hits > 0 {
-                row.whole_file_tokens - row.excerpt_tokens
-            } else {
-                0
-            };
-            if row.hits > 0 {
-                t.credited.insert(row.key.clone());
-                t.whole += row.whole_file_tokens;
-                t.excerpt += row.excerpt_tokens;
-                t.estimated |= row.tokenizer != crate::ledger::MODEL;
-            }
-            let client = t.clients.entry(row.client.clone()).or_default();
-            client.queries.insert(row.key.clone());
-            if !row.client_version.is_empty() {
-                client.version = row.client_version.clone();
-            }
-            if row.hits > 0 {
-                client.credited.insert(row.key.clone());
-            }
-            client.net += net;
-            let session = t
-                .sessions
-                .entry((row.session.clone(), row.client.clone()))
-                .or_default();
-            session.last = session.last.max(row.at);
-            session.stores.insert(label.to_string());
-            session.queries.insert(row.key.clone());
-            if !row.client_version.is_empty() {
-                session.version = row.client_version.clone();
-            }
-            if row.hits > 0 {
-                session.credited.insert(row.key.clone());
-            }
-            session.net += net;
-            t.rows.push((label.to_string(), row));
         }
     }
-    // A query is answered if any store answered it; zero-hit is the rest,
-    // counted once however many stores it asked.
-    for (label, row) in &t.rows {
-        if !t.credited.contains(&row.key) {
-            let entry = t
-                .unanswered
-                .entry(row.query.clone())
-                .or_insert((0, 0, BTreeSet::new()));
-            entry.0 += 1;
-            entry.1 = entry.1.max(row.at);
-            entry.2.insert(label.clone());
-        }
-    }
-    // A multi-store query is several rows and one ask: count times once per key.
-    for (query, entry) in t.unanswered.iter_mut() {
-        let keys: BTreeSet<&str> = t
-            .rows
-            .iter()
-            .filter(|(_, r)| &r.query == query && !t.credited.contains(&r.key))
-            .map(|(_, r)| r.key.as_str())
-            .collect();
-        entry.0 = keys.len() as i64;
-    }
-    t.micros.sort_unstable();
-    t.rows
-        .sort_by(|a, b| b.1.at.cmp(&a.1.at).then(b.1.id.cmp(&a.1.id)));
-    Ok(t)
-}
-
-impl Tally {
-    fn percentile(&self, q: f64) -> i64 {
-        if self.micros.is_empty() {
-            return 0;
-        }
-        self.micros[((self.micros.len() as f64 - 1.0) * q).round() as usize]
-    }
-
-    fn net(&self) -> i64 {
-        self.whole - self.excerpt
-    }
-
-    fn zero_hit(&self) -> i64 {
-        (self.queries.len() - self.credited.len()) as i64
-    }
-
-    fn tier(&self) -> &'static str {
-        if self.credited.is_empty() || self.estimated {
-            "modelled"
-        } else {
-            "measured"
-        }
-    }
-
-    fn ratio(&self) -> Option<f64> {
-        (self.excerpt > 0).then(|| self.whole as f64 / self.excerpt as f64)
-    }
+    rows.sort_by(|a, b| b.1.at.cmp(&a.1.at).then(b.1.id.cmp(&a.1.id)));
+    Ok(Tally { f, rows })
 }
 
 fn s(n: usize, one: &str, many: &str) -> String {
@@ -1315,8 +1179,8 @@ fn savings(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
     let t = tally(ctx)?;
     let chain = chain_of(ctx)?;
     let cost = |tokens: i64| tokens as f64 / 1e6 * per_million;
-    let (queries, credited) = (t.queries.len(), t.credited.len());
-    let ratio = t.ratio();
+    let (queries, credited) = (t.f.queries as usize, t.f.credited as usize);
+    let ratio = t.f.ratio;
 
     report.lede = if queries == 0 {
         runs(&[
@@ -1363,7 +1227,7 @@ fn savings(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
         Kpi {
             label: "Net tokens not read".into(),
             figure: Figure::count(
-                t.net(),
+                t.f.net_tokens,
                 "tokens",
                 format!(
                     "whole-file less excerpt, {}",
@@ -1374,7 +1238,7 @@ fn savings(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
         },
         Kpi {
             label: "Net cost avoided".into(),
-            figure: Figure::usd(cost(t.net()), format!("at {name} input price")),
+            figure: Figure::usd(cost(t.f.net_tokens), format!("at {name} input price")),
             lead: false,
         },
         Kpi {
@@ -1410,23 +1274,23 @@ fn savings(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
         rows: vec![
             vec![
                 Cell::text("Whole files not read"),
-                Cell::int(t.whole),
-                Cell::usd(cost(t.whole)),
+                Cell::int(t.f.whole_file_tokens),
+                Cell::usd(cost(t.f.whole_file_tokens)),
                 Cell::text(
                     "reading every file a query was answered from, counted as the agent would read it",
                 ),
             ],
             vec![
                 Cell::text("Excerpts read instead"),
-                Cell::int(t.excerpt),
-                Cell::usd(cost(t.excerpt)),
+                Cell::int(t.f.excerpt_tokens),
+                Cell::usd(cost(t.f.excerpt_tokens)),
                 Cell::text("what the answers actually cost"),
             ],
         ],
         total: Some(vec![
             Cell::text("Net not read"),
-            Cell::int(t.net()),
-            Cell::usd(cost(t.net())),
+            Cell::int(t.f.net_tokens),
+            Cell::usd(cost(t.f.net_tokens)),
             Cell::text(format!(
                 "over {}",
                 s(credited, "credited query", "credited queries")
@@ -1436,18 +1300,22 @@ fn savings(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
         note: Some(format!(
             "Refunds ({}) and zero-hit queries ({}) are counted on their own lines below and never in the saving.",
             s(
-                t.refunds as usize,
+                t.f.refunds as usize,
                 "file an agent read whole anyway",
                 "files an agent read whole anyway"
             ),
-            num::int(t.zero_hit())
+            num::int(t.f.zero_hit)
         )),
         empty: "Nothing recorded in this window.".into(),
     };
 
-    let mut agents: Vec<(&String, &ClientTally)> = t.clients.iter().collect();
-    agents.sort_by(|a, b| b.1.net.cmp(&a.1.net).then(a.0.cmp(b.0)));
-    let total_net = t.net().max(1);
+    let mut agents: Vec<&crate::ledger::ClientFigures> = t.f.client_figures.iter().collect();
+    agents.sort_by(|a, b| {
+        b.net_tokens
+            .cmp(&a.net_tokens)
+            .then(a.client.cmp(&b.client))
+    });
+    let total_net = t.f.net_tokens.max(1);
     let by_agent = Table {
         id: "by_agent",
         title: "By agent".into(),
@@ -1462,23 +1330,19 @@ fn savings(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
         ],
         rows: agents
             .iter()
-            .map(|(client, c)| {
-                let q = c.queries.len() as f64;
+            .map(|c| {
+                let q = c.queries as f64;
                 vec![
-                    Cell::text(client.as_str()),
+                    Cell::text(c.client.as_str()),
                     if c.version.is_empty() {
                         Cell::empty()
                     } else {
                         Cell::text(&c.version)
                     },
-                    Cell::int(c.queries.len() as i64),
-                    Cell::share(if q == 0.0 {
-                        0.0
-                    } else {
-                        c.credited.len() as f64 / q
-                    }),
-                    Cell::int(c.net),
-                    Cell::share(c.net.max(0) as f64 / total_net as f64),
+                    Cell::int(c.queries),
+                    Cell::share(if q == 0.0 { 0.0 } else { c.credited as f64 / q }),
+                    Cell::int(c.net_tokens),
+                    Cell::share(c.net_tokens.max(0) as f64 / total_net as f64),
                 ]
             })
             .collect(),
@@ -1488,14 +1352,14 @@ fn savings(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
         empty: "No agent asked anything in this window.".into(),
     };
 
-    let refunds_over = if t.refunds > 0 {
+    let refunds_over = if t.f.refunds > 0 {
         "files read whole anyway · steering hook, measured"
     } else {
         "a floor: no steering hook reported a whole-file read here"
     };
     let over_queries = format!(
         "over {} in the window",
-        s(t.micros.len(), "query", "queries")
+        s(t.f.timed as usize, "query", "queries")
     );
     let facts = Block::Facts {
         title: "Counted alongside".into(),
@@ -1503,7 +1367,7 @@ fn savings(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
         facts: vec![
             Fact {
                 label: "Refunds".into(),
-                figure: Figure::count(t.refunds, "files", refunds_over),
+                figure: Figure::count(t.f.refunds, "files", refunds_over),
             },
             Fact {
                 label: "Zero-hit".into(),
@@ -1511,11 +1375,11 @@ fn savings(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
                     let share = if queries == 0 {
                         0.0
                     } else {
-                        t.zero_hit() as f64 / queries as f64
+                        t.f.zero_hit as f64 / queries as f64
                     };
-                    let display = format!("{} · {}", num::int(t.zero_hit()), num::pct(share));
+                    let display = format!("{} · {}", num::int(t.f.zero_hit), num::pct(share));
                     Figure::count(
-                        t.zero_hit(),
+                        t.f.zero_hit,
                         "queries",
                         "queries the corpus could not answer",
                     )
@@ -1525,8 +1389,8 @@ fn savings(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
             Fact {
                 label: "Tier".into(),
                 figure: Figure::text(
-                    t.tier(),
-                    if t.tier() == "measured" {
+                    t.f.tier.word,
+                    if t.f.tier.word == "measured" {
                         "both sides counted with the store's tokenizer"
                     } else {
                         "some rows estimated at four characters a token"
@@ -1535,16 +1399,16 @@ fn savings(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
             },
             Fact {
                 label: "Latency p50".into(),
-                figure: Figure::ms(t.percentile(0.50), &over_queries),
+                figure: Figure::ms(t.f.p50_micros, &over_queries),
             },
             Fact {
                 label: "Latency p95".into(),
-                figure: Figure::ms(t.percentile(0.95), &over_queries),
+                figure: Figure::ms(t.f.p95_micros, &over_queries),
             },
             Fact {
                 label: "Human searches".into(),
                 figure: Figure::count(
-                    t.human.len() as i64,
+                    t.f.human.queries,
                     "queries",
                     "portal and CLI, recorded, not counted as agent saving",
                 ),
@@ -1575,8 +1439,8 @@ const ATTACHED: usize = 500;
 fn access(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
     let t = tally(ctx)?;
     let chain = chain_of(ctx)?;
-    let agents: BTreeSet<&str> = t.sessions.keys().map(|(_, c)| c.as_str()).collect();
-    let sessions = t.sessions.len();
+    let agents: BTreeSet<&str> = t.f.per_session.iter().map(|s| s.client.as_str()).collect();
+    let sessions = t.f.per_session.len();
 
     report.lede = {
         let sessions_text = s(sessions, "session", "sessions");
@@ -1633,24 +1497,21 @@ fn access(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
         Kpi {
             label: "Queries".into(),
             figure: Figure::count(
-                t.queries.len() as i64,
+                t.f.queries,
                 "queries",
-                format!(
-                    "{} answered with excerpts",
-                    num::int(t.credited.len() as i64)
-                ),
+                format!("{} answered with excerpts", num::int(t.f.credited)),
             ),
             lead: false,
         },
         Kpi {
             label: "Read whole".into(),
-            figure: Figure::count(t.refunds, "files", "refunds seen by the steering hook"),
+            figure: Figure::count(t.f.refunds, "files", "refunds seen by the steering hook"),
             lead: false,
         },
         Kpi {
             label: "Human searches".into(),
             figure: Figure::count(
-                t.human.len() as i64,
+                t.f.human.queries,
                 "queries",
                 "portal and CLI · not agent sessions",
             ),
@@ -1658,8 +1519,8 @@ fn access(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
         },
     ];
 
-    let mut rows: Vec<(&(String, String), &SessionTally)> = t.sessions.iter().collect();
-    rows.sort_by_key(|r| std::cmp::Reverse(r.1.last));
+    // Newest first, as the aggregation orders them.
+    let rows: Vec<&crate::ledger::SessionFigures> = t.f.per_session.iter().collect();
     let sessions_table = Table {
         id: "sessions",
         title: "Sessions".into(),
@@ -1676,24 +1537,24 @@ fn access(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
         ],
         rows: rows
             .iter()
-            .map(|((session, client), st)| {
+            .map(|st| {
                 vec![
                     Cell::stamp(st.last),
-                    if session.is_empty() {
+                    if st.session.is_empty() {
                         Cell::empty()
                     } else {
-                        Cell::text(session.as_str())
+                        Cell::text(st.session.as_str())
                     },
-                    Cell::text(client.as_str()),
-                    if st.version.is_empty() {
+                    Cell::text(st.client.as_str()),
+                    if st.client_version.is_empty() {
                         Cell::empty()
                     } else {
-                        Cell::text(&st.version)
+                        Cell::text(&st.client_version)
                     },
-                    Cell::text(st.stores.iter().cloned().collect::<Vec<_>>().join(" · ")),
-                    Cell::int(st.queries.len() as i64),
-                    Cell::int((st.queries.len() - st.credited.len()) as i64),
-                    Cell::int(st.net),
+                    Cell::text(st.stores.join(" · ")),
+                    Cell::int(st.queries),
+                    Cell::int(st.zero_hit),
+                    Cell::int(st.net_tokens),
                 ]
             })
             .collect(),
@@ -2245,11 +2106,11 @@ const GAPS_LISTED: usize = 50;
 
 fn gaps(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
     let t = tally(ctx)?;
-    let mut asked: Vec<(&String, &Unanswered)> = t.unanswered.iter().collect();
-    asked.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(b.1.1.cmp(&a.1.1)));
-    let times: i64 = asked.iter().map(|(_, e)| e.0).sum();
+    // Most asked first, as the aggregation orders them.
+    let asked: Vec<&crate::ledger::GapFigures> = t.f.gaps.iter().collect();
+    let times: i64 = asked.iter().map(|g| g.asked).sum();
     let mut missing = Vec::new();
-    let (mut distinct, mut several) = (0i64, 0i64);
+    let (mut distinct, mut several, mut builtins) = (0i64, 0i64, 0i64);
     for (label, store) in ctx.scope {
         let (targets, count) = crate::store::unresolved_targets(store.db(), 20)?;
         distinct += count;
@@ -2257,6 +2118,7 @@ fn gaps(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
             missing.push(vec![Cell::text(name), Cell::int(edges), Cell::text(*label)]);
         }
         several += crate::store::names_with_several_definitions(store.db())?;
+        builtins += crate::store::builtin_targets(store.db())?;
     }
     missing.sort_by(|a, b| b[1].value.as_i64().cmp(&a[1].value.as_i64()));
     report.lede = {
@@ -2339,12 +2201,12 @@ fn gaps(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
             rows: asked
                 .iter()
                 .take(GAPS_LISTED)
-                .map(|(query, (times, last, stores))| {
+                .map(|g| {
                     vec![
-                        Cell::text(ctx.said(query)),
-                        Cell::int(*times),
-                        Cell::stamp(*last),
-                        Cell::text(stores.iter().cloned().collect::<Vec<_>>().join(" · ")),
+                        Cell::text(ctx.said(&g.query)),
+                        Cell::int(g.asked),
+                        Cell::stamp(g.last),
+                        Cell::text(g.stores.join(" · ")),
                     ]
                 })
                 .collect(),
@@ -2370,12 +2232,14 @@ fn gaps(ctx: &Ctx<'_>, report: &mut Report) -> Result<()> {
             rows: missing,
             total: None,
             more: 0,
-            note: Some(
-                "A call target with no definition is code this corpus does not contain: the \
-                 standard library, a dependency nobody indexed, or a typo. Standard-library names \
-                 are not filtered out."
-                    .into(),
-            ),
+            note: Some(format!(
+                "A call target with no definition is code this corpus does not contain: a \
+                 dependency nobody indexed, or a typo. Each language's builtins and standard \
+                 library ({} call {}, such as Go's len and fmt.Errorf) are left out: they are \
+                 not missing code.",
+                num::int(builtins),
+                if builtins == 1 { "target" } else { "targets" }
+            )),
             empty: "Every call target has a definition here.".into(),
         }),
         recompute(ctx, "gaps", true),
