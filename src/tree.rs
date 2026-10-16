@@ -57,12 +57,26 @@ struct File {
     chunks: i64,
     indexed_at: i64,
     symbols: usize,
+    /// Markdown headings, which are not symbols a reader opens a file for
+    /// but are what a document is made of: ripgrep's CHANGELOG read
+    /// "0 symbols" over 42 headings (2026-10-14 audit, G6).
+    headings: usize,
     firsts: Vec<String>,
     /// The size and modification time recorded at indexing, when there are.
     stamp: Option<store::Stamp>,
 }
 
 impl File {
+    /// `12 symbols`, or `42 headings` for a document with no code in it.
+    fn counted(&self) -> String {
+        let (n, what) = if self.symbols == 0 && self.headings > 0 {
+            (self.headings, "heading")
+        } else {
+            (self.symbols, "symbol")
+        };
+        format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+    }
+
     /// Whether the file on disk differs from what was indexed. Asked only for
     /// a file an answer shows, so a view of one folder does not `stat` every
     /// file in the store.
@@ -172,6 +186,7 @@ fn load(
                         .iter()
                         .filter(|d| !crate::graph::NAVIGATIONAL_KINDS.contains(&d.3.as_str()))
                         .count(),
+                    headings: defs.iter().filter(|d| d.3 == "heading").count(),
                     firsts: firsts(&defs),
                     stamp,
                     path: row.path,
@@ -329,11 +344,10 @@ fn write_dir(
             continue;
         }
         let mut line = format!(
-            "{inner}{} · {} lines · {} symbol{}",
+            "{inner}{} · {} lines · {}",
             file.name,
             file.lines,
-            file.symbols,
-            if file.symbols == 1 { "" } else { "s" }
+            file.counted()
         );
         if !file.firsts.is_empty() {
             line.push_str(&format!(" · {}", file.firsts.join(", ")));
@@ -521,6 +535,7 @@ fn one_level(
                 "name": f.name,
                 "lines": f.lines,
                 "symbols": f.symbols,
+                "headings": f.headings,
                 "chunks": f.chunks,
                 "stale": f.stale(),
                 "lang": crate::filter::language_of_path(&f.name).map(|l| l.name),
@@ -719,9 +734,24 @@ mod tests {
             chunks,
             indexed_at: 0,
             symbols: 0,
+            headings: 0,
             firsts: Vec::new(),
             stamp: None,
         }
+    }
+
+    /// A document of setext or ATX headings counts them rather than saying
+    /// "0 symbols"; a file with code says how many symbols it has.
+    #[test]
+    fn a_document_counts_its_headings() {
+        let mut changelog = file("CHANGELOG.md", 1870, 120);
+        changelog.headings = 42;
+        assert_eq!(changelog.counted(), "42 headings");
+        let mut code = file("main.rs", 400, 20);
+        code.symbols = 1;
+        code.headings = 3;
+        assert_eq!(code.counted(), "1 symbol");
+        assert_eq!(file("empty.txt", 1, 1).counted(), "0 symbols");
     }
 
     fn parts(p: &str) -> Vec<String> {
