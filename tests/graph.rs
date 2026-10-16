@@ -197,16 +197,21 @@ fn the_writer_stores_the_same_rows_for_the_same_corpus() {
     );
 }
 
+// 0.42.0 moved two pins, both measured against the 0.41.0 binary on this
+// corpus: notes.md's headings end on its last line (7), not past it (8), and
+// Lock.elm's top-level `acquire : Int` is an edge of the file's module on
+// line 11 beside the `module Lock exposing (acquire)` one on line 1, where
+// the two shared a source name and one was deduplicated away.
 const PINNED_COUNTS: [(&str, i64); 4] = [
     ("chunks", 48),
     ("fts", 48),
     ("symbols", 188),
-    ("edges", 207),
+    ("edges", 208),
 ];
 const PINNED_DIGESTS: [(&str, &str); 3] = [
     ("chunks", "64ee910ab7c594a3"),
-    ("symbols", "9b0915f8fcbf455d"),
-    ("edges", "e3214b8591ad4e4b"),
+    ("symbols", "ba65e9aaf787ebb1"),
+    ("edges", "c1cb5daaa2f6a061"),
 ];
 
 /// A graph list that fails leaves the search standing on the two lists that

@@ -834,7 +834,7 @@ Text after the fence.
     fn setext_headings_cut_and_name_sections_like_atx_ones() {
         let text = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/graph/markdown/ripgrep_changelog.md"),
+                .join("tests/fixtures/graph-audit/markdown/ripgrep_changelog.md"),
         )
         .unwrap();
         assert_eq!(heading_cuts(&text), vec![1, 6, 36, 54, 66]);

@@ -6351,7 +6351,8 @@ mod audit_tests {
     use super::*;
 
     fn fixture(name: &str) -> String {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph");
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph-audit");
         std::fs::read_to_string(root.join(name)).unwrap()
     }
 
