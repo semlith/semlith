@@ -740,6 +740,56 @@ mod tests {
         assert!(!file.remove("s9"));
     }
 
+    /// The Schedules card says any cadence: a 60 s schedule read "every 0 h"
+    /// and "next in 0m" (R8). Runs `app.js`'s own `everyWord` and `until`
+    /// under node; a machine without node skips, and says so.
+    #[test]
+    fn the_portal_says_any_cadence() {
+        let app = include_str!("portal/app.js");
+        let grab = |name: &str| -> String {
+            let at = app.find(&format!("function {name}(")).expect(name);
+            let mut depth = 0;
+            for (i, c) in app[at..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return app[at..at + i + 1].to_string();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("{name} does not end");
+        };
+        let cadences = &app[app.find("const CADENCES = [").unwrap()..];
+        let cadences = &cadences[..cadences.find("];").unwrap() + 2];
+        let script = format!(
+            "{cadences}\n{}\n{}\nconst now = Math.floor(Date.now() / 1000);\n\
+             console.log([everyWord(60), everyWord(90), everyWord(7200), everyWord(86400), \
+             until(now + 30), until(now + 60)].join('|'));",
+            grab("everyWord"),
+            grab("until")
+        );
+        let Ok(out) = std::process::Command::new("node")
+            .args(["-e", &script])
+            .output()
+        else {
+            eprintln!("skipped: no node on this machine");
+            return;
+        };
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "every 1 minute|every 90 seconds|every 2 hours|every day|in under a minute|in 1m"
+        );
+    }
+
     #[test]
     fn an_empty_set_sleeps_for_the_ceiling() {
         assert_eq!(Schedules::default().until_next(0), IDLE);

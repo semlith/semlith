@@ -502,7 +502,12 @@ fn with_remotes(state: &Arc<State>, request: &Request) -> Option<Response> {
 /// while the terminal showed another.
 fn schedules(_state: &Arc<State>) -> Response {
     match crate::schedule::Schedules::load() {
-        Ok(file) => Response::json(&serde_json::json!({ "schedules": file.schedules })),
+        // The file's own path, so the card names it rather than a
+        // `~/.semlith` a `SEMLITH_HOME` moved elsewhere.
+        Ok(file) => Response::json(&serde_json::json!({
+            "schedules": file.schedules,
+            "path": crate::home::schedules_path().ok().map(|p| crate::plain(&p.to_string_lossy())),
+        })),
         // A schedules file this binary cannot read is a report that will not be
         // written, not a reason for the page to fail to draw.
         Err(e) => error_response(&e),
@@ -565,6 +570,11 @@ fn schedule_write(state: &Arc<State>, request: &Request) -> Response {
                         .collect()
                 })
                 .unwrap_or_default();
+            // Every option the builder set: a schedule saved with "Hash the
+            // query text" on wrote plain queries in 0.41 (R8).
+            let flag = |name: &str| body.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
+            schedule.redact = flag("redact");
+            schedule.excerpts = flag("excerpts");
             // Refused before anything is written, naming what would have
             // worked. Half a schedules file is worse than none.
             if let Err(e) = schedule.check() {

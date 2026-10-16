@@ -4739,6 +4739,20 @@ button.gl-row:hover,
   overflow-y: auto;
   overflow-wrap: anywhere;
 }
+/* The rendered report: its own document in a sandboxed frame, so the frame
+   scrolls and the card around it does not. */
+.preview.report-preview {
+  padding: 0;
+  max-height: none;
+  white-space: normal;
+}
+.report-frame {
+  display: block;
+  width: 100%;
+  height: 560px;
+  border: 0;
+  background: var(--bg);
+}
 .save-line {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 120px 90px;
