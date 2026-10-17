@@ -304,7 +304,10 @@ fn unzip(archive: &Path, into: &Path, wheel: Option<&str>) -> Result<()> {
         if entry.is_dir() {
             continue;
         }
-        let Some(name) = inside(entry.name()) else {
+        let Ok(raw) = entry.name() else {
+            continue;
+        };
+        let Some(name) = inside(&raw) else {
             continue;
         };
         let target = match wheel {

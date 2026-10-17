@@ -562,7 +562,7 @@ fn unzip_libs(wheel: &Path, dir: &Path, part: &Part) -> Result<()> {
     let mut placed = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
-        let name = entry.name().to_string();
+        let name = entry.name()?.into_owned();
         let base = name.rsplit('/').next().unwrap_or_default();
         let target = if name.starts_with("nvidia/") && part.libs.contains(&base) {
             placed += 1;

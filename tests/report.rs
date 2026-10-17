@@ -1059,7 +1059,10 @@ fn csv_and_json_carry_numbers_as_numbers() {
     // file has one header row.
     let zip = report.render_bytes("csv").unwrap();
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
-    let names: Vec<String> = archive.file_names().map(str::to_string).collect();
+    let names: Vec<String> = archive
+        .file_names()
+        .map(|n| n.unwrap().into_owned())
+        .collect();
     for wanted in [
         "savings-summary.csv",
         "savings-not_read.csv",
