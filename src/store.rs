@@ -127,6 +127,12 @@ CREATE TABLE IF NOT EXISTS symbols_past (
 );
 
 CREATE INDEX IF NOT EXISTS symbols_past_name ON symbols_past(name);
+-- The change brief asks for one path's oldest retirement since a moment, per
+-- changed file. With only the name index that was two scans of the whole
+-- table per file, and on a store with 953,601 history rows `semlith report
+-- change` ran past 12 minutes without finishing (0.42.0). Additive, so an
+-- older binary opens the store and never uses it.
+CREATE INDEX IF NOT EXISTS symbols_past_path ON symbols_past(path, retired_at);
 
 -- An edge is owned by the file its *source* is in: `src` is a symbol id, and
 -- the cascade above deletes an edge when its source file is re-indexed or
@@ -3509,13 +3515,24 @@ pub struct SyncRow {
     pub session: String,
     pub tool: String,
     pub excerpt_tokens: i64,
+    /// What a saving is credited against (0.43.0, cloud audit C26): without
+    /// these a member's local use reached the org's ledger as net 0.
+    pub hits: i64,
+    pub whole_file_tokens: i64,
+    /// `measured` or `modelled`, as [`SessionRow::tier`] says it per row.
+    pub tier: &'static str,
+    /// The id one retrieval shares across stores, so the cloud counts a
+    /// cross-store call once. `None` on rows written before 0.20.2.
+    pub query_id: Option<String>,
 }
 
 /// Rows written at or after `since` and not yet sent, oldest first, at most
 /// `limit`.
 pub fn unsynced(db: &Connection, since: i64, limit: usize) -> Result<Vec<SyncRow>> {
     let mut q = db.prepare(
-        "SELECT id, at, client, COALESCE(session, ''), COALESCE(tool, ''), excerpt_tokens
+        "SELECT id, at, client, COALESCE(session, ''), COALESCE(tool, ''), excerpt_tokens,
+                hits, whole_file_tokens, tokenizer IS NOT NULL AND tokenizer <> 'chars4',
+                query_id
            FROM retrievals
           WHERE synced_at IS NULL AND at >= ?1
           ORDER BY id LIMIT ?2",
@@ -3528,6 +3545,10 @@ pub fn unsynced(db: &Connection, since: i64, limit: usize) -> Result<Vec<SyncRow
             session: r.get(3)?,
             tool: r.get(4)?,
             excerpt_tokens: r.get(5)?,
+            hits: r.get(6)?,
+            whole_file_tokens: r.get(7)?,
+            tier: if r.get(8)? { "measured" } else { "modelled" },
+            query_id: r.get(9)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -5976,6 +5997,36 @@ pub fn files_read_since(db: &Connection, since: i64) -> Result<Vec<ReadFile>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The change brief's history lookup searches the path index rather than
+    /// scanning symbols_past, which never finished on the owner's store.
+    #[test]
+    fn the_change_briefs_history_lookup_uses_the_path_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir.path().join("s.db")).unwrap();
+        let plan: Vec<String> = db
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT name, kind, start_line, end_line FROM symbols_past
+                  WHERE path = ?1 AND retired_at = (SELECT MIN(retired_at) FROM symbols_past
+                                                    WHERE path = ?1 AND retired_at >= ?2)
+                    AND kind != 'module'",
+            )
+            .unwrap()
+            .query_map(params!["/a.rs", 0], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .all(|step| !step.starts_with("SCAN symbols_past")),
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter().any(|step| step.contains("symbols_past_path")),
+            "{plan:?}"
+        );
+    }
 
     /// Several connections opening one new store at the same moment, as the
     /// daemon's index route, its watcher and a CLI do (#132). Before the open

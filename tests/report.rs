@@ -207,6 +207,36 @@ fn an_unknown_report_names_the_ones_there_are() {
     assert!(said.contains("gaps"), "{said}");
 }
 
+#[test]
+fn a_report_out_folder_is_made_and_the_file_is_named() {
+    // Cloud audit C30: `--out ./reports/` was "No such file or directory"
+    // when missing and "Is a directory" when there.
+    let store = tempfile::tempdir().unwrap();
+    ledger_store(store.path(), "s1", 0);
+    let work = tempfile::tempdir().unwrap();
+    let folder = work.path().join("reports");
+    for (arg, exists) in [
+        (format!("{}/", folder.display()), false),
+        (folder.display().to_string(), true),
+    ] {
+        assert_eq!(folder.is_dir(), exists);
+        let said = cli(
+            store.path(),
+            &["report", "savings", "--format", "md", "--out", &arg],
+        );
+        let file = folder.join("semlith-savings-month.md");
+        assert!(file.is_file(), "{said}");
+        assert!(said.contains("semlith-savings-month.md"), "{said}");
+    }
+    // A file path is still a file path.
+    let file = work.path().join("mine.md");
+    cli(
+        store.path(),
+        &["report", "savings", "--out", file.to_str().unwrap()],
+    );
+    assert!(file.is_file());
+}
+
 // --------------------------------------------- the window and the scope
 
 use semlith::report::{Block, Cell, Kind, Report, Table, Window};
@@ -900,6 +930,51 @@ fn a_redacted_query_is_not_its_unsalted_digest() {
 }
 
 #[test]
+fn sk31_a_formula_query_reaches_every_csv_table_as_text() {
+    // Audit SK31 (2026-10-17): a typed report's CSV never hands a spreadsheet
+    // a formula. Every cell of every table goes through csv_cell; this pins
+    // the typed path, where the query is an agent's and so anyone's.
+    let dir = tempfile::tempdir().unwrap();
+    let formula = r#"=HYPERLINK("https://example.com","x")"#;
+    row(
+        dir.path(),
+        0,
+        "claude-code",
+        "s1",
+        "search",
+        formula,
+        1,
+        10,
+        100,
+        1_000,
+    );
+    let fleet = Fleet::open(&[dir.path().to_path_buf()]).unwrap();
+    let options = semlith::report::Options {
+        excerpts: true,
+        redact: false,
+        salt: Some([9u8; 32]),
+    };
+    let report =
+        semlith::report::generate_with(&fleet, "access", "Sonnet 5", Window::All, &[], options)
+            .unwrap();
+    let mut seen = false;
+    for id in report.table_ids().into_iter().chain(["summary"]) {
+        let csv = report.render_table(id).unwrap();
+        for line in csv.lines() {
+            for cell in line.split(',') {
+                let cell = cell.trim_start_matches('"');
+                assert!(
+                    !cell.starts_with(['=', '+', '@']),
+                    "{id} has a formula cell: {line}"
+                );
+            }
+        }
+        seen |= csv.contains("'=HYPERLINK");
+    }
+    assert!(seen, "no table carried the query, so nothing was checked");
+}
+
+#[test]
 fn the_change_brief_counts_every_file_and_a_first_index_is_not_a_re_read() {
     // 476 = 200 + 200 + 58 + 14 + 4 per-store caps over 511 files (R3).
     let dir = tempfile::tempdir().unwrap();
@@ -984,7 +1059,10 @@ fn csv_and_json_carry_numbers_as_numbers() {
     // file has one header row.
     let zip = report.render_bytes("csv").unwrap();
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
-    let names: Vec<String> = archive.file_names().map(str::to_string).collect();
+    let names: Vec<String> = archive
+        .file_names()
+        .map(|n| n.unwrap().into_owned())
+        .collect();
     for wanted in [
         "savings-summary.csv",
         "savings-not_read.csv",

@@ -533,7 +533,7 @@ fn extract_plugin(wheel: &Path, dir: &Path) -> Result<()> {
     let mut placed = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
-        let name = entry.name().to_string();
+        let name = entry.name()?.into_owned();
         let Some(base) = name.strip_prefix("onnxruntime_ep_webgpu/") else {
             continue;
         };

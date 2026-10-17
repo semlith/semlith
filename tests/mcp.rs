@@ -249,6 +249,11 @@ fn the_files_tool_lists_narrows_and_says_what_it_left_out() {
         capped.contains("1 more"),
         "a capped list must say how many it left out: {capped}"
     );
+    // Cloud audit C62: the total is the first thing said, not only the last.
+    assert!(
+        capped.starts_with("1 of 2 files shown (limit 1)\n"),
+        "a capped list must say the total first: {capped}"
+    );
 }
 
 /// A filter that behaves one way at the terminal and another over MCP is two

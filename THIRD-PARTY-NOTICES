@@ -57,7 +57,7 @@ tree-sitter-elm 5.9.4
     Licence: MIT
     Source:  https://github.com/elm-tooling/tree-sitter-elm
 
-tree-sitter-erlang 0.20.0
+tree-sitter-erlang 0.21.0
     Licence: MIT
     Source:  https://github.com/WhatsApp/tree-sitter-erlang
 

@@ -502,7 +502,10 @@ fn unpack(archive: &Path, into: &Path) -> Result<PathBuf> {
             if entry.is_dir() {
                 continue;
             }
-            let Some(file_name) = strip_leading_dir(entry.name()).map(str::to_string) else {
+            let Ok(raw) = entry.name() else {
+                continue;
+            };
+            let Some(file_name) = strip_leading_dir(&raw).map(str::to_string) else {
                 continue;
             };
             let out = into.join(&file_name);
