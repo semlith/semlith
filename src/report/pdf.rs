@@ -675,6 +675,21 @@ impl<'a> Writer<'a> {
     /// Lines of at most `max` points, broken at spaces; a word wider than a
     /// line is broken by characters, because the margin is the promise.
     fn wrap(&self, text: &str, face: Face, size: f32, max: f32) -> Vec<String> {
+        self.wrap_spaced(text, face, size, 0.0, max)
+    }
+
+    /// [`Writer::wrap`] for text drawn with `spacing` between letters, as a
+    /// table header is: measured untracked, a header that just fit its
+    /// column ran past it once drawn.
+    fn wrap_spaced(
+        &self,
+        text: &str,
+        face: Face,
+        size: f32,
+        spacing: f32,
+        max: f32,
+    ) -> Vec<String> {
+        let width = |t: &str| self.fonts.width(face, size, spacing, t);
         let mut out = Vec::new();
         for paragraph in text.split('\n') {
             let mut line = String::new();
@@ -684,20 +699,20 @@ impl<'a> Writer<'a> {
                 } else {
                     format!("{line} {word}")
                 };
-                if self.width(face, size, &candidate) <= max {
+                if width(&candidate) <= max {
                     line = candidate;
                     continue;
                 }
                 if !line.is_empty() {
                     out.push(std::mem::take(&mut line));
                 }
-                if self.width(face, size, word) <= max {
+                if width(word) <= max {
                     line = word.to_string();
                     continue;
                 }
                 for c in word.chars() {
                     let next = format!("{line}{c}");
-                    if self.width(face, size, &next) > max && !line.is_empty() {
+                    if width(&next) > max && !line.is_empty() {
                         out.push(std::mem::replace(&mut line, c.to_string()));
                     } else {
                         line = next;
@@ -1485,7 +1500,13 @@ fn cell_size(kind: Kind, size: f32) -> f32 {
 const HEAD: f32 = 10.5 * PX;
 
 fn header_lines(w: &Writer<'_>, label: &str, width: f32) -> Vec<String> {
-    w.wrap(&label.to_uppercase(), Face::MonoMedium, HEAD, width)
+    w.wrap_spaced(
+        &label.to_uppercase(),
+        Face::MonoMedium,
+        HEAD,
+        HEAD * 0.08,
+        width,
+    )
 }
 
 fn fit_table(w: &Writer<'_>, table: &Table) -> Fit {
@@ -2156,6 +2177,20 @@ mod tests {
                 assert!(c == ' ' || fonts.glyph(face, c).1 != 0, "{c} has no glyph");
             }
         }
+    }
+
+    #[test]
+    fn a_header_wraps_by_its_drawn_width() {
+        // Headers are drawn tracked; wrapped by their untracked width, one
+        // that just fit ran past its column (macOS CI, "NET TOKENS").
+        let w = Writer::new(Fonts::new(&[]));
+        let tracked = w.fonts.width(Face::MonoMedium, HEAD, HEAD * 0.08, "NET TOKENS");
+        let plain = w.fonts.width(Face::MonoMedium, HEAD, 0.0, "NET TOKENS");
+        assert!(plain < tracked);
+        assert_eq!(
+            header_lines(&w, "Net tokens", (plain + tracked) / 2.0),
+            ["NET", "TOKENS"]
+        );
     }
 
     #[test]

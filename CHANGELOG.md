@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **semlith's own PDF prints ids and paths whole.** An id or path wider than
   its column wraps, after a `/` where it has one, instead of keeping its head
   and tail around an ellipsis, and a table too wide even at the smallest size
-  narrows its widest wrappable columns so it ends inside the margin.
+  narrows its widest wrappable columns so it ends inside the margin. A
+  header is wrapped by the width it is drawn at, letter spacing included, so
+  one that just fit no longer runs past its column.
 - **The change brief finishes.** `semlith report change` looked up each
   changed file's history with two scans of `symbols_past`; on a store with
   961,068 history rows 0.42.0 was still running after two minutes (over twelve
@@ -48,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   formula cells, keyed redaction digest) and **SK32** (a tree file swapped for
   a symlink is never followed by read or by the sweep) are pinned by tests
   named for them.
+- **zip 9.0.4** for RUSTSEC-2026-0369 (`ZipStreamReader::extract`, which
+  semlith never calls). It brings `nix` on macOS and the BSDs.
 
 ## [0.42.0] - 2026-10-17
 
