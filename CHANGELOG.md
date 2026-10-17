@@ -5,6 +5,50 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.43.0] - 2026-10-17
+
+### Fixed
+
+- **A printed report keeps every column.** Printed or saved as PDF from a
+  browser, 0.42.0's access report lost HITS, EXCERPT TOKENS and WHOLE-FILE: a
+  query with no spaces made its cell wider than the page, and print turns the
+  table's sideways scroll into a clip (a 2,616 px table on a 685 px A4 page).
+  A run over 24 characters in a cell now breaks anywhere in print, so every
+  table of all five reports fits the page; stamps and tool names stay whole,
+  and the screen keeps its sideways scroll.
+- **semlith's own PDF prints ids and paths whole.** An id or path wider than
+  its column wraps, after a `/` where it has one, instead of keeping its head
+  and tail around an ellipsis, and a table too wide even at the smallest size
+  narrows its widest wrappable columns so it ends inside the margin.
+- **The change brief finishes.** `semlith report change` looked up each
+  changed file's history with two scans of `symbols_past`; on a store with
+  961,068 history rows 0.42.0 was still running after two minutes (over twelve
+  on the owner's daemon). An index on `(path, retired_at)`, made on open,
+  brings it to 5-20 s. The Reports page and `semlith_report` share the path.
+- **A team member's local use counts in the cloud.** Ledger sync rows carry
+  hits, whole-file tokens, tier and query id, so the org's ledger can credit a
+  local saving instead of net 0 (cloud audit C26). Additive: a cloud that
+  reads the old fields still accepts the body.
+- **`semlith cloud push` says what it leaves out.** Every tracked file the
+  walk does not take — `.github/`, dotfiles, ignored or generated paths — is
+  listed with why, and a refused push names a file this push kept back as kept
+  back instead of "not in the folder" (C15, C23). The portal's push toast
+  counts both.
+- **`--out` takes a folder.** `semlith report --out ./reports/` and `semlith
+  cloud report --out ./reports/` make the folder when missing and name the
+  file written; `semlith cloud report --format markdown` is `md` (C30).
+- **`semlith_files` says the total first**: a capped list starts with how
+  many of how many files it shows (C62).
+
+### Security
+
+- **SK30, DNS rebinding in `semlith_add`**: confirmed closed since 0.41.0's
+  resolver (the address connected to is the address checked) and pinned by a
+  test with a name that answers public, then loopback. **SK31** (report CSV
+  formula cells, keyed redaction digest) and **SK32** (a tree file swapped for
+  a symlink is never followed by read or by the sweep) are pinned by tests
+  named for them.
+
 ## [0.42.0] - 2026-10-17
 
 ### Added
