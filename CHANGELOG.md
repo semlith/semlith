@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   browser, 0.42.0's access report lost HITS, EXCERPT TOKENS and WHOLE-FILE: a
   query with no spaces made its cell wider than the page, and print turns the
   table's sideways scroll into a clip (a 2,616 px table on a 685 px A4 page).
-  A run over 24 characters in a cell now breaks anywhere in print, so every
+  A run over 12 characters in a cell now breaks anywhere in print, so every
   table of all five reports fits the page; stamps and tool names stay whole,
   and the screen keeps its sideways scroll.
 - **semlith's own PDF prints ids and paths whole.** An id or path wider than
