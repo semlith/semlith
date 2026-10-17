@@ -51,10 +51,12 @@ reading the finding's own "should" sentence gives, and a comment names the
 ambiguity so the next person can see the choice was made rather than assumed.
 """
 
+import base64
 import json
 import random
 import shutil
 import string
+import subprocess
 import os
 import re
 import time
@@ -6037,6 +6039,71 @@ def _(d):
     want("the schedules listed", d.eval("document.querySelectorAll('#main .sched-row').length"),
          len(d.api("/api/schedules").get("schedules") or {}))
     no_console_errors(d, "Reports")
+
+
+@finding("rep.print", "a report printed to A4 keeps every column: long text wraps inside its cell")
+def _(d):
+    # 0.42.0's access report printed by Chrome lost HITS, EXCERPT TOKENS and
+    # WHOLE-FILE: a query with no spaces gave its cell a min-content wider than
+    # the page, and print turns the table's sideways scroll into a clip.
+    a_store(d)
+    query = "(" + "|".join("w%03d" % i for i in range(60)) + ")"
+    query = (query * 2)[:300]
+    # As an agent asks, over stdio MCP: a portal search is recorded as a
+    # person's, which the access report's per-call table leaves out.
+    calls = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "drive-agent", "version": "1.0"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "semlith_search", "arguments": {"query": query, "k": 2}}},
+    ]
+    subprocess.run([fixtures.semlith_bin(), "mcp"], input="".join(json.dumps(c) + "\n" for c in calls),
+                   capture_output=True, text=True, encoding="utf-8", timeout=180)
+    time.sleep(0.8)
+    # A4 portrait less the report's 14 mm side margins, at 96 px to the inch.
+    page = int((210 - 28) / 25.4 * 96)
+    pdftotext = shutil.which("pdftotext")
+    for kind in ("access", "savings", "change", "health", "gaps"):
+        answer = d.api("/api/report?kind=%s&format=html&excerpts=1&preview=1" % kind)
+        if kind == "access" and query not in answer.get("text", ""):
+            fail("the access report does not carry the 300-character query, so nothing was checked")
+        d.navigate(d.portal_url + answer["preview"])
+        d._send("Emulation.setEmulatedMedia", {"media": "print"})
+        d.set_viewport(page, 1000)
+        try:
+            pause(d, 300)
+            heads = d.eval("[...document.querySelectorAll('th')].map(t => t.textContent.trim()).filter(Boolean)")
+            wide = d.eval(
+                "[...document.querySelectorAll('table')].map(t => [t.getBoundingClientRect().right, "
+                "t.scrollWidth, (t.parentElement || t).clientWidth])"
+                ".filter(([right, scroll, room]) => right > %d + 1 || scroll > room + 1)" % page)
+            if wide:
+                fail("the %s report printed has %d table(s) wider than the A4 page: %r" % (kind, len(wide), wide[:3]))
+            cut = d.eval("[...document.querySelectorAll('th')].filter(t => t.getBoundingClientRect().right > %d + 1)"
+                         ".map(t => t.textContent.trim())" % page)
+            if cut:
+                fail("the %s report printed puts headers past the page edge: %r" % (kind, cut))
+            if pdftotext:
+                pdf = base64.b64decode(d._send("Page.printToPDF", {
+                    "paperWidth": 210 / 25.4, "paperHeight": 297 / 25.4, "preferCSSPageSize": True,
+                })["data"])
+                path = os.path.join(d.out_dir, "rep-print-%s.pdf" % kind)
+                with open(path, "wb") as f:
+                    f.write(pdf)
+                text = subprocess.run([pdftotext, "-enc", "UTF-8", path, "-"], capture_output=True,
+                                      text=True, encoding="utf-8").stdout
+                # A header wraps across lines in its column ("ZERO-" over
+                # "HIT"), and pdftotext joins the halves without the hyphen,
+                # so spaces and hyphens are left out of both sides.
+                flat = lambda v: re.sub(r"[\s-]+", "", v).upper()
+                missing = [h for h in heads if flat(h) not in flat(text)]
+                if missing:
+                    fail("the %s report printed to PDF lacks the headers %r" % (kind, missing))
+        finally:
+            d._send("Emulation.setEmulatedMedia", {"media": ""})
+            d.reset_viewport()
 
 
 @finding("v6.31", "Privacy states what has left the machine from the daemon's own count")

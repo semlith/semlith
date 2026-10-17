@@ -552,6 +552,36 @@ pub(super) fn csv_cell(v: &str) -> String {
 
 // ----------------------------------------------------------------- html
 
+/// An unbroken run too long for any column, marked so print may break it
+/// anywhere. Only the long runs: `overflow-wrap:anywhere` on a whole cell
+/// lowers the width the table lays the column out at to one character, and
+/// a stamp or a tool name then broke mid-word to make room. Printed, a
+/// 300-character query in one table cell pushed HITS, EXCERPT TOKENS and
+/// WHOLE-FILE past the page (0.42.0); on screen the table still scrolls.
+fn breakable(escaped: &str) -> String {
+    const LONG: usize = 24;
+    let mut out = String::with_capacity(escaped.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if word.chars().count() > LONG {
+            out.push_str(&format!("<span class=\"brk\">{word}</span>"));
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in escaped.chars() {
+        if c.is_whitespace() {
+            flush(&mut word, &mut out);
+            out.push(c);
+        } else {
+            word.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
 fn esc(v: &str) -> String {
     v.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -624,6 +654,10 @@ fn html_table(table: &Table, bars: &mut std::collections::BTreeSet<u32>) -> Stri
         });
         for (column, cell) in table.columns.iter().zip(cells) {
             let text = esc(&cell.display);
+            let text = match column.kind {
+                Kind::Num | Kind::Bar => text,
+                _ => breakable(&text),
+            };
             tr.push_str(&match column.kind {
                 Kind::Num => format!("<td class=\"r n\">{text}</td>"),
                 Kind::Id => format!("<td class=\"id\">{text}</td>"),
@@ -874,7 +908,7 @@ h1{font-size:22px}.top .grow+.pill{display:none}.kpi .v{font-size:19px}}
 body{font-size:10.5pt;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .sheet{max-width:none;margin:0;padding:0}.tw{overflow:visible}
 thead{display:table-header-group}tr,.kpi,.card-h,.facts>div{break-inside:avoid}.card-h{break-after:avoid}
-th{white-space:normal}th,td{padding:6px 8px}table{font-size:9.5pt}.id{white-space:normal;font-size:8.5pt}.card{overflow:visible}
+th{white-space:normal}th,td{padding:6px 8px}.brk{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere}table{font-size:9.5pt}.id{white-space:normal;font-size:8.5pt}.card{overflow:visible}
 .kpis{grid-template-columns:repeat(4,minmax(0,1fr))}.kpis.k3{grid-template-columns:repeat(3,minmax(0,1fr))}.meta{grid-template-columns:repeat(3,minmax(0,1fr))}}
 "#;
 
@@ -893,6 +927,17 @@ mod tests {
         assert_eq!(csv_cell("-12"), "-12");
         assert_eq!(csv_cell("-"), "-");
         assert_eq!(csv_cell("plain"), "plain");
+    }
+
+    #[test]
+    fn only_a_long_unbroken_run_may_break_anywhere_in_print() {
+        assert_eq!(breakable("2026-10-17 12:17:45"), "2026-10-17 12:17:45");
+        let long = "w000|w001|w002|w003|w004|w005";
+        assert_eq!(
+            breakable(&format!("a {long} b")),
+            format!("a <span class=\"brk\">{long}</span> b")
+        );
+        assert!(COMPONENTS.contains(".brk{overflow-wrap:anywhere}"));
     }
 
     #[test]
