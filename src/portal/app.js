@@ -10367,14 +10367,15 @@ async function setCloudSync(name, on, org) {
 async function pushCloud(r) {
   const dir = (cloudUi.dirs[r.name] || "").trim();
   if (!dir) return toast("Name the folder to push", true);
-  const done = (x) => `${plural(x.files, "file")} in the manifest · ${x.sent} sent · ${x.removed} removed · job ${x.job}${x.position != null ? `, ${x.position} ahead of it` : ""}`;
+  const held = (x) => [[x.refused, "kept back"], [x.left_out, "left out"]].filter(([l]) => l?.length).map(([l, w]) => ` · ${l.length} ${w}`).join("");
+  const done = (x) => `${plural(x.files, "file")} in the manifest · ${x.sent} sent · ${x.removed} removed${held(x)} · job ${x.job}${x.position != null ? `, ${x.position} ahead of it` : ""}`;
   try {
     toast(done(await post("/api/cloud/push", { store: r.name, dir })));
   } catch (e) {
     // The cloud refuses a push that would remove uploads the folder lacks,
     // naming them; removing them is a separate, confirmed choice.
     if (!/--prune/.test(e.message)) return toast(e.message, true);
-    const ok = await ask({ title: "Remove these files?", body: e.message.replace(/,? or push again with --prune to remove them\.?/, "."), ok: "Remove and push" });
+    const ok = await ask({ title: "Remove these files?", body: e.message.replace(/[,;]? (or )?push again with --prune to (remove them|drop it)\.?/, "."), ok: "Remove and push" });
     if (ok) await act(() => post("/api/cloud/push", { store: r.name, dir, prune: true }), done);
   }
 }
