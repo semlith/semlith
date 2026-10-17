@@ -2184,7 +2184,9 @@ mod tests {
         // Headers are drawn tracked; wrapped by their untracked width, one
         // that just fit ran past its column (macOS CI, "NET TOKENS").
         let w = Writer::new(Fonts::new(&[]));
-        let tracked = w.fonts.width(Face::MonoMedium, HEAD, HEAD * 0.08, "NET TOKENS");
+        let tracked = w
+            .fonts
+            .width(Face::MonoMedium, HEAD, HEAD * 0.08, "NET TOKENS");
         let plain = w.fonts.width(Face::MonoMedium, HEAD, 0.0, "NET TOKENS");
         assert!(plain < tracked);
         assert_eq!(
