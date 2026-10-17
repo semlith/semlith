@@ -1609,8 +1609,16 @@ fn call_local(
                             .collect::<Vec<_>>()
                             .join("\n");
                         // A truncated list that does not say so is how an agent
-                        // decides a file it cannot see was never indexed.
+                        // decides a file it cannot see was never indexed; said
+                        // first as well as last (cloud audit C62), because an
+                        // agent reading the head of a long list never meets
+                        // its tail.
                         if left_out > 0 {
+                            out = format!(
+                                "{} of {} files shown (limit {limit})\n{out}",
+                                paths.len(),
+                                paths.len() + left_out
+                            );
                             out.push_str(&format!(
                             "\n… and {left_out} more. Narrow with path/ext/lang, or raise limit."
                         ));

@@ -1563,6 +1563,10 @@ pub struct PushReport {
     pub removed: usize,
     /// What the binary's own rules kept back, with why.
     pub refused: Vec<(String, String)>,
+    /// Files git tracks under the folder that the walk does not take — a
+    /// dotfile, `.github/`, an ignored or generated path — with why (cloud
+    /// audit C15). Listed so the store's contents are never a surprise.
+    pub left_out: Vec<(String, String)>,
     pub push: String,
     pub job: Option<i64>,
     pub position: Option<i64>,
@@ -1636,8 +1640,11 @@ pub fn push(
         by_path.insert(name, (path.clone(), hash));
     }
     report.files = manifest.len();
+    report.left_out = left_out(&root, |p| {
+        by_path.contains_key(p) || report.refused.iter().any(|(r, _)| r == p)
+    });
     say(&format!(
-        "{} file{} to {target} from {}{}",
+        "{} file{} to {target} from {}{}{}",
         manifest.len(),
         if manifest.len() == 1 { "" } else { "s" },
         root.display(),
@@ -1645,13 +1652,22 @@ pub fn push(
             String::new()
         } else {
             format!(" · {} kept back by semlith's own rules", refused.len())
+        },
+        if report.left_out.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " · {} tracked file{} left out",
+                report.left_out.len(),
+                if report.left_out.len() == 1 { "" } else { "s" }
+            )
         }
     ));
     let mut body = json!({ "files": manifest, "prune": prune });
     if let Some(commit) = git_head(&root) {
         body["commit"] = json!(commit);
     }
-    let opened = call_as(
+    let opened = match call_as(
         &entry,
         "POST",
         &format!("/v1/orgs/{}/stores/{}/pushes", seg(org), seg(store)),
@@ -1659,8 +1675,13 @@ pub fn push(
             json: Some(&body),
             ..Send::default()
         },
-    )?
-    .json()?;
+    ) {
+        Ok(reply) => reply.json()?,
+        Err(Failure::Refused { code, message, .. }) if code == "would_remove" => {
+            bail!("{}", would_remove(&message, &report))
+        }
+        Err(e) => return Err(e.into()),
+    };
     report.push = opened["push"].as_str().unwrap_or_default().to_string();
     if report.push.is_empty() {
         bail!("{} opened no push", entry.host_name());
@@ -1785,6 +1806,79 @@ pub fn push(
     Ok(report)
 }
 
+/// The files git tracks under `root` that the push does not carry and did not
+/// keep back, with why. Empty outside a git checkout: there the walk's own
+/// rules are all there is to go by.
+fn left_out(root: &Path, carried: impl Fn(&str) -> bool) -> Vec<(String, String)> {
+    let Ok(out) = crate::git(root)
+        .args(["ls-files", "-z"])
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|p| !p.is_empty() && !carried(p))
+        // Tracked but deleted, or a link: nothing a push would send.
+        .filter(|p| root.join(p).symlink_metadata().is_ok_and(|m| m.is_file()))
+        .map(|p| {
+            let why = if p.split('/').any(|c| c.starts_with('.')) {
+                "hidden (a dotfile or dot-folder); semlith neither indexes nor pushes it"
+            } else {
+                "left out by .gitignore, .semlithignore or a generated folder"
+            };
+            (crate::plain(p), why.to_string())
+        })
+        .collect()
+}
+
+/// The cloud's refusal of a push that would drop uploads, said for what it
+/// is when some of those files are in the folder and this push held them
+/// back (cloud audit C23): "not in the folder" was wrong for a file the push
+/// itself kept back.
+fn would_remove(message: &str, report: &PushReport) -> String {
+    // The cloud lists the paths as `: a, b and N more.` or `: a, b.`; a
+    // path is matched whole, so `a.md` is not found inside `data.md`.
+    let named = |p: &str| {
+        [",", ".", " and"]
+            .iter()
+            .any(|end| message.contains(&format!(" {p}{end}")))
+    };
+    let held: Vec<String> = report
+        .refused
+        .iter()
+        .map(|(p, why)| (p, "kept back", why))
+        .chain(report.left_out.iter().map(|(p, why)| (p, "left out", why)))
+        .filter(|(p, ..)| named(p))
+        .map(|(p, how, why)| format!("{p} ({how}: {why})"))
+        .collect();
+    if held.is_empty() {
+        return message.to_string();
+    }
+    let named = message
+        .split_once("remove ")
+        .and_then(|(_, rest)| rest.split(' ').next()?.parse::<usize>().ok())
+        .unwrap_or(held.len());
+    let gone = named.saturating_sub(held.len());
+    format!(
+        "The store's uploads hold {} file{} this push did not carry, though {} in the folder: {}. \
+         Pushing would drop the store's copy{}; push again with --prune to drop it.",
+        held.len(),
+        if held.len() == 1 { "" } else { "s" },
+        if held.len() == 1 { "it is" } else { "they are" },
+        held.join(", "),
+        if gone > 0 {
+            format!(", and {gone} more files no longer in the folder")
+        } else {
+            String::new()
+        }
+    )
+}
+
 /// The commit a working tree is at, when it is a git checkout.
 fn git_head(dir: &Path) -> Option<String> {
     let out = crate::git(dir)
@@ -1865,6 +1959,11 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(60);
 /// `bytes` is null: the local ledger counts what an answer cost in tokens
 /// (`excerpt_tokens`, sent as `tokens`), and a byte count made up from it
 /// would be a number nobody measured.
+///
+/// Version 2 (0.43.0, cloud audit C26) adds `hits`, `whole_tokens` (the name
+/// the cloud's ledger keeps it under), `tier` and `query_id`, so a member's
+/// local saving counts in the org's figures. Fields are only added: a cloud
+/// that reads version 1 ignores them.
 pub fn sync_body(machine: &str, store: &str, rows: &[crate::store::SyncRow]) -> Value {
     json!({
         "machine": machine,
@@ -1877,6 +1976,10 @@ pub fn sync_body(machine: &str, store: &str, rows: &[crate::store::SyncRow]) -> 
             "tool": r.tool,
             "bytes": null,
             "tokens": r.excerpt_tokens,
+            "hits": r.hits,
+            "whole_tokens": r.whole_file_tokens,
+            "tier": r.tier,
+            "query_id": r.query_id,
         })).collect::<Vec<_>>(),
     })
 }
@@ -2086,16 +2189,24 @@ pub struct ReportAsk<'a> {
     pub stores: &'a [String],
 }
 
+/// The cloud's name for a format: `markdown` is `md`, as the local report
+/// takes either (cloud audit C30, where the cloud's own printed command said
+/// `markdown`).
+pub fn report_format(format: &str) -> &str {
+    if format == "markdown" { "md" } else { format }
+}
+
 /// `semlith cloud report`: the cloud's report file, as its bytes.
 pub fn report(entry: &Entry, ask: &ReportAsk<'_>) -> Result<Vec<u8>> {
-    if !REPORT_FORMATS.contains(&ask.format) {
+    let format = report_format(ask.format);
+    if !REPORT_FORMATS.contains(&format) {
         bail!(
             "{} is not a report format; one of {}",
             ask.format,
             REPORT_FORMATS.join(", ")
         );
     }
-    let mut query = format!("format={}", seg(ask.format));
+    let mut query = format!("format={}", seg(format));
     if let Some(window) = ask.window {
         query.push_str(&format!("&window={}", seg(window)));
     }
@@ -2579,15 +2690,61 @@ mod tests {
                 !s.text().contains("PRIVATE QUERY TEXT"),
                 "query text left the machine"
             );
+            let body = s.json();
+            // `query_id` is an opaque id, not the text; the cloud refuses a
+            // row with a `query` field, so none may carry one.
             assert!(
-                !s.text().contains("query"),
+                body["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|r| r.get("query").is_none()),
                 "a query field left the machine"
             );
-            let body = s.json();
             assert_eq!(body["machine"], "m_1");
             assert_eq!(body["store"], "notes");
             assert_eq!(body["rows"][0]["tool"], "semlith_search");
         }
+    }
+
+    /// Sync body v2 (cloud audit C26): a row carries what its saving is
+    /// credited against, and every version 1 field as it was.
+    #[test]
+    fn a_synced_row_carries_its_whole_file_tokens_hits_tier_and_query_id() {
+        let (_dir, db) = ledger(1);
+        {
+            let _w = crate::store::Writing::begin(&db).unwrap();
+            db.execute(
+                "UPDATE retrievals SET query_id = 'q-7', tokenizer = 'granite'",
+                [],
+            )
+            .unwrap();
+        }
+        let rows = crate::store::unsynced(&db, 0, 10).unwrap();
+        let body = sync_body("m_1", "notes", &rows);
+        let row = &body["rows"][0];
+        assert_eq!(row["hits"], 3, "{row}");
+        assert_eq!(row["whole_tokens"], 900, "{row}");
+        assert_eq!(row["tier"], "measured", "{row}");
+        assert_eq!(row["query_id"], "q-7", "{row}");
+        for (key, value) in [
+            ("client", json!("claude-code")),
+            ("session", json!("s-1")),
+            ("tool", json!("semlith_search")),
+            ("bytes", Value::Null),
+            ("tokens", json!(120)),
+            ("at", json!("1970-01-01T00:16:40Z")),
+        ] {
+            assert_eq!(row[key], value, "{key}: {row}");
+        }
+        assert!(row["local_id"].is_i64());
+        // A row counted by the four-characters fallback is modelled.
+        let _w = crate::store::Writing::begin(&db).unwrap();
+        db.execute("UPDATE retrievals SET tokenizer = 'chars4'", [])
+            .unwrap();
+        drop(_w);
+        let rows = crate::store::unsynced(&db, 0, 10).unwrap();
+        assert_eq!(sync_body("m", "s", &rows)["rows"][0]["tier"], "modelled");
     }
 
     /// Turning sync on sends what is retrieved from then on, not the history.

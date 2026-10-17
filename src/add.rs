@@ -423,18 +423,23 @@ fn embedded_v4(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
 /// passed the check and reached the private one (audit S22). Here the
 /// addresses the connection uses are the addresses checked; the certificate
 /// is still checked against the name, so TLS is unchanged.
+///
+/// Wraps the resolver it checks rather than naming the system one, so a test
+/// can stand in a name that answers public to the check and loopback after
+/// (audit SK30, 2026-10-17, which read the code from before S22).
 #[derive(Debug)]
-struct PublicOnly;
+struct PublicOnly<R>(R);
 
-impl ureq::unversioned::resolver::Resolver for PublicOnly {
+impl<R: ureq::unversioned::resolver::Resolver> ureq::unversioned::resolver::Resolver
+    for PublicOnly<R>
+{
     fn resolve(
         &self,
         uri: &ureq::http::Uri,
         config: &ureq::config::Config,
         timeout: ureq::unversioned::transport::NextTimeout,
     ) -> std::result::Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
-        let addrs = ureq::unversioned::resolver::DefaultResolver::default()
-            .resolve(uri, config, timeout)?;
+        let addrs = self.0.resolve(uri, config, timeout)?;
         if !private_allowed()
             && let Some(bad) = addrs.iter().find(|a| !is_public(&a.ip()))
         {
@@ -448,12 +453,12 @@ impl ureq::unversioned::resolver::Resolver for PublicOnly {
     }
 }
 
-/// Follow the chain to the document, returning where it ended, what the server
-/// said it was, and its bytes.
-fn get(url: &str) -> Result<(String, String, Vec<u8>)> {
-    // Redirects are followed here rather than by the agent, because the check
-    // that matters is per hop: an https URL that redirects to http is exactly
-    // the case an agent's own redirect following would hide.
+/// The agent `semlith add` fetches with, connecting only to what `resolver`
+/// answers and [`PublicOnly`] passed.
+fn agent(resolver: impl ureq::unversioned::resolver::Resolver) -> ureq::Agent {
+    // Redirects are followed by [`get`] rather than by the agent, because the
+    // check that matters is per hop: an https URL that redirects to http is
+    // exactly the case an agent's own redirect following would hide.
     // Deadlines, as every outbound agent in semlith has: a server that accepts
     // the connection and then drips a byte a minute held this call, and before
     // 0.40.0 every other agent's call with it.
@@ -464,11 +469,17 @@ fn get(url: &str) -> Result<(String, String, Vec<u8>)> {
         .max_redirects_will_error(false)
         .http_status_as_error(false)
         .build();
-    let agent = ureq::Agent::with_parts(
+    ureq::Agent::with_parts(
         config,
         ureq::unversioned::transport::DefaultConnector::default(),
-        PublicOnly,
-    );
+        PublicOnly(resolver),
+    )
+}
+
+/// Follow the chain to the document, returning where it ended, what the server
+/// said it was, and its bytes.
+fn get(url: &str) -> Result<(String, String, Vec<u8>)> {
+    let agent = agent(ureq::unversioned::resolver::DefaultResolver::default());
 
     let mut current = url.to_string();
     require_public(&current)?;
@@ -750,6 +761,89 @@ fn register_root(store_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name that answers a public address the first time it is asked and
+    /// this machine's loopback every time after: DNS rebinding.
+    #[derive(Debug)]
+    struct Rebinding {
+        asked: std::sync::atomic::AtomicUsize,
+        port: u16,
+    }
+
+    impl ureq::unversioned::resolver::Resolver for Rebinding {
+        fn resolve(
+            &self,
+            _uri: &ureq::http::Uri,
+            _config: &ureq::config::Config,
+            _timeout: ureq::unversioned::transport::NextTimeout,
+        ) -> std::result::Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error>
+        {
+            let first = self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            let ip: std::net::IpAddr = if first {
+                [93, 184, 215, 14]
+            } else {
+                [127, 0, 0, 1]
+            }
+            .into();
+            let mut addrs = self.empty();
+            addrs.push(std::net::SocketAddr::new(ip, self.port));
+            Ok(addrs)
+        }
+    }
+
+    /// Audit SK30 (2026-10-17): the address checked as public is the address
+    /// connected to, so a rebinding name never reaches loopback. Closed by
+    /// 0.41.0's S22 resolver; this pins it. The same name through an agent
+    /// without [`PublicOnly`] does reach the listener, so the check below is
+    /// not vacuous.
+    #[test]
+    fn sk30_a_rebinding_name_never_reaches_loopback() {
+        use ureq::unversioned::resolver::Resolver;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let rebinding = || Rebinding {
+            asked: Default::default(),
+            port,
+        };
+        let uri: ureq::http::Uri = format!("https://rebind.test:{port}/doc.md")
+            .parse()
+            .unwrap();
+        let config = ureq::Agent::config_builder().build();
+        let timeout = ureq::unversioned::transport::NextTimeout {
+            after: ureq::unversioned::transport::time::Duration::NotHappening,
+            reason: ureq::Timeout::Resolve,
+        };
+        let connected = |listener: &std::net::TcpListener| {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            listener.accept().is_ok()
+        };
+
+        // Unguarded, the second answer is where the request goes.
+        let plain = rebinding();
+        let checked = plain.resolve(&uri, &config, timeout).unwrap();
+        assert!(is_public(&checked[0].ip()));
+        let unguarded = ureq::Agent::with_parts(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(2)))
+                .build(),
+            ureq::unversioned::transport::DefaultConnector::default(),
+            plain,
+        );
+        let _ = unguarded.get(&uri.to_string()).call();
+        assert!(connected(&listener), "the control never reached loopback");
+
+        // Guarded: the connection's own answer is checked, and refused.
+        let guarded = rebinding();
+        let checked = guarded.resolve(&uri, &config, timeout).unwrap();
+        assert!(is_public(&checked[0].ip()));
+        let err = agent(guarded).get(&uri.to_string()).call().unwrap_err();
+        assert!(
+            err.to_string().contains("not on the public internet"),
+            "{err}"
+        );
+        assert!(!connected(&listener), "a rebinding name reached loopback");
+    }
 
     /// Audit S22: an IPv4 address inside an IPv6 one is judged as itself, an
     /// IPv6 literal parses, and credentials in a URL are refused.

@@ -237,3 +237,5 @@ mod s22;
 mod s23;
 #[path = "security/s24.rs"]
 mod s24;
+#[path = "security/sk32.rs"]
+mod sk32;

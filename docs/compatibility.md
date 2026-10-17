@@ -728,6 +728,21 @@ From 0.37.0-rc.7:
 |---|---|
 | Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
+### 0.43.0
+
+`FORMAT_VERSION` does not move. One index, `symbols_past_path` on
+`symbols_past(path, retired_at)`, is created on open (about 6 s once on a store
+with a million history rows); an older binary never uses it.
+
+| Surface | Change |
+|---|---|
+| Cloud ledger sync | `POST /v1/orgs/<org>/ledger` rows gain `hits`, `whole_tokens`, `tier` (`measured` or `modelled`) and `query_id`; no field is renamed or removed, so a cloud that reads only the 0.42.0 fields accepts the body. Rows synced before 0.43.0 are not sent again. |
+| CLI | `semlith cloud push` lists each tracked file the walk leaves out as `left out <path> <why>` (and `left_out` in `--json`), and the cloud's refusal of a push that would drop an upload this push kept back or left out names it as such. `semlith report --out` and `semlith cloud report --out` take a folder, made when missing, and write `semlith-<kind>[-<window>][-<table>].<ext>` / `semlith-<org>-<kind>.<ext>` there. `semlith cloud report --format markdown` is `md`. |
+| MCP | `semlith_files`, when it shows part of a store, starts with `<shown> of <total> files shown (limit <n>)`. |
+| Reports | Printed from a browser, an unbroken run over 12 characters in a table cell breaks anywhere (`<span class="brk">`), so every table fits the page. The native PDF wraps an id or path wider than its column instead of ellipsizing it, and an over-wide table's widest wrappable columns give way. Screen styles are unchanged. |
+| Dependencies | zip 8.6.0 -> 9.0.4 (RUSTSEC-2026-0369), which adds `nix` 0.31 on macOS and the BSDs. |
+| Library | `report::out_path`, `cloud::report_format`; `store::SyncRow` gains `hits`, `whole_file_tokens`, `tier`, `query_id`; `cloud::PushReport` gains `left_out`. |
+
 ### 0.42.0
 
 `FORMAT_VERSION` does not move. The ledger gains three additive columns

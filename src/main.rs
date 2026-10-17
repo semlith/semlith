@@ -936,7 +936,8 @@ enum Command {
         #[arg(long)]
         redact: bool,
 
-        /// Write to this file instead of standard output.
+        /// Write to this file instead of standard output; a folder (one that
+        /// exists, or a path ending in `/`) gets `semlith-<kind>-<window>.<ext>`.
         #[arg(long, short)]
         out: Option<std::path::PathBuf>,
     },
@@ -1091,7 +1092,7 @@ enum CloudCommand {
     Report {
         org: String,
         kind: String,
-        /// md, csv, json, html or pdf.
+        /// md (or markdown), csv, json, html or pdf.
         #[arg(long, default_value = "md")]
         format: String,
         /// 24h, 7d, 30d, quarter or all.
@@ -1103,7 +1104,8 @@ enum CloudCommand {
         /// Only these stores, comma-separated.
         #[arg(long, value_delimiter = ',')]
         stores: Vec<String>,
-        /// Write it to this file instead of stdout.
+        /// Write it to this file instead of stdout; a folder gets
+        /// `semlith-<org>-<kind>.<ext>`.
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -2940,6 +2942,24 @@ fn run() -> Result<()> {
             };
             match out {
                 Some(path) => {
+                    let name = format!(
+                        "semlith-{kind}{}{}.{}",
+                        if kind == "health" {
+                            String::new()
+                        } else {
+                            format!("-{}", window.name())
+                        },
+                        table
+                            .as_deref()
+                            .map(|t| format!("-{t}"))
+                            .unwrap_or_default(),
+                        if table.is_some() {
+                            "csv"
+                        } else {
+                            semlith::report::Report::extension(&format)
+                        }
+                    );
+                    let path = semlith::report::out_path(&path, &name)?;
                     std::fs::write(&path, bytes)?;
                     println!("{} written to {}", report.title, display(&path));
                 }
@@ -5488,6 +5508,9 @@ fn run_cloud(what: CloudCommand, stores: &[PathBuf]) -> Result<()> {
                 for (path, why) in &report.refused {
                     println!("kept back  {path}  {why}");
                 }
+                for (path, why) in &report.left_out {
+                    println!("left out  {path}  {why}");
+                }
                 println!(
                     "{} file{} in the manifest · {} sent ({}) · {} removed{}{}",
                     report.files,
@@ -5545,7 +5568,7 @@ fn run_cloud(what: CloudCommand, stores: &[PathBuf]) -> Result<()> {
             };
             match sync {
                 Some(org) => println!(
-                    "{store}: ledger rows from now on go to {org} each minute while the daemon runs — when, client, session, tool, tokens; never the query text"
+                    "{store}: ledger rows from now on go to {org} each minute while the daemon runs — when, client, session, tool, tokens, hits, whole-file tokens; never the query text"
                 ),
                 None => println!("{store}: ledger sync off; nothing more is sent"),
             }
@@ -5575,6 +5598,11 @@ fn run_cloud(what: CloudCommand, stores: &[PathBuf]) -> Result<()> {
             )?;
             match out {
                 Some(path) => {
+                    let name = format!(
+                        "semlith-{org}-{kind}.{}",
+                        semlith::report::Report::extension(cloud::report_format(&format))
+                    );
+                    let path = semlith::report::out_path(&path, &name)?;
                     std::fs::write(&path, &bytes)?;
                     println!(
                         "wrote {} ({})",

@@ -675,6 +675,21 @@ impl<'a> Writer<'a> {
     /// Lines of at most `max` points, broken at spaces; a word wider than a
     /// line is broken by characters, because the margin is the promise.
     fn wrap(&self, text: &str, face: Face, size: f32, max: f32) -> Vec<String> {
+        self.wrap_spaced(text, face, size, 0.0, max)
+    }
+
+    /// [`Writer::wrap`] for text drawn with `spacing` between letters, as a
+    /// table header is: measured untracked, a header that just fit its
+    /// column ran past it once drawn.
+    fn wrap_spaced(
+        &self,
+        text: &str,
+        face: Face,
+        size: f32,
+        spacing: f32,
+        max: f32,
+    ) -> Vec<String> {
+        let width = |t: &str| self.fonts.width(face, size, spacing, t);
         let mut out = Vec::new();
         for paragraph in text.split('\n') {
             let mut line = String::new();
@@ -684,20 +699,20 @@ impl<'a> Writer<'a> {
                 } else {
                     format!("{line} {word}")
                 };
-                if self.width(face, size, &candidate) <= max {
+                if width(&candidate) <= max {
                     line = candidate;
                     continue;
                 }
                 if !line.is_empty() {
                     out.push(std::mem::take(&mut line));
                 }
-                if self.width(face, size, word) <= max {
+                if width(word) <= max {
                     line = word.to_string();
                     continue;
                 }
                 for c in word.chars() {
                     let next = format!("{line}{c}");
-                    if self.width(face, size, &next) > max && !line.is_empty() {
+                    if width(&next) > max && !line.is_empty() {
                         out.push(std::mem::replace(&mut line, c.to_string()));
                     } else {
                         line = next;
@@ -1485,7 +1500,13 @@ fn cell_size(kind: Kind, size: f32) -> f32 {
 const HEAD: f32 = 10.5 * PX;
 
 fn header_lines(w: &Writer<'_>, label: &str, width: f32) -> Vec<String> {
-    w.wrap(&label.to_uppercase(), Face::MonoMedium, HEAD, width)
+    w.wrap_spaced(
+        &label.to_uppercase(),
+        Face::MonoMedium,
+        HEAD,
+        HEAD * 0.08,
+        width,
+    )
 }
 
 fn fit_table(w: &Writer<'_>, table: &Table) -> Fit {
@@ -1519,10 +1540,9 @@ fn fit_table(w: &Writer<'_>, table: &Table) -> Fit {
             .map(|(i, c)| measure(i, c.kind))
             .collect();
         // Numbers never shrink; an id wraps at its own spaces (a stamp's date
-        // and time) and a word of it still too wide keeps ten characters,
-        // ellipsized in the middle; prose wraps down to its header's longest
-        // word.
-        let id_cap = w.width(Face::Mono, cell_size(Kind::Id, size), "0123456789…");
+        // and time) and a word of it still too wide wraps within eleven
+        // characters; prose wraps down to its header's longest word.
+        let id_cap = w.width(Face::Mono, cell_size(Kind::Id, size), "01234567890");
         let floor: Vec<f32> = table
             .columns
             .iter()
@@ -1554,6 +1574,37 @@ fn fit_table(w: &Writer<'_>, table: &Table) -> Fit {
             continue;
         }
         let mut cols = floor.clone();
+        // Still too wide at the smallest size: the widest columns that wrap
+        // come down to one level until the table ends inside the margin, so
+        // no column is drawn past it. Numbers keep their width.
+        let wraps = |k: Kind| !matches!(k, Kind::Num | Kind::Bar);
+        if cols.iter().sum::<f32>() > inner {
+            let mut widths: Vec<f32> = Vec::new();
+            let mut room = inner;
+            for (c, width) in table.columns.iter().zip(&cols) {
+                if wraps(c.kind) {
+                    widths.push(*width);
+                } else {
+                    room -= width;
+                }
+            }
+            widths.sort_by(f32::total_cmp);
+            let mut level = 0.0;
+            for (k, width) in widths.iter().enumerate() {
+                let rest = (widths.len() - k) as f32;
+                if width * rest >= room {
+                    level = room / rest;
+                    break;
+                }
+                room -= width;
+            }
+            let level = level.max(2.0 * pad + size);
+            for (c, width) in table.columns.iter().zip(&mut cols) {
+                if wraps(c.kind) {
+                    *width = width.min(level);
+                }
+            }
+        }
         let mut spare = inner - cols.iter().sum::<f32>();
         // Give back what was taken, ids first, so a stamp or a path is whole
         // wherever the page has room for it, then prose.
@@ -1580,32 +1631,9 @@ fn fit_table(w: &Writer<'_>, table: &Table) -> Fit {
     }
 }
 
-/// `stdio-3f2a…91bc`: an id that does not fit keeps both ends, because a
-/// session or a path is told apart by its tail as often as by its head.
-fn fit_middle(w: &Writer<'_>, text: &str, size: f32, max: f32) -> String {
-    if w.width(Face::Mono, size, text) <= max {
-        return text.to_string();
-    }
-    let chars: Vec<char> = text.chars().collect();
-    let mut keep = chars.len();
-    while keep > 2 {
-        keep -= 1;
-        let head = keep.div_ceil(2);
-        let tail = keep / 2;
-        let candidate: String = chars[..head]
-            .iter()
-            .chain(std::iter::once(&'…'))
-            .chain(&chars[chars.len() - tail..])
-            .collect();
-        if w.width(Face::Mono, size, &candidate) <= max {
-            return candidate;
-        }
-    }
-    "…".into()
-}
-
-/// An id on as few lines as its own spaces allow, never broken inside a
-/// word: a word too wide for the column is ellipsized in the middle instead.
+/// An id on as few lines as its own spaces allow. A word too wide for the
+/// column wraps rather than losing any of itself, because a session or a path
+/// is told apart by its middle as often as by its ends.
 fn wrap_id(w: &Writer<'_>, text: &str, size: f32, max: f32) -> Vec<String> {
     if w.width(Face::Mono, size, text) <= max {
         return vec![text.to_string()];
@@ -1613,13 +1641,20 @@ fn wrap_id(w: &Writer<'_>, text: &str, size: f32, max: f32) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for word in text.split(' ').filter(|p| !p.is_empty()) {
         // A path breaks after a `/`, which is a boundary between its tokens;
-        // the segment that tells two rows apart is never the one cut away.
-        let pieces: Vec<String> = if w.width(Face::Mono, size, word) > max && word.contains('/') {
+        // a segment still too wide, or a word with no `/`, breaks at the
+        // character that fills the line.
+        let pieces: Vec<String> = if w.width(Face::Mono, size, word) > max {
             word.split_inclusive('/')
-                .map(|segment| fit_middle(w, segment, size, max))
+                .flat_map(|segment| {
+                    if w.width(Face::Mono, size, segment) > max {
+                        segment.chars().map(String::from).collect()
+                    } else {
+                        vec![segment.to_string()]
+                    }
+                })
                 .collect()
         } else {
-            vec![fit_middle(w, word, size, max)]
+            vec![word.to_string()]
         };
         for (i, piece) in pieces.into_iter().enumerate() {
             let joiner = if i == 0 { " " } else { "" };
@@ -1638,6 +1673,17 @@ fn wrap_id(w: &Writer<'_>, text: &str, size: f32, max: f32) -> Vec<String> {
         out.push(String::new());
     }
     out
+}
+
+/// A cell's lines in `room` points: prose wraps, ids wrap at their own
+/// boundaries, numbers do not.
+fn cell_lines(w: &Writer<'_>, kind: Kind, text: &str, size: f32, room: f32) -> Vec<String> {
+    match kind {
+        Kind::Text | Kind::Muted => w.wrap(text, Face::Sans, size, room),
+        Kind::Strong => w.wrap(text, Face::SansBold, size, room),
+        Kind::Id => wrap_id(w, text, cell_size(Kind::Id, size), room),
+        Kind::Num | Kind::Bar => vec![text.to_string()],
+    }
 }
 
 fn table_body(w: &mut Writer<'_>, card: &mut Card, table: &Table, sect: usize) {
@@ -1699,20 +1745,14 @@ fn table_body(w: &mut Writer<'_>, card: &mut Card, table: &Table, sect: usize) {
         .collect();
     let mut first_bar = true;
     for (index, (row, total)) in rows.into_iter().enumerate() {
-        // Lay the row out: prose wraps, ids and numbers do not.
+        // Lay the row out: prose and ids wrap, numbers do not.
         let laid: Vec<Vec<String>> = table
             .columns
             .iter()
             .zip(&cols)
             .zip(row)
             .map(|((column, width), cell)| {
-                let room = width - 2.0 * pad;
-                match column.kind {
-                    Kind::Text | Kind::Muted => w.wrap(&cell.display, Face::Sans, size, room),
-                    Kind::Strong => w.wrap(&cell.display, Face::SansBold, size, room),
-                    Kind::Id => wrap_id(w, &cell.display, cell_size(Kind::Id, size), room),
-                    Kind::Num | Kind::Bar => vec![cell.display.clone()],
-                }
+                cell_lines(w, column.kind, &cell.display, size, width - 2.0 * pad)
             })
             .collect();
         let lines = laid.iter().map(Vec::len).max().unwrap_or(1).max(1);
@@ -2135,6 +2175,150 @@ mod tests {
             for c in "Résumé café ŁŒ → ×·…—".chars() {
                 assert!(matches!(fonts.glyph(face, c).0, FontKey::Plex(_)), "{c}");
                 assert!(c == ' ' || fonts.glyph(face, c).1 != 0, "{c} has no glyph");
+            }
+        }
+    }
+
+    #[test]
+    fn a_header_wraps_by_its_drawn_width() {
+        // Headers are drawn tracked; wrapped by their untracked width, one
+        // that just fit ran past its column (macOS CI, "NET TOKENS").
+        let w = Writer::new(Fonts::new(&[]));
+        let tracked = w
+            .fonts
+            .width(Face::MonoMedium, HEAD, HEAD * 0.08, "NET TOKENS");
+        let plain = w.fonts.width(Face::MonoMedium, HEAD, 0.0, "NET TOKENS");
+        assert!(plain < tracked);
+        assert_eq!(
+            header_lines(&w, "Net tokens", (plain + tracked) / 2.0),
+            ["NET", "TOKENS"]
+        );
+    }
+
+    #[test]
+    fn an_over_long_id_path_or_query_wraps_whole_inside_the_page() {
+        let column = |key: &'static str, label: &str, kind: Kind| super::super::Column {
+            key,
+            label: label.into(),
+            kind,
+        };
+        let table = |id: &'static str, columns, rows| Table {
+            id,
+            title: id.into(),
+            meta: String::new(),
+            columns,
+            rows,
+            total: None,
+            more: 0,
+            note: None,
+            empty: "Nothing.".into(),
+        };
+        let id = format!("stdio-{}", "3f2a9c41d07be5".repeat(7));
+        let mut path = String::from("/Users/someone/work");
+        while path.len() < 170 {
+            path.push_str("/generated-module");
+        }
+        path = format!("{path}/{}", "x".repeat(200 - path.len() - 1));
+        let query: String = r"(?i)^(fn|struct|impl)\s+[A-Za-z_][A-Za-z0-9_]*(<[^>]*>)?\(|\.rs$|"
+            .repeat(6)
+            .chars()
+            .take(300)
+            .collect();
+        assert_eq!((path.len(), query.len()), (200, 300));
+        // The access report's own tables, the query once as prose and once as
+        // the digest column a redacted report draws it in; and a table of ids
+        // too many to fit at any size, so the columns have to give way.
+        let mut report = Report::new("access", "Access");
+        let mut blocks = vec![Block::Table(table(
+            "sessions",
+            vec![
+                column("last_seen", "Last seen", Kind::Id),
+                column("session", "Session", Kind::Id),
+                column("agent", "Agent", Kind::Strong),
+                column("version", "Version", Kind::Id),
+                column("stores", "Stores", Kind::Text),
+                column("queries", "Queries", Kind::Num),
+                column("zero_hit", "Zero-hit", Kind::Num),
+                column("net_tokens", "Net tokens", Kind::Num),
+            ],
+            vec![vec![
+                Cell::text("2026-10-17 09:41:07"),
+                Cell::text(&id),
+                Cell::text("claude-code"),
+                Cell::text("2.1.0"),
+                Cell::text(&path),
+                Cell::int(12),
+                Cell::int(1),
+                Cell::int(1_234_567),
+            ]],
+        ))];
+        for kind in [Kind::Text, Kind::Id] {
+            blocks.push(Block::Table(table(
+                "retrievals",
+                vec![
+                    column("at", "At", Kind::Id),
+                    column("agent", "Agent", Kind::Strong),
+                    column("store", "Store", Kind::Text),
+                    column("tool", "Tool", Kind::Id),
+                    column("query", "Query", kind),
+                    column("hits", "Hits", Kind::Num),
+                    column("excerpt_tokens", "Excerpt tokens", Kind::Num),
+                    column("whole_file_tokens", "Whole-file tokens", Kind::Num),
+                ],
+                vec![vec![
+                    Cell::text("2026-10-17 09:41:07"),
+                    Cell::text("claude-code"),
+                    Cell::text(&path),
+                    Cell::text(&id),
+                    Cell::text(&query),
+                    Cell::int(8),
+                    Cell::int(2_400),
+                    Cell::int(48_000),
+                ]],
+            )));
+        }
+        let keys = ["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"];
+        blocks.push(Block::Table(table(
+            "crowded",
+            keys.iter().map(|k| column(k, k, Kind::Id)).collect(),
+            vec![keys.iter().map(|_| Cell::text(&path)).collect()],
+        )));
+        report.blocks = blocks;
+
+        let text = pdf_extract::extract_text_from_mem(&report.pdf()).expect("the PDF parses");
+        let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        for data in [&id, &path, &query] {
+            assert!(
+                squeezed.contains(data.as_str()),
+                "{data} is not whole in:\n{text}"
+            );
+        }
+        assert!(!text.contains('…'), "an ellipsis in:\n{text}");
+
+        // Every column, and every line in it, ends inside the right margin.
+        let w = Writer::new(Fonts::new(&[]));
+        for table in report.tables() {
+            let Fit { cols, size, pad } = fit_table(&w, table);
+            let total: f32 = cols.iter().sum();
+            assert!(
+                total <= w.inner() + 0.01,
+                "{}: {total} > {}",
+                table.id,
+                w.inner()
+            );
+            for (i, (column, width)) in table.columns.iter().zip(&cols).enumerate() {
+                let room = width - 2.0 * pad;
+                for line in header_lines(&w, &column.label, room) {
+                    let lw = w.fonts.width(Face::MonoMedium, HEAD, HEAD * 0.08, &line);
+                    assert!(lw <= room + 0.01, "{}: header {line}", table.id);
+                }
+                for row in &table.rows {
+                    let fs = cell_size(column.kind, size);
+                    for line in cell_lines(&w, column.kind, &row[i].display, size, room) {
+                        let lw = w.width(face_of(column.kind), fs, &line);
+                        assert!(lw <= room + 0.01, "{}: {line} is {lw} in {room}", table.id);
+                    }
+                }
             }
         }
     }

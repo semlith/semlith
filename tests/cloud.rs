@@ -1372,6 +1372,127 @@ fn a_push_sends_only_what_changed_after_the_binarys_own_refusals() {
     assert_eq!(tar_names(&puts[1].body), ["README.md"]);
 }
 
+/// A git checkout as the push's folder: README.md, a tracked CI workflow and
+/// editor config (dotfiles the walk does not take), and a tracked file
+/// holding a live-looking key (kept back).
+fn tracked_tree(home: &Path) -> std::path::PathBuf {
+    let tree = home.join("infra");
+    for (rel, bytes) in [
+        ("README.md", &b"# infra\nHow the boxes are built.\n"[..]),
+        (".github/workflows/ci.yml", b"on: push\n"),
+        (".editorconfig", b"root = true\n"),
+        ("keys.txt", b"aws_access_key_id = AKIAZ7Q4M2P9X3K8L5N6\n"),
+    ] {
+        let p = tree.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, bytes).unwrap();
+    }
+    let git = |args: &[&str]| {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&tree)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "git {args:?}: {}", out(&o));
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "init"]);
+    tree
+}
+
+#[test]
+fn a_push_lists_every_tracked_file_it_leaves_out_and_keeps_back() {
+    // Cloud audit C15: 18 tracked dotfiles of flask were skipped unlisted.
+    let home = tempfile::tempdir().unwrap();
+    let host = upload_host();
+    signed_in(home.path(), &host);
+    let tree = tracked_tree(home.path());
+
+    let o = semlith(
+        home.path(),
+        &[
+            "cloud",
+            "push",
+            "acme/infra",
+            tree.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(o.status.success(), "{}", out(&o));
+    let report: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let paths = |key: &str| -> Vec<String> {
+        let mut v: Vec<String> = report[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[0].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        paths("left_out"),
+        [".editorconfig", ".github/workflows/ci.yml"],
+        "{}",
+        out(&o)
+    );
+    assert_eq!(paths("refused"), ["keys.txt"], "{}", out(&o));
+
+    let o = semlith(
+        home.path(),
+        &["cloud", "push", "acme/infra", tree.to_str().unwrap()],
+    );
+    let said = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        said.contains("left out  .github/workflows/ci.yml"),
+        "{}",
+        out(&o)
+    );
+    assert!(said.contains("kept back  keys.txt"), "{}", out(&o));
+}
+
+#[test]
+fn a_refused_push_calls_a_kept_back_file_kept_back() {
+    // Cloud audit C23: "not in the folder" for the file the push held back.
+    let home = tempfile::tempdir().unwrap();
+    let host = Stub::start(|seen: &Seen| match seen.path.as_str() {
+        "/v1/whoami" => stub::json(200, json!({ "org": { "slug": "acme", "plan": "pro" } })),
+        _ => stub::error(
+            409,
+            "would_remove",
+            "This push would remove 2 files infra's uploads hold that are not in the folder: \
+             keys.txt, old.md. Push the folder they came from, or push again with --prune to \
+             remove them.",
+        ),
+    });
+    signed_in(home.path(), &host);
+    let tree = tracked_tree(home.path());
+
+    let o = semlith(
+        home.path(),
+        &["cloud", "push", "acme/infra", tree.to_str().unwrap()],
+    );
+    assert!(!o.status.success());
+    let said = String::from_utf8_lossy(&o.stderr);
+    assert!(said.contains("keys.txt (kept back:"), "{}", out(&o));
+    assert!(
+        said.contains("1 more files no longer in the folder"),
+        "{}",
+        out(&o)
+    );
+    assert!(!said.contains("would remove"), "{}", out(&o));
+}
+
 // ------------------------------------------------------------ ledger sync
 
 #[test]
@@ -1461,6 +1582,34 @@ fn a_cloud_report_is_written_where_asked() {
         host.seen().last().unwrap().path,
         "/v1/orgs/acme/reports/savings?format=csv&window=7d&stores=platform,docs"
     );
+
+    // Cloud audit C30: the cloud's own printed command, `--format markdown
+    // --out ./reports/`, into a folder that is missing and then one that is
+    // there.
+    for _ in 0..2 {
+        let o = semlith(
+            home.path(),
+            &[
+                "cloud",
+                "report",
+                "acme",
+                "savings",
+                "--format",
+                "markdown",
+                "--out",
+                "./reports/",
+            ],
+        );
+        assert!(o.status.success(), "{}", out(&o));
+        let written = home.path().join("reports/semlith-acme-savings.md");
+        assert!(written.is_file(), "{}", out(&o));
+        assert!(
+            String::from_utf8_lossy(&o.stdout).contains("semlith-acme-savings.md"),
+            "{}",
+            out(&o)
+        );
+        assert!(host.seen().last().unwrap().path.contains("format=md"));
+    }
 }
 
 fn transcript(home: &Path, id: &str) {

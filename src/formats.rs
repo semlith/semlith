@@ -96,7 +96,9 @@ pub(crate) fn why_no_text(ext: &str, bytes: &[u8]) -> crate::SkipReason {
             let Ok(entry) = archive.by_index_raw(i) else {
                 continue;
             };
-            if entry.name() == "META-INF/manifest.xml" || entry.name().ends_with("encryption.xml") {
+            // A name that does not decode is neither manifest.
+            let name = entry.name().unwrap_or_default();
+            if name == "META-INF/manifest.xml" || name.ends_with("encryption.xml") {
                 manifests.push(i);
             } else {
                 declared = declared.saturating_add(entry.size());
@@ -450,7 +452,10 @@ fn pptx(bytes: &[u8]) -> Option<(String, i64)> {
     // order and put the wrong number on every marker after the tenth.
     let mut slides: Vec<(u32, String)> = zip
         .file_names()
-        .filter_map(|name| Some((slide_number(name)?, name.to_string())))
+        .filter_map(|name| {
+            let name = name.ok()?;
+            Some((slide_number(&name)?, name.into_owned()))
+        })
         .collect();
     slides.sort_unstable();
     let count = slides.len() as i64;

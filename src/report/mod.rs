@@ -394,6 +394,23 @@ pub fn check_any_format(format: &str) -> Result<()> {
     )
 }
 
+/// Where `--out` writes: the path itself, or for a folder (one that exists,
+/// or one named with a trailing separator) `name` inside it, the folder made
+/// first. `--out ./reports/` failed both ways before 0.43.0 (cloud audit C30):
+/// "No such file or directory" when missing, "Is a directory" when there.
+pub fn out_path(out: &std::path::Path, name: &str) -> Result<std::path::PathBuf> {
+    let folder = out.is_dir()
+        || out
+            .as_os_str()
+            .to_string_lossy()
+            .ends_with(std::path::is_separator);
+    if !folder {
+        return Ok(out.to_path_buf());
+    }
+    std::fs::create_dir_all(out).with_context(|| format!("making the folder {}", out.display()))?;
+    Ok(out.join(name))
+}
+
 // ------------------------------------------------------------- the model
 
 /// A number with what it means: the value as data, its unit, the currency
@@ -572,8 +589,9 @@ pub enum Kind {
     Strong,
     /// A description, in the muted ink.
     Muted,
-    /// An id, a path, a version or a stamp: mono, never wrapped — a PDF
-    /// ellipsizes one that does not fit rather than cutting it mid-token.
+    /// An id, a path, a version or a stamp: mono, never wrapped on screen —
+    /// printed, or in a PDF, one wider than its column wraps (after a `/`
+    /// where it has one) rather than being shortened.
     Id,
     /// A number: mono, right-aligned, never wrapped.
     Num,

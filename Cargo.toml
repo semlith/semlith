@@ -1,6 +1,6 @@
 [package]
 name = "semlith"
-version = "0.42.0"
+version = "0.43.0"
 edition = "2024"
 rust-version = "1.90"
 description = "A fast local vector store for AI agents — index files once, keep it current as you save, and answer questions across all of it in milliseconds without leaving the machine."
@@ -95,7 +95,7 @@ tree-sitter-css = "0.25.0"
 tree-sitter-dart = "0.2.0"
 tree-sitter-elixir = "0.3.5"
 tree-sitter-elm = "5.9.4"
-tree-sitter-erlang = "0.20.0"
+tree-sitter-erlang = "0.21.0"
 tree-sitter-fortran = "0.6.0"
 tree-sitter-graphql = "0.3.0"
 tree-sitter-groovy = "0.1.2"
@@ -137,7 +137,7 @@ base64 = "0.23"
 # Reading only: `deflate-flate2` is the decompressor and nothing else. The
 # default feature set adds every compressor and cipher the format allows, none
 # of which semlith needs to read a document.
-zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2"] }
 # Already in the tree under zip; named here so `upgrade` can decompress the
 # release archive in this process rather than through whatever `tar` is on
 # PATH. `rust_backend` keeps it from linking a system zlib.
@@ -207,4 +207,4 @@ pdf-extract = "0.12.0"
 # test can build a `.docx` — a zip of XML — to prove the credential scan reads
 # what a document reader produced rather than only what a text file holds.
 # Compiles nothing that was not already being compiled.
-zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2"] }
