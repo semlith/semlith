@@ -137,7 +137,7 @@ base64 = "0.23"
 # Reading only: `deflate-flate2` is the decompressor and nothing else. The
 # default feature set adds every compressor and cipher the format allows, none
 # of which semlith needs to read a document.
-zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.0.3", default-features = false, features = ["deflate-flate2"] }
 # Already in the tree under zip; named here so `upgrade` can decompress the
 # release archive in this process rather than through whatever `tar` is on
 # PATH. `rust_backend` keeps it from linking a system zlib.
@@ -207,4 +207,4 @@ pdf-extract = "0.12.0"
 # test can build a `.docx` — a zip of XML — to prove the credential scan reads
 # what a document reader produced rather than only what a text file holds.
 # Compiles nothing that was not already being compiled.
-zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.0.3", default-features = false, features = ["deflate-flate2"] }
