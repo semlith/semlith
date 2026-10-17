@@ -7174,14 +7174,17 @@ def _(d):
     whole, sent = L.get("whole_file_tokens") or 0, L.get("excerpt_tokens") or 0
     if max(whole, sent) and abs(max(fills) - 1) > 0.01:
         fail("the larger read bar is not full: %r (whole %d, sent %d)" % (fills, whole, sent))
-    for title, key in (("Savings by agent", "client"), ("Savings by store", "store")):
+    # Each table against the daemon's own grouping. The sessions were the
+    # reference until 0.43.0, which only held while no agent session existed:
+    # by_store has a row for every member store, searched or not.
+    for title, key in (("Savings by agent", "by_agent"), ("Savings by store", "by_store")):
         rows = d.eval("(() => { const c = [...document.querySelectorAll('#main .card')].find(c => (c.querySelector('.card-t') || {}).textContent === %s);"
                       " return c ? c.querySelectorAll('tbody tr:not(.empty-row)').length : null; })()" % json.dumps(title))
         if rows is None:
             fail("the Ledger has no %s table" % title)
-        groups = len({s.get(key) for s in L.get("sessions") or []})
+        groups = len(L.get(key) or [])
         if groups and rows != min(groups, 10):
-            fail("%s lists %d rows; the daemon's sessions have %d %ss" % (title, rows, groups, key))
+            fail("%s lists %d rows; the daemon's %s has %d" % (title, rows, key, groups))
     foot = text_of(d, "#main .ledger-foot", "the ledger's foot")
     if "rows kept" not in foot or "hash chain" not in foot:
         fail("the foot does not state retention and the chain: %r" % foot)
