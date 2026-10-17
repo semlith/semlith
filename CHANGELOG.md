@@ -53,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **zip 9.0.4** for RUSTSEC-2026-0369 (`ZipStreamReader::extract`, which
   semlith never calls). It brings `nix` on macOS and the BSDs.
 
+### Changed
+
+- Dependencies: fastembed 7.1.1, serde_json 1.0.154, sha2 0.11.1,
+  tree-sitter 0.27.1 and tree-sitter-erlang 0.21.0.
+
 ## [0.42.0] - 2026-10-17
 
 ### Added
