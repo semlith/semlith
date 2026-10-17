@@ -552,14 +552,14 @@ pub(super) fn csv_cell(v: &str) -> String {
 
 // ----------------------------------------------------------------- html
 
-/// An unbroken run too long for any column, marked so print may break it
+/// An unbroken run longer than a short word, marked so print may break it
 /// anywhere. Only the long runs: `overflow-wrap:anywhere` on a whole cell
 /// lowers the width the table lays the column out at to one character, and
 /// a stamp or a tool name then broke mid-word to make room. Printed, a
 /// 300-character query in one table cell pushed HITS, EXCERPT TOKENS and
 /// WHOLE-FILE past the page (0.42.0); on screen the table still scrolls.
 fn breakable(escaped: &str) -> String {
-    const LONG: usize = 24;
+    const LONG: usize = 12;
     let mut out = String::with_capacity(escaped.len());
     let mut word = String::new();
     let flush = |word: &mut String, out: &mut String| {
@@ -908,7 +908,7 @@ h1{font-size:22px}.top .grow+.pill{display:none}.kpi .v{font-size:19px}}
 body{font-size:10.5pt;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .sheet{max-width:none;margin:0;padding:0}.tw{overflow:visible}
 thead{display:table-header-group}tr,.kpi,.card-h,.facts>div{break-inside:avoid}.card-h{break-after:avoid}
-th{white-space:normal}th,td{padding:6px 8px}.brk{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere}table{font-size:9.5pt}.id{white-space:normal;font-size:8.5pt}.card{overflow:visible}
+th{white-space:normal}th,td{padding:6px 8px}.brk{overflow-wrap:anywhere}th{letter-spacing:.04em}.bar{width:64px;margin-right:6px}pre{white-space:pre-wrap;overflow-wrap:anywhere}table{font-size:9.5pt}.id{white-space:normal;font-size:8.5pt}.card{overflow:visible}
 .kpis{grid-template-columns:repeat(4,minmax(0,1fr))}.kpis.k3{grid-template-columns:repeat(3,minmax(0,1fr))}.meta{grid-template-columns:repeat(3,minmax(0,1fr))}}
 "#;
 
@@ -932,7 +932,8 @@ mod tests {
     #[test]
     fn only_a_long_unbroken_run_may_break_anywhere_in_print() {
         assert_eq!(breakable("2026-10-17 12:17:45"), "2026-10-17 12:17:45");
-        let long = "w000|w001|w002|w003|w004|w005";
+        assert_eq!(breakable("claude-code search"), "claude-code search");
+        let long = "pathfinder-339533550";
         assert_eq!(
             breakable(&format!("a {long} b")),
             format!("a <span class=\"brk\">{long}</span> b")

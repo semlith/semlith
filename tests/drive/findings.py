@@ -6046,18 +6046,20 @@ def _(d):
     # 0.42.0's access report printed by Chrome lost HITS, EXCERPT TOKENS and
     # WHOLE-FILE: a query with no spaces gave its cell a min-content wider than
     # the page, and print turns the table's sideways scroll into a clip.
-    a_store(d)
+    store = a_store(d)
     query = "(" + "|".join("w%03d" % i for i in range(60)) + ")"
     query = (query * 2)[:300]
     # As an agent asks, over stdio MCP: a portal search is recorded as a
-    # person's, which the access report's per-call table leaves out.
+    # person's, which the access report's per-call table leaves out. One
+    # store only: a search over every store writes a row in each, and par.6
+    # compares the Ledger's stores with the sessions'.
     calls = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2025-06-18", "capabilities": {},
             "clientInfo": {"name": "drive-agent", "version": "1.0"}}},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-            "name": "semlith_search", "arguments": {"query": query, "k": 2}}},
+            "name": "semlith_search", "arguments": {"query": query, "k": 2, "store": [store]}}},
     ]
     subprocess.run([fixtures.semlith_bin(), "mcp"], input="".join(json.dumps(c) + "\n" for c in calls),
                    capture_output=True, text=True, encoding="utf-8", timeout=180)
