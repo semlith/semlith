@@ -403,8 +403,28 @@ fn rows(db: &rusqlite::Connection) -> i64 {
         .unwrap()
 }
 
+/// The binary with a home of its own: a spawned `semlith` that inherits the
+/// machine's `HOME` reads the owner's registry, settings and cloud token. The
+/// home lives as long as the returned guard; the model cache stays the real
+/// one so nothing is downloaded again.
+fn semlith_bin() -> (std::process::Command, tempfile::TempDir) {
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"));
+    cmd.env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("SEMLITH_HOME", home.path().join(".semlith"))
+        .env(
+            semlith::MODEL_CACHE_ENV,
+            semlith::model_cache_dir().unwrap(),
+        )
+        .env_remove("SEMLITH_STORE")
+        .env_remove("SEMLITH_PORT");
+    (cmd, home)
+}
+
 fn cli(store: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+    let (mut cmd, _home) = semlith_bin();
+    let out = cmd
         .arg("--store")
         .arg(store)
         .args(args)
@@ -500,9 +520,17 @@ fn a_raw_read_is_recorded_uncredited_and_does_not_break_the_chain() {
         savings.credited, 0,
         "a raw read must never be credited with a saving"
     );
+    // 0.42.0 (37d9422, "one aggregation"): a refund is no query, no coverage
+    // and no zero hit. It is counted as a refund beside the saving instead of
+    // as a retrieval inside its denominator, which this test asserted before.
     assert_eq!(
-        savings.total, 1,
-        "it is still a retrieval, and a denominator"
+        savings.total, 0,
+        "a raw read is a refund, not a retrieval in the saving's denominator"
+    );
+    assert_eq!(
+        semlith::store::ledger_misses(s.db()).unwrap().refunds,
+        1,
+        "it is counted as a refund"
     );
     assert_eq!(savings.coverage(), 0, "nothing was covered");
     assert!(
@@ -538,12 +566,20 @@ fn the_ledger_states_its_saving_with_coverage_refunds_and_tier() {
     drop(fleet);
 
     let s = Semlith::open(store.path(), None).unwrap();
+    // 0.42.0 (37d9422) made a refund no retrieval: clients are the agents that
+    // retrieved, so a store holding only a raw read names none. One agent
+    // retrieval, counted by the tokenizer, gives the block a client and a
+    // tokenizer to name.
+    let mut asked = row("claude-code", "sourdough", 10, 100);
+    asked.tokenizer = semlith::ledger::MODEL;
+    semlith::store::record_retrieval(s.db(), &asked).unwrap();
     let savings = semlith::store::ledger_savings(s.db()).unwrap();
     let misses = semlith::store::ledger_misses(s.db()).unwrap();
     drop(s);
 
     for args in [vec!["ledger"], vec!["ledger", "--verify"]] {
-        let out = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+        let (mut cmd, _home) = semlith_bin();
+        let out = cmd
             .args(&args)
             .arg("-s")
             .arg(store.path())
@@ -570,9 +606,10 @@ fn the_ledger_states_its_saving_with_coverage_refunds_and_tier() {
             args.join(" ")
         );
         // The helper says what the denominator is, in the words the contract
-        // fixes, so the number is never a bare multiplier.
+        // fixes, so the number is never a bare multiplier. 0.42.0 (37d9422)
+        // split it into the excerpt side and the whole-file side.
         assert!(
-            said.contains("counted with the store's tokenizer"),
+            said.contains("counted: excerpts with the store's tokenizer"),
             "the token helper is missing:\n{said}"
         );
     }

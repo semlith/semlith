@@ -5,6 +5,39 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.44.0] - 2026-10-18
+
+### Added
+
+- **Any number of remote workers.** A program that embeds semlith registers
+  remote workers with `accel::add_remote("remote-<name>", remote)` and takes
+  them away with `accel::remove_remote`, while it runs. Each is a lane of its
+  own: a row in the Machine snapshot and in `doctor --gpu`, a switch saved
+  under its id (off until turned on), and a share of every index run's
+  batches. A lane removed mid-run hands its batches back to the run, and no
+  chunk is lost. No count is fixed in code. `accel::set_remote` still
+  registers the lane called `remote`. The binary registers none, so nothing
+  changes for it. semlith-cloud 0.10.0 uses this for several confidential GPU
+  workers at once.
+
+### Fixed
+
+- **Calls inside Rust macro arguments are calls.** `json!({ "x": f(1) })`,
+  `format!("{}", a::g(2))` and `assert!(x.h())` now give `calls` edges to `f`,
+  `g` and `h`, so `semlith_neighbors`, `semlith_impact` and the cloud's impact
+  check see them (#244, which missed a caller of `mcp::tool_list_tokens`
+  inside a `json!`). Attribute arguments and `macro_rules!` bodies still call
+  nothing. Existing stores gain the edges as their files are re-indexed.
+- **The CPU-backed worker lane is not refused as a software renderer.** The
+  GPU speed floor (#197) applied to the `worker` lane too, which is on the CPU
+  by design, and on a busy machine refused it.
+
+### Upgrading
+
+- Library: `accel::lane` returns an owned `Arc<Lane>`; `accel::Enabled.remote`
+  is now `remotes` (the remote lanes switched on); `accel::Switches` gains
+  `remotes` and is no longer `Copy`. See docs/compatibility.md.
+
 ## [0.43.0] - 2026-10-17
 
 ### Fixed

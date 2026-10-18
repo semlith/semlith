@@ -509,7 +509,17 @@ mod tests {
         );
         assert_eq!(installed(cache.path(), &pack), Some(dir.clone()));
 
-        std::fs::write(dir.join("lib").join("libx.dylib"), b"swapped").unwrap();
+        // Same size, written later: the size matches, so only the digest can
+        // catch it. Dated a second on, because a write in the same clock tick
+        // as the stamp kept its mtime on Windows CI and the fast path passed.
+        let lib = dir.join("lib").join("libx.dylib");
+        std::fs::write(&lib, b"swapped").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&lib)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(1))
+            .unwrap();
         assert_eq!(
             installed(cache.path(), &pack),
             None,

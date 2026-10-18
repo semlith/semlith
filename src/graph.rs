@@ -238,6 +238,26 @@ fn supplement(lang: &str) -> &'static str {
               function: (field_expression
                 value: (_) @receiver
                 field: (field_identifier) @name)) @reference.call
+            ; A call inside a macro's arguments: `json!({ "x": f(1) })`. The
+            ; grammar leaves the arguments as a flat token tree, so none of the
+            ; patterns above ever saw `f(1)` and the call had no edge — which
+            ; is how a caller inside a `json!` slipped past the impact check
+            ; (#244). The same three shapes are read off the tokens instead: a
+            ; name, `a::name` with the segment as the hint, and `x.name` with
+            ; `x` as the receiver, each followed by a parenthesised tree. A
+            ; tree whose own child is `(` is one the parentheses delimit; an
+            ; anchor on that first child misses `()`. An anchor also skips the
+            ; `!` of a nested `vec![..]` or `format!(..)`, and a query cannot
+            ; see whether the tree sits in a macro call or an attribute, so
+            ; `collect` finishes the check; see `macro_argument_call`.
+            (token_tree
+              (identifier) @name . (token_tree "(") @reference.call)
+            (token_tree
+              (identifier) @hint . "::" . (identifier) @name
+              . (token_tree "(") @reference.call)
+            (token_tree
+              (_) @receiver . "." . (identifier) @name
+              . (token_tree "(") @reference.call)
         "#
         }
         // TypeScript's bundled query matches nothing on ordinary unexported
@@ -1177,6 +1197,9 @@ fn collect(
             let Some(target) = target.filter(|t| !t.is_empty()) else {
                 continue;
             };
+            if node.kind() == "token_tree" && !macro_argument_call(node, name) {
+                continue;
+            }
             // A macro invocation is recorded under the name the source writes.
             //
             // `format!(...)` is a reference to the macro `format!`, not a call
@@ -1564,6 +1587,30 @@ fn in_macro(node: tree_sitter::Node) -> bool {
     }
     node.parent()
         .is_some_and(|parent| MACRO_KINDS.contains(&parent.kind()))
+}
+
+/// Whether a call the Rust supplement read out of a token tree (#244) is a
+/// call written in a macro invocation's arguments.
+///
+/// Two things the query cannot say. The name has to stand directly before the
+/// parenthesised tree, with nothing between: a query anchor skips anonymous
+/// nodes, so `format!("{}", x)` nested in a `json!` matched as a call to
+/// `format`, and a macro name is not a call edge. And the token tree has to
+/// belong to a macro invocation: an attribute's arguments are token trees too,
+/// and `#[cfg(not(test))]` calls nothing named `not`, nor does a `macro_rules!`
+/// body call anything until it is expanded somewhere.
+fn macro_argument_call(args: tree_sitter::Node, name: Option<tree_sitter::Node>) -> bool {
+    if name.is_none() || args.prev_sibling() != name {
+        return false;
+    }
+    let mut up = args.parent();
+    while let Some(node) = up {
+        if node.kind() != "token_tree" {
+            return node.kind() == "macro_invocation";
+        }
+        up = node.parent();
+    }
+    false
 }
 
 /// The lead a `@hint` capture carries, or `None` when it carries none worth
@@ -4898,6 +4945,90 @@ mod tests {
             has_edge(&e, "go", "helper", "calls"),
             "an ordinary call is untouched: {:?}",
             e.edges
+        );
+    }
+
+    /// A call written inside a macro's arguments is still a call (#244).
+    ///
+    /// tree-sitter-rust leaves a macro's arguments as an unparsed token tree,
+    /// so `json!({ "x": f(1) })` held no `call_expression` and the graph had no
+    /// edge for `f` — which is how semlith-cloud's call to
+    /// `mcp::tool_list_tokens` inside a `json!` escaped the impact check on
+    /// #238. The macro name itself stays a reference to the macro.
+    #[test]
+    fn a_call_inside_a_macro_argument_is_a_call() {
+        let e = run(
+            "a.rs",
+            "#[cfg(not(test))]\nfn go(x: X) {\n    let v = json!({ \"x\": f(1), \"y\": vec![1] });\n    \
+             let s = format!(\"{}\", a::g(2));\n    assert!(x.h());\n}\n",
+        );
+        let only = |to: &str| -> Vec<&Edge> {
+            e.edges
+                .iter()
+                .filter(|x| x.from == "go" && x.to == to && x.kind == "calls")
+                .collect()
+        };
+        assert_eq!(only("f").len(), 1, "{:?}", e.edges);
+        let g = only("g");
+        assert_eq!(g.len(), 1, "{:?}", e.edges);
+        assert_eq!(g[0].hint.as_deref(), Some("a"), "{:?}", e.edges);
+        let h = only("h");
+        assert_eq!(h.len(), 1, "{:?}", e.edges);
+        assert!(
+            h[0].hint
+                .as_deref()
+                .is_some_and(|x| x.starts_with(RECEIVER)),
+            "a method call inside a macro is still a method call: {:?}",
+            e.edges
+        );
+        for name in ["json", "vec", "format", "assert"] {
+            assert!(
+                !has_edge(&e, "go", name, "calls"),
+                "a macro name is not a call to `fn {name}`: {:?}",
+                e.edges
+            );
+        }
+        assert!(has_edge(&e, "go", "json!", "calls"), "{:?}", e.edges);
+        assert!(
+            !e.edges.iter().any(|x| x.to == "not"),
+            "an attribute's arguments call nothing: {:?}",
+            e.edges
+        );
+    }
+
+    /// The #244 case end to end: a crate whose only call to
+    /// `mcp::tool_list_tokens` sits inside a `json!`, indexed by the writer
+    /// `index_set` uses, names that caller under neighbours and impact.
+    #[test]
+    fn a_caller_inside_json_is_a_neighbour_and_an_impact() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::store::prepare_for_tests(&db);
+        for (path, text) in [
+            (
+                "src/mcp.rs",
+                "pub fn tool_list_tokens(counter: &Counter) -> usize { 0 }\n",
+            ),
+            (
+                "src/routes.rs",
+                "use crate::mcp;\nfn tools(counter: &Counter) -> Value {\n    \
+                 json!({ \"tokens\": mcp::tool_list_tokens(counter) })\n}\n",
+            ),
+        ] {
+            let file = crate::store::insert_file(&db, path, path, text.len() as u64, 0).unwrap();
+            let e = extract(Path::new(path), text).unwrap().unwrap();
+            crate::store::write_extraction(&db, &e, file, &[]).unwrap();
+        }
+        let n = neighbours(&db, "tool_list_tokens", &[], false, &Scope::all()).unwrap();
+        assert!(
+            n.callers.iter().any(|c| c.symbol.name == "tools"),
+            "{:?}",
+            n.callers
+        );
+        let reach = impact(&db, "tool_list_tokens", &[], 1, false, &Scope::all()).unwrap();
+        assert!(
+            reach.reached.iter().any(|r| r.name == "tools"),
+            "{:?}",
+            reach.reached
         );
     }
 
