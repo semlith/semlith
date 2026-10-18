@@ -202,16 +202,23 @@ fn the_writer_stores_the_same_rows_for_the_same_corpus() {
 // Lock.elm's top-level `acquire : Int` is an edge of the file's module on
 // line 11 beside the `module Lock exposing (acquire)` one on line 1, where
 // the two shared a source name and one was deduplicated away.
+//
+// 0.44.0 moved all of them for 0.42.0's e7e3bf2, which keeps HTML as written
+// in a code store instead of stripping its tags: html/lock.html is
+// parsed as markup now, one symbol and three edges more, and its chunk text
+// is the file's. Nobody ran this ignored test between that commit and 0.44.0
+// (bisected: green on e7e3bf2~1, these rows on e7e3bf2). The 0.44.0 macro
+// call edges (#244) change no row here; the corpus has no call in a macro.
 const PINNED_COUNTS: [(&str, i64); 4] = [
     ("chunks", 48),
     ("fts", 48),
-    ("symbols", 188),
-    ("edges", 208),
+    ("symbols", 189),
+    ("edges", 211),
 ];
 const PINNED_DIGESTS: [(&str, &str); 3] = [
-    ("chunks", "64ee910ab7c594a3"),
-    ("symbols", "ba65e9aaf787ebb1"),
-    ("edges", "c1cb5daaa2f6a061"),
+    ("chunks", "c15da193b747a888"),
+    ("symbols", "086ea783c20cdd27"),
+    ("edges", "b52593a6b8771b51"),
 ];
 
 /// A graph list that fails leaves the search standing on the two lists that

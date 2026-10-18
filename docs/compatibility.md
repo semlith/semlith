@@ -728,6 +728,19 @@ From 0.37.0-rc.7:
 |---|---|
 | Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
+### 0.44.0
+
+`FORMAT_VERSION` does not move. The binary registers no remote lane, so its
+CLI, MCP, routes and `settings.json` are unchanged.
+
+| Surface | Change |
+|---|---|
+| Library | `accel::add_remote(id, remote)` and `accel::remove_remote(id)` register and remove any number of remote lanes at run time; an id is `remote` or `remote-` and lowercase letters, digits and hyphens. `accel::set_remote(Some/None)` stays, for the lane called `remote`. `accel::is_remote(id)`. **Break:** `accel::lane(id)` returns `Option<Arc<Lane>>` instead of `Option<&'static Arc<Lane>>`; `accel::Enabled`'s `remote: bool` is `remotes: Vec<String>` (the remote lanes switched on); `accel::Switches` gains `remotes` and is no longer `Copy`. |
+| `settings.json` | `accelerators.remotes`, `{<id>: bool}` for every remote lane but `remote`, which keeps `accelerators.remote`; absent while empty. An older binary ignores it. |
+| `SEMLITH_ACCEL` | Takes any remote lane id. |
+| `GET /api/accel`, `doctor --gpu` | One row per registered remote lane, labelled `Remote <name>`, each with its `Remote::describe()` fields; a check row carries them whether the lane was checked or not. |
+| Graph | A call written inside a Rust macro's arguments (`json!({ "x": f(1) })`) is a `calls` edge. Existing stores gain these edges as their files are re-indexed. |
+
 ### 0.43.0
 
 `FORMAT_VERSION` does not move. One index, `symbols_past_path` on

@@ -1735,7 +1735,7 @@ fn a_stopped_index_run_undoes_itself() {
     // run it asks for.
     let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
-    for i in 0..60 {
+    for i in 0..200 {
         let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(120));
         std::fs::write(extra.join(format!("note{i:03}.md")), body).unwrap();
     }
@@ -1745,9 +1745,16 @@ fn a_stopped_index_run_undoes_itself() {
 
     let run = daemon.index_run(&extra);
 
-    // Stop it once it has written something, so the rollback has work to do.
+    // Stop it once it is writing files, so the rollback has work to do. Read
+    // from the run's own log: since 0.42.0 a run is answered from the
+    // generation before it, so `/api/files` moves only when the run commits,
+    // and a stop then found the run already finished (409).
     until("the run to embed something to roll back", SLOW, || {
-        daemon.get("/api/files").json()["total"].as_i64().unwrap() > before
+        daemon
+            .get(&format!("/api/index/log?store=api&run={run}"))
+            .json()["lines"]
+            .as_array()
+            .is_some_and(|lines| lines.iter().filter(|l| l["event"] == "file").count() >= 3)
     });
 
     let stopped = daemon.post("/api/index/control", "{\"action\":\"stop\"}");

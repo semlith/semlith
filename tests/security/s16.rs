@@ -24,20 +24,60 @@ fn s16_a_query_exports_as_text_not_a_formula_or_html() {
     );
 
     // What a hostile agent would ask: a spreadsheet formula, and markup.
+    //
+    // Asked over MCP, as an agent. Until 0.42.0 this test asked through
+    // `semlith search`; 37d9422 ("one aggregation") keeps the CLI's and the
+    // portal's own retrievals out of the agents' figures and out of the access
+    // report, so a CLI query no longer reaches it by design.
     let formula = r#"=HYPERLINK("http://example.invalid","deploy")"#;
     let markup = "<img src=x onerror=alert(1)> deploy | nightly";
-    for query in [formula, markup] {
-        let out = run(&home, &["search", query], &[]);
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+    let mut script = vec![serde_json::json!({
+        "jsonrpc": "2.0", "id": 0, "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "clientInfo": { "name": "hostile-agent", "version": "1" }
+        }
+    })];
+    for (id, query) in [formula, markup].into_iter().enumerate() {
+        script.push(serde_json::json!({
+            "jsonrpc": "2.0", "id": id + 1, "method": "tools/call",
+            "params": { "name": "semlith_search", "arguments": { "query": query } }
+        }));
     }
+    let mut child = semlith(&home)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        for message in &script {
+            writeln!(stdin, "{message}").unwrap();
+        }
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let csv = run(
         &home,
-        &["report", "access", "--excerpts", "--format", "csv"],
+        // From 0.42.0 (3b6dbe1, typed reports) a report's CSV is a zip of one
+        // file per table unless one table is named; the queries are in
+        // `retrievals`.
+        &[
+            "report",
+            "access",
+            "--excerpts",
+            "--format",
+            "csv",
+            "--table",
+            "retrievals",
+        ],
         &[],
     );
     let csv = String::from_utf8_lossy(&csv.stdout).into_owned();
