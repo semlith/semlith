@@ -67,8 +67,11 @@ fn s24_a_store_outside_the_home_is_private_and_its_ledger_is_keyed() {
     assert!(key.is_file(), "no ledger key beside the store");
     let ledger = run(&home, &["--store", s, "ledger", "--json"], &[]);
     let ledger = String::from_utf8_lossy(&ledger.stdout).into_owned();
+    // Chain v2 (0.42.0, 3b61a5d) writes keyed rows as `k2:`; `k1:` is the
+    // 0.41.0 formula, which still verifies on rows it wrote but is no longer
+    // written.
     assert!(
-        ledger.contains("k1:"),
+        ledger.contains("\"k2:"),
         "the ledger's rows are not keyed:\n{ledger}"
     );
 
