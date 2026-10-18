@@ -349,7 +349,12 @@ fn a_running_mcp_server_sees_an_edit_without_restarting() {
     let watcher = spawn(store.path(), corpus.path());
 
     // A real server process over real stdio, started before the edit exists.
+    // In a home of its own: with the machine's, a search also merged the
+    // remote stores its owner had connected, asked the cloud with their
+    // token, and the edit was crowded out of the answer.
+    let home = tempfile::tempdir().unwrap();
     let mut server = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .env("SEMLITH_HOME", home.path())
         .arg("--store")
         .arg(store.path())
         .arg("mcp")
