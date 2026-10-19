@@ -2737,10 +2737,11 @@ fn reachable(
             }
         }
     }
-    // Go writes `pkg.F()` and `t.F()` alike, and only the extractor knows
-    // which receivers are the method's own; any other lead may be a value.
+    // Go writes `pkg.F()` and `t.F()` alike, and JavaScript `ns.f()` and
+    // `obj.f()`: only the extractor knows which leads are receivers, so
+    // there only a call with no lead at all is bare.
     let bare = match lang {
-        Some("go") => hint.is_none(),
+        Some("go" | "javascript" | "typescript" | "svelte" | "vue") => hint.is_none(),
         _ => hint.is_none_or(|h| {
             !h.starts_with(crate::graph::RECEIVER)
                 && !h.chars().next().is_some_and(char::is_uppercase)
@@ -2748,10 +2749,16 @@ fn reachable(
     };
     let receiver_free = lang.is_some_and(crate::graph::no_implicit_receiver);
     let no_this = (bare && receiver_free) || (caller_top_level && hint.is_none());
+    // A module path drops methods only for a free function it places: in
+    // flask's drive, `d.fixtures.bulk()` named fixtures.py, which holds the
+    // method `Fixtures.bulk` and no free `bulk`.
+    let placed = |c: &SymbolRow| {
+        hint.is_none_or(|h| names_file(h, &c.path, src_path) || owner_of(&c.qualified) == Some(h))
+    };
     let free_left = candidates
         .iter()
         .zip(&keep)
-        .any(|(c, k)| *k && free_function(c));
+        .any(|(c, k)| *k && free_function(c) && placed(c));
     if no_this && free_left {
         for (k, c) in keep.iter_mut().zip(candidates) {
             *k = *k && !owned_by_type(c);
@@ -2939,6 +2946,19 @@ fn through_receiver(candidates: &[&SymbolRow], src_path: &str, lead: &str) -> (V
             1 => return (typed, true),
             0 => {}
             _ => return (typed, false),
+        }
+    }
+    // `this.close()` where `this` is an object literal or a function's own
+    // object, a type the extractor cannot name: the one method of that name
+    // in the calling file is the one meant.
+    if lead.is_empty() {
+        let here: Vec<bool> = candidates
+            .iter()
+            .zip(&pool)
+            .map(|(c, p)| *p && c.path == src_path)
+            .collect();
+        if here.iter().filter(|h| **h).count() == 1 {
+            return (here, true);
         }
     }
     (pool, false)

@@ -452,6 +452,13 @@ fn supplement(lang: &str) -> &'static str {
                   (unary_expression) (binary_expression)
                   (call_expression) (new_expression)
                 ])) @definition.constant
+            ; `store.search(...)`, `view.sel.clear()`: the object is the hint,
+            ; as in TypeScript. Without it every member call read as a bare
+            ; one.
+            (call_expression
+              function: (member_expression
+                object: (_) @hint
+                property: (property_identifier) @name)) @reference.call
         "#
         }
         "php" => {
@@ -798,6 +805,8 @@ struct Ref {
     method: bool,
     /// That receiver is `self`, `this` or `cls`: the enclosing class.
     on_self: bool,
+    /// That receiver is `super`: a method, of a class the call does not name.
+    on_super: bool,
 }
 
 /// The deepest nesting a block grammar is given. tree-sitter-md and
@@ -1149,7 +1158,11 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
             (None, true) => owner.clone(),
             (None, false) => member.clone(),
         };
-        let method = (reference.method || go_self)
+        // `this.close()` goes through a receiver; JavaScript and TypeScript
+        // capture it as a hint, which drops `this`, and it read as bare.
+        let this_call = (on_self || reference.on_super)
+            && matches!(lang, "javascript" | "typescript" | "svelte" | "vue");
+        let method = (reference.method || go_self || this_call)
             && !(lang == "python"
                 && !reference.on_self
                 && lead.as_ref().is_some_and(|l| {
@@ -1351,6 +1364,7 @@ fn collect(
                 method,
                 on_self: hint
                     .is_some_and(|h| matches!(&text[h.byte_range()], "self" | "this" | "cls")),
+                on_super: hint.is_some_and(|h| &text[h.byte_range()] == "super"),
             });
         }
 
@@ -7729,5 +7743,47 @@ fn typed(e: &Enabled) {
             .find(|i| i.end.symbol.name == "attach")
             .expect("attach calls get");
         assert!(!call.means.is_empty(), "{call:#?}");
+    }
+
+    /// JavaScript member calls are receiver calls, not bare ones:
+    /// `this.close()` inside an object literal's method means that object's
+    /// `close` in the same file, and `view.sel.clear()` is not the file's
+    /// free `clear` (both read as bare calls once the rule existed).
+    #[test]
+    fn javascript_member_calls_are_not_bare() {
+        let js = "const menu = {\n  close() {\n    return 1;\n  },\n  ensure() {\n    this.close();\n  },\n};\n\nfunction close() {}\n\nfunction clear() {}\n\nfunction paint(view) {\n  view.sel.clear();\n}\n";
+        let db = store(&[("src/app.js", js)]);
+        settles_at(&db, "ensure", "close", "src/app.js", 2);
+        let out = crate::store::edges_out(&db, "paint", &dependency_kinds()).unwrap();
+        assert!(
+            out.iter()
+                .all(|e| e.symbol.name != "clear" || e.confidence == AMBIGUOUS),
+            "{out:#?}"
+        );
+    }
+
+    /// A TypeScript `this.f()` names its class and settles on `C.f`, beside
+    /// a free `f` of the same file.
+    #[test]
+    fn typescript_this_call_means_the_class_method() {
+        let ts = "function f() {}\n\nclass C {\n  f() {}\n  g() {\n    this.f();\n  }\n}\n";
+        let db = store(&[("src/c.ts", ts)]);
+        settles_at(&db, "g", "f", "src/c.ts", 4);
+    }
+
+    /// A Python attribute named like an imported module is no module path to
+    /// a free function: `d.fixtures.bulk()` in flask's drive is
+    /// `Fixtures.bulk`, and fixtures.py holds no free `bulk`.
+    #[test]
+    fn a_module_path_drops_methods_only_for_a_free_function_it_places() {
+        let fixtures = "class Fixtures:\n    def bulk(self):\n        return 1\n";
+        let other = "def bulk():\n    return 2\n";
+        let caller = "import fixtures\n\n\ndef run(d):\n    d.fixtures.bulk()\n";
+        let db = store(&[
+            ("drive/fixtures.py", fixtures),
+            ("drive/other.py", other),
+            ("drive/findings.py", caller),
+        ]);
+        settles_at(&db, "run", "bulk", "drive/fixtures.py", 2);
     }
 }
