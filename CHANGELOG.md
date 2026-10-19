@@ -81,6 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the trait.
 - The extractor changes above take effect as files are re-indexed; the
   resolver changes answer at once.
+- **A live Slack token no longer reads as a typed placeholder by chance.**
+  The secret scanner looked for a run like `12345678` across the whole token,
+  so `…3312-3456786…` spelled one over the `-` and a real token scored 55,
+  under the floor it refuses at; runs are read inside one segment now.
 - **Portal dialogs scroll instead of clipping.** On a short window the
   folder picker's list, or a long confirm, was squashed with no scrollbar;
   the dialog scrolls now.

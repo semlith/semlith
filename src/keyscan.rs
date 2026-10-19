@@ -700,7 +700,13 @@ fn randomness(body: &str) -> (i32, String) {
     if chars.len() < 8 {
         return (0, String::new());
     }
-    if sequential(&chars) {
+    // A run is read inside one segment: across a separator, Slack's
+    // `…3312-3456786…` spelled `12345678` by chance and a live token scored
+    // under the floor (CI run 39255714448 on Windows).
+    let in_a_segment = body
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|segment| sequential(&segment.chars().collect::<Vec<_>>()));
+    if in_a_segment {
         return (
             -20,
             "a sequential run such as abcdefgh or 12345678".to_string(),
@@ -1389,6 +1395,22 @@ mod tests {
         assert!(dummy_rule("x", "FAKE000000000000").is_some());
         assert!(dummy_rule("x", "FAKEcccccccccccc").is_some());
         assert!(dummy_rule("x", "sk_test_DUMMY").is_some());
+        // A rising run across a segment separator is chance, not a dummy: the
+        // forged Slack value of CI run 39255714448 on Windows scored 55.
+        // Built from its parts, as `forge` builds its values: a token-shaped
+        // literal in the source is one GitHub's push protection refuses.
+        let value = [
+            "xoxb",
+            "188119213312",
+            "3456786401962",
+            "75ZcJ4TEuvBXoX62p3LJryGu",
+        ]
+        .join("-");
+        let joined = scan("src/config.rs", &value);
+        assert!(
+            joined.iter().map(|m| m.confidence).max().unwrap_or(0) >= 70,
+            "{joined:?}"
+        );
         let slack = crate::filter::SHAPES
             .iter()
             .position(|s| s.provider == "slack")
