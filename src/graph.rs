@@ -1367,14 +1367,25 @@ fn collect(
             let raw = &text[name.byte_range()];
             let scope = scope_owner(name, text);
             let go = go_receiver(span, text);
+            let owner = match rust {
+                Some(_) => rust_owner(span, text),
+                None => go.as_ref().map(|(ty, _)| ty.clone()).or(scope.clone()),
+            };
             // `void ns::helper() {}` is a namespace's function, which the
-            // grammar tags as a method because of its qualified name.
+            // grammar tags as a method because of its qualified name; so is a
+            // Rust `fn` in a `mod tests { }` body, which the grammar shapes
+            // like an `impl`'s.
             // ponytail: case decides type vs namespace (`Foo::` vs `ns::`), the
             // convention nearly every C++ codebase keeps; a lower-case class
             // defined out of line reads as a namespace function.
-            let kind = match &scope {
-                Some(s) if kind == "method" && !s.starts_with(char::is_uppercase) => "function",
-                _ => kind,
+            let namespace = match &scope {
+                Some(s) => !s.starts_with(char::is_uppercase),
+                None => rust.is_some() && owner.is_none(),
+            };
+            let kind = if kind == "method" && namespace {
+                "function"
+            } else {
+                kind
             };
             defs.push(Def {
                 kind: kind.to_string(),
@@ -1383,10 +1394,7 @@ fn collect(
                 } else {
                     raw.to_string()
                 },
-                owner: match rust {
-                    Some(_) => rust_owner(span, text),
-                    None => go.as_ref().map(|(ty, _)| ty.clone()).or(scope),
-                },
+                owner,
                 receiver: go.and_then(|(_, name)| name),
                 start: span.start_byte(),
                 end: span.end_byte(),
@@ -7629,5 +7637,23 @@ fn typed(e: &Enabled) {
         settles_at(&db, "first", "lane", "src/jobs.rs", 6);
         // The same receiver inside a macro's arguments.
         settles_at(&db, "second", "lane", "src/jobs.rs", 6);
+    }
+
+    /// A Rust `fn` inside `mod tests { }` is a function: the grammar shapes
+    /// a module body like an `impl`'s and tagged it a method, so the 0.44.1
+    /// rule dropped it and ripgrep's escape.rs tests called a `b` in
+    /// another repository (found by the ground-truth pass).
+    #[test]
+    fn a_rust_fn_in_a_module_body_is_a_function() {
+        let escape = "#[cfg(test)]\nmod tests {\n    fn b(s: &str) -> String {\n        s.to_string()\n    }\n\n    #[test]\n    fn empty() {\n        b(\"\");\n    }\n}\n";
+        let other = "struct G;\n\nimpl G {\n    fn b(&self) {}\n}\n";
+        let py = "def outer():\n    def b():\n        pass\n    return b\n";
+        let db = store(&[
+            ("crates/cli/src/escape.rs", escape),
+            ("crates/index/src/literal.rs", other),
+            ("tests/test_x.py", py),
+        ]);
+        assert_eq!(kind_of(&db, "b", 3), "function");
+        settles_at(&db, "empty", "b", "crates/cli/src/escape.rs", 3);
     }
 }
