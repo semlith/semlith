@@ -53,6 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   imports (`std::env::current_dir()`) stays unsettled instead of resolving to
   the one `current_dir` the corpus happens to define; an inline
   `mod m { fn f() }` is named by `m::f()`.
+- **JavaScript member calls are calls through a receiver.** `store.search()`
+  and `view.sel.clear()` carry their object as a hint, as in TypeScript
+  (they read as bare calls), and `this.f()` / `super.f()` are receiver calls;
+  a `this` whose type nothing names settles on the one method of that name in
+  the file.
+- **A grouped Rust `use` places what it imports.** `use super::{Item,
+  gdrive::{base, url}}` now ranks gdrive.rs for a bare `url(..)`; the import
+  list was split only on `/ . : \`, so braces and commas hid every module.
 - **A Rust `fn` in a module body is a function** (`mod tests { fn b() }` was
   tagged a method), and a method of `impl Trait for Box<dyn Error>` belongs to
   the trait.
