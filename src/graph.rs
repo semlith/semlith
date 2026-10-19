@@ -7684,12 +7684,16 @@ fn typed(e: &Enabled) {
     #[test]
     fn a_module_path_naming_nothing_here_does_not_settle() {
         let hiargs = "pub fn current_dir() -> u8 {\n    0\n}\n";
-        let walk = "fn get_or_set_current_dir() {\n    std::env::current_dir();\n}\n\nmod m {\n    pub fn f() {}\n}\n\nfn g() {\n    m::f();\n}\n";
+        let walk = "use crate::dir::{Ignore, IgnoreBuilder};\n\nfn get_or_set_current_dir() {\n    std::env::current_dir();\n}\n\nmod m {\n    pub fn f() {}\n}\n\nfn g() {\n    m::f();\n}\n";
         let other = "fn f() {}\n";
+        // A method of that name in a file the caller imports for something
+        // else places nothing for a path that names `env`.
+        let dir = "pub struct IgnoreBuilder;\n\nimpl IgnoreBuilder {\n    pub fn current_dir(&self) {}\n}\n";
         let db = store(&[
             ("crates/core/flags/hiargs.rs", hiargs),
             ("crates/ignore/src/walk.rs", walk),
             ("crates/other/src/lib.rs", other),
+            ("crates/ignore/src/dir.rs", dir),
         ]);
         let out =
             crate::store::edges_out(&db, "get_or_set_current_dir", &dependency_kinds()).unwrap();
@@ -7698,7 +7702,7 @@ fn typed(e: &Enabled) {
                 .all(|e| e.symbol.name != "current_dir" || e.confidence == AMBIGUOUS),
             "{out:#?}"
         );
-        settles_at(&db, "g", "f", "crates/ignore/src/walk.rs", 6);
+        settles_at(&db, "g", "f", "crates/ignore/src/walk.rs", 8);
     }
 
     /// `impl SinkError for Box<dyn Error>` names no type, so its methods are

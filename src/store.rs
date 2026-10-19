@@ -3043,10 +3043,18 @@ fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[St
     }
     // Split on anything that is not part of a name, so a grouped
     // `use super::{gdrive::{url, get_json}, oauth::TokenSet}` yields
-    // `gdrive` rather than one segment of braces, commas and newlines.
-    if imports.iter().any(|i| {
+    // `gdrive` rather than one segment of braces, commas and newlines. A
+    // call that names its module counts only the imports that name it too:
+    // `std::env::current_dir()` is not placed by `use crate::dir::{..}`.
+    fn segments(i: &str) -> Vec<&str> {
         i.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
-            .any(|segment| !segment.is_empty() && names_file(segment, candidate, src_path))
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+    if imports.iter().any(|i| {
+        let parts = segments(i);
+        path_hint.is_none_or(|h| parts.contains(&h))
+            && parts.iter().any(|s| names_file(s, candidate, src_path))
     }) {
         return 3;
     }
