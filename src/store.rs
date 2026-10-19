@@ -2718,6 +2718,23 @@ fn reachable(
         }
     }
     let lang = crate::filter::language_of_path(src_path).map(|l| l.name);
+    // A Rust file under a crate's `tests/`, `benches/` or `examples/` is a
+    // crate of its own, reachable only from beside it: the cloud's
+    // `semlith::accel::lane(..)` tied src/accel.rs's `lane` with a helper of
+    // that name in tests/accel.rs. ponytail: a `tests` module directory
+    // inside `src/` reads as one too; only test code calls into it.
+    if lang == Some("rust") {
+        let reached = |p: &str| separate_crate(p).is_none_or(|dir| src_path.starts_with(dir));
+        if candidates
+            .iter()
+            .zip(&keep)
+            .any(|(c, k)| *k && reached(&c.path))
+        {
+            for (k, c) in keep.iter_mut().zip(candidates) {
+                *k = *k && reached(&c.path);
+            }
+        }
+    }
     // Go writes `pkg.F()` and `t.F()` alike, and only the extractor knows
     // which receivers are the method's own; any other lead may be a value.
     let bare = match lang {
@@ -2799,6 +2816,22 @@ fn choose(
     }
     let settled = keep.iter().filter(|k| **k).count() == 1;
     Ok((keep, settled))
+}
+
+/// The directory, separator included, that makes a Rust file a crate of its
+/// own: `semlith/tests/` for `semlith/tests/accel.rs`. `None` for a file of
+/// the library or binary.
+fn separate_crate(path: &str) -> Option<&str> {
+    let mut start = 0;
+    for (i, c) in path.char_indices() {
+        if c == '/' || c == '\\' {
+            if matches!(&path[start..i], "tests" | "benches" | "examples") {
+                return Some(&path[..=i]);
+            }
+            start = i + 1;
+        }
+    }
+    None
 }
 
 /// Whether a definition sits at its file's top level, where no `this` is in

@@ -1639,6 +1639,30 @@ fn expr_ty(node: tree_sitter::Node, text: &str, fields: &RustFields, depth: u8) 
                 .or_else(|| node.named_child(0))?;
             expr_ty(inner, text, fields, depth + 1)
         }
+        // An enum variant is a value of its enum: `Kind::Catchup.lane()`
+        // calls `Kind::lane`, and `Self::Catchup` is the `impl`'s type.
+        "scoped_identifier" => {
+            let variant = &text[node.child_by_field_name("name")?.byte_range()];
+            let path = &text[node.child_by_field_name("path")?.byte_range()];
+            let owner = path.rsplit("::").next().unwrap_or(path);
+            if !variant.starts_with(char::is_uppercase) || !owner.starts_with(char::is_uppercase) {
+                return None;
+            }
+            if owner != "Self" {
+                return Some(Ty {
+                    name: owner.to_string(),
+                    elem: None,
+                });
+            }
+            let mut at = node.parent();
+            while let Some(n) = at {
+                if n.kind() == "function_item" {
+                    return rust_owner(n, text).map(|name| Ty { name, elem: None });
+                }
+                at = n.parent();
+            }
+            None
+        }
         _ => None,
     }
 }
@@ -7545,5 +7569,33 @@ fn typed(e: &Enabled) {
             row("helper"),
             ("function".to_string(), "ns::helper".to_string())
         );
+    }
+
+    /// A Rust integration test is a crate of its own: the cloud worker's
+    /// `semlith::accel::lane("remote")` tied src/accel.rs's `lane` with a
+    /// helper `lane` in tests/accel.rs. The test file's own call still means
+    /// its own helper.
+    #[test]
+    fn a_rust_test_crate_is_reachable_only_from_beside_it() {
+        let tests = "fn lane(id: &str) -> bool {\n    id == \"cpu\"\n}\n\n#[test]\nfn t() {\n    lane(\"cpu\");\n}\n";
+        let db = store(&[
+            ("semlith/src/accel.rs", ACCEL),
+            ("semlith/tests/accel.rs", tests),
+            (
+                "semlith-cloud/src/bin/worker.rs",
+                "fn warm_remote() {\n    semlith::accel::lane(\"remote\");\n}\n",
+            ),
+        ]);
+        settles_at(&db, "warm_remote", "lane", "semlith/src/accel.rs", 1);
+        settles_at(&db, "t", "lane", "semlith/tests/accel.rs", 1);
+    }
+
+    /// An enum variant is a value of its enum: `Kind::Catchup.lane()` is
+    /// `Kind::lane`, not any other type's `lane`.
+    #[test]
+    fn a_rust_enum_variant_receiver_names_its_enum() {
+        let rs = "enum Kind {\n    Catchup,\n}\n\nimpl Kind {\n    fn lane(&self) -> u8 {\n        1\n    }\n}\n\nstruct Other;\n\nimpl Other {\n    fn lane(&self) -> u8 {\n        2\n    }\n}\n\nfn first() -> u8 {\n    Kind::Catchup.lane()\n}\n";
+        let db = store(&[("src/jobs.rs", rs)]);
+        settles_at(&db, "first", "lane", "src/jobs.rs", 6);
     }
 }

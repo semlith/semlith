@@ -42,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package's `a::F`), so `t.F()` on a method's own receiver and `T.F(t)`
   settle on the method; a C++ out-of-line definition is qualified by the
   scope it names (`Foo::bar`, `ns::helper`) in whatever file it sits.
+- **A Rust integration test is not a library function.** A file under a
+  crate's `tests/`, `benches/` or `examples/` is reachable only from beside
+  it, so `semlith::accel::lane(..)` from another repository no longer ties
+  with a `lane` helper in `tests/accel.rs`. An enum variant receiver names its
+  enum: `Kind::Catchup.lane()` resolves to `Kind::lane`.
 - The extractor changes above take effect as files are re-indexed; the
   resolver changes answer at once.
 - **Portal dialogs scroll instead of clipping.** On a short window the
