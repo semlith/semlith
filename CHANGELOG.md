@@ -46,7 +46,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   crate's `tests/`, `benches/` or `examples/` is reachable only from beside
   it, so `semlith::accel::lane(..)` from another repository no longer ties
   with a `lane` helper in `tests/accel.rs`. An enum variant receiver names its
-  enum: `Kind::Catchup.lane()` resolves to `Kind::lane`.
+  enum: `Kind::Catchup.lane()` resolves to `Kind::lane`, inside a macro's
+  arguments too.
+- **A call into the standard library no longer lands on a namesake in your
+  code.** A module path that names none of the store's files, modules or
+  imports (`std::env::current_dir()`) stays unsettled instead of resolving to
+  the one `current_dir` the corpus happens to define; an inline
+  `mod m { fn f() }` is named by `m::f()`.
+- **A Rust `fn` in a module body is a function** (`mod tests { fn b() }` was
+  tagged a method), and a method of `impl Trait for Box<dyn Error>` belongs to
+  the trait.
 - The extractor changes above take effect as files are re-indexed; the
   resolver changes answer at once.
 - **Portal dialogs scroll instead of clipping.** On a short window the
