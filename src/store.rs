@@ -3041,8 +3041,11 @@ fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[St
     if in_named_module || hint.is_some_and(|h| names_file(h, candidate, src_path)) {
         return 2;
     }
+    // Split on anything that is not part of a name, so a grouped
+    // `use super::{gdrive::{url, get_json}, oauth::TokenSet}` yields
+    // `gdrive` rather than one segment of braces, commas and newlines.
     if imports.iter().any(|i| {
-        i.split(['/', '.', ':', '\\'])
+        i.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
             .any(|segment| !segment.is_empty() && names_file(segment, candidate, src_path))
     }) {
         return 3;

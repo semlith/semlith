@@ -7786,4 +7786,20 @@ fn typed(e: &Enabled) {
         ]);
         settles_at(&db, "run", "bulk", "drive/fixtures.py", 2);
     }
+
+    /// A grouped Rust `use` places what it imports: atlassian.rs's
+    /// `use super::{Item, gdrive::{base, url}};` names gdrive.rs, so a bare
+    /// `url(..)` there is gdrive's `url`.
+    #[test]
+    fn a_grouped_rust_use_places_its_module() {
+        let gdrive = "pub(super) fn url(base: &str) -> String {\n    base.to_string()\n}\n";
+        let daemon = "fn url() -> u8 {\n    0\n}\n";
+        let atlassian = "use super::{\n    Item,\n    gdrive::{base, url},\n};\n\nfn account() {\n    url(\"x\");\n}\n";
+        let db = store(&[
+            ("cloud/src/connectors/gdrive.rs", gdrive),
+            ("core/src/daemon.rs", daemon),
+            ("cloud/src/connectors/atlassian.rs", atlassian),
+        ]);
+        settles_at(&db, "account", "url", "cloud/src/connectors/gdrive.rs", 1);
+    }
 }
