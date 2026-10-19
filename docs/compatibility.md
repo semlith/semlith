@@ -728,6 +728,17 @@ From 0.37.0-rc.7:
 |---|---|
 | Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
+### 0.44.1
+
+`FORMAT_VERSION` does not move, and no library API, CLI flag, MCP schema,
+route or `settings.json` key changes.
+
+| Surface | Change |
+|---|---|
+| Graph | In Rust, Python, Go, JavaScript and TypeScript (Svelte and Vue scripts too), a call with no receiver and no type in its path (`lane(id)`, `crate::accel::lane(..)`) no longer counts a same-named method as a candidate when a free function answers to the name, so it resolves instead of reading as ambiguous. This is decided when an edge is read, so every existing store answers this way at once: `neighbors`, `impact`, `trace`, `path`, `brief`, the portal Graph and `store::edges_in_resolved`. Other languages are unchanged. |
+| Graph | In the same languages, a bare call inside a method to the method's own name (`fn lane(&self) { lane(id) }`) is a `calls` edge to the free function instead of being dropped as recursion. Existing stores gain these edges as their files are re-indexed. |
+| Portal | Dialogs scroll instead of squashing a child on a short window (`.modal > *` keeps its height). |
+
 ### 0.44.0
 
 `FORMAT_VERSION` does not move. The binary registers no remote lane, so its

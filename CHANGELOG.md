@@ -5,6 +5,30 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.44.1] - 2026-10-19
+
+### Fixed
+
+- **A call with no receiver resolves to the function it names, not a tie
+  with a method.** `crate::accel::lane("ane")` in daemon.rs, and a bare
+  `lane(id)` beside `impl Enabled { fn lane(&self, ..) }`, were left
+  ambiguous between the free fn `accel::lane` and `Enabled::lane`, so
+  `semlith_neighbors`, `semlith_impact` and the cloud's impact check did not
+  list them as callers (semlith#245 changed `lane`'s return type and the
+  check said nothing outside the PR broke). In Rust, Python, Go and
+  JavaScript/TypeScript a call that is neither `x.f()` nor `Type::f()` cannot
+  reach a method, so when a free function answers to the name it is the one
+  meant. `Type::f()` still means the method, and languages where a bare call
+  inside a class can be `this.f()` (Java, Kotlin, C#, Swift, Ruby, PHP and the
+  rest) are unchanged. Resolution happens when an edge is read, so existing
+  stores answer this way without a re-index.
+- **A method that calls the free function of its own name records the
+  call.** `fn lane(&self, id) { lane(id) }` was read as recursion and
+  dropped. Existing stores gain these edges as their files are re-indexed.
+- **Portal dialogs scroll instead of clipping.** On a short window the
+  folder picker's list, or a long confirm, was squashed with no scrollbar;
+  the dialog scrolls now.
+
 ## [0.44.0] - 2026-10-18
 
 ### Added
