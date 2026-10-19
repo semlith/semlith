@@ -2541,14 +2541,11 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
     for key in order {
         let mut candidates = groups.remove(&key).unwrap_or_default();
         let (src_path, _, kind, hint) = &key;
-        // A call never means a module, unless nothing else has the name (see
-        // `choose_for`), and an unsettled call does not list one either.
-        if kind == "calls"
-            && candidates.iter().any(|c| c.symbol.kind == "module")
-            && candidates.iter().any(|c| c.symbol.kind != "module")
-        {
-            candidates.retain(|c| c.symbol.kind != "module");
-        }
+        // What the call cannot mean (see `reachable`) is not ranked, and an
+        // unsettled call does not list it either.
+        let rows: Vec<&SymbolRow> = candidates.iter().map(|c| &c.symbol).collect();
+        let mut reach = reachable(kind, &rows, src_path, hint.as_deref()).into_iter();
+        candidates.retain(|_| reach.next().unwrap_or(true));
         // A structural edge names a definition in its own file, on the line
         // the edge records; anything elsewhere with that name is not it.
         if structural(kind) {
@@ -2615,10 +2612,8 @@ fn structural(kind: &str) -> bool {
     matches!(kind, "defines" | "contains")
 }
 
-/// [`choose`] for an edge of `kind`. A call never means a module: ripgrep's
-/// main.rs declares `mod search;` beside `fn search`, and the module made the
-/// bare call `search(&args, mode)` a tie. Modules are candidates only when
-/// nothing else answers to the name.
+/// [`choose`] for an edge of `kind`, over only the candidates it can reach
+/// (see [`reachable`]).
 fn choose_for(
     db: &Connection,
     kind: &str,
@@ -2627,18 +2622,69 @@ fn choose_for(
     hint: Option<&str>,
     imports: &mut std::collections::HashMap<String, Vec<String>>,
 ) -> Result<(Vec<bool>, bool)> {
-    let module = |c: &&SymbolRow| c.kind == "module";
-    if kind != "calls" || !candidates.iter().any(module) || candidates.iter().all(module) {
+    let reach = reachable(kind, candidates, src_path, hint);
+    if reach.iter().all(|r| *r) {
         return choose(db, candidates, src_path, hint, imports);
     }
-    let callable: Vec<&SymbolRow> = candidates.iter().filter(|c| !module(c)).copied().collect();
+    let callable: Vec<&SymbolRow> = candidates
+        .iter()
+        .zip(&reach)
+        .filter(|(_, r)| **r)
+        .map(|(c, _)| *c)
+        .collect();
     let (picked, settled) = choose(db, &callable, src_path, hint, imports)?;
     let mut picked = picked.into_iter();
-    let keep = candidates
+    let keep = reach
         .iter()
-        .map(|c| !module(c) && picked.next().unwrap_or(false))
+        .map(|r| *r && picked.next().unwrap_or(false))
         .collect();
     Ok((keep, settled))
+}
+
+/// Which of `candidates` an edge of `kind` written in `src_path` with `hint`
+/// can mean at all, before anything is ranked.
+///
+/// A call never means a module: ripgrep's main.rs declares `mod search;`
+/// beside `fn search`, and the module made the bare call `search(&args, mode)`
+/// a tie. Modules are candidates only when nothing else answers to the name.
+///
+/// And a call with no receiver never means a method where the language has no
+/// implicit receiver ([`crate::graph::no_implicit_receiver`]): `lane(id)` beside
+/// `impl Enabled { fn lane(&self, ..) }` in accel.rs, or
+/// `crate::accel::lane("ane")` in daemon.rs, can only be the free fn
+/// `accel::lane`, and the tie with `Enabled::lane` hid both callers from the
+/// cloud's impact check when semlith#245 changed its return type. The mirror
+/// of [`through_receiver`], which never lets a receiver call mean a free
+/// function. Only when a free function answers to the name: with none, the
+/// call may leave the corpus and is ranked as before. A hint that reads as a
+/// type (`Enabled::lane(..)`, `Self::new`) is a path to a method and keeps
+/// every candidate.
+fn reachable(
+    kind: &str,
+    candidates: &[&SymbolRow],
+    src_path: &str,
+    hint: Option<&str>,
+) -> Vec<bool> {
+    let mut keep = vec![true; candidates.len()];
+    if kind != "calls" {
+        return keep;
+    }
+    if candidates.iter().any(|c| c.kind != "module") {
+        for (k, c) in keep.iter_mut().zip(candidates) {
+            *k = c.kind != "module";
+        }
+    }
+    let bare = hint.is_none_or(|h| {
+        !h.starts_with(crate::graph::RECEIVER) && !h.chars().next().is_some_and(char::is_uppercase)
+    });
+    let receiver_free = crate::filter::language_of_path(src_path)
+        .is_some_and(|l| crate::graph::no_implicit_receiver(l.name));
+    if bare && receiver_free && candidates.iter().any(|c| free_function(c)) {
+        for (k, c) in keep.iter_mut().zip(candidates) {
+            *k = *k && !owned_by_type(c);
+        }
+    }
+    keep
 }
 
 /// Which of `candidates` an edge written in `src_path` with `hint` means, and
@@ -2713,6 +2759,13 @@ fn free_function(c: &SymbolRow) -> bool {
         && owner_of(&c.qualified).is_none_or(|o| !o.chars().next().is_some_and(char::is_uppercase))
 }
 
+/// What only a receiver can call: a method (Go's are qualified by their
+/// package, so the kind is what says so), or a function a type owns
+/// (Python's `C::f`).
+fn owned_by_type(c: &SymbolRow) -> bool {
+    c.kind == "method" || (c.kind == "function" && !free_function(c))
+}
+
 /// What a call through a receiver (`x.run()`, `self.flush()`) means.
 ///
 /// Never a free function: `.build_parallel().run(||` in ripgrep's main.rs was
@@ -2729,8 +2782,7 @@ fn through_receiver(candidates: &[&SymbolRow], src_path: &str, lead: &str) -> (V
     // What a receiver can call: a method, or a function a type owns. With
     // none in the store the call leaves the corpus, and the edge lists what
     // shares the name, never a module (`searcher.search()` is not search.rs).
-    let method = |c: &SymbolRow| c.kind == "method" || (c.kind == "function" && !free_function(c));
-    let methods: Vec<bool> = candidates.iter().map(|c| method(c)).collect();
+    let methods: Vec<bool> = candidates.iter().map(|c| owned_by_type(c)).collect();
     let callable: Vec<bool> = candidates.iter().map(|c| c.kind != "module").collect();
     let pool = if methods.contains(&true) {
         methods
@@ -2754,7 +2806,7 @@ fn through_receiver(candidates: &[&SymbolRow], src_path: &str, lead: &str) -> (V
         let mut typed: Vec<bool> = candidates
             .iter()
             .zip(&pool)
-            .map(|(c, p)| *p && method(c) && owner_of(&c.qualified) == Some(lead))
+            .map(|(c, p)| *p && owned_by_type(c) && owner_of(&c.qualified) == Some(lead))
             .collect();
         if typed.iter().filter(|t| **t).count() > 1 {
             let near: Vec<usize> = candidates

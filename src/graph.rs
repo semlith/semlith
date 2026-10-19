@@ -157,6 +157,20 @@ pub fn has_graph(lang: &str) -> bool {
     grammar(lang).is_some()
 }
 
+/// Whether a bare `f()` in this language can only mean a function, never a
+/// method of the type around the call. True for Rust, Python, Go and
+/// JavaScript and TypeScript (Svelte and Vue scripts included): a method there
+/// is reached through `self.`, `this.` or a value. Java, Kotlin, Scala,
+/// Groovy, C#, C++, Objective-C, Swift, Dart, Ruby and PHP are left out, as is
+/// every language not named here, because inside a class body a bare
+/// `helper()` can be `this.helper()`.
+pub(crate) fn no_implicit_receiver(lang: &str) -> bool {
+    matches!(
+        lang,
+        "rust" | "python" | "go" | "javascript" | "typescript" | "svelte" | "vue"
+    )
+}
+
 /// Every language the graph covers, in the table's own order.
 pub fn languages() -> Vec<&'static str> {
     crate::filter::LANGUAGES
@@ -1026,6 +1040,15 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         None
     };
 
+    // Calls through a receiver, by line and name. The bundled query captures
+    // `self.go()` a second time with no receiver, and that copy must not read
+    // as a bare call. ponytail: a line holding both `go(x.go())` loses the
+    // bare one; key on the call's span if that ever matters.
+    let through: std::collections::HashSet<(u32, &str)> = refs
+        .iter()
+        .filter(|r| r.method || r.on_self)
+        .map(|r| (r.line, r.name.as_str()))
+        .collect();
     let holders = innermost_at(&defs, refs.iter().map(|r| r.at), None);
     for (reference, holder) in refs.iter().zip(holders) {
         let enclosing = holder.map(|h| &defs[h]);
@@ -1053,10 +1076,17 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         // same name through anything but the caller's own class is not
         // recursion: `Fleet::search_preferring` calling
         // `store.search_preferring()`, or helpers.py's `make_response` calling
-        // `current_app.make_response(args)` (2026-10-14 audit, G2).
+        // `current_app.make_response(args)` (2026-10-14 audit, G2). Nor is a
+        // bare call inside a method where no implicit receiver exists:
+        // `fn lane(&self, id) { lane(id) }` in an `impl` calls the free fn.
+        let in_method = owner.is_some() || enclosing.is_some_and(|d| d.kind == "method");
         let recursion = from == reference.name
             && match &lead {
-                None => true,
+                None => {
+                    method
+                        || through.contains(&(reference.line, reference.name.as_str()))
+                        || !(in_method && no_implicit_receiver(lang))
+                }
                 Some(l) => owner.as_ref() == Some(l) || (!method && l == "Self"),
             };
         if recursion {
@@ -6951,5 +6981,301 @@ mod audit_tests {
         }
         assert_eq!(distinct, names.len() as i64);
         assert!(crate::store::builtin_targets(&db).unwrap() >= 7);
+    }
+}
+
+/// semlith#245: a free function beside a method of the same name.
+///
+/// `pub fn lane(id)` and `impl Enabled { fn lane(&self, id) }` both sit in
+/// src/accel.rs. A bare `lane(id)` there tied at rank 1, and
+/// `crate::accel::lane("ane")` from daemon.rs tied at rank 2, so both callers
+/// were ambiguous and the cloud impact check missed them. In a language with
+/// no implicit receiver a call that is neither `x.f()` nor `Type::f()` cannot
+/// reach a method, so it means the free function.
+#[cfg(test)]
+mod tie_tests {
+    use super::*;
+
+    /// A store holding each `(path, source)` pair, written by the writer
+    /// `index_set` uses.
+    fn store(files: &[(&str, &str)]) -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::store::prepare_for_tests(&db);
+        for (path, text) in files {
+            let file = crate::store::insert_file(&db, path, path, text.len() as u64, 0).unwrap();
+            let e = extract(Path::new(path), text).unwrap().unwrap();
+            crate::store::write_extraction(&db, &e, file, &[]).unwrap();
+        }
+        db
+    }
+
+    const ACCEL: &str = r#"pub fn lane(id: &str) -> Option<u8> {
+    if id == "ane" { Some(1) } else { None }
+}
+
+pub struct Enabled;
+
+impl Enabled {
+    pub fn lane(&self, id: &str) -> bool {
+        id == "ane"
+    }
+}
+
+pub fn warm() {
+    lane("ane");
+}
+
+fn typed(e: &Enabled) {
+    Enabled::lane(e, "x");
+}
+"#;
+
+    /// `from`'s call to `to` settled on the definition at `path` named
+    /// `qualified`, from both ends: `edges_out` from the caller, and the
+    /// caller row `neighbours` lists for the callee.
+    fn settles_on(db: &rusqlite::Connection, from: &str, to: &str, path: &str, qualified: &str) {
+        let out = crate::store::edges_out(db, from, &dependency_kinds()).unwrap();
+        let hits: Vec<_> = out.iter().filter(|e| e.symbol.name == to).collect();
+        assert_eq!(hits.len(), 1, "{from} -> {to} did not settle: {hits:#?}");
+        assert!(
+            [RESOLVED, EXTRACTED].contains(&hits[0].confidence.as_str()),
+            "{from} -> {to} is {}: {hits:#?}",
+            hits[0].confidence
+        );
+        assert_eq!(
+            (
+                hits[0].symbol.path.as_str(),
+                hits[0].symbol.qualified.as_str()
+            ),
+            (path, qualified),
+            "{from} -> {to}"
+        );
+        let n = neighbours(db, to, &[], false, &Scope::all()).unwrap();
+        let caller: Vec<_> = n.callers.iter().filter(|c| c.symbol.name == from).collect();
+        assert_eq!(caller.len(), 1, "{from} as a caller of {to}: {caller:#?}");
+        assert!(
+            [RESOLVED, EXTRACTED].contains(&caller[0].confidence.as_str()),
+            "{from} as a caller of {to} is {}: {caller:#?}",
+            caller[0].confidence
+        );
+        assert_eq!(
+            caller[0].means.as_deref(),
+            Some(qualified),
+            "{from} as a caller of {to}"
+        );
+    }
+
+    /// semlith#245, in-file: `warm()` calls `lane("ane")` beside both the free
+    /// `accel::lane` and `Enabled::lane`. Rust has no implicit `self`, so the
+    /// bare call is the free function.
+    #[test]
+    fn rust_bare_call_beside_a_method_means_the_free_function() {
+        let db = store(&[("src/accel.rs", ACCEL)]);
+        settles_on(&db, "warm", "lane", "src/accel.rs", "accel::lane");
+    }
+
+    /// semlith#245, from daemon.rs: `crate::accel::lane("ane")` names
+    /// accel.rs, which holds both `lane`s; a module path never reaches a
+    /// method, so `run` is a resolved caller of the free function.
+    #[test]
+    fn rust_module_path_call_means_the_free_function() {
+        let db = store(&[
+            ("src/accel.rs", ACCEL),
+            (
+                "src/daemon.rs",
+                "fn run() {\n    crate::accel::lane(\"ane\");\n}\n",
+            ),
+        ]);
+        settles_on(&db, "run", "lane", "src/accel.rs", "accel::lane");
+    }
+
+    /// semlith#245, cross-root: the cloud worker calls
+    /// `semlith::accel::lane("remote")` from another repository root.
+    #[test]
+    fn rust_module_path_call_from_another_root_means_the_free_function() {
+        let db = store(&[
+            ("semlith/src/accel.rs", ACCEL),
+            (
+                "semlith-cloud/src/bin/worker.rs",
+                "fn warm_remote() {\n    semlith::accel::lane(\"remote\");\n}\n",
+            ),
+        ]);
+        settles_on(
+            &db,
+            "warm_remote",
+            "lane",
+            "semlith/src/accel.rs",
+            "accel::lane",
+        );
+    }
+
+    const PYTHON_M: &str = "def f():\n    return 1\n\n\nclass C:\n    def f(self):\n        return 2\n\n\ndef g():\n    f()\n";
+
+    /// Python reaches a method only through `self.f()` or `C.f()`: a bare
+    /// `f()` in m.py, beside `def f()` and `class C: def f(self)`, is the
+    /// module's function. Python records the method as a function owned by
+    /// `C` (`C::f`).
+    #[test]
+    fn python_bare_call_beside_a_method_means_the_free_function() {
+        let db = store(&[("pkg/m.py", PYTHON_M)]);
+        settles_on(&db, "g", "f", "pkg/m.py", "m::f");
+    }
+
+    /// `from m import f` imports the module's function, never `C.f`: both sat
+    /// in the imported file and tied at rank 3.
+    #[test]
+    fn python_imported_bare_call_means_the_free_function() {
+        let db = store(&[
+            ("pkg/m.py", PYTHON_M),
+            ("pkg/user.py", "from m import f\n\n\ndef h():\n    f()\n"),
+        ]);
+        settles_on(&db, "h", "f", "pkg/m.py", "m::f");
+    }
+
+    /// JavaScript reaches a class method only through `this.f()`: a bare
+    /// `f()` beside `function f()` and `class C { f() {} }` is the function.
+    #[test]
+    fn javascript_bare_call_beside_a_method_means_the_free_function() {
+        let db = store(&[(
+            "web/a.js",
+            "function f() {\n  return 1;\n}\n\nclass C {\n  f() {\n    return 2;\n  }\n}\n\nfunction g() {\n  f();\n}\n",
+        )]);
+        settles_on(&db, "g", "f", "web/a.js", "a::f");
+    }
+
+    /// The TypeScript form of the JavaScript case.
+    #[test]
+    fn typescript_bare_call_beside_a_method_means_the_free_function() {
+        let db = store(&[(
+            "web/a.ts",
+            "function f(): number {\n  return 1;\n}\n\nclass C {\n  f(): number {\n    return 2;\n  }\n}\n\nfunction g(): void {\n  f();\n}\n",
+        )]);
+        settles_on(&db, "g", "f", "web/a.ts", "a::f");
+    }
+
+    /// Go reaches a method only through a value (`t.F()`): a bare `F()` beside
+    /// `func F()` and `func (t T) F()` is the function. Go records the method
+    /// as kind "method" qualified by the package (`a::F`), not by `T`.
+    #[test]
+    fn go_bare_call_beside_a_method_means_the_free_function() {
+        let db = store(&[(
+            "go/a.go",
+            "package a\n\ntype T struct{}\n\nfunc F() int { return 1 }\n\nfunc (t T) F() int { return 2 }\n\nfunc G() {\n\tF()\n}\n",
+        )]);
+        let out = crate::store::edges_out(&db, "G", &dependency_kinds()).unwrap();
+        let hits: Vec<_> = out.iter().filter(|e| e.symbol.name == "F").collect();
+        assert_eq!(hits.len(), 1, "G -> F did not settle: {hits:#?}");
+        assert_eq!(hits[0].confidence, RESOLVED, "{hits:#?}");
+        assert_eq!(hits[0].symbol.kind, "function", "{hits:#?}");
+        assert_eq!(hits[0].symbol.start_line, 5, "{hits:#?}");
+        let n = neighbours(&db, "F", &[], false, &Scope::all()).unwrap();
+        assert!(
+            n.callers
+                .iter()
+                .any(|c| c.symbol.name == "G" && c.confidence == RESOLVED),
+            "{:?}",
+            n.callers
+        );
+    }
+
+    /// Guard: `Enabled::lane(e, "x")` names the type, so tier 0 settles it on
+    /// the method — the free `lane` beside it does not take it.
+    #[test]
+    fn rust_type_path_call_still_means_the_method() {
+        let db = store(&[("src/accel.rs", ACCEL)]);
+        settles_on(&db, "typed", "lane", "src/accel.rs", "Enabled::lane");
+    }
+
+    /// Guard: Java has an implicit `this`, so `helper()` inside `class A`
+    /// is `A.helper`, not `Util.helper` elsewhere. Today it settles on the
+    /// method in the calling file (rank 1); Java records both as methods.
+    #[test]
+    fn java_bare_call_keeps_the_implicit_receiver() {
+        let db = store(&[
+            (
+                "java/A.java",
+                "class A {\n    void helper() {}\n    void run() {\n        helper();\n    }\n}\n",
+            ),
+            (
+                "java/Util.java",
+                "class Util {\n    static void helper() {}\n}\n",
+            ),
+        ]);
+        settles_on(&db, "run", "helper", "java/A.java", "A::helper");
+    }
+
+    /// Guard: Kotlin has an implicit `this`, so `helper()` inside `class A`
+    /// is the member, even with a top-level `fun helper()` in util.kt — the
+    /// one free function a rule for receiver-less languages would wrongly
+    /// prefer. Today the member settles at rank 1.
+    #[test]
+    fn kotlin_bare_call_keeps_the_implicit_receiver() {
+        let db = store(&[
+            (
+                "kt/A.kt",
+                "class A {\n    fun helper() {}\n    fun run() {\n        helper()\n    }\n}\n",
+            ),
+            ("kt/util.kt", "fun helper() {}\n"),
+        ]);
+        settles_on(&db, "run", "helper", "kt/A.kt", "A::helper");
+    }
+
+    /// Guard: `crate::m::g()` where m.rs holds only methods named `g` — on
+    /// two types — has no free function to prefer, so it stays a tie.
+    #[test]
+    fn rust_module_path_call_with_only_methods_stays_ambiguous() {
+        let db = store(&[
+            (
+                "src/m.rs",
+                "pub struct S;\npub struct T;\n\nimpl S {\n    pub fn g(&self) {}\n}\n\nimpl T {\n    pub fn g(&self) {}\n}\n",
+            ),
+            ("src/daemon.rs", "fn other() {\n    crate::m::g();\n}\n"),
+        ]);
+        let out = crate::store::edges_out(&db, "other", &dependency_kinds()).unwrap();
+        let hits: Vec<_> = out.iter().filter(|e| e.symbol.name == "g").collect();
+        assert_eq!(hits.len(), 2, "{hits:#?}");
+        assert!(hits.iter().all(|e| e.confidence == AMBIGUOUS), "{hits:#?}");
+        let n = neighbours(&db, "g", &[], false, &Scope::all()).unwrap();
+        assert!(
+            n.callers.iter().any(|c| c.symbol.name == "other"
+                && c.confidence == AMBIGUOUS
+                && c.means.is_none()),
+            "{:?}",
+            n.callers
+        );
+    }
+
+    /// A method that wraps the free function of its own name:
+    /// `impl Enabled { fn lane(&self, id) { lane(id) } }`. The bare call was
+    /// read as recursion and recorded nothing, so impact never saw it. With no
+    /// implicit receiver it is a call to the free fn, in Rust and Python alike.
+    #[test]
+    fn a_method_calling_the_free_function_of_its_name_is_a_call() {
+        let rust = "pub fn lane(id: &str) -> Option<u8> {\n    None\n}\n\npub struct Enabled;\n\nimpl Enabled {\n    pub fn lane(&self, id: &str) -> bool {\n        lane(id).is_some()\n    }\n}\n";
+        let db = store(&[("src/accel.rs", rust)]);
+        settles_on(&db, "lane", "lane", "src/accel.rs", "accel::lane");
+        let python = "def f():\n    return 1\n\n\nclass C:\n    def f(self):\n        return f()\n";
+        let db = store(&[("pkg/m.py", python)]);
+        settles_on(&db, "f", "f", "pkg/m.py", "m::f");
+    }
+
+    /// Recursion still adds no self-edge: a free fn calling itself, a method
+    /// calling itself through `self`, and a Java method's bare call to its
+    /// own name, which there can be `this.helper()`.
+    #[test]
+    fn recursion_still_records_no_edge() {
+        let rust = "fn count(n: u32) -> u32 {\n    if n == 0 { 0 } else { count(n - 1) }\n}\n\nstruct S;\n\nimpl S {\n    fn walk(&self) {\n        self.walk();\n    }\n}\n";
+        let db = store(&[("src/r.rs", rust)]);
+        for name in ["count", "walk"] {
+            let out = crate::store::edges_out(&db, name, &dependency_kinds()).unwrap();
+            assert!(
+                out.iter().all(|e| e.symbol.name != name),
+                "{name}: {out:#?}"
+            );
+        }
+        let java = "class A {\n    void helper() {\n        helper();\n    }\n}\n";
+        let db = store(&[("src/A.java", java)]);
+        let out = crate::store::edges_out(&db, "helper", &dependency_kinds()).unwrap();
+        assert!(out.iter().all(|e| e.symbol.name != "helper"), "{out:#?}");
     }
 }
