@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.44.1] - 2026-10-19
 
+### Added
+
+- **The documents benchmark is in the repository.** `bench/scorecard/documents/`
+  holds the 127 frozen questions about passages inside 53 public documents
+  (PDF, Word, PowerPoint, Excel, OpenDocument, EPUB, RTF, notebooks, CSV), a
+  fetch step that downloads each from its publisher and checks its SHA-256,
+  the four retrieval arms and the headless Claude Code round, and the raw
+  scores of the run behind the numbers. Re-run on 0.44.1: `semlith_search`
+  finds the passage within 4k tokens for 116 of 127 questions, against 34 for
+  `rga` and 7 for `rg`; on Opus, an agent with semlith finds 124 of 127 and
+  quotes nothing it did not read, an agent with Grep, Glob and Read 80, with
+  41 of its 127 top quotes not in the document it names.
+- **The README's first screen** carries the install line, a three-command
+  quick start and the link to the scorecard.
+
 ### Fixed
 
 - **A call with no receiver resolves to the function it names, not a tie
