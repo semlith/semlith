@@ -1,0 +1,45 @@
+{
+ "bench": "documents",
+ "command": "uv run --with pyarrow python bench/scorecard/documents/documents.py score /Users/aakashpawar/semlith-bench/scorecard/results/documents/20261019T171008",
+ "fetch_mismatches": {},
+ "files": {
+  "score.json": "3ea5c6c35d75fbe27b0dff47893606e165b9cd2e400d56ce8aa66cc46c0c0411",
+  "scores.jsonl": "63aca33bd63834434489658227a54a02ebe26714e35837776e07d53eef219d35"
+ },
+ "gold_not_in_store": [],
+ "machine": "macOS-27.0.1-arm64-arm-64bit",
+ "python": "3.11.2",
+ "questions": 127,
+ "raw": "~/semlith-bench/scorecard/results/documents/20261019T171008",
+ "raw_files": {
+  "r0-r0.jsonl": "e6ca6b6c667e4dc8ec2a54f2ec48a0836f8649fde3a919547a559e5d7a0140d7",
+  "r0-r1.jsonl": "6627958336c55172b5de2a144acb24f92b72d3f9ab554adbfb0b2231612d3e3e",
+  "r0-r2.jsonl": "22a40e2c2163e9b25655102ac7b765690c2c6c41feac61891917c0d72b5de17d",
+  "r0x-r0.jsonl": "d9888e74abda9b5a63792f2cd0325087de646c4f44ded97f802666009179ed14",
+  "r0x-r1.jsonl": "6986bd55b8aaf71a2feec9fa9d2bebdbc5d92c491c0585d4e17e7f3ce2f8fd1f",
+  "r0x-r2.jsonl": "f86c5b85cde60908e49d3b5424194570a287faec492722d19f097a00e13d4fbc",
+  "s1-r0.jsonl": "3efd0d94f1f721b82e635ae35875e48edb1f153801c0d163863bb66ff7e9d9d1",
+  "s1-r1.jsonl": "26b4f1c9d166b8a14cd47c96beb4b52b7f4ec1b33ab09ff612c3920ed4091dac",
+  "s1-r2.jsonl": "dd8188aa5874f21d3afbf0123db5fd66799e886a5fbd46840ef58b65c1ef1e47",
+  "s2-r0.jsonl": "8ddbaa70f6e0d7727185378bbdabc52c25bfb8bf509f18bbf2a25ceb73048eb3",
+  "s2-r1.jsonl": "06ec943d49977382e0eee8646c53e7679fbf592b103da83e1767a557d5f554f3",
+  "s2-r2.jsonl": "d7264ecc8a06d8a01e1cfae8691a6067235b39aacfaaa60098a41ca5cb496a93"
+ },
+ "run_command": "uv run --with pyarrow python bench/scorecard/documents/documents.py run",
+ "runs": 3,
+ "seconds": 85,
+ "semlith": "semlith 0.44.1\nreleases signed by SHA256:a5oJmrakIwDHEWTDWqWe51Ttt6m2tQ0dsGzIqyxDuxs",
+ "semlith_binary": {
+  "commit": "e185899",
+  "path": "/private/tmp/claude-501/-Users-aakashpawar-Documents-Aakash-AI-Apps-live-semlith/0f2ebba9-bda7-4908-9169-f0f50bb3e745/scratchpad/bin/semlith-e185899",
+  "sha256": "7f2130abb114b7177833f2a8885738ecf5219b03adc6f0fe019294224cde7ae8"
+ },
+ "store_stats": "store    /Users/aakashpawar/semlith-bench/scorecard/documents/home/stores/documents\nmodel    granite-embedding-small-english-r2-int8 (384 dim)\nranking  fusion alone \u2014 SEMLITH_RERANK=on adds jina-reranker-v1-turbo-en-int8, at about 124 ms a search\nfiles    53\nchunks   60170 (cut at headings, and code with its definition)\nvariants 67276 fp16-ane\nlanes    ane (set by the environment)\nvectors  60170\nshards   1, up to 19 resident (512 MB budget, SEMLITH_INDEX_MEMORY)\nindexed  58.8 MB\nexact    99.1 MB (full-precision rescoring)\ndisk     170.3 MB (159.1 MB live, 11.2 MB reclaimable, 6 %)\ncache    60407 vectors, 97.9 MB of 1.0 GB, 9 % of lookups hit\nhistory  0 retired definitions\ngraph    language      files  unparsed  defs  extracted  resolved  ambiguous  unresolved  settled\n         other           53         0     0          0         0          0           0       0 %\ngraph    0 call targets with no definition here\ngraph    0 names with several definitions\n",
+ "tools": {
+  "pandoc": "pandoc 3.11",
+  "pdftotext": "pdftotext version 26.09.0",
+  "rg": "ripgrep 15.2.0",
+  "rga": "ripgrep-all 0.10.10"
+ },
+ "written": "2026-10-19T17:11:36+0530"
+}

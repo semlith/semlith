@@ -1,0 +1,1115 @@
+[
+ {
+  "path": "csv/cisa-known-exploited-vulnerabilities.csv",
+  "start_line": 63,
+  "end_line": 63,
+  "text": "CVE-2026-59310,Broadcom,\"VMware vCenter\",\"Broadcom VMware vCenter Path Traversal Vulnerability\",2026-08-18,\"Broadcom VMware vCenter contains a path traversal vulnerability which could allow a threat actor with network access to vCenter to execute arbitrary code.\",\"Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA\u2019s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA\u2019s \u201cForensics Triage Requirements\u201d (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.\",2026-08-21,Known,Yes,\"https://support.broadco",
+  "id": "fmt-001"
+ },
+ {
+  "path": "csv/cisa-known-exploited-vulnerabilities.csv",
+  "start_line": 1158,
+  "end_line": 1159,
+  "text": "CVE-2012-2034,Adobe,\"Flash Player\",\"Adobe Flash Player Memory Corruption Vulnerability\",2022-03-28,\"Adobe Flash Player contains a memory corruption vulnerability that allows for remote code execution or denial-of-service (DoS).\",\"The impacted product is end-of-life and should be disconnected if still in use.\",2022-04-18,Unknown,No,https://nvd.nist.gov/vuln/detail/CVE-2012-2034,CWE-119\nCVE-2012-0518,Oracle,\"Fusion Middleware\",\"Oracle Fusion Middleware Unspecified Vulnerability\",2022-03-28,\"Unspecified vulnerability in the Oracle Application Server Single Sign-On component in Oracle Fusion Middleware allows remote attackers to affect integrity via Unknown vectors\",\"Apply updates per vendor instructions.\",2022-04-18,Unknown,No,https://nvd.nist.gov/vuln/detail/CVE-2012-0518,CWE-601",
+  "id": "fmt-002"
+ },
+ {
+  "path": "csv/cisa-known-exploited-vulnerabilities.csv",
+  "start_line": 1521,
+  "end_line": 1521,
+  "text": "CVE-2019-15752,Docker,\"Desktop Community Edition\",\"Docker Desktop Community Edition Privilege Escalation Vulnerability\",2021-11-03,\"Docker Desktop Community Edition contains a vulnerability that may allow local users to escalate privileges by placing a trojan horse docker-credential-wincred.exe file in %PROGRAMDATA%\\DockerDesktop\\version-bin\\.\",\"Apply updates per vendor instructions.\",2022-05-03,Unknown,No,https://nvd.nist.gov/vuln/detail/CVE-2019-15752,CWE-732",
+  "id": "fmt-003"
+ },
+ {
+  "path": "docx/au-dhs-annual-report-2014-15.docx",
+  "start_line": 3879,
+  "end_line": 3903,
+  "text": "Pensioner Education Supplement, 26\npensioners see Age Pension; older Australians\nPeople and Leadership Committee, 89\u201390\nperformance against KPIs, 12\u201315\nperformance audits see audits and reviews\nperformance management, staff, 124\nperformance report, 12\u201386\npersonal information, 94, 96\nPersonally Controlled Electronic Health Record system, 52\nPharmaceutical Benefits Scheme, 49\u201352\napproved suppliers, 51\u201352\nauthority-required prescriptions, 51\nclaims processing, 51\ncompliance reviews, 109\neligibility, 49\ngeneral rate, 49\npatient contribution, 49\nveterans, 49\npharmacies, 49, 50\napproved suppliers, 51\u201352\ncompliance reviews, 109\nportfolio structure, 8\nPractice Incentives Programme, 41\u201342, 110\nPractice Nurse Incentives Program, 43, 110\nPremium Support Scheme, 45\u201346",
+  "id": "fmt-004"
+ },
+ {
+  "path": "docx/au-dhs-annual-report-2014-15.docx",
+  "start_line": 2106,
+  "end_line": 2108,
+  "text": "implementation of a Supplier Diversity Strategy to increase the level of activity between the department and supplier groups such as Australian Disability Enterprises and Indigenous SMEs\nmembership of Supply Nation, a non-profit organisation established to grow the Aboriginal and Torres Strait Islander business sector through the promotion of supplier diversity in Australia, to further the department\u2019s activity within the Indigenous business sector.  In May 2015 the department was recognised as the Supply Nation Government Member of the Year for leadership in supplier diversity and creating opportunities for Indigenous procurement.\nthe use of Australian Industry Participation Plans in whole-of-government procurement where applicable",
+  "id": "fmt-005"
+ },
+ {
+  "path": "docx/au-dhs-annual-report-2014-15.docx",
+  "start_line": 3177,
+  "end_line": 3185,
+  "text": "11(5)\t\tDiscussion and analysis of the department\u2019s financial performance\tMandatory\t174\u2013177\n11(6)\t\tDiscussion of any significant changes in financial results from the prior year, from budget or anticipated to have a significant impact on future operations.\tMandatory\tNil to report\n11(7)\t\tAgency resource statement and summary resource tables by outcomes\tMandatory\t284\u2013287\n12\tManagement and Accountability\n\tCorporate Governance\n12(1)\t\tAgency heads are required to certify their agency's actions in dealing with fraud.\tMandatory\tXII\n12(2)\t\tStatement of the main corporate governance practices in place\tMandatory\t88\u201390\n12(3)\t\tNames of the senior executive and their responsibilities\tSuggested\t4\u20137\n12(3)\t\tSenior management committees and their roles\tSuggested\t88\u201390",
+  "id": "fmt-006"
+ },
+ {
+  "path": "docx/dfe-send-speech-language-evidence-summary.docx",
+  "start_line": 182,
+  "end_line": 184,
+  "text": "For example,\u00a0an English teacher might pre-teach vocabulary when reading a novel with a class, choosing\u00a0critical\u00a0words which significantly\u00a0impact\u00a0meaning in key parts of the text. By also teaching pupils to\u00a0identify\u00a0verbs and pronouns in sentences, the class might also find it easier to follow longer, more complex sentences in the story.\nAdditionally, by explicitly teaching high-utility (or Tier 2) vocabulary which is most pertinent for analysing the characters, themes and meaning of a text, pupils can be supported to develop the sophistication of their own analysis. This helps them avoid falling back on simpler or less nuanced language that may not enable them to convey a deeper understanding of what they have read.\nIn this example the teacher used the following strategies:",
+  "id": "fmt-007"
+ },
+ {
+  "path": "docx/dfe-send-speech-language-evidence-summary.docx",
+  "start_line": 148,
+  "end_line": 148,
+  "text": "Working memory is essential for thinking and learning, as it allows us to temporarily hold and actively process information (Miyake & Shah, 1999; Baddeley, 2003). However, its capacity is limited and can be affected by factors such as task complexity and the language demands of a lesson (Atkinson & Shriffin, 1968; Baddeley, 1992; Miller et al., 2017; Weinstein, 2017). For pupils with speech, language and communication needs, these limits can make it particularly challenging to process and retain information during complex or language-heavy tasks, increasing cognitive load.",
+  "id": "fmt-008"
+ },
+ {
+  "path": "docx/dfe-send-speech-language-evidence-summary.docx",
+  "start_line": 84,
+  "end_line": 85,
+  "text": "What are the nuances and caveats when thinking about identifying and supporting SLC difficulties in the classroom?\nIt can be challenging to understand whether a pupil\u2019s behaviour is linked to a SLC need, another underlying need, or whether it is primarily a behaviour concern.\u00a0There is\u00a0strong evidence\u00a0of an association between SLC needs and behavioural challenges. For example, 81% of children with emotional and behavioural disorders have significant language difficulties, often unidentified\u00a0(Hollo et. al., 2014). Some studies have found that between 40% and 54% of children with spoken language difficulties also have behaviour challenges (van Daal et al., 2007; Maggio et al., 2014). However, these findings are based on small sample sizes, so the actual proportion may vary.",
+  "id": "fmt-009"
+ },
+ {
+  "path": "docx/geoscience-australia-local-wind-assessment-methodology.docx",
+  "start_line": 568,
+  "end_line": 571,
+  "text": "Stewart, M. G. and Wang, X., 2011. Risk assessment of climate adaptation strategies for extreme wind events in Queensland. Published by CSIRO, Canberra, ISBN 978 0 643 10431 0, 86pp\nStull, R. B., 1988. An introduction to boundary layer meteorology. Kluwer Academic Publishers.\nTurner, R., Reese, S., Revell, M., Popinet, S. and King, A., 2011. Wind hazard and engineering related research at NIWA, New Zealand. Proceedings of the 13th International Conference on Wind Engineering, Amsterdam, 10 - 15 July\nVen\u00e4l\u00e4inen, A., Sahlgren, V., Podsechin, V. and Huttula, T., 2003. Small-scale variability of the wind field over a typical Scandinavian lake. Boreal Environment Research, (8), 71-81",
+  "id": "fmt-010"
+ },
+ {
+  "path": "docx/geoscience-australia-local-wind-assessment-methodology.docx",
+  "start_line": 341,
+  "end_line": 344,
+  "text": "Category 3: Terrain with numerous closely spaced obstructions 3 to 5\u00a0m high such as areas of suburban housing (shown in  REF _Ref388959799 \\h Figure 3.5). The roughness length for this terrain category is approximately 0.2\u00a0m.\nCategory 4: Terrain with numerous large, high (10\u00a0m to 30\u00a0m high) and closely spaced obstructions such as large city centres and well-developed industrial complexes (as shown in  REF _Ref388959655 \\h Figure 3.6). The roughness length for this terrain category is approximately 2\u00a0m.\nREF _Ref388959636 \\h Figure 3.3 to  REF _Ref388959655 \\h Figure 3.6 illustrate the typical classes from Category 1 to Category 4 respectively.\nFigure  STYLEREF 1 \\s 3. SEQ Figure \\* ARABIC \\s 1 3 Typical example of terrain category 1 (smooth snow).",
+  "id": "fmt-011"
+ },
+ {
+  "path": "docx/geoscience-australia-local-wind-assessment-methodology.docx",
+  "start_line": 309,
+  "end_line": 310,
+  "text": "Source: AS/NZS 1170.2 (2011) \u2013 Table 3.2\nIn regions B, C and D, tropical cyclone and thunderstorm gust wind speeds dominate the extreme high range tail of the wind speed distribution. The prevailing direction effects from tropical cyclone and thunderstorm gusts are small, so AS/NZS 1170.2 recommends a value of unity for all directions as the wind direction multiplier. A single statistical direction multiplier of 0.95 is given for overall forces and loads for major structural elements.",
+  "id": "fmt-012"
+ },
+ {
+  "path": "docx/nasa-cfe-requirements.docx",
+  "start_line": 732,
+  "end_line": 737,
+  "text": "Alternate Strategy B\tAll critical events defined in the requirements. Build testing validates all required event messages.\nRationale\tEvent messages created during the design phase don\u2019t need to be tested by build tests, but only unit tested.\nConsequences\tIf an event is never executed by build testing but the unit test driver used doesn\u2019t validate the interface then an erroneous message could be delivered. However, if the cFE provides a standardized unit test environment with automated validation, then this problem could be avoided.\n4. Telemetry\nProblem\tShould all event messages be defined in the FSW Requirements?\ncFE Strategy\tDefine all critical events in the requirements. Build testing validates all event messages.",
+  "id": "fmt-013"
+ },
+ {
+  "path": "docx/nasa-cfe-requirements.docx",
+  "start_line": 613,
+  "end_line": 613,
+  "text": "Once a FSW product is created it must be qualified (verified and validated). The qualification processes are shown on the right hand side of Figure A-1 following the upward flow.  The goal of each testing level corresponds to a component in the problem definition and solution processes.  Tests must be written from a perspective of meeting the goals of a particular level. In terms of software functional coverage overlap will occur at each level.  The key to an efficient test program is to only do what is necessary at each level and this is driven by how well the definition and development levels are defined. There are programmatic issues as well such as the fidelity and availability of the test environments that are beyond the scope of this document.",
+  "id": "fmt-014"
+ },
+ {
+  "path": "docx/nasa-cfe-requirements.docx",
+  "start_line": 608,
+  "end_line": 608,
+  "text": "This section shows how the FSW Requirements Specification is used during the FSW development and verification processes for a single mission. These processes define the context for the FSW Requirements Specification. cFE specific issues will be addressed in section A.4.  Figure A-1 shows a reference FSW development process.  Goddard does not have a standard FSW development process so this may vary between missions. The general process can be viewed in layers. The top-most layer contains spacecraft level activities. The second layer contains spacecraft subsystem activities. Note that the FSW can view a group of subsystems as a FSW system.  This is important when the qualification strategies are discussed.  The third layer decomposes subsystems into software products and the activities assoc",
+  "id": "fmt-015"
+ },
+ {
+  "path": "docx/oasis-sarif-2-1-0-spec.docx",
+  "start_line": 1406,
+  "end_line": 1412,
+  "text": "If none of the properties text, markdown, or id contains any placeholders, then arguments MAY be absent.\nThe arguments array SHALL contain as many elements as required by the maximum placeholder index among all the message strings specified by the text, markdown, and id properties.\nEXAMPLE: If the highest numbered placeholder in the text message string is {3} and the highest numbered placeholder in the markdown message string is {5}, the arguments array must contain at least 6 elements.\nmultiformatMessageString object\nGeneral\nA multiformatMessageString object groups together all available textual formats for a message string.\nLocalizable multiformatMessageStrings",
+  "id": "fmt-016"
+ },
+ {
+  "path": "docx/oasis-sarif-2-1-0-spec.docx",
+  "start_line": 3100,
+  "end_line": 3101,
+  "text": "Successive runs might detect the same condition in the code. When two result objects represent the same condition, we say that the results are \u201clogically identical;\u201d when they represent different conditions, we say that the results are \u201clogically distinct.\u201d Two results can be logically identical even if the result objects are not identical. For example, if code is inserted into a file between runs, the same condition might be reported on two different lines.\nTo avoid reporting the same condition repeatedly, result management systems typically group results into equivalence classes such that results in any one class are logically identical and results in different classes are logically distinct.",
+  "id": "fmt-017"
+ },
+ {
+  "path": "docx/oasis-sarif-2-1-0-spec.docx",
+  "start_line": 6047,
+  "end_line": 6049,
+  "text": "$schema property\nAn externalProperties object MAY contain a property named $schema whose value is a string containing an absolute URI from which a JSON schema document describing the version of the external property file format to which this external property file conforms can be obtained.\nIf the $schema property is present, the JSON schema obtained from the specified URI SHALL describe the version of the external property file format corresponding to the SARIF version specified by the version property (\u00a7 REF _Ref523913350 \\r \\h 4.3.3).",
+  "id": "fmt-018"
+ },
+ {
+  "path": "docx/oasis-stix-2-1-spec.docx",
+  "start_line": 5228,
+  "end_line": 5228,
+  "text": "sensationalist\tSeeks to cause embarrassment and brand damage by exposing sensitive information in a manner designed to cause a public relations crisis. A sensationalist may be an individual or small group of people motivated primarily by a need for notoriety. Unlike the activist, the sensationalist generally has no political goal, and is not using bad PR to influence the target to change its behavior or business practices.",
+  "id": "fmt-019"
+ },
+ {
+  "path": "docx/oasis-stix-2-1-spec.docx",
+  "start_line": 5197,
+  "end_line": 5200,
+  "text": "Report type is an open vocabulary to describe the primary purpose or subject of a report. For example, a report that contains malware and indicators for that malware should have a report type of malware to capture that the malware is the primary purpose. Report types are not mutually exclusive: a Report can be both a malware report and a tool report. Just because a report contains objects of a type does not mean that the report should include that type. If the objects are there to simply provide evidence or context for other objects, it is not necessary to include them in the type.\nVocabulary Summary\nattack-pattern, campaign, identity, indicator, intrusion-set, malware, observed-data, threat-actor, threat-report, tool, vulnerability\nVocabulary Value\tDescription",
+  "id": "fmt-020"
+ },
+ {
+  "path": "docx/oasis-stix-2-1-spec.docx",
+  "start_line": 1913,
+  "end_line": 1915,
+  "text": "\u200b\n4.14.2 Relationships\nThere are no forward relationships explicitly defined between the Observed Data object and other STIX Objects, other than those defined as common relationships. The first section lists the embedded relationships by property name along with their corresponding target. The reverse relationships section illustrates the relationships targeting this object type from another object type. They are included here for convenience. For their definitions, please see the \"Source\" object.",
+  "id": "fmt-021"
+ },
+ {
+  "path": "docx/parks-australia-ashmore-cartier-management-plan.docx",
+  "start_line": 741,
+  "end_line": 743,
+  "text": "63\nThe Government of Australia will, subject to paragraph 8 of these understandings, refrain from applying its laws regarding fisheries to Indonesian traditional fishermen who conduct their operations in accordance with these understandings.\n3. The Government of the Republic of Indonesia understand that, in the part of the areas described in paragraph 2 of these understandings where the Government of Australia is authorised by international law to regulate fishing or exploitation for or exploitation of the living natural resources of the Australian continental shelf by foreign nationals, the Government of Australia will permit operations by Indonesian nationals subject to the following conditions:",
+  "id": "fmt-022"
+ },
+ {
+  "path": "docx/parks-australia-ashmore-cartier-management-plan.docx",
+  "start_line": 391,
+  "end_line": 396,
+  "text": "introduction of marine and terrestrial pests and weeds\nterrestrial environmental impacts such as disturbing and killing nesting birds and removing their critical habitat.\nA S HMO R E REEF NATIONAL NATURE RESERVE AND CARTIER ISLAND MARINE RESERVE\t29\n5.3 Tourism and recreation\nCommercial tour operators have visited the region intermittently, primarily for scuba diving and bird watching because the Reserves provide opportunities for these activities. All visitors to the region currently arrive by boat, mainly on yachts on route to other locations.\nLittle tourist or recreational activity currently occurs within the Reserves or is anticipated, as visitor numbers are limited by the remote location, and difficulty and expense involved in accessing the area.",
+  "id": "fmt-023"
+ },
+ {
+  "path": "docx/parks-australia-ashmore-cartier-management-plan.docx",
+  "start_line": 744,
+  "end_line": 746,
+  "text": "Indonesian operations in the areas mentioned in paragraph 2 of the understandings shall be confined to traditional fishermen.\nLandings by Indonesian traditional fishermen shall be confined to East Islet (Latitude 12\u00b015' South, Longitude 123\u00b007' East) and Middle Islet (Latitude 12\u00b015' South, Longitude 123\u00b003' East) of Ashmore Reef for the purpose of obtaining supplies of fresh water.\nTraditional Indonesian fishing vessels may take shelter within the island groups described in paragraph 2 of these understandings but the persons on board shall not go ashore except as allowed in (b) above.",
+  "id": "fmt-024"
+ },
+ {
+  "path": "docx/wa-gov-digital-content-writing-guide.docx",
+  "start_line": 133,
+  "end_line": 148,
+  "text": "Example: possession\nJess\u2019s start-up (singular possession)\nthe girls\u2019 start-up (plural possession)\na week\u2019s time (singular)\nin 2 weeks (plural)\nUse \u2019s for words that end in \u2019s\u2019 to show possession if you pronounce the \u2019s\u2019 (for example, personal names).\nIf you don\u2019t pronounce the \u2019s\u2019 just use an apostrophe.\nDon\u2019t use apostrophes for plural abbreviations or decades.\nExample: plural abbreviations and decades\nCDs \u2014 not CD\u2019s\n1980s \u2014 not 1980\u2019s\nUse apostrophes for substitutions of \u2018is\u2019, \u2018us\u2019 or \u2018are\u2019 and in other\u00a0contractions.\nFull stops (.)\nDo not use full stops after email addresses that end sentences as they may be misread.\nExample: email address at the end of a sentence\nYou can email the department at\u00a0example@department.wa.gov.au",
+  "id": "fmt-025"
+ },
+ {
+  "path": "docx/wa-gov-digital-content-writing-guide.docx",
+  "start_line": 304,
+  "end_line": 311,
+  "text": "Example: referring to a government department\nWA Health is Western Australia\u2019s public health system. With a State spanning over 2.5 million square kilometres, it is the largest area in the world covered by a single health authority. We employ 50,000 dedicated staff in metropolitan, regional and remote areas of the State to attend to the health needs of our growing population.\nWhen naming other departments, use the name in full followed by the acronym in brackets.\nExample: using department acronyms\nWe worked closely with the Department of Biodiversity, Conservation and Attractions (DBCA).\nWrite whole of government in full, without hyphens.\nWhen referring to a department such as DBCA in a sentence, there is no requirement to add \u2018the\u2019 in front of DBCA.\nExample:",
+  "id": "fmt-026"
+ },
+ {
+  "path": "docx/wa-gov-digital-content-writing-guide.docx",
+  "start_line": 95,
+  "end_line": 113,
+  "text": "How to apply\nRules of engagement\nWhile working at the Department of Transport the department has implemented various initiatives.\nHeadings and subheadings\nUse sentence case for headings and subheadings.\nIn general, capitalise the first word only.\nHeadings and subheadings example\nBusiness innovation incentives\nApplying for a visa\nVisiting Australia\nNouns\nUse title case for proper nouns \u2014 for example, names of people, places or organisations.\nCapitalise the principal words only, to distinguish them from common nouns or the generic meaning.\nExample: capitalising proper nouns\nJane Bloggs\nUnited Kingdom\nDigital Transformation Agency\nThe Department of Transport is a Western Australian Government department.\nPeople\u2019s titles",
+  "id": "fmt-027"
+ },
+ {
+  "path": "epub/gutenberg-art-of-war.epub",
+  "start_line": 188,
+  "end_line": 198,
+  "text": "specimen, taken from the opening sentences of chapter 5:\u2014\n\nDe l\u2019habilet\u00e9 dans le gouvernement des Troupes. Sun-tse dit : Ayez\nles noms de tous les Officiers tant g\u00e9n\u00e9raux que subalternes; inscrivez-les\ndans un catalogue \u00e0 part, avec la note des talents & de la capacit\u00e9 de\nchacun d\u2019eux, afin de pouvoir les employer avec avantage lorsque\nl\u2019occasion en sera venue. Faites en sorte que tous ceux que vous devez\ncommander soient persuad\u00e9s que votre principale attention est de les pr\u00e9server\nde tout dommage. Les troupes que vous ferez avancer contre l\u2019ennemi\ndoivent \u00eatre comme des pierres que vous lanceriez contre des \u0153ufs. De vous \u00e0\nl\u2019ennemi il ne doit y avoir d\u2019autre diff\u00e9rence que celle du fort au",
+  "id": "fmt-028"
+ },
+ {
+  "path": "epub/gutenberg-art-of-war.epub",
+  "start_line": 5262,
+  "end_line": 5279,
+  "text": "[Danger has a bracing effect.]\n\n60. Success in warfare is gained by carefully accommodating ourselves to the\nenemy\u2019s purpose.\n\n[Ts\u2019ao Kung says: \"Feign stupidity\"\u2014by an appearance of yielding\nand falling in with the enemy\u2019s wishes. Chang Yu\u2019s note makes the meaning\nclear: \"If the enemy shows an inclination to advance, lure him on to do so; if\nhe is anxious to retreat, delay on purpose that he may carry out his\nintention.\" The object is to make him remiss and contemptuous before we deliver\nour attack.]\n\n61. By persistently hanging on the enemy\u2019s flank,\n\n[I understand the first four words to mean \"accompanying the enemy in one\ndirection.\" Ts\u2019ao Kung says: \"unite the soldiers and make for the enemy.\"\nBut such a violent displacement of characters is quite indefensible.]\n",
+  "id": "fmt-029"
+ },
+ {
+  "path": "epub/gutenberg-art-of-war.epub",
+  "start_line": 411,
+  "end_line": 421,
+  "text": "grandfather by Duke Ching of Ch\u2019i [547-490 B.C.]. Sun Wu\u2019s father Sun\nP\u2019ing, rose to be a Minister of State in Ch\u2019i, and Sun Wu himself,\nwhose style was Ch\u2019ang-ch\u2019ing, fled to Wu on account of the\nrebellion which was being fomented by the kindred of T\u2019ien Pao. He had\nthree sons, of whom the second, named Ming, was the father of Sun Pin.\nAccording to this account then, Pin was the grandson of Wu, which, considering\nthat Sun Pin\u2019s victory over Wei was gained in 341 B.C., may be dismissed as\nchronologically impossible. Whence these data were obtained by Teng Ming-shih I\ndo not know, but of course no reliance whatever can be placed in them.\n\nAn interesting document which has survived from the close of the Han period is",
+  "id": "fmt-030"
+ },
+ {
+  "path": "epub/gutenberg-common-sense.epub",
+  "start_line": 2699,
+  "end_line": 2713,
+  "text": "volunteer support.\n\nProject Gutenberg eBooks are often created from several printed\neditions, all of which are confirmed as not protected by copyright in\nthe U.S. unless a copyright notice is included. Thus, we do not\nnecessarily keep eBooks in compliance with any particular paper\nedition.\n\nMost people start at our website which has the main PG search\nfacility: www.gutenberg.org.\n\nThis website includes information about Project Gutenberg,\nincluding how to make donations to the Project Gutenberg Literary\nArchive Foundation, how to help produce our new eBooks, and how to\nsubscribe to our email newsletter to hear about new eBooks.",
+  "id": "fmt-031"
+ },
+ {
+  "path": "epub/gutenberg-common-sense.epub",
+  "start_line": 2286,
+  "end_line": 2301,
+  "text": "not so, and the making him no king who is already one.  And pray what\nhath this to do in the present case?  We neither mean to set up\nnor to put down, neither to make nor to unmake,\nbut to have nothing to do with them.  Wherefore, your testimony\nin whatever light it is viewed serves only to dishonor your judgement, and\nfor many other reasons had better have been let alone than published.\n\nFirst, Because it tends to the decrease and reproach of all religion\nwhatever, and is of the utmost danger to society, to make it a party in\npolitical disputes.\n\nSecondly, Because it exhibits a body of men, numbers of whom disavow\nthe publishing political testimonies, as being concerned therein and\napprovers thereof.\n\nThirdly, Because it hath a tendency to undo that continental harmony",
+  "id": "fmt-032"
+ },
+ {
+  "path": "epub/gutenberg-common-sense.epub",
+  "start_line": 1171,
+  "end_line": 1184,
+  "text": "this, would have joined Lucifer in his revolt.\n\nBut as there is a peculiar delicacy, from whom, or in what manner, this\nbusiness must first arise, and as it seems most agreeable and\nconsistent that it should come from some intermediate body between the\ngoverned and the governors, that is, between the Congress and the\npeople, let a Continental Conference be held,\nin the following manner, and for the following purpose.\n\nA committee of twenty-six members of Congress, viz. two for each\ncolony.  Two members from each House of Assembly, or Provincial\nConvention; and five representatives of the people at large, to be\nchosen in the capital city or town of each province, for, and in behalf\nof the whole province, by as many qualified voters as shall think",
+  "id": "fmt-033"
+ },
+ {
+  "path": "epub/gutenberg-federalist-papers.epub",
+  "start_line": 12885,
+  "end_line": 12897,
+  "text": "      in their hands or in those of the Union.\n\n      But what is to be the object of this capricious partiality in the national\n      councils? Is it to be exercised in a discrimination between the different\n      departments of industry, or between the different kinds of property, or\n      between the different degrees of property? Will it lean in favor of the\n      landed interest, or the moneyed interest, or the mercantile interest, or\n      the manufacturing interest? Or, to speak in the fashionable language of\n      the adversaries to the Constitution, will it court the elevation of \"the\n      wealthy and the well-born,\" to the exclusion and debasement of all the\n      rest of the society?\n\n      If this partiality is to be exerted in favor of those who are concerned in",
+  "id": "fmt-034"
+ },
+ {
+  "path": "epub/gutenberg-federalist-papers.epub",
+  "start_line": 2511,
+  "end_line": 2528,
+  "text": "      FEDERALIST No. 12. The Utility of the Union In Respect to Revenue\n\n      FEDERALIST No. 12. The Utility of the Union In Respect to Revenue\n\n      From the New York Packet. Tuesday, November 27, 1787.\n\n      HAMILTON\n\n      To the People of the State of New York:\n\n      THE effects of Union upon the commercial prosperity of the States have\n      been sufficiently delineated. Its tendency to promote the interests of\n      revenue will be the subject of our present inquiry.\n\n      The prosperity of commerce is now perceived and acknowledged by all\n      enlightened statesmen to be the most useful as well as the most productive\n      source of national wealth, and has accordingly become a primary object of\n      their political cares. By multiplying the means of gratification, by",
+  "id": "fmt-035"
+ },
+ {
+  "path": "epub/gutenberg-federalist-papers.epub",
+  "start_line": 14400,
+  "end_line": 14410,
+  "text": "      States whose appointments are NOT in the Constitution OTHERWISE PROVIDED\n      FOR, and WHICH SHALL BE ESTABLISHED BY LAW.\" Immediately after this clause\n      follows another in these words: \"The President shall have power to fill up\n      all VACANCIES that may happen DURING THE RECESS OF THE SENATE, by granting\n      commissions which shall EXPIRE AT THE END OF THEIR NEXT SESSION.\" It is\n      from this last provision that the pretended power of the President to fill\n      vacancies in the Senate has been deduced. A slight attention to the\n      connection of the clauses, and to the obvious meaning of the terms, will\n      satisfy us that the deduction is not even colorable.\n\n      The first of these two clauses, it is clear, only provides a mode for",
+  "id": "fmt-036"
+ },
+ {
+  "path": "epub/gutenberg-origin-of-species.epub",
+  "start_line": 6139,
+  "end_line": 6148,
+  "text": "of sweet juice, which was eagerly devoured by the ant. Even the quite young\naphides behaved in this manner, showing that the action was instinctive, and\nnot the result of experience. But as the excretion is extremely viscid, it is\nprobably a convenience to the aphides to have it removed; and therefore\nprobably the aphides do not instinctively excrete for the sole good of the\nants. Although I do not believe that any animal in the world performs an action\nfor the exclusive good of another of a distinct species, yet each species tries\nto take advantage of the instincts of others, as each takes advantage of the\nweaker bodily structure of others. So again, in some few cases, certain\ninstincts cannot be considered as absolutely perfect; but as details on this",
+  "id": "fmt-037"
+ },
+ {
+  "path": "epub/gutenberg-origin-of-species.epub",
+  "start_line": 7938,
+  "end_line": 7950,
+  "text": "specially endowed with various degrees of sterility to prevent them crossing\nand blending in nature, than to think that trees have been specially endowed\nwith various and somewhat analogous degrees of difficulty in being grafted\ntogether in order to prevent them becoming inarched in our forests.\n\nThe sterility of first crosses between pure species, which have their\nreproductive systems perfect, seems\n\nto depend on several circumstances; in some cases largely on the early death of\nthe embryo. The sterility of hybrids, which have their reproductive systems\nimperfect, and which have had this system and their whole organisation\ndisturbed by being compounded of two distinct species, seems closely allied to\nthat sterility which so frequently affects pure species, when their natural",
+  "id": "fmt-038"
+ },
+ {
+  "path": "epub/gutenberg-origin-of-species.epub",
+  "start_line": 944,
+  "end_line": 955,
+  "text": "rock-pigeons are known; and these have not any of the characters of the\ndomestic breeds. Hence the supposed aboriginal stocks must either still exist\nin the countries where they were originally domesticated, and yet be unknown to\nornithologists; and this, considering their size, habits, and remarkable\ncharacters, seems very improbable; or they must have become extinct in the wild\nstate. But birds breeding on precipices, and good fliers, are unlikely to be\nexterminated; and the common rock-pigeon, which has the same habits with the\ndomestic breeds, has not been exterminated\n\neven on several of the smaller British islets, or on the shores of the\nMediterranean. Hence the supposed extermination of so many species having\nsimilar habits with the rock-pigeon seems to me a very rash assumption.",
+  "id": "fmt-039"
+ },
+ {
+  "path": "epub/gutenberg-study-in-scarlet.epub",
+  "start_line": 2730,
+  "end_line": 2741,
+  "text": "\n\u201cWe do not know. The hand of God is leading us under the person of our Prophet.\nYou must come before him. He shall say what is to be done with you.\u201d\n\nThey had reached the base of the hill by this time, and were surrounded by\ncrowds of the pilgrims\u2014pale-faced meek-looking women, strong laughing\nchildren, and anxious earnest-eyed men. Many were the cries of astonishment and\nof commiseration which arose from them when they perceived the youth of one of\nthe strangers and the destitution of the other. Their escort did not halt,\nhowever, but pushed on, followed by a great crowd of Mormons, until they\nreached a waggon, which was conspicuous for its great size and for the\ngaudiness and smartness of its appearance. Six horses were yoked to it, whereas",
+  "id": "fmt-040"
+ },
+ {
+  "path": "epub/gutenberg-study-in-scarlet.epub",
+  "start_line": 2971,
+  "end_line": 2983,
+  "text": "trapper, a silver explorer, and a ranchman. Wherever stirring adventures were\nto be had, Jefferson Hope had been there in search of them. He soon became a\nfavourite with the old farmer, who spoke eloquently of his virtues. On such\noccasions, Lucy was silent, but her blushing cheek and her bright, happy eyes,\nshowed only too clearly that her young heart was no longer her own. Her honest\nfather may not have observed these symptoms, but they were assuredly not thrown\naway upon the man who had won her affections.\n\nIt was a summer evening when he came galloping down the road and pulled up at\nthe gate. She was at the doorway, and came down to meet him. He threw the\nbridle over the fence and strode up the pathway.\n\n\u201cI am off, Lucy,\u201d he said, taking her two hands in his, and gazing tenderly",
+  "id": "fmt-041"
+ },
+ {
+  "path": "epub/gutenberg-study-in-scarlet.epub",
+  "start_line": 2664,
+  "end_line": 2675,
+  "text": "ascending the precipitous slope which led up to the object which had excited\ntheir curiosity. They advanced rapidly and noiselessly, with the confidence and\ndexterity of practised scouts. The watchers from the plain below could see them\nflit from rock to rock until their figures stood out against the skyline. The\nyoung man who had first given the alarm was leading them. Suddenly his\nfollowers saw him throw up his hands, as though overcome with astonishment, and\non joining him they were affected in the same way by the sight which met their\neyes.\n\nOn the little plateau which crowned the barren hill there stood a single giant\nboulder, and against this boulder there lay a tall man, long-bearded and\nhard-featured, but of an excessive thinness. His placid face and regular",
+  "id": "fmt-042"
+ },
+ {
+  "path": "ipynb/pdsh-numpy-array-basics.ipynb",
+  "start_line": 121,
+  "end_line": 140,
+  "text": "\n# Cell 24 (markdown)\nKeep in mind that, unlike Python lists, NumPy arrays have a fixed type.\nThis means, for example, that if you attempt to insert a floating-point value into an integer array, the value will be silently truncated. Don't be caught unaware by this behavior!\n\n# Cell 25 (code)\nx1[0] = 3.14159  # this will be truncated!\nx1\n# Output:\narray([3, 4, 0, 3, 8, 6])\n\n# Cell 26 (markdown)\n## Array Slicing: Accessing Subarrays\n\n# Cell 27 (markdown)\nJust as we can use square brackets to access individual array elements, we can also use them to access subarrays with the *slice* notation, marked by the colon (`:`) character.\nThe NumPy slicing syntax follows that of the standard Python list; to access a slice of an array `x`, use this:\n``` python\nx[start:stop:step]\n```",
+  "id": "fmt-043"
+ },
+ {
+  "path": "ipynb/pdsh-numpy-array-basics.ipynb",
+  "start_line": 139,
+  "end_line": 176,
+  "text": "x[start:stop:step]\n```\nIf any of these are unspecified, they default to the values `start=0`, `stop=<size of dimension>`, `step=1`.\nLet's look at some examples of accessing subarrays in one dimension and in multiple dimensions.\n\n# Cell 28 (markdown)\n### One-Dimensional Subarrays\n\nHere are some examples of accessing elements in one-dimensional subarrays:\n\n# Cell 29 (code)\nx1\n# Output:\narray([3, 4, 0, 3, 8, 6])\n\n# Cell 30 (code)\nx1[:3]  # first three elements\n# Output:\narray([3, 4, 0])\n\n# Cell 31 (code)\nx1[3:]  # elements after index 3\n# Output:\narray([3, 8, 6])\n\n# Cell 32 (code)\nx1[1:4]  # middle subarray\n# Output:\narray([4, 0, 3])\n\n# Cell 33 (code)\nx1[::2]  # every second element\n# Output:\narray([3, 0, 8])\n\n# Cell 34 (code)\nx1[1::2]  # every second element, starting at index 1\n# Output:",
+  "id": "fmt-044"
+ },
+ {
+  "path": "ipynb/pdsh-numpy-array-basics.ipynb",
+  "start_line": 1,
+  "end_line": 12,
+  "text": "# Cell 1 (markdown)\n# The Basics of NumPy Arrays\n\n# Cell 2 (markdown)\nData manipulation in Python is nearly synonymous with NumPy array manipulation: even newer tools like Pandas ([Part 3](03.00-Introduction-to-Pandas.ipynb)) are built around the NumPy array.\nThis chapter will present several examples of using NumPy array manipulation to access data and subarrays, and to split, reshape, and join the arrays.\nWhile the types of operations shown here may seem a bit dry and pedantic, they comprise the building blocks of many other examples used throughout the book.\nGet to know them well!\n\nWe'll cover a few categories of basic array manipulations here:\n\n- *Attributes of arrays*: Determining the size, shape, memory consumption, and data types of arrays",
+  "id": "fmt-045"
+ },
+ {
+  "path": "ipynb/pdsh-pandas-aggregation-grouping.ipynb",
+  "start_line": 272,
+  "end_line": 292,
+  "text": "Transit                              5.714932\nTransit Timing Variations           57.011000\nName: orbital_period, dtype: float64\n\n# Cell 40 (markdown)\nThis gives an idea of the general scale of orbital periods (in days) that each method is sensitive to.\n\n# Cell 41 (markdown)\n#### Iteration over groups\n\nThe `GroupBy` object supports direct iteration over the groups, returning each group as a `Series` or `DataFrame`:\n\n# Cell 42 (code)\nfor (method, group) in planets.groupby('method'):\n    print(\"{0:30s} shape={1}\".format(method, group.shape))\n# Output:\nAstrometry                     shape=(2, 6)\nEclipse Timing Variations      shape=(9, 6)\nImaging                        shape=(38, 6)\nMicrolensing                   shape=(23, 6)\nOrbital Brightness Modulation  shape=(3, 6)",
+  "id": "fmt-046"
+ },
+ {
+  "path": "ipynb/pdsh-pandas-aggregation-grouping.ipynb",
+  "start_line": 238,
+  "end_line": 257,
+  "text": "We'll discuss each of these more fully in the next section, but before that let's take a look at some of the other functionality that can be used with the basic `GroupBy` operation.\n\n# Cell 35 (markdown)\n#### Column indexing\n\nThe `GroupBy` object supports column indexing in the same way as the `DataFrame`, and returns a modified `GroupBy` object.\nFor example:\n\n# Cell 36 (code)\nplanets.groupby('method')\n# Output:\n<pandas.core.groupby.generic.DataFrameGroupBy object at 0x11d1bc820>\n\n# Cell 37 (code)\nplanets.groupby('method')['orbital_period']\n# Output:\n<pandas.core.groupby.generic.SeriesGroupBy object at 0x11d1bcd60>\n\n# Cell 38 (markdown)\nHere we've selected a particular `Series` group from the original `DataFrame` group by reference to its column name.",
+  "id": "fmt-047"
+ },
+ {
+  "path": "ipynb/pdsh-pandas-aggregation-grouping.ipynb",
+  "start_line": 228,
+  "end_line": 239,
+  "text": "\n# Cell 33 (markdown)\nThe `sum` method is just one possibility here; you can apply most Pandas or NumPy aggregation functions, as well as most `DataFrame` operations, as you will see in the following discussion.\n\n# Cell 34 (markdown)\n### The GroupBy Object\n\nThe `GroupBy` object is a flexible abstraction: in many ways, it can be treated as simply a collection of ``DataFrame``s, though it is doing more sophisticated things under the hood. Let's see some examples using the Planets data.\n\nPerhaps the most important operations made available by a `GroupBy` are *aggregate*, *filter*, *transform*, and *apply*.\nWe'll discuss each of these more fully in the next section, but before that let's take a look at some of the other functionality that can be used with the basic `GroupBy` operation.\n",
+  "id": "fmt-048"
+ },
+ {
+  "path": "ipynb/pdsh-support-vector-machines.ipynb",
+  "start_line": 159,
+  "end_line": 177,
+  "text": "    model.fit(X, y)\n    \n    ax = ax or plt.gca()\n    ax.scatter(X[:, 0], X[:, 1], c=y, s=50, cmap='autumn')\n    ax.set_xlim(-1, 4)\n    ax.set_ylim(-1, 6)\n    plot_svc_decision_function(model, ax)\n\nfig, ax = plt.subplots(1, 2, figsize=(16, 6))\nfig.subplots_adjust(left=0.0625, right=0.95, wspace=0.1)\nfor axi, N in zip(ax, [60, 120]):\n    plot_svm(N, axi)\n    axi.set_title('N = {0}'.format(N))\n# Output:\n<Figure size 1152x432 with 2 Axes>\n\n# Cell 22 (markdown)\nIn the left panel, we see the model and the support vectors for 60 training points.\nIn the right panel, we have doubled the number of training points, but the model has not changed: the three support vectors in the left panel are the same as the support vectors in the right panel.",
+  "id": "fmt-049"
+ },
+ {
+  "path": "ipynb/pdsh-support-vector-machines.ipynb",
+  "start_line": 341,
+  "end_line": 352,
+  "text": "# Cell 45 (markdown)\nEach image contains 62 \u00d7 47, or around 3,000, pixels.\nWe could proceed by simply using each pixel value as a feature, but often it is more effective to use some sort of preprocessor to extract more meaningful features; here we will use principal component analysis (see [In Depth: Principal Component Analysis](05.09-Principal-Component-Analysis.ipynb)) to extract 150 fundamental components to feed into our support vector machine classifier.\nWe can do this most straightforwardly by packaging the preprocessor and the classifier into a single pipeline:\n\n# Cell 46 (code)\nfrom sklearn.svm import SVC\nfrom sklearn.decomposition import PCA\nfrom sklearn.pipeline import make_pipeline\n\npca = PCA(n_components=150, whiten=True,\n          svd_solver='randomized', random_state=42)",
+  "id": "fmt-050"
+ },
+ {
+  "path": "ipynb/pdsh-support-vector-machines.ipynb",
+  "start_line": 78,
+  "end_line": 95,
+  "text": "\n# Cell 12 (markdown)\nThe line that maximizes this margin is the one we will choose as the optimal model.\n\n# Cell 13 (markdown)\n### Fitting a Support Vector Machine\n\nLet's see the result of an actual fit to this data: we will use Scikit-Learn's support vector classifier (`SVC`) to train an SVM model on this data.\nFor the time being, we will use a linear kernel and set the ``C`` parameter to a very large number (we'll discuss the meaning of these in more depth momentarily):\n\n# Cell 14 (code)\nfrom sklearn.svm import SVC # \"Support vector classifier\"\nmodel = SVC(kernel='linear', C=1E10)\nmodel.fit(X, y)\n# Output:\nSVC(C=10000000000.0, kernel='linear')\n\n# Cell 15 (markdown)",
+  "id": "fmt-051"
+ },
+ {
+  "path": "mbox/apache-commons-dev-2024-02.mbox",
+  "start_line": 5522,
+  "end_line": 5550,
+  "text": ">  https://downloads.apache.org/commons/KEYS\n> \n> Please review the release candidate and vote.\n> This vote will close no sooner than 72 hours from now.\n> \n>  [ ] +1 Release these artifacts\n>  [ ] +0 OK, but...\n>  [ ] -0 OK, but really should fix...\n>  [ ] -1 I oppose this release because...\n> \n> Thank you,\n> \n> Gary Gregory,\n> Release Manager (using key 86fdc7e2a11262cb)\n> \n> For following is intended as a helper and refresher for reviewers.\n> \n> Validating a release candidate\n> ==============================\n> \n> These guidelines are NOT complete.\n> \n> Requirements: Git, Java, Maven.\n> \n> You can validate a release from a release candidate (RC) tag as follows.\n> \n> 1a) Clone and checkout the RC tag\n> \n> git clone https://gitbox.apache.org/repos/asf/commons-compress.git",
+  "id": "fmt-052"
+ },
+ {
+  "path": "mbox/apache-commons-dev-2024-02.mbox",
+  "start_line": 5160,
+  "end_line": 5184,
+  "text": "\n# Message 52: [RDF] Bump Java requirement from Java 8 to 11\nFrom: Gary Gregory <garydgregory@gmail.com>\nTo: Commons Developers List <dev@commons.apache.org>\nDate: Sun, 18 Feb 2024 16:01:53 +0000\nSubject: [RDF] Bump Java requirement from Java 8 to 11\n\nTo use a new Jena version, we would require Java 11.\n\nRaise your hand if this would be a deal breaker for you and why.\n\nRaise your hand to say hi or anything else ;-)\n\nSee:\n\n- the thread [RDF] New Jena Version\n- the PR https://github.com/apache/commons-rdf/pull/196\n\nGary\n\n---------------------------------------------------------------------\nTo unsubscribe, e-mail: dev-unsubscribe@commons.apache.org\nFor additional commands, e-mail: dev-help@commons.apache.org\n\n# Message 53: Re: [VOTE] Release Apache Commons Compress 1.26.0 based on RC1",
+  "id": "fmt-053"
+ },
+ {
+  "path": "mbox/apache-commons-dev-2024-02.mbox",
+  "start_line": 4880,
+  "end_line": 4892,
+  "text": "> >     https://gitbox.apache.org/repos/asf?p=commons-compress.git;a=commit;h=acaf5642b1e16d872870a4dc4618e46ccd349493\n> > You may checkout this tag using:\n> >     git clone https://gitbox.apache.org/repos/asf/commons-compress.git\n> > --branch commons-compress-1.26.0-RC1 commons-compress-1.26.0-RC1\n> >\n> > Maven artifacts are here:\n> >     https://repository.apache.org/content/repositories/orgapachecommons-1689/org/apache/commons/commons-compress/1.26.0/\n> >\n> > These are the artifacts and their hashes:\n> >\n> > #Release SHA-512s\n> > #Sat Feb 17 23:50:41 UTC 2024\n> > commons-compress-1.26.0-bom.xml=30154dabf68fe1d9dfcfb02a9e4d80a4aadd182817c310900178ebae8df06fce23a30b269f63c37fc3a69c59fd57e0d9a9cdc86cddb38ca4d53617f6f6c0da7e",
+  "id": "fmt-054"
+ },
+ {
+  "path": "mbox/apache-httpd-dev-2024-01.mbox",
+  "start_line": 5802,
+  "end_line": 5829,
+  "text": "> prettier on GitHub.\n>\n> I almost just CTR'ed it, but it occurred to me that someone might find\n> this objectionable, so I thought I'd ask first.\n>\n\n# Message 29: Re: PR #363\nFrom: Ruediger Pluem <rpluem@apache.org>\nTo: dev@httpd.apache.org\nDate: Thu, 25 Jan 2024 08:04:31 +0100\nSubject: Re: PR #363\n\n\n\nOn 1/24/24 11:31 PM, Rich Bowen wrote:\n> Well, it turns out that in order for this to actually work, we would need to rename README to README.md, so I'm inclined to revert\n> this change unless someone thinks differently.\n\nHow about using a symlink? Keep README and create a README.md symlink to it?\nBut I am not sure if github handles this correctly.\n\nRegards\n\nR\u00fcdiger\n\n# Message 30: Re: PR #363\nFrom: Ruediger Pluem <rpluem@apache.org>\nTo: dev@httpd.apache.org",
+  "id": "fmt-055"
+ },
+ {
+  "path": "mbox/apache-httpd-dev-2024-01.mbox",
+  "start_line": 6333,
+  "end_line": 6346,
+  "text": ">> @@ -958,6 +959,15 @@ FOREACH(pgm ${standard_support})\n>>     TARGET_LINK_LIBRARIES(${pgm} ${EXTRA_LIBS} ${APR_LIBRARIES})\n>>   ENDFOREACH()\n>>   \n>> +ADD_EXECUTABLE(ab support/ab.c build/win32/httpd.rc)\n>> +SET(install_targets ${install_targets} ab)\n>> +SET(install_bin_pdb ${install_bin_pdb} $<TARGET_PDB_FILE:ab>)\n>> +SET(tmp_includes ${HTTPD_INCLUDE_DIRECTORIES})\n>> +SET_TARGET_PROPERTIES(ab PROPERTIES INCLUDE_DIRECTORIES \"${tmp_includes}\")\n>> +DEFINE_WITH_BLANKS(define_long_name \"LONG_NAME\" \"Apache HTTP Server ab program\")\n>> +SET_TARGET_PROPERTIES(ab PROPERTIES COMPILE_FLAGS \"-DAPP_FILE ${define_long_name} -DBIN_NAME=ab.exe ${EXTRA_COMPILE_FLAGS}\")\n>> +TARGET_LINK_LIBRARIES(ab ${EXTRA_LIBS} ${APR_LIBRARIES} Ws2_32.lib)\n>> +\n>>   IF(OPENSSL_FOUND)",
+  "id": "fmt-056"
+ },
+ {
+  "path": "mbox/apache-httpd-dev-2024-01.mbox",
+  "start_line": 4913,
+  "end_line": 4922,
+  "text": "|61986|New|Maj|2018-01-10|POST Data Lost between Apache and Tomcat          |\n|61990|Inf|Nor|2018-01-11|Can't use variable with Require ldap-filter       |\n|62007|Inf|Maj|2018-01-17|413:REQUEST ENTITY TOO LARGE error is coming when |\n|62014|New|Cri|2018-01-18|active connections are terminated when do a gracef|\n|62025|New|Nor|2018-01-20|mod_headers doesn't edit WWW-Authentication from m|\n|62031|New|Nor|2018-01-22|document better ocsp stapling values              |\n|62061|New|Nor|2018-01-30|FcgidInitialEnv per Directory or Location         |\n|62079|Inf|Nor|2018-02-05|Connection timeout after 60 seconds               |\n|62083|New|Maj|2018-02-07|RTLD_GLOBAL should not be used for loading modules|\n|62089|New|Nor|2018-02-09|failover not working with forward proxies         |",
+  "id": "fmt-057"
+ },
+ {
+  "path": "odp/levelling-up-fund-developing-economic-case.odp",
+  "start_line": 128,
+  "end_line": 130,
+  "text": "In the economic case, applicants should seek to demonstrate the scale of all of the benefits (impacts) the proposal is anticipated to deliver. The categories of benefits should be consistent with the Theory of Change (covered in the Strategic Fit section).\nWhere possible, impacts should be monetised and presented in a way that is consistent with the Green Book and relevant departmental appraisal guidance. However, some of the impacts that a proposal is likely to deliver are unlikely to bemonetisable.\nExamples of benefits that a proposal could deliver and which can be monetised include direct and wider land value uplift, amenity benefits, cultural capital, reduced travel times to key services, environmental benefits, crime reduction etc.",
+  "id": "fmt-058"
+ },
+ {
+  "path": "odp/levelling-up-fund-developing-economic-case.odp",
+  "start_line": 108,
+  "end_line": 118,
+  "text": "8\nAdjusting for Optimism Bias\n\u201cOptimism bias \u2013 this is the proven tendency for appraisers to be optimistically biased about key project parameters, including capital costs and operating costs, project duration, and resulting benefits delivery.\u201d \u2013The Green Book (2022)\nCosts should be uplifted by an appropriate optimism bias to provide a more realistic assessment of the costs and benefits of the bid.\nIf possible, applicants should utilise reliable data relating to the specific proposal. In the absence of such data, the Green Book provides appropriate optimism bias adjustments by project type.\nNote, optimism bias should complement rather than replace good practice in calculating risk adjustments.\nSource:Supplementary Green Book Guidance \u2013 Optimism Bias\n8\n\n# Slide 9 (Slide36)\n9",
+  "id": "fmt-059"
+ },
+ {
+  "path": "odp/levelling-up-fund-developing-economic-case.odp",
+  "start_line": 117,
+  "end_line": 127,
+  "text": "# Slide 9 (Slide36)\n9\nDiscounting future costs and benefits\nCosts and benefits should be presented on apresent valuebasis. Allowing for comparison of values across years. The discount rates to use depend on the particular type of intervention.\nDiscounting should be applied to real values and should not be confused with inflation, therefore it is best practice to first convert costs and benefits to real values before performing the discounting adjustment. The inflation rate and discount rate should not be added and applied to costs and benefits as it gives an arithmetically incorrect result.\nSource:Green Book (2022)\n9\n\n# Slide 10 (Slide37)\n10\nEstimating the benefits (impacts) of an intervention",
+  "id": "fmt-060"
+ },
+ {
+  "path": "odp/montreal-2012-resident-satisfaction-survey-fr.odp",
+  "start_line": 37,
+  "end_line": 54,
+  "text": "\uf0ec\uf0ee indique des diff\u00e9rences les plus importantes, \u00e0 la hausse ou \u00e0 la baisse, par rapport aux autres cat\u00e9gories de r\u00e9pondants ou aux autres questions pr\u00e9sent\u00e9es dans un tableau.\nIl convient de souligner que le sondage a co\u00efncid\u00e9 avec les travaux de la commission Charbonneau et la d\u00e9mission de l\u2019ancien maire de Montr\u00e9al. Les r\u00e9sultats de l\u2019\u00e9tude, en termes de perception, ont pu \u00eatre l\u00e9g\u00e8rement teint\u00e9s par ce contexte particulier.\nContexte et objectifs\nPopulation cible\n\u00c9chantillonnage\nCollecte\nPond\u00e9ration\nLimites de l\u2019\u00e9tude\nL\u00c9GENDE\nNOTE\n<num\u00e9ro>\n\n# Slide 4 (faits saillants)\nfaits saillants\n\n# Slide 5 (faits saillants)\n<num\u00e9ro>\nNiveau de connaissance des services relevant de la responsabilit\u00e9 de la ville de Montr\u00e9al",
+  "id": "fmt-061"
+ },
+ {
+  "path": "odp/montreal-2012-resident-satisfaction-survey-fr.odp",
+  "start_line": 634,
+  "end_line": 636,
+  "text": "## Sheet: \nVille de Montr\u00e9al (Satisfaction r\u00e9sidents) - Volet SOM Sondage r\u00e9alis\u00e9 du 14 novembre au 21 novembre 2012\nTAILLE DE L\u2019\u00c9CHANTILLON Nombre d\u2019entrevues vis\u00e9es Invitations envoy\u00e9es (A) UNIT\u00c9 JOINTE R\u00c9PONDANTE Questionnaires compl\u00e9t\u00e9s (B1) Hors de la population vis\u00e9e ou quota atteint (B2) UNIT\u00c9 JOINTE TARDIVE Acc\u00e8s lorsque collecte de la strate termin\u00e9e UNIT\u00c9 JOINTE NON R\u00c9PONDANTE Abandon \u00e0 la page d\u2019accueil Abandon durant le questionnaire Probl\u00e8me technique Courriel automatique re\u00e7u indiquant absence du r\u00e9pondant Courriel re\u00e7u indiquant refus de r\u00e9pondre D\u00e9sabonnement \u00c0 faire par t\u00e9l\u00e9phone UNIT\u00c9 JOINTE TOTALE (C)\t3472 3472 924 72 0 0 109 0 0 0 15 0 1129",
+  "id": "fmt-062"
+ },
+ {
+  "path": "odp/montreal-2012-resident-satisfaction-survey-fr.odp",
+  "start_line": 85,
+  "end_line": 90,
+  "text": "Les services culturels, sportifs et de loisirs municipaux (hormis les services de loisir \u00e0 caract\u00e8re scientifique);\nLes services de transport;\nLes travaux d\u2019urgence au niveau des canalisations et de la chauss\u00e9e;\nLes centres de contacts (le num\u00e9ro 311 et les bureaux Acc\u00e8s Montr\u00e9al);\nLes services financiers (gestion du budget de la Ville, gestion des revenus de la taxation\u2026)\nLe taux de Montr\u00e9alais attribuant la responsabilit\u00e9 de ces services \u00e0 la Ville de Montr\u00e9al varie entre 82\u00a0% et 88\u00a0%, ce qui demeure un niveau de connaissance \u00e9lev\u00e9.",
+  "id": "fmt-063"
+ },
+ {
+  "path": "ods/geospatial-commission-authoritative-data-assessment-tool.ods",
+  "start_line": 6,
+  "end_line": 10,
+  "text": "\t\tPlease email anyfeedbackor suggestions to:\t\t\t\t\t\t\t\n\t\tgeospatialcommission@cabinetoffice.gov.uk\t\t\t\t\t\t\n\t\tAssumption The assessment has been designed initially for use with geospatial datasets, however it can be easily adapted for other datasets. In particular, the question on Positional Accuracy does not apply to datasets with no location information \u2013 please select N/A for this question. This will not affect the overall quality score.\t\t\t\n\t\tHow to use the Assessment Tool\t\t\t\n\t\tStep 1 - Complete 'Part 1 - Organisation' (with embedded guidance)\t\t\t\t\t",
+  "id": "fmt-064"
+ },
+ {
+  "path": "ods/geospatial-commission-authoritative-data-assessment-tool.ods",
+  "start_line": 64,
+  "end_line": 66,
+  "text": "\t\tSoil\tPlease Select\tSoils and subsoil characterised according to depth, texture, structure and content of particles and organic material, stoniness, erosion, where appropriate mean slope and anticipated water storage capacity.\t\t\n\t\tSpecies Distribution\tPlease Select\tGeographical distribution of occurrence of animal and plant species aggregated by grid, region, administrative unit or other analytical unit.\t\t\n\t\tStatistical Units\tPlease Select\tUnits for dissemination or use of statistical information.\t\t",
+  "id": "fmt-065"
+ },
+ {
+  "path": "ods/geospatial-commission-authoritative-data-assessment-tool.ods",
+  "start_line": 188,
+  "end_line": 193,
+  "text": "\t4. Coverage Geographical coverage of the dataset, e.g. Hampshire, UK Waters, Great Britain\t0\t\t\n\t5. Similar Datasets Please list any similar datasets you are aware of that exist either within your organisation or are provided by external companies or organisations\t0\t\t\n\t\t\t0\t\t\n\t\tResult\t0.00\t\t\t\n\tQuestion\tGuidance / Examples\tResponse\tCalculation\t\t\t\n\t7. Does this dataset fall within yourorganisation's primary thematic domains, as defined in Part 1, Question 2?\tExample 1:If you selected Addresses, Buildings and Land Cover in Part 1 Question 2, and this is an Address Dataset, answer 'Yes'. Example 2:If you selected Cadastral Parcels in Part 1 Question 2 and this is a Hydrography dataset, answer 'No'.\tPlease Select\t\t\t\t",
+  "id": "fmt-066"
+ },
+ {
+  "path": "ods/phe-aaa-screening-minimum-dataset-dictionary.ods",
+  "start_line": 86,
+  "end_line": 89,
+  "text": "\t1.11.2\tActive Date\tDate from which this determination of eligibility is valid.\tdd/mm/yyyy\tderived by system\toptional\tnon-identifiable data\t\u00fc\t\t\t\n\t1.11.2.1\tActive Date - Screen Year\tScreening year from which this determination of eligibility is valid\tyyyy\tderived from 1.11.2\toptional\tnon-identifiable data\t\u00fc\t\t\t\n\t1.11.3\tReview Date\tDate at which this determination of eligibility expires.\tdd/mm/yyyy\tkeyed\tmandatory 2008 if 1.11.1 Eligibility Recommendation = 4 Temporarily Excluded; otherwise optional\tnon-identifiable data\t\u00fc\t\t\t\n\t1.11.4\tPerson category\tCategory of person who made recommendation of eligibility status.\tn1 1 Subject 2 Relative / Carer 3 Screening programme 4 GP 5 Clinician other than GP 9 Default Eligibility Status\tkeyed\tmandatory 2008\tnon-identifiable data\t\u00fc\t\t\t",
+  "id": "fmt-067"
+ },
+ {
+  "path": "ods/phe-aaa-screening-minimum-dataset-dictionary.ods",
+  "start_line": 161,
+  "end_line": 163,
+  "text": "\t2.1.6\tAppointment Month Name\tThe name of the month that the AAA screening appointment is in\tn2 01 January 02 February 03 March 04 April 05 May 06 June 07 July 08 August 09 September 10 October 11 November 12 December\tderived from 2.1.3 Appointment Date Time\tmandatory if 2.1.3 appointment date time is completed\tnon-identifiable data\t\u00fc\tReporting field\t\t\n\t2.1.7\tAppointment Year\tThe year that the appointment is within\tyyyy\tderived from 2.1.3 Appointment Date Time\tmandatory if 2.1.3 appointment date time is completed\tnon-identifiable data\t\u00fc\tReporting field\t\t\t\n\t2.1.8\tAppointment Test Date/Time\tThe date and time that the screening test took place\tdd/mm/yyyy hh:mm:ss\tkeyed or entered from calendar\toptional\tnon-identifiable data\t\u00fc\t\t\t",
+  "id": "fmt-068"
+ },
+ {
+  "path": "ods/phe-aaa-screening-minimum-dataset-dictionary.ods",
+  "start_line": 373,
+  "end_line": 375,
+  "text": "\t6.7\tDate Patient Informed\tThe date at which the outcome of the assessment by the vascular specialist was reported to the patient.\tdd/mm/yyyy\tderived from system date\toptional\tnon-identifiable data\t\u00fc\t\t\t\n\t6.8\tDate GP Informed\tThe date at which the outcome of the assessment by the vascular specialist was reported to the GP.\tdd/mm/yyyy\tderived from system date\toptional\tnon-identifiable data\t\u00fc\t\t\t\n\t6.9\tFurther Investigation Due Date\tThe date by which any further investigation should have been completed (to support failsafe / action date reporting).\tdd/mm/yyyy\tderived from national vascular registry fields or keyed\tmandatory if 6.6.1 Specialist Assessment Outcome = Further investigation required; otherwise optional\tnon-identifiable data\t\u00fc\tRetired 2018\t\t",
+  "id": "fmt-069"
+ },
+ {
+  "path": "odt/dhsc-nhs-continuing-healthcare-checklist-guidance.odt",
+  "start_line": 161,
+  "end_line": 161,
+  "text": "Please provide us with some information about yourself.\u00a0We collect information to help us understand whether people are receiving fair and equal accessto NHS Continuing Healthcare (CHC) via theNHS CHC Patient Level Data Set (PLDS)which is used to help achieve better patient outcomes, better experiences and better use of resources in CHC.\u00a0The lawful basis for collecting this information is Article 6 (1) (c) of the GDPR enacted by the Data Protection Act 2018. Please note that NHS CHC PLDS data is pseudonymised for analysis purposes. This means that identifiers such as names, NHS numbers and dates of birth are removed. Detailed information about the use of individual\u2019s identifiable data is publicly available athttps://digital.nhs.uk/about-nhs-digital/our-work/keeping-patient-data-safe/gdpr/g",
+  "id": "fmt-070"
+ },
+ {
+  "path": "odt/dhsc-nhs-continuing-healthcare-checklist-guidance.odt",
+  "start_line": 123,
+  "end_line": 123,
+  "text": "ty even with supervision, prompting or assistance to make decisions about some aspects of their lives, which consequently puts them at some risk of harm, neglect or health deterioration.\tCognitive impairment that could for example include frequent short-term memory issues and maybe disorientation to time and place. The individual has awareness of only a limited range of needs and basic risks. Although they may be able to make some choices appropriate to need on a limited range of issues, they are unable to do so on most issues, even with supervision, prompting or assistance. The individual finds it difficult, even with supervision, prompting or assistance, to make decisions about key aspects of their lives, which consequently puts them at high risk of harm, neglect or health deterioration.",
+  "id": "fmt-071"
+ },
+ {
+  "path": "odt/dhsc-nhs-continuing-healthcare-checklist-guidance.odt",
+  "start_line": 78,
+  "end_line": 84,
+  "text": "An individual is receiving services under Section 117 of the Mental Health Act that are meeting all of their assessed needs.\nIt has previously been decided that the individual isnot eligible for NHS Continuing Healthcare and it is clear that there has been no change in needs.\nIf upon review of these statements, it is deemed that it is not necessary to screen for NHS Continuing Healthcare at this time, the decision not tocomplete the Checklist and its reasons should be clearly recorded in the patient\u2019s notes.\n\n## Sheet: \nName of individual\tDate of completion\t\n\tC\tB\tA\t",
+  "id": "fmt-072"
+ },
+ {
+  "path": "odt/govuk-lgbt-veterans-review-audio-testimony-guidance.odt",
+  "start_line": 1,
+  "end_line": 5,
+  "text": "Google Keep Guidance: LGBT Veterans Review Call for Evidence\nThis is guidance on how to provide oral testimony to the LGBT Veterans Review.\nYou do not need to send us your testimony in multiple formats - if you have already submitted testimony you do not also need to submit the same answers via voice, but you can if you wish. If your verbal testimony is supplementary to testimony you have already submitted, and you want it attached to your previous testimony, you will need to either provide us with your email or service number that you input previously.\nYou do not have to give any personal details. However, by sending this oral testimony we will receive your email. All personal details, such as email address, will be deleted at the end of the Review.\nDownload Google Keep",
+  "id": "fmt-073"
+ },
+ {
+  "path": "odt/govuk-lgbt-veterans-review-audio-testimony-guidance.odt",
+  "start_line": 12,
+  "end_line": 17,
+  "text": "If you want to, you can respond to the questions we have set out in our Call for Evidence.\nHead to our govuk page and download the question set for your group: LGBT Veterans, other service personnel or family, friends and/or representatives. These questions may be useful when recording your testimony.\nYou do not need to respond to all the questions. The important thing is that we hear your story.\nRecord your testimony\nHead to your keep app, click the microphone button and start speaking.\nWhen you have finished your recording, you will see a transcription of what you said alongside an audio recording. Please do read over this to check it is correct.",
+  "id": "fmt-074"
+ },
+ {
+  "path": "odt/govuk-lgbt-veterans-review-audio-testimony-guidance.odt",
+  "start_line": 25,
+  "end_line": 29,
+  "text": "Please note that any information you pass to us will be confidential.\nWe thank you for your time and willingness to share your story.\nWe provide a list of support organisations if you need help: https://www.gov.uk/guidance/national-services-that-offer-support-to-veterans\nYou can read our Privacy Notice.\nIf the above method does not work for you or you wish to provide evidence in a different format, contact us at contact@lgbtveterans.independent-review.uk.",
+  "id": "fmt-075"
+ },
+ {
+  "path": "odt/libreoffice-gs52-introducing-libreoffice.odt",
+  "start_line": 100,
+  "end_line": 102,
+  "text": "Base (database)\nBase provides tools for day-to-day database work within a simple interface. It can create and edit forms, reports, queries, tables, views, and relations, so that managing a relational database is much the same as in other popular database applications. Base provides many new features, such as the ability to analyze and edit relationships from a diagram view. Base incorporates two relational database engines, HSQLDB and PostgreSQL. It can also use dBASE, Microsoft Access, MySQL, or Oracle, or any ODBC compliant or JDBC compliant database. Base also provides support for a subset of ANSI-92 SQL.\nMath (formula editor)",
+  "id": "fmt-076"
+ },
+ {
+  "path": "odt/libreoffice-gs52-introducing-libreoffice.odt",
+  "start_line": 211,
+  "end_line": 214,
+  "text": "To show or hide icons defined for the selected toolbar, click Visible Buttons. Visible icons on a toolbar are indicated by an outline around the icon ( Figure 5) or by a check mark beside the icon, depending on your operating system. Select or deselect icons to hide or show them on the toolbar.\nFigure 5: Selection of visible toolbar icons\nClick Customize Toolbar to open the Customize dialog; See Chapter 14 Customizing LibreOffice for more information.\nClick Dock Toolbar to dock the selected floating toolbar. By default, a toolbar will dock at the top of the workspace. You can reposition the toolbar to a different docked position. See \u201cMoving toolbars\u201d on page 11.",
+  "id": "fmt-077"
+ },
+ {
+  "path": "odt/libreoffice-gs52-introducing-libreoffice.odt",
+  "start_line": 130,
+  "end_line": 135,
+  "text": "Mac OS X users can also get two versions of LibreOffice from the App Store: LibreOffice Vanilla (free) and LibreOffice-from-Collabora (an enterprise-ready version; small fee).\nHow to install the software\nInformation on installing and setting up LibreOffice on the various supported operating systems is given here: http://www.libreoffice.org/get-help/install-howto/.\nExtensions and add-ons\nExtensions and add-ons are available to enhance LibreOffice. Several extensions are installed with the program and you can get others from the official extensions repository, http://extensions.libreoffice.org/. See Chapter 14, Customizing LibreOffice for more information on installing extensions and add-ons.\nStarting LibreOffice",
+  "id": "fmt-078"
+ },
+ {
+  "path": "pdf/arxiv-attention-is-all-you-need.pdf",
+  "start_line": 115,
+  "end_line": 127,
+  "text": "textual entailment and learning task-independent sentence representations [4, 27, 28, 22].\n\nEnd-to-end memory networks are based on a recurrent attention mechanism instead of sequence-\naligned recurrence and have been shown to perform well on simple-language question answering and\nlanguage modeling tasks [34].\n\nTo the best of our knowledge, however, the Transformer is the first transduction model relying\nentirely on self-attention to compute representations of its input and output without using sequence-\naligned RNNs or convolution. In the following sections, we will describe the Transformer, motivate\nself-attention and discuss its advantages over models such as [17, 18] and [9].\n\n3 Model Architecture\n",
+  "id": "fmt-079"
+ },
+ {
+  "path": "pdf/arxiv-attention-is-all-you-need.pdf",
+  "start_line": 261,
+  "end_line": 274,
+  "text": "consists of two linear transformations with a ReLU activation in between.\n\nFFN(x) = max(0, xW1 + b1)W2 + b2 (2)\n\nWhile the linear transformations are the same across different positions, they use different parameters\nfrom layer to layer. Another way of describing this is as two convolutions with kernel size 1.\nThe dimensionality of input and output is dmodel = 512, and the inner-layer has dimensionality\ndf f = 2048.\n\n3.4 Embeddings and Softmax\n\nSimilarly to other sequence transduction models, we use learned embeddings to convert the input\ntokens and output tokens to vectors of dimension dmodel. We also use the usual learned linear transfor-\nmation and softmax function to convert the decoder output to predicted next-token probabilities. In",
+  "id": "fmt-080"
+ },
+ {
+  "path": "pdf/arxiv-attention-is-all-you-need.pdf",
+  "start_line": 745,
+  "end_line": 754,
+  "text": "Attention Visualizations\n\nInput-Input Layer5ItisinthisspiritthatamajorityofAmericangovernmentshavepassednewlawssince2009makingtheregistrationorvotingprocessmoredifficult.<EOS><pad><pad><pad><pad><pad><pad>ItisinthisspiritthatamajorityofAmericangovernmentshavepassednewlawssince2009makingtheregistrationorvotingprocessmoredifficult.<EOS><pad><pad><pad><pad><pad><pad>\nFigure 3: An example of the attention mechanism following long-distance dependencies in the\nencoder self-attention in layer 5 of 6. Many of the attention heads attend to a distant dependency of\nthe verb \u2018making\u2019, completing the phrase \u2018making...more difficult\u2019. Attentions here shown only for\nthe word \u2018making\u2019. Different colors represent different heads. Best viewed in color.\n\n13\n",
+  "id": "fmt-081"
+ },
+ {
+  "path": "pdf/arxiv-bert.pdf",
+  "start_line": 1699,
+  "end_line": 1724,
+  "text": "in this paper. A multitask \ufb01ne-tuning approach could poten-\ntially push the performance even further. For example, we\ndid observe substantial improvements on RTE from multi-\ntask training with MNLI.\n15https://gluebenchmark.com/faq\n\njority class.\n\nC Additional Ablation Studies\n\nC.1 Effect of Number of Training Steps\n\nFigure 5 presents MNLI Dev accuracy after \ufb01ne-\ntuning from a checkpoint that has been pre-trained\nfor k steps. This allows us to answer the following\nquestions:\n\n1. Question: Does BERT really need such\na large amount of pre-training (128,000\nwords/batch * 1,000,000 steps) to achieve\nhigh \ufb01ne-tuning accuracy?\nAnswer: Yes, BERTBASE achieves almost\n1.0% additional accuracy on MNLI when\ntrained on 1M steps compared to 500k steps.\n\n2. Question: Does MLM pre-training converge",
+  "id": "fmt-082"
+ },
+ {
+  "path": "pdf/arxiv-bert.pdf",
+  "start_line": 69,
+  "end_line": 84,
+  "text": "general language representations.\nWe argue that current techniques restrict the\npower of the pre-trained representations, espe-\ncially for the \ufb01ne-tuning approaches. The ma-\njor limitation is that standard language models are\nunidirectional, and this limits the choice of archi-\ntectures that can be used during pre-training. For\nexample, in OpenAI GPT, the authors use a left-to-\nright architecture, where every token can only at-\ntend to previous tokens in the self-attention layers\nof the Transformer (Vaswani et al., 2017). Such re-\nstrictions are sub-optimal for sentence-level tasks,\nand could be very harmful when applying \ufb01ne-\ntuning based approaches to token-level tasks such\nas question answering, where it is crucial to incor-\nporate context from both directions.",
+  "id": "fmt-083"
+ },
+ {
+  "path": "pdf/arxiv-bert.pdf",
+  "start_line": 726,
+  "end_line": 746,
+  "text": "construct four input sequences, each containing\nthe concatenation of the given sentence (sentence\nA) and a possible continuation (sentence B). The\nonly task-speci\ufb01c parameters introduced is a vec-\ntor whose dot product with the [CLS] token rep-\nresentation C denotes a score for each choice\nwhich is normalized with a softmax layer.\nWe \ufb01ne-tune the model for 3 epochs with a\nlearning rate of 2e-5 and a batch size of 16. Re-\nsults are presented in Table 4. BERTLARGE out-\nperforms the authors\u2019 baseline ESIM+ELMo sys-\ntem by +27.1% and OpenAI GPT by 8.3%.\n\n5 Ablation Studies\n\nIn this section, we perform ablation experiments\nover a number of facets of BERT in order to better\nunderstand their relative importance. Additional\n\nDev Set\nTasks MNLI-m QNLI MRPC SST-2 SQuAD",
+  "id": "fmt-084"
+ },
+ {
+  "path": "pdf/arxiv-lora.pdf",
+  "start_line": 1696,
+  "end_line": 1703,
+  "text": "Intuitively, when \u2206W mostly contains task-speci\ufb01c directions, this quantity measures how much of\nthem are ampli\ufb01ed by \u2206W . As shown in Section 7.3, for r = 4, this ampli\ufb01cation factor is as large\nas 20. In other words, there are (generally speaking) four feature directions in each layer (out of the\nentire feature space from the pre-trained model W ), that need to be ampli\ufb01ed by a very large factor\n20, in order to achieve our reported accuracy for the downstream speci\ufb01c task. And, one should\nexpect a very different set of feature directions to be ampli\ufb01ed for each different downstream task.\n\nOne may notice, however, for r = 64, this ampli\ufb01cation factor is only around 2, meaning that",
+  "id": "fmt-085"
+ },
+ {
+  "path": "pdf/arxiv-lora.pdf",
+  "start_line": 971,
+  "end_line": 985,
+  "text": "\nXiang Lisa Li and Percy Liang. Pre\ufb01x-Tuning: Optimizing Continuous Prompts for Generation.\narXiv:2101.00190 [cs], January 2021. URL http://arxiv.org/abs/2101.00190.\n\nYuanzhi Li and Yingyu Liang. Learning overparameterized neural networks via stochastic gradient\ndescent on structured data. In Advances in Neural Information Processing Systems, 2018.\n\nYuanzhi Li, Yingyu Liang, and Andrej Risteski. Recovery guarantee of weighted low-rank ap-\nproximation via alternating minimization. In International Conference on Machine Learning, pp.\n2358\u20132367. PMLR, 2016.\n\nYuanzhi Li, Tengyu Ma, and Hongyang Zhang. Algorithmic regularization in over-parameterized\nmatrix sensing and neural networks with quadratic activations. In Conference On Learning The-\nory, pp. 2\u201347. PMLR, 2018b.\n",
+  "id": "fmt-086"
+ },
+ {
+  "path": "pdf/arxiv-lora.pdf",
+  "start_line": 1418,
+  "end_line": 1431,
+  "text": "on its own already achieves performance comparable to the human baseline. Secondly, we notice\nthat LoRA+PL performs slightly worse than LoRA even with more trainable parameters. We at-\ntribute this to the fact that pre\ufb01x-layer tuning is very sensitive to the choice of learning rate and thus\nmakes the optimization of LoRA weights more dif\ufb01cult in LoRA+PL.\n\nF ADDITIONAL EMPIRICAL EXPERIMENTS\n\nF.1 ADDITIONAL EXPERIMENTS ON GPT-2\n\nWe also repeat our experiment on DART (Nan et al., 2020) and WebNLG (Gardent et al., 2017)\nfollowing the setup of Li & Liang (2021). The result is shown in Table 13. Similar to our result\non E2E NLG Challenge, reported in Section 5, LoRA performs better than or at least on-par with\npre\ufb01x-based approaches given the same number of trainable parameters.\n",
+  "id": "fmt-087"
+ },
+ {
+  "path": "pdf/arxiv-rag.pdf",
+  "start_line": 1027,
+  "end_line": 1038,
+  "text": "https://www.aclweb.org/anthology/N18-1074.\n\n[57] James H. Thorne and Andreas Vlachos. Avoiding catastrophic forgetting in mitigating model\nbiases in sentence-pair classi\ufb01cation with elastic weight consolidation. ArXiv, abs/2004.14366,\n2020. URL https://arxiv.org/abs/2004.14366.\n\n[58] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez,\n\u0141 ukasz Kaiser, and Illia Polosukhin. Attention is all you need. In I. Guyon, U. V. Luxburg,\nS. Bengio, H. Wallach, R. Fergus, S. Vishwanathan, and R. Garnett, editors, Advances in Neural\nInformation Processing Systems 30, pages 5998\u20136008. Curran Associates, Inc., 2017. URL\nhttp://papers.nips.cc/paper/7181-attention-is-all-you-need.pdf.\n",
+  "id": "fmt-088"
+ },
+ {
+  "path": "pdf/arxiv-rag.pdf",
+  "start_line": 1233,
+  "end_line": 1244,
+  "text": "retrieval component would \u201ccollapse\u201d and learn to retrieve the same documents regardless of the\ninput. In these cases, once retrieval had collapsed, the generator would learn to ignore the documents,\nand the RAG model would perform equivalently to BART. The collapse could be due to a less-explicit\nrequirement for factual knowledge in some tasks, or the longer target sequences, which could result\nin less informative gradients for the retriever. Perez et al. [46] also found spurious retrieval results\nwhen optimizing a retrieval component in order to improve performance on downstream tasks.\n\nI Number of instances per dataset\n\nThe number of training, development and test datapoints in each of our datasets is shown in Table 7.\n\n19",
+  "id": "fmt-089"
+ },
+ {
+  "path": "pdf/arxiv-rag.pdf",
+  "start_line": 716,
+  "end_line": 729,
+  "text": "The authors would like to thank the reviewers for their thoughtful and constructive feedback on this\npaper, as well as HuggingFace for their help in open-sourcing code to run RAG models. The authors\nwould also like to thank Kyunghyun Cho and Sewon Min for productive discussions and advice. EP\nthanks supports from the NSF Graduate Research Fellowship. PL is supported by the FAIR PhD\nprogram.\n\nReferences\n\n[1] Payal Bajaj, Daniel Campos, Nick Craswell, Li Deng, Jianfeng Gao, Xiaodong Liu, Rangan\nMajumder, Andrew McNamara, Bhaskar Mitra, Tri Nguyen, Mir Rosenberg, Xia Song, Alina\nStoica, Saurabh Tiwary, and Tong Wang. MS MARCO: A Human Generated MAchine\nReading COmprehension Dataset. arXiv:1611.09268 [cs], November 2016. URL http:\n//arxiv.org/abs/1611.09268. arXiv: 1611.09268.\n",
+  "id": "fmt-090"
+ },
+ {
+  "path": "pdf/arxiv-resnet.pdf",
+  "start_line": 306,
+  "end_line": 319,
+  "text": "\nWe can also use a square matrix Ws in Eqn.(1). But we will\nshow by experiments that the identity mapping is suf\ufb01cient\nfor addressing the degradation problem and is economical,\nand thus Ws is only used when matching dimensions.\nThe form of the residual function F is \ufb02exible. Exper-\niments in this paper involve a function F that has two or\nthree layers (Fig. 5), while more layers are possible. But if\nF has only a single layer, Eqn.(1) is similar to a linear layer:\ny = W1x + x, for which we have not observed advantages.\nWe also note that although the above notations are about\nfully-connected layers for simplicity, they are applicable to\nconvolutional layers. The function F(x, {Wi}) can repre-\nsent multiple convolutional layers. The element-wise addi-",
+  "id": "fmt-091"
+ },
+ {
+  "path": "pdf/arxiv-resnet.pdf",
+  "start_line": 1318,
+  "end_line": 1330,
+  "text": "R. R. Salakhutdinov. Improving neural networks by preventing co-\nadaptation of feature detectors. arXiv:1207.0580, 2012.\n[15] S. Hochreiter and J. Schmidhuber. Long short-term memory. Neural\ncomputation, 9(8):1735\u20131780, 1997.\n[16] S. Ioffe and C. Szegedy. Batch normalization: Accelerating deep\nnetwork training by reducing internal covariate shift. In ICML, 2015.\n[17] H. Jegou, M. Douze, and C. Schmid. Product quantization for nearest\nneighbor search. TPAMI, 33, 2011.\n[18] H. Jegou, F. Perronnin, M. Douze, J. Sanchez, P. Perez, and\nC. Schmid. Aggregating local image descriptors into compact codes.\nTPAMI, 2012.\n[19] Y. Jia, E. Shelhamer, J. Donahue, S. Karayev, J. Long, R. Girshick,\nS. Guadarrama, and T. Darrell. Caffe: Convolutional architecture for",
+  "id": "fmt-092"
+ },
+ {
+  "path": "pdf/arxiv-resnet.pdf",
+  "start_line": 1675,
+  "end_line": 1690,
+  "text": "ours (ILSVRC\u201915) 8.9 9.0\n\nTable 14. Comparisons of localization error (%) on the ImageNet\ndataset with state-of-the-art methods.\n\nports a center-crop error of 33.1% (Table 13) using ground\ntruth classes. Under the same setting, our RPN method us-\ning ResNet-101 net signi\ufb01cantly reduces the center-crop er-\nror to 13.3%. This comparison demonstrates the excellent\nperformance of our framework. With dense (fully convolu-\ntional) and multi-scale testing, our ResNet-101 has an error\nof 11.7% using ground truth classes. Using ResNet-101 for\npredicting classes (4.6% top-5 classi\ufb01cation error, Table 4),\nthe top-5 localization error is 14.4%.\nThe above results are only based on the proposal network\n(RPN) in Faster R-CNN [32]. One may use the detection",
+  "id": "fmt-093"
+ },
+ {
+  "path": "pdf/irs-pub-15-employer-tax-guide.pdf",
+  "start_line": 1774,
+  "end_line": 1792,
+  "text": "20% of the employee rate of 6.2%, for a total rate of \n7.44% of wages.\n\u2022 For Medicare taxes: employer rate of 1.45% plus 20% \nof the employee rate of 1.45%, for a total rate of 1.74% \nof wages.\n\u2022 For Additional Medicare Tax: 0.18% (20% of the em-\nployee rate of 0.9%) of wages subject to Additional \nMedicare Tax.\n \u2022 For federal income tax withholding, the rate is 1.5% of \nwages.\n\nIf  the  employer  didn\u2019t  issue  required  information  re-\nturns, the section 3509 rates are the following.\n\u2022 For social security taxes: employer rate of 6.2% plus \n40% of the employee rate of 6.2%, for a total rate of \n8.68% of wages.\n\u2022 For Medicare taxes: employer rate of 1.45% plus 40% \nof the employee rate of 1.45%, for a total rate of 2.03% \nof wages.",
+  "id": "fmt-094"
+ },
+ {
+  "path": "pdf/irs-pub-15-employer-tax-guide.pdf",
+  "start_line": 541,
+  "end_line": 553,
+  "text": "Voluntary  withholding  on  dividends  and  other  distri-\nbutions  by  an  Alaska  Native  Corporation  (ANC).  A \nshareholder  of  an  ANC  may  request  voluntary  federal  in-\ncome tax withholding on dividends and other distributions \npaid  by  an  ANC.  A  shareholder  may  request  voluntary \nwithholding  by  giving  the  ANC  a  completed  Form  W-4V. \n For more information, see Notice 2013-77, 2013-50 I.R.B. \n632, available at IRS.gov/irb/2013-50_IRB#NOT-2013-77.\nDefinition  of  marriage.  A  marriage  of  two  individuals  is \nrecognized for federal tax purposes if the marriage is rec-\nognized  by  the  state  or  territory  of  the  United  States  in \nwhich the marriage is entered into, regardless of legal resi-\ndence. Two individuals who enter into a relationship that is ",
+  "id": "fmt-095"
+ },
+ {
+  "path": "pdf/irs-pub-15-employer-tax-guide.pdf",
+  "start_line": 4549,
+  "end_line": 4563,
+  "text": "also include one who signs checks for the business or oth-\nerwise  has  authority  to  cause  the  spending  of  business \nfunds.\nWillfully  means  voluntarily,  consciously,  and  intention-\nally. A responsible person acts willfully if the person knows \nthe required actions of collecting, accounting for, or paying \nover trust fund taxes aren\u2019t taking place, or recklessly dis-\nregards obvious and known risks to the government\u2019s right \nto receive trust fund taxes.\n\nSeparate  accounting  when  deposits  aren\u2019t  made  or \nwithheld  taxes  aren\u2019t  paid.   Separate  accounting  may \nbe required if you don\u2019t pay over withheld employee social \nsecurity, Medicare, or income tax; deposit required taxes; \nmake  required  payments;  or  file  tax  returns.  In  this  case, ",
+  "id": "fmt-096"
+ },
+ {
+  "path": "pdf/nist-ai-rmf-1-0.pdf",
+  "start_line": 774,
+  "end_line": 788,
+  "text": "and potential impact of an AI system.\n\nRisk from lack of explainability may be managed by describing how AI systems function,\nwith descriptions tailored to individual differences such as the user\u2019s role, knowledge, and\nskill level. Explainable systems can be debugged and monitored more easily, and they lend\nthemselves to more thorough documentation, audit, and governance.\n Page 16\n\nNIST AI 100-1 AI RMF 1.0\n\nRisks to interpretability often can be addressed by communicating a description of why\nan AI system made a particular prediction or recommendation. (See \u201cFour Principles of\nExplainable Artificial Intelligence\u201d and \u201cPsychological Foundations of Explainability and\nInterpretability in Artificial Intelligence\u201d found here.)\n",
+  "id": "fmt-097"
+ },
+ {
+  "path": "pdf/nist-ai-rmf-1-0.pdf",
+  "start_line": 766,
+  "end_line": 775,
+  "text": "Explainability refers to a representation of the mechanisms underlying AI systems\u2019 oper-\nation, whereas interpretability refers to the meaning of AI systems\u2019 output in the context\nof their designed functional purposes. Together, explainability and interpretability assist\nthose operating or overseeing an AI system, as well as users of an AI system, to gain\ndeeper insights into the functionality and trustworthiness of the system, including its out-\nputs. The underlying assumption is that perceptions of negative risk stem from a lack of\nability to make sense of, or contextualize, system output appropriately. Explainable and\ninterpretable AI systems offer information that will help end users understand the purposes\nand potential impact of an AI system.\n",
+  "id": "fmt-098"
+ },
+ {
+  "path": "pdf/nist-ai-rmf-1-0.pdf",
+  "start_line": 62,
+  "end_line": 93,
+  "text": "3.1 Valid and Reliable 13\n3.2 Safe 14\n3.3 Secure and Resilient 15\n3.4 Accountable and Transparent 15\n3.5 Explainable and Interpretable 16\n3.6 Privacy-Enhanced 17\n3.7 Fair \u2013 with Harmful Bias Managed 17\n\n4 Effectiveness of the AI RMF 19\n\nPart 2: Core and Profiles 20\n\n5 AI RMF Core 20\n5.1 Govern 21\n5.2 Map 24\n5.3 Measure 28\n5.4 Manage 31\n\n6 AI RMF Profiles 33\n\nAppendix A: Descriptions of AI Actor Tasks from Figures 2 and 3 35\n\nAppendix B: How AI Risks Differ from Traditional Software Risks 38\n\nAppendix C: AI Risk Management and Human-AI Interaction 40\n\nAppendix D: Attributes of the AI RMF 42\n\nList of Tables\n\nTable 1 Categories and subcategories for the GOVERN function. 22\nTable 2 Categories and subcategories for the MAP function. 26",
+  "id": "fmt-099"
+ },
+ {
+  "path": "pdf/nist-csf-2-0.pdf",
+  "start_line": 968,
+  "end_line": 990,
+  "text": "their life cycles \n\n\u2022  Risk Assessment (ID.RA): The cybersecurity risk to the organization, assets, and individuals \nis understood by the organization \n\no  ID.RA-01: Vulnerabilities in assets are identified, validated, and recorded \n\nNIST CSWP 29    The NIST Cybersecurity Framework (CSF) 2.0 \nFebruary 26, 2024 \n \n    19 \n\no  ID.RA-02: Cyber threat intelligence is received from information sharing forums and \nsources \n\no  ID.RA-03: Internal and external threats to the organization are identified and recorded \n\no  ID.RA-04: Potential impacts and likelihoods of threats exploiting vulnerabilities are \nidentified and recorded \n\no  ID.RA-05: Threats, vulnerabilities, likelihoods, and impacts are used to understand \ninherent risk and inform risk response prioritization \n",
+  "id": "fmt-100"
+ },
+ {
+  "path": "pdf/nist-csf-2-0.pdf",
+  "start_line": 570,
+  "end_line": 584,
+  "text": "  \n\nFig. 5. Using the CSF to improve risk management communication \n\nNIST CSWP 29    The NIST Cybersecurity Framework (CSF) 2.0 \nFebruary 26, 2024 \n    11 \n\nPreparing to create and use Organizational Profiles involves gathering information about \norganizational priorities, resources, and risk direction from executives. Managers then \ncollaborate with practitioners to communicate business needs and create risk-informed \nOrganizational Profiles. Actions to close any gaps identified between the Current and Target \nProfiles will be implemented by managers and practitioners and will provide key inputs into \nsystem-level plans. As the target state is achieved throughout the organization \u2014 including \nthrough controls and monitoring applied at the system level \u2014 the updated results can be ",
+  "id": "fmt-101"
+ },
+ {
+  "path": "pdf/nist-csf-2-0.pdf",
+  "start_line": 1351,
+  "end_line": 1370,
+  "text": "formally act upon those risks through mechanisms such \nas written agreements to communicate baseline \nrequirements, governance structures (e.g., risk councils), \nand policy implementation and monitoring. These \nactions are implemented consistently and as intended \nand are continuously monitored and reviewed. \n \nTier 4: \nAdaptive   There is an organization-wide \napproach to managing cybersecurity \nrisks that uses risk-informed policies, \nprocesses, and procedures to address \npotential cybersecurity events. The \nrelationship between cybersecurity \nrisks and organizational objectives is \nclearly understood and considered \nwhen making decisions. Executives \nmonitor cybersecurity risks in the \nsame context as financial and other \norganizational risks. The organizational ",
+  "id": "fmt-102"
+ },
+ {
+  "path": "pdf/nist-sp-800-218-ssdf.pdf",
+  "start_line": 849,
+  "end_line": 867,
+  "text": "EO14028: 4e(iii), 4e(ix) \nMSSDL: 8 \nOWASPSAMM: IR2-B, ST2-B \nSCAGILE: Tasks Requiring the Help of Security Experts 9 \nSCSIC: Vendor Software Delivery Integrity Controls \nSP80053: SA-15 \nSP800161: SA-15 \nSP800181: K0013, K0178 \n\nPO.3.2: Follow recommended security practices to \ndeploy, operate, and maintain tools and toolchains.  Example 1: Evaluate, select, and acquire tools, and assess the security of each \ntool. \nExample 2: Integrate tools with other tools and existing software development \nprocesses and workflows. \nExample 3: Use code-based configuration for toolchains (e.g., pipelines-as-code, \ntoolchains-as-code). \nExample 4: Implement the technologies and processes needed for reproducible \nbuilds. \nExample 5: Update, upgrade, or replace tools as needed to address tool ",
+  "id": "fmt-103"
+ },
+ {
+  "path": "pdf/nist-sp-800-218-ssdf.pdf",
+  "start_line": 2203,
+  "end_line": 2217,
+  "text": "22 This publication is available free of charge from: https://doi.org/10.6028/NIST.SP.800-218  \n[PCISSLC]  Payment Card Industry (PCI) Security Standards Council (2021) Secure \nSoftware Lifecycle (Secure SLC) Requirements and Assessment Procedures \nVersion 1.1. Available at \nhttps://www.pcisecuritystandards.org/document_library?category=sware_s\nec#results \n\n[SCAGILE]  Software Assurance Forum for Excellence in Code (2012) Practical \nSecurity Stories and Security Tasks for Agile Development Environments. \nAvailable at \nhttp://www.safecode.org/publication/SAFECode_Agile_Dev_Security0712\n.pdf \n\n[SCFPSSD]  Software Assurance Forum for Excellence in Code (2018) Fundamental \nPractices for Secure Software Development: Essential Elements of a ",
+  "id": "fmt-104"
+ },
+ {
+  "path": "pdf/nist-sp-800-218-ssdf.pdf",
+  "start_line": 1348,
+  "end_line": 1361,
+  "text": " Example 1: Review the software design to confirm that it addresses applicable \nsecurity requirements. \nExample 2: Review the risk models created during software design to determine \nif they appear to adequately identify the risks. \nExample 3: Review the software design to confirm that it satisfactorily addresses \nthe risks identified by the risk models. \nExample 4: Have the software\u2019s designer correct failures to meet the \nrequirements. \nExample 5: Change the design and/or the risk response strategy if the security \nrequirements cannot be met. \nExample 6: Record the findings of design reviews to serve as artifacts (e.g., in \nthe software specification, in the issue tracking system, in the threat model). \n BSAFSS: TV.3 \nBSIMM: AA1.1, AA1.2, AA1.3, AA2.1, AA3.1 ",
+  "id": "fmt-105"
+ },
+ {
+  "path": "pdf/nist-sp-800-61r2-incident-handling.pdf",
+  "start_line": 2149,
+  "end_line": 2159,
+  "text": "Extended  Time to recovery is unpredictable; additional resources and outside help are needed \n\nNot Recoverable  Recovery from the incident is not possible (e.g., sensitive data exfiltrated and posted \npublicly); launch investigation \n \n\nOrganizations should also establish an escalation process for those instances when the team does not \nrespond to an incident within the designated time. This can happen for many reasons: for example, cell \nphones may fail or people may have personal emergencies. The escalation process should state how long \na person should wait for a response and what to do if no response occurs. Generally, the first step is to \nduplicate the initial contact. After waiting for a brief time\u2014perhaps 15 minutes\u2014the caller should ",
+  "id": "fmt-106"
+ },
+ {
+  "path": "pdf/nist-sp-800-61r2-incident-handling.pdf",
+  "start_line": 2443,
+  "end_line": 2454,
+  "text": "\nAnother important post-incident activity is creating a follow-up report for each incident, which can be \nquite valuable for future use. The report provides a reference that can be used to assist in handling similar \nincidents. Creating a formal chronology of events (including timestamped information such as log data \nfrom systems) is important for legal reasons, as is creating a monetary estimate of the amount of damage \nthe incident caused. This estimate may become the basis for subsequent prosecution activity by entities \nsuch as the U.S. Attorney General\u2019s office. Follow-up reports should be kept for a period of time as \nspecified in record retention policies.\n45 \n\n3.4.2  Using Collected Incident Data \n",
+  "id": "fmt-107"
+ },
+ {
+  "path": "pdf/nist-sp-800-61r2-incident-handling.pdf",
+  "start_line": 1502,
+  "end_line": 1515,
+  "text": "\uf03c  Network diagrams and lists of critical assets, such as database servers \n\n\uf03c  Current baselines of expected network, system, and application activity \n\n\uf03c  Cryptographic hashes of critical files\n22 to speed incident analysis, verification, and eradication \n\nIncident Mitigation Software: \n\n\uf03c  Access to images of clean OS and application installations for restoration and recovery purposes \n\nMany incident response teams create a jump kit, which is a portable case that contains materials that may \nbe needed during an investigation. The jump kit should be ready to go at all times. Jump kits contain \nmany of the same items listed in the bulleted lists above. For example, each jump kit typically includes a ",
+  "id": "fmt-108"
+ },
+ {
+  "path": "pdf/nist-sp-800-63b-authentication.pdf",
+  "start_line": 2478,
+  "end_line": 2489,
+  "text": " \n Note: At AAL2, a memorized secret or biometric, and not a physical authenticator, is \nrequired because the session secret is something you have, and an additional \nauthentication factor is required to continue the session. \n\n7.2.1  Reauthentication from a Federation or Assertion \n\nWhen using a federation protocol as described in SP 800-63C, Section 5 to connect the CSP and \nRP, special considerations apply to session management and reauthentication. The federation \nprotocol communicates an authentication event between the CSP and the RP but establishes no \nsession between them. Since the CSP and RP often employ separate session management \ntechnologies, there SHALL NOT be any assumption of correlation between these sessions. ",
+  "id": "fmt-109"
+ },
+ {
+  "path": "pdf/nist-sp-800-63b-authentication.pdf",
+  "start_line": 2316,
+  "end_line": 2330,
+  "text": "The CSP SHALL require subscribers to surrender or prove destruction of any physical \nauthenticator containing attribute certificates signed by the CSP as soon as practical after \nexpiration or receipt of a renewed authenticator. \n\n  Revocation and Termination \n\nRevocation of an authenticator \u2014 sometimes referred to as termination, especially in the context \nof PIV authenticators \u2014 refers to removal of the binding between an authenticator and a \ncredential the CSP maintains. \n\nCSPs SHALL revoke the binding of authenticators promptly when an online identity ceases to \nexist (e.g., subscriber\u2019s death, discovery of a fraudulent subscriber), when requested by the \nsubscriber, or when the CSP determines that the subscriber no longer meets its eligibility \nrequirements. \n",
+  "id": "fmt-110"
+ },
+ {
+  "path": "pdf/nist-sp-800-63b-authentication.pdf",
+  "start_line": 3345,
+  "end_line": 3361,
+  "text": "Usability considerations for typical usage include: \n\n\u2022  Give cryptographic keys appropriately descriptive names that are meaningful to users \nsince users have to recognize and recall which cryptographic key to use for which \nauthentication task. This prevents users from having to deal with multiple similarly- and \nambiguously-named cryptographic keys. Selecting from multiple cryptographic keys on \nsmaller mobile devices may be particularly problematic if the names of the cryptographic \nkeys are shortened due to reduced screen size. \n\n10.2.7  Single-Factor Cryptographic Device \n\nTypical Usage \n\nUsers authenticate by proving possession of the single-factor cryptographic device. \n\nUsability considerations for typical usage include: \n",
+  "id": "fmt-111"
+ },
+ {
+  "path": "pdf/rfc9110-http-semantics-v2.pdf",
+  "start_line": 12262,
+  "end_line": 12319,
+  "text": "Fielding, et al. Standards Track Page 191\n\nRealm\nrecipient\nReferer header \ufb01eld\nrepresentation\nrequest\nrequest target\nresource\nresponse\nRetry-After header \ufb01eld\nreverse proxy\n\nsafe\nsatis\ufb01able range\nsecured\nselected representation\nself-descriptive\nsender\nserver\nServer header \ufb01eld\nsingleton \ufb01eld\nspider\nStatus Code\nStatus Codes\nFinal\nInformational\nInterim\nStatus Codes Classes\n1xx Informational\n2xx Successful\n3xx Redirection\n4xx Client Error\n5xx Server Error\n\ntarget resource\ntarget URI\nTE header \ufb01eld\nTRACE method\nTrailer Fields\nETag\nTrailer header \ufb01eld\ntrailer section\ntrailers\ntransforming proxy\n\nSection 11.5\nSection 3.4\nSection 10.1.3\nSection 3.2\nSection 3.4\nSection 7.1\nSection 3.1; Section 4\nSection 3.4 Section 10.2.3\nSection 3.7, Paragraph 6\n\nSection 9.2.1\nSection 14.1.1",
+  "id": "fmt-112"
+ },
+ {
+  "path": "pdf/rfc9110-http-semantics-v2.pdf",
+  "start_line": 3860,
+  "end_line": 3868,
+  "text": "as when a semantically signi\ufb01cant part of the representation metadata is changed (e.g., Content-\nType), but it is in the best interests of the origin server to only change the value when it is\nnecessary to invalidate the stored responses held by remote caches and authoring tools.\n\nCache entries might persist for arbitrarily long periods, regardless of expiration times. Thus, a\ncache might attempt to validate an entry using a validator that it obtained in the distant past. A\nstrong validator is unique across all versions of all representations associated with a particular\nresource over time. However, there is no implication of uniqueness across representations of\ndi\ufb00erent resources (i.e., the same strong validator might be in use for representations of multiple",
+  "id": "fmt-113"
+ },
+ {
+  "path": "pdf/rfc9110-http-semantics-v2.pdf",
+  "start_line": 3789,
+  "end_line": 3800,
+  "text": "\nA user agent that sends Content-Location in a request message is stating that its value refers to\nwhere the user agent originally obtained the content of the enclosed representation (prior to any\nmodi\ufb01cations made by that user agent). In other words, the user agent is providing a back link to\nthe source of the original representation.\n\nAn origin server that receives a Content-Location \ufb01eld in a request message   treat the\ninformation as transitory request context rather than as metadata to be saved verbatim as part\nof the representation. An origin server   use that context to guide in processing the request or\nto save it for other uses, such as within source links or versioning metadata. However, an origin\nserver   use such context information to alter the request semantics.\n",
+  "id": "fmt-114"
+ },
+ {
+  "path": "pptx/dfe-send-what-is-inclusive-teaching-slides.pptx",
+  "start_line": 15,
+  "end_line": 28,
+  "text": "However, the session is intended to be flexible enough to adapt this to slightly longer or shorter times as required (e.g., 75 mins or 50 mins).\nFor shorter sessions, you may need to limit optional slides and consider the use of time provided for reflection activities \u2013 for example, considering the length of discussion time and how many responses you elicit.\nFor longer sessions, you might offer more of the optional slides and extend the time available for reflection and discussion \u2013 for example, taking more contributions from staff and explicitly drawing out the suggested key points as they are raised by the staff themselves.\n2\n\n# Slide 3\nWhat is inclusive teaching?\n\n# Slide 4\nSession timings\n{72833802-FEF1-4C79-8D5D-14CF1EAF98D9}Activity\nTime\nAims of the session\n5 mins",
+  "id": "fmt-115"
+ },
+ {
+  "path": "pptx/dfe-send-what-is-inclusive-teaching-slides.pptx",
+  "start_line": 122,
+  "end_line": 140,
+  "text": "\"The two parts of the model should be viewed as complementary and overlapping, rather than sequential steps. Schools should consider universal approaches together with adaptations and additional support when planning lessons and whole school support.\"\n(EEF, 2026)\nThink about a class that you currently teach:\nTo what extent are you taking this approach currently, and what impact is it having?\nWhere you aren\u2019t currently taking this approach, what barriers are you facing?\n15\n\n# Slide 16\nUniversal approaches\nWhat is inclusive teaching?\nUniversal approaches\nAdaptations & additional support\nReflections\n16\n\n# Slide 17\nAspects of universal approaches\nUniversal approaches\nThe EEF (2026) guidance suggests that universal approaches are the foundation of inclusive teaching:",
+  "id": "fmt-116"
+ },
+ {
+  "path": "pptx/dfe-send-what-is-inclusive-teaching-slides.pptx",
+  "start_line": 201,
+  "end_line": 224,
+  "text": "Reflection on positive relationships\nReflection\nThink about when you\u2019ve used one of these elements of developing positive relationships:\ncommunicating high expectations\nensuring every pupil has a supportive relationship with a member of staff\nhelping learners to develop friendships\ncreating opportunities for conversations with parents\nWhat did you do?\nHow did this help learners with additional needs to better access their learning?\nTake a couple of minutes individually to think about this and make a note if you like.\nDiscuss in pairs.\n23\n\n# Slide 24\nAdaptations and additional support\nWhat is inclusive teaching?\nUniversal approaches\nAdaptations & additional support\nReflections\n24\n\n# Slide 25\nAspects of adaptations and additional support\nAdaptations and additional support",
+  "id": "fmt-117"
+ },
+ {
+  "path": "pptx/fsa-safer-food-better-business-lecturers.pptx",
+  "start_line": 92,
+  "end_line": 108,
+  "text": "# Slide 11\nLecturer responsibilities \u2013 part 1\nIt is the head chef/lecturer\u2019s responsibility to update the safe methods for new menu items that occur at the last minute or that are planned in on the menu rotation.\nTo complete the 4-weekly review in the diary section of SFBB.\nSFBB resources - Presentation Level 3\n11\n\n# Slide 12\nLecturer responsibilities \u2013 part 2\nAs part of our college\u2019s reporting systems, we are using SFBB as a tool to promote learning for students.\nTherefore a nominated, trained level 3 student may be asked to conduct the checks and sign the diary.\nIt must always be checked and countersigned, by the lecturer in charge of that kitchen.\nSFBB resources - Presentation Level 3\n12\n\n# Slide 13\nSFBB: in-house documents",
+  "id": "fmt-118"
+ },
+ {
+  "path": "pptx/fsa-safer-food-better-business-lecturers.pptx",
+  "start_line": 1,
+  "end_line": 24,
+  "text": "# Slide 1\nSafer food, better business\nSFBB\nPresented by:\nSFBB resources - Presentation Level 3\n1\n\n# Slide 2\nThe aim \u2013 lesson 1\nThe aim of this session is to introduce you to SFBB (Safer food, better business) and to show how you must comply with safe methods to guarantee a strong due diligence defence.\nSFBB resources - Presentation Level 3\n2\n\n# Slide 3\nLearning outcomes\nDescribe how SFBB meets legal requirements.\nDescribe three safe methods, the relevant checks and follow-up actions.\nList five checks you would make on an opening and five on a closing checklist.\nGive three examples of entries you would make in an SFBB diary.\nSFBB resources - Presentation Level 3\n3\n\n# Slide 4\nWhy should we introduce SFBB?",
+  "id": "fmt-119"
+ },
+ {
+  "path": "pptx/fsa-safer-food-better-business-lecturers.pptx",
+  "start_line": 76,
+  "end_line": 93,
+  "text": "The person who is responsible for the day-to-day running of the kitchen/business\nwithin college, this would be the chef lecturer.\nEach kitchen must have its own SFBB pack/diary.\nEach head chef/lecturer must complete the safe methods.\nSFBB resources - Presentation Level 3\n9\n\n# Slide 10\nWhat are we signing?\nThe diary must be signed and dated at the end of each shift.\nIt is signed to show that you have completed the opening and closing checks.\nWhen you sign the diary you are confirming that you have supervised your staff in following your safe methods and that any problems are being solved and recorded in the diary.\n\u2018Recording by exception\u2019.\nSFBB resources - Presentation Level 3\n10\n\n# Slide 11\nLecturer responsibilities \u2013 part 1",
+  "id": "fmt-120"
+ },
+ {
+  "path": "pptx/geoscience-australia-canning-basin-presentation.pptx",
+  "start_line": 42,
+  "end_line": 60,
+  "text": "https://wapims.dmp.wa.gov.au/WAPIMS/Search/WellDetails\nMethods\nDrilling results\nSpare\nslide\nWell data integration\nColumn 1: Measure depth\nColumn 2: Chemostratigraphic packages from Forbes et al. (2020)\nColumn 3: three well logs as gamma ray (GR), compressional slowness (DT) and bulk density (RHOB)\nColumn 4: Lithological description of cores at wellsite (well composite log)\nColumn 5: Fluid inclusions (FIS) testing results, including methane (CH4), ethane (C2H6) and Benzene indicating hydrocarbon species, and hydrogen sulphide (H2S) indicating water-bearing interval.\nColumn 6: Inductive coupled plasma (ICP) results presenting various compounds, which implies major mineral types\nColumn 7: Mineral compositions from XRD.\n\n# Slide 5\nIntroduction\nResults\nSpare\nslide",
+  "id": "fmt-121"
+ },
+ {
+  "path": "pptx/geoscience-australia-canning-basin-presentation.pptx",
+  "start_line": 67,
+  "end_line": 70,
+  "text": "Department of Mines, Industry Regulation and Safety (DMIRS), 2020. Canning Basin. https://www.dmp.wa.gov.au/Petroleum/Canning-Basin-10989.aspx\nBoreham, C.J., Edwards, D.S., Sohn, J.H., Palatty, P., Chen, J.H., Mory, A.J. 2020. Gas systems in the onshore Canning Basin as revealed by gas trapped in fluid inclusions. Record no issues. Geoscience Australia, Canberra. https://ecat.ga.gov.au/geonetwork/srv/eng/catalog.search#/metadata/135207\nCarr, L.K., Edwards, D.S., Anderson, J.R. and MacFarlane, S., 2020. Exploring for the future: Canning Basin. Seismic survey and geological interpretation. Geoscience Australia Record 2020/XXX, in prep.\nForbes et al., 2020a. Chemostratigraphy of Waukarlycarly-1, Canning Basin, Western Australia. Report CAu50017 prepared for Geoscience Australia.",
+  "id": "fmt-122"
+ },
+ {
+  "path": "pptx/geoscience-australia-canning-basin-presentation.pptx",
+  "start_line": 59,
+  "end_line": 62,
+  "text": "Spare\nslide\nOil and gas discoveries throughout the Canning Basin were generated from Paleozoic marine source rocks, deposited under stratified oxic and euxinic water columns. Three distinct petroleum systems, the Ordovician (Larapintine 2), Late Devonian (Larapintine 3) and latest Devonian\u2013early Carboniferous (Larapintine 4), are recognized based on the geochemical character of their associated fluids and each display strong stratigraphic control (Carr et al., 2020). Widespread generation of gas from Paleozoic sources is evident from molecular analyses of gases recovered from petroleum wells and fluid inclusions (Boreham et al., 2020). Currently the Larapintine 2 Petroleum System is deemed most prospective system in the Kidson Sub-basin.\nhttp://www.ga.gov.au/eftf/energy/kidson-sub-basin",
+  "id": "fmt-123"
+ },
+ {
+  "path": "pptx/govuk-prevent-duty-higher-education-intro.pptx",
+  "start_line": 241,
+  "end_line": 252,
+  "text": "Other students in the class laughed at him and the individual stood up, aggressively responding; \u201cyou don\u2019t even know me!\u201d and left the class\u2026\u2026.\n\n# Slide 28\nCase study 3 \u2013 What would you do?\nA student has started to control use of the prayer room, only allowing those who share similar views and values to enter and making others feel uncomfortable and unwelcome\u2026.\n\n# Slide 29\nCase study 4 \u2013 What would you do?\nDuring an organised and peaceful demonstration on campus against the Iraq war, one student starts shouting and accusing everyone of being \u201ccomplacent and as guilty as the government\u201d.\nIt is clear that he is making his peers feel very uncomfortable and has deviated from the message that the campaign is trying to achieve...\n\n# Slide 30",
+  "id": "fmt-124"
+ },
+ {
+  "path": "pptx/govuk-prevent-duty-higher-education-intro.pptx",
+  "start_line": 56,
+  "end_line": 75,
+  "text": "Prevent is intended to deal with all forms of terrorism.\nThis is not only about Islamist extremism and so-called Islamist terrorist attacks \u2013 although it has been perceived as such.\nNature and severity of threat varies over time.\nThe statutory guidance describes the current most significant threats but identifies others.\nFrom where do you think threats come?\n\n# Slide 8\nTerrorist threats\nListed in alphabetical order:\nAnarchist extremism\n\u2018Single issue\u2019 extremism - including environmentalist and animal rights movements that advocate violence\nRight Wing Extremism\nIslamist Extremism\nIncel-related\nLeft Wing Extremism\nMixed/Unstable/Unclear ideologies, including fixations on violence\nNorthern Ireland-related terrorism\nThere is also a list of proscribed organisations on GOV.UK\n\n# Slide 9",
+  "id": "fmt-125"
+ },
+ {
+  "path": "pptx/govuk-prevent-duty-higher-education-intro.pptx",
+  "start_line": 180,
+  "end_line": 198,
+  "text": "Snooping on our students.\nInterfering with academic freedom and freedom of expression (this is specifically protected in the Act).\nIgnoring legal responsibilities relating to equality and diversity and promoting good campus relations.\nPreventing research and teaching on sensitive topics.\nIgnoring our responsibilities around confidentiality and data protection.\nThese are some of the common misconceptions that make Prevent a contentious issue.\n\n# Slide 21\nPrevent duty expectations\nRisk assessment\nPartnerships\nAction Plans, including policies and procedures for management of events and speakers\nStaff training\nWelfare and Pastoral Care\nIT Policies\nStudent Unions and Societies\n\n# Slide 22\nPrevent duty expectations (continued)",
+  "id": "fmt-126"
+ },
+ {
+  "path": "pptx/nasa-trick-advanced-topics.pptx",
+  "start_line": 1578,
+  "end_line": 1597,
+  "text": "sys.exec.in.rt_itimer = No ;\nsys.exec.in.rt_itimer_pause = No ;\nsys.exec.in.rt_software_frame {s} = RT_FRAME ;\nsys.exec.in.rt_sync_frame     {s} = SW_FRAME ;\nsys.exec.in.sync_wait_limit  {s} = 0.050 ;\n/* MAXIMUM NON-DEGRADING PRIORITY */\nsys.exec.in.rt_lock_memory[1] = Yes ;\nsys.exec.in.rt_nond_pri[1]    = Yes ;\nsys.exec.in.rt_priority[1]    = 1 ;\nSets the priority.\nSetting rt_priority = 1 will set the process to run at maximum priority on any platform\nWarning: Setting rt_priority = 1 on a single processor computer with no \u201cnapping\u201d will completely shut out all shells and input devices, i.e. mouse, keyboard\n\n# Slide 92\n10/31/2011\nTrick Advanced Training\n92\nMRMDF Multithreaded Applications\nBORIS is an all-in-one generic robotics trainer\nArm simulation",
+  "id": "fmt-127"
+ },
+ {
+  "path": "pptx/nasa-trick-advanced-topics.pptx",
+  "start_line": 1814,
+  "end_line": 1837,
+  "text": "# Slide 106\n10/31/2011\nTrick Advanced Training\n106\nMRMDF Real-Time Performance Analysis\nSelecting the DP_rt_jobs file will bring up multiple pages detailing how long each job took in each frame\nOn average mcse_rs422_read takes 30us or less\n\n# Slide 107\n10/31/2011\nTrick Advanced Training\n107\nMRMDF Real-Time Performance\nSelecting the DP_rt_timeline file will bring up a single graph plotting job currently executing vs. real-time\nStretched to show first 33.33ms frame\n\n# Slide 108\n10/31/2011\nTrick Advanced Training\n108\nMRMDF Real-Time Performance\nTo translate Job IDs to function names see RUN_mcse_sim/S_job_execution\nS_job execution lists out all jobs, their frequencies at init\u2026\nEnabled | PID |  Start   |  Cycle   |   Stop   | ID  | Job Name",
+  "id": "fmt-128"
+ },
+ {
+  "path": "pptx/nasa-trick-advanced-topics.pptx",
+  "start_line": 1384,
+  "end_line": 1407,
+  "text": "sys.exec.in.rt_itimer = No ;\nsys.exec.in.rt_itimer_pause = No ;\nsys.exec.in.rt_software_frame {s} = RT_FRAME ;\nsys.exec.in.rt_sync_frame     {s} = SW_FRAME ;\nsys.exec.in.sync_wait_limit  {s} = 0.050 ;\n/* MAXIMUM NON-DEGRADING PRIORITY */\nsys.exec.in.rt_lock_memory[1] = Yes ;\nsys.exec.in.rt_nond_pri[1]    = Yes ;\nsys.exec.in.rt_priority[1]    = 1 ;\n\n# Slide 83\n10/31/2011\nTrick Advanced Training\n83\nReal-time Input Parameters\nPartial input file for real-time input parameters (FCSE)\n#define SW_FRAME 0.0333300\n#define RT_FRAME 0.0033330\n/* SIM-TO-WALL-CLOCK SYNCHRONIZATION */\nsys.exec.in.rt_nap = No ;\nsys.exec.in.rt_itimer = No ;\nsys.exec.in.rt_itimer_pause = No ;\nsys.exec.in.rt_software_frame {s} = RT_FRAME ;\nsys.exec.in.rt_sync_frame     {s} = SW_FRAME ;",
+  "id": "fmt-129"
+ },
+ {
+  "path": "pptx/pspc-gc-hr-pay-change-management-culture-strategy.pptx",
+  "start_line": 135,
+  "end_line": 150,
+  "text": "Unify communications\nStreamline access to tools and templates\nSupport GC organization engagement\n\n# Slide 8\nDriving Adoption Through Training\nLearners will be supported throughout their transformation journey. Scalable materials across multiple channels will be developed to enhance the learner\u2019s experience to adoption.\nTraining Inputs\nChange Impact Assessment\nPersonas\nJourney Maps\nThe continuous capture of change impacts will guide the development of personas and journey maps, which will be valuable inputs for creating training materials.\nTraining Layers\nTraining Delivery\nRole-based Process Training\nEquips stakeholders with the knowledge to understand their role as part of the HR & Pay Transformation by emphasizing the changes to responsibilities and future state processes.",
+  "id": "fmt-130"
+ },
+ {
+  "path": "pptx/pspc-gc-hr-pay-change-management-culture-strategy.pptx",
+  "start_line": 286,
+  "end_line": 295,
+  "text": "Review the GC Change Management, Leadership and Organizations Checklist. Review the Change Management Plan template and align it with the Change Management Plan Template.\nComing Summer 2026\nKey Success Metrics: Key Performance and Behavioural Indicators to guide change management planning and delivery within GC organizations\nJourney Maps: For key communities illustrating involvement and engagement in the Execution phase\nTraining Plan & Playbook: To inform training planning and delivery for GC-organizations\nChange Management Templates for GC Organizations: Select change management plans and tools for deploying GC organizations\n12\n\n# Slide 13\nEvaluating Change Management Progress & Success*",
+  "id": "fmt-131"
+ },
+ {
+  "path": "pptx/pspc-gc-hr-pay-change-management-culture-strategy.pptx",
+  "start_line": 427,
+  "end_line": 435,
+  "text": "Leaders: to drive successful change; help lead the GC-wide outreach and engagement activities and be the face of the change.\nHR & Pay Community: as mobilizers of change; actively engage in opportunities, provide your expertise, and embrace the change.\nManagers: as a catalyst for change; staying informed and encourage your teams to be participate.\nEmployees: as end-users of the change; the outreach and engagement activities will help provide insight into the future of HR & pay.\nEngagement Activities Snapshot\nThe Strategic Outreach Plan includes GC-wide tactics with the goal of increasing awareness and understanding. Some examples include:\nLobby Roadshows and User Awareness Sessions\nFAQs\nLeadership Videos and Testimonials",
+  "id": "fmt-132"
+ },
+ {
+  "path": "pptx/pspc-pay-backlog-reduction-ai-update.pptx",
+  "start_line": 98,
+  "end_line": 110,
+  "text": "PROCESSING: Modelling\nCurrent (2023-24 Q4)\nSCOPE: two scenarios modelled to understand impact of AI to bring forward the date of pay stabilization.\nSmall-scale implementation\n30 compensation advisors (2% of compensation advisors)\nActing, acting in exempt groups, and leave without pay (LWOP) cases in the backlog\nAffecting 54,000 cases (as of March 2024, represented 27% of the backlog and 13% of the main queue)\nRESULTS:\nPotential to bring forward the date to pay stabilization by 2-4 weeks.\nFuture (2024-2025)\nSCOPE: Expanded roll-out to more compensation advisors:\n70+ of approx. 1,700 compensation advisors dedicated to processing backlog and other cases\nBy the end of 2025-26, scale to compensation advisors trained on processing in-scope cases",
+  "id": "fmt-133"
+ },
+ {
+  "path": "pptx/pspc-pay-backlog-reduction-ai-update.pptx",
+  "start_line": 36,
+  "end_line": 62,
+  "text": "\n# Slide 3\nRECAP: Background\nData Modernization team developed an AI prototype FY2023/24\nProvides pay centre compensation advisors\u00a0with a virtual assistant to help process backlog cases\nDemonstrated to the Sub-Committee on Service Delivery in April 2024\nCurrently building a pilot (with CGI), slated to launch summer 2024\n\n# Slide 4\nPREP FOR PILOT: March-July 2024\nPreparing cloud environment (through SSC, Microsoft sovereign cloud)\nCyber-security checks and authority to operate (ATO)\nTesting/assurance criteria\nBaseline assessments show\u2026\nAverage number of minutes to calculate an acting case\nPay Administrator\n50\nAI Virtual Assistant\n0.5\nWorking together \u2013\nhuman in the loop\n10\n+\n\n# Slide 5\nTESTING: July-August 2024\nWHY test with real data?",
+  "id": "fmt-134"
+ },
+ {
+  "path": "pptx/pspc-pay-backlog-reduction-ai-update.pptx",
+  "start_line": 140,
+  "end_line": 147,
+  "text": "Return from Leave Without Pay\nOther case types (pending Q3 review and analysis of queue behavior and volume forecasts)\nOnboarding additional pay centre compensation advisors\u00a0(scale to all compensation advisors trained to work on in-scope case types)\nValidation of accuracy continues, but random sampling rather than every case\nLeverage new AI to validate the AI virtual agent tool\nExplore additional ways in which AI can support backlog reduction\nOnce case types are eliminated, the backlog will be clear of it for good\n",
+  "id": "fmt-135"
+ },
+ {
+  "path": "rtf/dcms-armitt-report-london-2012-showcase.rtf",
+  "start_line": 254,
+  "end_line": 259,
+  "text": "The Foreign and Commonwealth Office has put commercial diplomacy at the heart of the Government\u2019s foreign policy and the diplomatic network is now charged with marketing the achievements of London 2012 around the world.\nFurther support for businesses is provided by the Department for Business Innovation and Skills (BIS), Businesslink and the Export Credits Guarantee Department, which gives UK businesses a protective layer of financial security when operating overseas.\nIn the last year, the Government has helped UK businesses secure more than \u00a3800m of high-value overseas contracts and supported more than 20,000 SMEs in breaking into new high-growth markets.\nhttps://britishbusinessclub.innovateuk.org/\nb. What help do businesses want?\nBusiness comments:",
+  "id": "fmt-136"
+ },
+ {
+  "path": "rtf/dcms-armitt-report-london-2012-showcase.rtf",
+  "start_line": 67,
+  "end_line": 70,
+  "text": "Six years ago, the Olympic site was neglected and tired, a place of discarded shopping trolleys, dirty canals, polluted soil and broken buildings.\nToday, it\u2019s a fitting stage for the world\u2019s biggest sporting event, all of it built on time and within budget, and now helping to drive one of the most ambitious regeneration projects in Europe.\nTwo major factors lay behind the success. The first is outstanding leadership \u2013 and I\u2019d particularly thank Sir John Armitt for steering the project forward in conjunction with Government and the Mayor of London.\nThe second is the extraordinary commitment of the companies and people working on the Park. In all, 1,600 firms \u2013 98% registered in the UK \u2013 have helped create a magnificent stage for London\u2019s Games.",
+  "id": "fmt-137"
+ },
+ {
+  "path": "rtf/dcms-armitt-report-london-2012-showcase.rtf",
+  "start_line": 242,
+  "end_line": 248,
+  "text": "\na. How Government is helping UK businesses to grow\nIn February 2011 the Government published its White Paper on Trade and Investment for Growth. Three months later UK Trade & Investment (UKTI) published Britain Open for Business, which set out its plans to provide practical support to exporters and inward investors over the next five years.\nThose plans included:\n1. Targeting services at innovative and high growth SMEs to encourage more companies to export, and help existing exporters reach more high growth and emerging markets.\n2. Winning high value opportunities in overseas markets for UK businesses of all sizes.\n3. Delivering high quality inward investment, with a drive to market large British infrastructure and regeneration projects to foreign investors.",
+  "id": "fmt-138"
+ },
+ {
+  "path": "rtf/oaic-guide-foi-statistical-returns-2011-12.rtf",
+  "start_line": 66,
+  "end_line": 73,
+  "text": "All requests where decisions were made allowing access in whole or part should be recorded whether or not:\n\u00b7\taccess is deferred under section 21 of the FOI Act,\n\u00b7\tthe applicant sought review of a decision granting access with deletions or with a charge for providing access to documents, or\n\u00b7\tthe applicant indicated that, having regard to the charges imposed, the applicant no longer sought access.\n3A covers all requests where a decision was made to grant access to the requested documents in full.\n3B covers all requests where a decision was made to grant partial access.  This includes where:\n\u00b7\taccess was granted to an edited copy (see section 22, FOI Act) of a requested document, and/or\n\u00b7\tthe request related to two or more documents, and access was refused to one or more documents.",
+  "id": "fmt-139"
+ },
+ {
+  "path": "rtf/oaic-guide-foi-statistical-returns-2011-12.rtf",
+  "start_line": 179,
+  "end_line": 183,
+  "text": "Item\tComments* Note FOI and IPS costs are counted separately\nA. General administrative costs \tThis would include photocopying, printing, postage, telephone, materials, travel etc directly related to FOI or IPS work.\nB. General legal advice costs \tThis is general legal advice on FOI or IPS matters either from an in house legal section or external solicitors/ legal counsel.\nC. Litigation costs \tThis is the costs of specific litigation in relation to particular FOI requests. It includes solicitors and legal counsel costs and internal agency legal services if they can be costed. It is very unlikely there would be any IPS litigation.\nD. Training costs\tThis is the training costs directly related to agency staff FOI or IPS skill development.",
+  "id": "fmt-140"
+ },
+ {
+  "path": "rtf/oaic-guide-foi-statistical-returns-2011-12.rtf",
+  "start_line": 79,
+  "end_line": 84,
+  "text": "For the purposes of 3C do not include:\n\u00b7\trequests where access is deemed to have been refused by virtue of subsection 15AC of the FOI Act because the time limit for notifying a decision has expired (a \u2018deemed refusal\u2019); or\n\u00b7\trequests where access in the form sought was refused but access in another form was granted.\nFor the purposes of 3D, only include requests transferred in full to another agency.\nFor the purposes of 3E, enter the number of requests which applicants have withdrawn or are taken to have been withdrawn.  A request should be recorded as withdrawn only where:\n\u00b7\tthe applicant has specifically indicated that the request has been withdrawn, or",
+  "id": "fmt-141"
+ },
+ {
+  "path": "xlsx/cdc-nchs-npals-2022-adsc-services-user-codebook.xlsx",
+  "start_line": 969,
+  "end_line": 977,
+  "text": "5. DON'T KNOW\tNumeric\tLogical\t4 = NEED NO ASSISTANCE \t166\t42.52\nDerived from 24\tDRESHLPrc\n\tWhich types of assistance, if any, does [SAMPLED PERSON'S INITIALS] currently need to dress at their usual residence or this adult day services center? Does [SAMPLED PERSON'S INITIALS] need any help or supervision from another person, use an assistive device, both, or need no assistance?\n\n1. NEED HELP OR SUPERVISION FROM ANOTHER PERSON\n2. USE OF AN ASSISTIVE DEVICE\n3. BOTH\n4. NEED NO ASSISTANCE\n5. DON'T KNOW\tNumeric\tLogical\t5 = DON'T KNOW\t11\t1.53",
+  "id": "fmt-142"
+ },
+ {
+  "path": "xlsx/cdc-nchs-npals-2022-adsc-services-user-codebook.xlsx",
+  "start_line": 1039,
+  "end_line": 1047,
+  "text": "4. NEED NO ASSISTANCE\n5. DON'T KNOW\tNumeric\tLogical\t2 = USE OF AN ASSISTIVE DEVICE\t17\t4.28\n26\tTOILHLP\tWhich types of assistance, if any, does [SAMPLED PERSON'S INITIALS] currently need to use the bathroom or toileting at their usual residence or this adult day services center? Does [SAMPLED PERSON'S INITIALS] need any help or supervision from another person, use an assistive device, both, or need no assistance?\n\n1. NEED HELP OR SUPERVISION FROM ANOTHER PERSON\n2. USE OF AN ASSISTIVE DEVICE\n3. BOTH\n4. NEED NO ASSISTANCE\n5. DON'T KNOW\tNumeric\tLogical\t3 = BOTH\t30\t5.12",
+  "id": "fmt-143"
+ },
+ {
+  "path": "xlsx/cdc-nchs-npals-2022-adsc-services-user-codebook.xlsx",
+  "start_line": 1393,
+  "end_line": 1397,
+  "text": "\n18. TRANSPORTATION FOR MEDICAL OR DENTAL APPOINTMENTS\tNumeric\tLogical\t1 = YES\t86\t30.04\n36\tTRANSMSERV\tPlease look at the show card titled \"Services\" to answer this question. The following services may be offered by adult day services center staff or provided at the community by non-center staff. Which of these services does [SAMPLED PERSON'S INITIALS] currently use? Please tell me the numbers that apply from the show card. SELECT ALL THAT APPLY. Any others?\n\n18. TRANSPORTATION FOR MEDICAL OR DENTAL APPOINTMENTS\tNumeric\tLogical\t2 = NO\t350\t69.400000000000006",
+  "id": "fmt-144"
+ },
+ {
+  "path": "xlsx/dfe-breakfast-clubs-early-adopters-data-dictionary.xlsx",
+  "start_line": 519,
+  "end_line": 520,
+  "text": "March2026\tAnalysis variable\tIMPACTPROUTINE\tan_impact_routine_01\tMotivation and experience with breakfast clubs\tImpact on household routines since the child(ren) started attending the free breakfast club: Our mornings are less stressful\t-1\tDon\u2019t know\tParents/carers\tRespondents whose children attend a free or both paid and free breakfast club\tNo\nMarch2026\tAnalysis variable\tIMPACTPROUTINE\tan_impact_routine_02\tMotivation and experience with breakfast clubs\tImpact on household routines since the child(ren) started attending the free breakfast club: We spend less time preparing breakfast on school days\t1\tStrongly agree\tParents/carers\tRespondents whose children attend a free or both paid and free breakfast club\tNo",
+  "id": "fmt-145"
+ },
+ {
+  "path": "xlsx/dfe-breakfast-clubs-early-adopters-data-dictionary.xlsx",
+  "start_line": 430,
+  "end_line": 431,
+  "text": "March2026\tAnalysis variable\tBCMOTIVATIONS&BENEFITS\tan_bc_reasons_attend_02\tMotivation and experience with breakfast clubs\tTop reasons the child(ren) attends the free breakfast club: My child enjoys going\t0\tNo\tParents/carers\tRespondents whose children attend a free or both paid and free breakfast club\tNo\nMarch2026\tAnalysis variable\tBCMOTIVATIONS&BENEFITS\tan_bc_reasons_attend_02\tMotivation and experience with breakfast clubs\tTop reasons the child(ren) attends the free breakfast club: My child enjoys going\t1\tYes\tParents/carers\tRespondents whose children attend a free or both paid and free breakfast club\tNo",
+  "id": "fmt-146"
+ },
+ {
+  "path": "xlsx/dfe-breakfast-clubs-early-adopters-data-dictionary.xlsx",
+  "start_line": 377,
+  "end_line": 378,
+  "text": "March2026\tAnalysis variable\tTIMEFREE\tan_time_freebc\tAttendance at breakfast clubs\tHow long has your child(ren) been attending the free breakfast club? {#single}\t2\t1\u20134 weeks\tParents/carers\tRespondents whose children attend a free or both paid and free breakfast club\tNo\nMarch2026\tAnalysis variable\tTIMEFREE\tan_time_freebc\tAttendance at breakfast clubs\tHow long has your child(ren) been attending the free breakfast club? {#single}\t3\t1\u20133 months\tParents/carers\tRespondents whose children attend a free or both paid and free breakfast club\tNo",
+  "id": "fmt-147"
+ },
+ {
+  "path": "xlsx/giaa-audit-risk-committee-self-assessment-tool.xlsx",
+  "start_line": 194,
+  "end_line": 197,
+  "text": "37b\tDoes the committee consider if all pertinent issues have been included in the Governance Statement from the work the committee has undertaken during the reporting period?\t1\n38\tDoes the committee satisfy itself that the arrangements for governance, risk management and control have operated effectively throughout the reporting period?\t1\n39\tHas the committee undertaken deep dives into significant risks to review and challenge management\u2019s actions to manage and mitigate the risk?\t1\n40\tHas the committee considered how it should coordinate with other committees that may have responsibility for risk management and corporate governance?\t1",
+  "id": "fmt-148"
+ },
+ {
+  "path": "xlsx/giaa-audit-risk-committee-self-assessment-tool.xlsx",
+  "start_line": 28,
+  "end_line": 32,
+  "text": "17b\tIs at least one other member a NEBM?\t2\n17c\tDo governance processes ensure the chair of the board is not a member of the committee?\t2\n18\tAre new committee members provided with an appropriate induction, including training to help them understand the public sector accountability framework, if they have not previously worked within central government?\t2\n19a\tDoes the induction include a programme of engagement with the organisation to help members understand: the organisation, its objectives, business needs, priorities, risk profile and challenges?\t2\n19b\tDoes the induction include a programme of engagement with the organisation to help members understand: the organisation\u2019s vision and purpose?\t2",
+  "id": "fmt-149"
+ },
+ {
+  "path": "xlsx/giaa-audit-risk-committee-self-assessment-tool.xlsx",
+  "start_line": 23,
+  "end_line": 29,
+  "text": "13\tHave members received formal appointment letters (setting out their terms of appointment including work required) before their term of office commenced?\tn/a\n14\tDoes the committee have the relevant/required range of skills in governance, risk, control, and financial management and is this reviewed on a regular basis?\t2\n15\tDoes at least one committee member have recent and relevant financial experience?\t2\n16\tIs the committee empowered to co-opt members and procure specialist advice to support them when needed?\t2\n17a\tIs the Chair a Non-Executive Board member (NEBM) with relevant experience to chair the committee?\t2\n17b\tIs at least one other member a NEBM?\t2\n17c\tDo governance processes ensure the chair of the board is not a member of the committee?\t2",
+  "id": "fmt-150"
+ },
+ {
+  "path": "xlsx/mitre-attack-enterprise-v19-2.xlsx",
+  "start_line": 1234,
+  "end_line": 1234,
+  "text": "Linux May 2019),(Citation: Proofpoint ZeroT Feb 2017),(Citation: ESET_MuddyWater_Dec2025),(Citation: Nccgroup Gh0st April 2018),(Citation: Forcepoint Felismus Mar 2017),(Citation: Security Intelligence More Eggs Aug 2019),(Citation: Scarlet Mimic Jan 2016),(Citation: ESET InvisiMole June 2018),(Citation: FireEye Poison Ivy),(Citation: RotaJakiro 2021 netlab360 analysis),(Citation: Bitdefender Trickbot C2 infra Nov 2020),(Citation: trendmicro xcsset xcode project 2020),(Citation: Kaspersky CactusPete Aug 2020),(Citation: ESET LightNeuron May 2019),(Citation: Joint Cybersecurity Advisory LockBit 3.0 MAR 2023),(Citation: CISA AppleJeus Feb 2021),(Citation: US-CERT HOTCROISSANT February 2020),(Citation: US-CERT BLINDINGCAN Aug 2020),(Citation: Nicolas Falliere, Liam O Murchu, Eric Chien Februa",
+  "id": "fmt-151"
+ },
+ {
+  "path": "xlsx/mitre-attack-enterprise-v19-2.xlsx",
+  "start_line": 4278,
+  "end_line": 4278,
+  "text": "S1188\tmalware--5f8c69a5-7acd-4a36-a929-de558d9c8223\tLine Runner\t[Line Runner](https://attack.mitre.org/software/S1188) is a persistent backdoor and web shell allowing threat actors to upload and execute arbitrary Lua scripts. [Line Runner](https://attack.mitre.org/software/S1188) is associated with the [ArcaneDoor](https://attack.mitre.org/campaigns/C0046) campaign.(Citation: CCCS ArcaneDoor 2024)(Citation: Cisco ArcaneDoor 2024)\thttps://attack.mitre.org/software/S1188\t06 January 2025\t15 April 2025\tenterprise-attack\t1.0\tNetwork Devices\tmalware\t,(Citation: Cisco ArcaneDoor 2024),(Citation: CCCS ArcaneDoor 2024),(Citation: Cisco ArcaneDoor 2024),(Citation: CCCS ArcaneDoor 2024)",
+  "id": "fmt-152"
+ },
+ {
+  "path": "xlsx/mitre-attack-enterprise-v19-2.xlsx",
+  "start_line": 4039,
+  "end_line": 4039,
+  "text": "S0338\tmalware--aa1462a1-d065-416c-b354-bedd04998c7f\tCobian RAT\t[Cobian RAT](https://attack.mitre.org/software/S0338) is a backdoor, remote access tool that has been observed since 2016.(Citation: Zscaler Cobian Aug 2017)\thttps://attack.mitre.org/software/S0338\t29 January 2019\t25 April 2025\tenterprise-attack\t1.1\tWindows\tmalware\t,,(Citation: Zscaler Cobian Aug 2017)",
+  "id": "fmt-153"
+ },
+ {
+  "path": "xlsx/nist-csf-2-0-core-informative-references.xlsx",
+  "start_line": 4747,
+  "end_line": 4776,
+  "text": "CCMv4.0: UEM-12\nCCMv4.0: UEM-13\nCIS Controls v8.0: 4.1\nCIS Controls v8.0: 4.2\nCIS Controls v8.1: 4.1\nCIS Controls v8.1: 4.2\nCRI Profile v2.0: PR.PS-01\nCRI Profile v2.0: PR.PS-01.01\nCRI Profile v2.0: PR.PS-01.02\nCRI Profile v2.0: PR.PS-01.03\nCRI Profile v2.0: PR.PS-01.04\nCRI Profile v2.0: PR.PS-01.05\nCRI Profile v2.0: PR.PS-01.06\nCRI Profile v2.0: PR.PS-01.07\nCRI Profile v2.0: PR.PS-01.08\nCRI Profile v2.0: PR.PS-01.09\nCSF v1.1: PR.IP-1\nCSF v1.1: PR.IP-3\nCSF v1.1: PR.PT-2\nCSF v1.1: PR.PT-3\nGuardian-SDK: GS-CF-01\nISO/IEC 27001:2022: Mandatory Clause: 9.3\nISO/IEC 27001:2022: Annex A Controls: 8.9\nISO/IEC 27001:2022: Control 8.8\nISO/IEC 27001:2022: Control 8.9\nNICE Framework: DD-WRL-001\nNICE Framework: DD-WRL-002\nNICE Framework: IO-WRL-005\nNICE Framework: OG-WRL-013\nNICE Framework: PD-WRL-004",
+  "id": "fmt-154"
+ },
+ {
+  "path": "xlsx/nist-csf-2-0-core-informative-references.xlsx",
+  "start_line": 5077,
+  "end_line": 5102,
+  "text": "CIS Controls v8.0: 16.1\nCIS Controls v8.1: 16.1\nCRI Profile v2.0: PR.PS-06\nCRI Profile v2.0: PR.PS-06.01\nCRI Profile v2.0: PR.PS-06.02\nCRI Profile v2.0: PR.PS-06.03\nCRI Profile v2.0: PR.PS-06.04\nCRI Profile v2.0: PR.PS-06.05\nCRI Profile v2.0: PR.PS-06.06\nCRI Profile v2.0: PR.PS-06.07\nCRI Profile v2.0: PR.PS-06.08\nCRI Profile v2.0: PR.PS-06.09\nCRI Profile v2.0: PR.PS-06.10\nCSF v1.1: PR.IP-2\nIRP: IRP-Sec-4\nISO/IEC 27001:2022: Mandatory Clause: None\nISO/IEC 27001:2022: Annex A Controls: 8.25\nISO/IEC 27001:2022: Annex A Controls: 8.28\nISO/IEC 27001:2022: Control 8.25\nISO/IEC 27001:2022: Control 8.26\nISO/IEC 27001:2022: Control 8.28\nISO/IEC 27001:2022: Control 8.29\nISO/IEC 27001:2022: Control 8.31\nNICE Framework: DD-WRL-001\nNICE Framework: DD-WRL-002\nNICE Framework: DD-WRL-003",
+  "id": "fmt-155"
+ },
+ {
+  "path": "xlsx/nist-csf-2-0-core-informative-references.xlsx",
+  "start_line": 4403,
+  "end_line": 4431,
+  "text": "SP 800-171 Rev 3: 03.14.02\nSP 800-171 Rev 3: 03.14.06\nSP 800-53 Rev 5.1.1: CA-03\nSP 800-53 Rev 5.1.1: CP-09\nSP 800-53 Rev 5.1.1: MP-08\nSP 800-53 Rev 5.1.1: SC-04\nSP 800-53 Rev 5.1.1: SC-07\nSP 800-53 Rev 5.1.1: SC-12\nSP 800-53 Rev 5.1.1: SC-13\nSP 800-53 Rev 5.1.1: SC-28\nSP 800-53 Rev 5.1.1: SC-32\nSP 800-53 Rev 5.1.1: SC-39\nSP 800-53 Rev 5.1.1: SC-43\nSP 800-53 Rev 5.1.1: SI-03\nSP 800-53 Rev 5.1.1: SI-04\nSP 800-53 Rev 5.1.1: SI-07\nSP 800-53 Rev 5.2.0: CA-03\nSP 800-53 Rev 5.2.0: CP-09\nSP 800-53 Rev 5.2.0: MP-08\nSP 800-53 Rev 5.2.0: SC-04\nSP 800-53 Rev 5.2.0: SC-07\nSP 800-53 Rev 5.2.0: SC-12\nSP 800-53 Rev 5.2.0: SC-13\nSP 800-53 Rev 5.2.0: SC-28\nSP 800-53 Rev 5.2.0: SC-32\nSP 800-53 Rev 5.2.0: SC-39\nSP 800-53 Rev 5.2.0: SC-43\nSP 800-53 Rev 5.2.0: SI-03\nSP 800-53 Rev 5.2.0: SI-04",
+  "id": "fmt-156"
+ },
+ {
+  "path": "xlsx/nist-sp800-53r5-control-catalog.xlsx",
+  "start_line": 1623,
+  "end_line": 1623,
+  "text": "SA-9(2)\tExternal System Services | Identification of Functions, Ports, Protocols, and Services\tRequire providers of the following external system services to identify the functions, ports, protocols, and other services required for the use of such services: [Assignment: organization-defined external system services].\tInformation from external service providers regarding the specific functions, ports, protocols, and services used in the provision of such services can be useful when the need arises to understand the trade-offs involved in restricting certain functions and services or blocking certain ports and protocols.\tCM-6, CM-7.",
+  "id": "fmt-157"
+ },
+ {
+  "path": "xlsx/nist-sp800-53r5-control-catalog.xlsx",
+  "start_line": 264,
+  "end_line": 264,
+  "text": "hanism and violating the security policy. The smallness property helps to ensure completeness in the analysis and testing of the mechanism to detect any weaknesses or deficiencies (i.e., latent flaws) that would prevent the enforcement of the security policy.\tAC-3, AC-16, SA-8, SA-17, SC-3, SC-11, SC-39, SI-13.",
+  "id": "fmt-158"
+ },
+ {
+  "path": "xlsx/nist-sp800-53r5-control-catalog.xlsx",
+  "start_line": 1839,
+  "end_line": 1839,
+  "text": "th internal and external networks or links that may be visible to individuals who are not authorized users. Encrypting the links and transmitting in continuous, fixed, or random patterns prevents the derivation of intelligence from the system communications patterns. Alternative physical controls include protected distribution systems.\tSC-12, SC-13.",
+  "id": "fmt-159"
+ }
+]

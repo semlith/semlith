@@ -2345,6 +2345,13 @@ button.gl-row:hover,
   flex-direction: column;
   gap: 10px;
 }
+/* A flex child with overflow hidden (the folder picker's .card) has an
+   automatic minimum height of zero, so on a short window the column shrank it
+   and clipped its content instead of the modal scrolling. Children keep their
+   height; the modal's own overflow-y does the scrolling. */
+.modal > * {
+  flex-shrink: 0;
+}
 .modal.wide {
   width: 560px;
 }

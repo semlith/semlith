@@ -1,10 +1,10 @@
 """The scorecard tables, from the runs' own score files.
 
     python bench/scorecard/report.py [--swe DIR] [--coderag DIR] [--repobench DIR] [--competitors FILE]
-                                     [--agent FILE] [--ledger DIR] [--readme bench/scorecard/README.md]
+                                     [--agent FILE] [--documents DIR] [--ledger DIR] [--readme bench/scorecard/README.md]
 
 Each option defaults to the newest run under SCORECARD_HOME/results (the competitor and agent files to
-their fixed paths). Prints Markdown -- or, with --readme, writes it between that file's scorecard markers:
+their fixed paths; the documents round to its newest score committed under bench/scorecard/documents/runs). Prints Markdown -- or, with --readme, writes it between that file's scorecard markers:
 one table per benchmark, each with its instance count, runs and the command that reproduces it. The tables
 live on the scorecard page, `bench/scorecard/README.md`; `charts.py` then draws the charts from them. A number is
 the median of the runs; a spread other than zero is printed beside it.
@@ -147,6 +147,49 @@ def agent(path):
             + "\n\n`python3 bench/scorecard/agent/corpus_round.py`")
 
 
+DOCUMENT_RUNS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "documents", "runs")
+ARMS_DOCUMENTS = {"r0": "rg, BM25", "r0x": "rga (rg with document adapters), BM25", "s1": "semlith_search, k 50",
+                  "s2": "semlith_brief", "g": "grep (Grep, Glob, Read)", "s": "semlith installed, Grep built in",
+                  "sx": "semlith and Read only"}
+
+
+def newest_documents(name):
+    """The newest committed run holding `name`; run directories are named by their start time."""
+    runs = sorted(glob.glob(os.path.join(DOCUMENT_RUNS, "*", name)))
+    return os.path.dirname(runs[-1]) if runs else None
+
+
+def documents(directory):
+    """The deterministic arms from `directory`; the agent round from the newest committed one, when there is one."""
+    rows = json.load(open(os.path.join(directory, "score.json")))
+    agent_dir = newest_documents("agent.json")
+    of = lambda r, key: f"{r[key]}/{r['n']}" + (f" ±{r[key + '_spread']}" if r.get(key + "_spread") else "")
+    body = [[ARMS_DOCUMENTS.get(r["arm"], r["arm"]), r["runs"], of(r, "hit2000"), of(r, "hit4000"), of(r, "hit8000"),
+             of(r, "file4000"), r["first_tokens_median"] if r["first_tokens_median"] is not None else "—"] for r in rows]
+    out = ("### Documents\n\n127 questions about passages inside 53 public documents fetched from their publishers' "
+           "own URLs, in 11 formats: PDF, Word, PowerPoint, Excel, OpenDocument text, sheets and slides, EPUB, RTF, "
+           "notebooks and CSV (two mailing-list archives sit beside them, with no questions). A passage is found when a delivered excerpt is in the gold document and shares a run of six "
+           "words with the gold passage, whichever extractor produced it.\n\n"
+           + table(["arm", "runs", "found within 2k tokens", "4k", "8k", "right document within 4k",
+                    "median tokens to the first find"], body)
+           + "\n\n`python3 bench/scorecard/documents/documents.py run && python3 bench/scorecard/documents/documents.py "
+           "score <run dir>`")
+    if not agent_dir:
+        return out + "\n\nThe agent round on these questions has not been run on this release."
+    agents = json.load(open(os.path.join(agent_dir, "agent.json")))
+    money = lambda x: f"${x:.3f}"
+    body = [[r["model"], ARMS_DOCUMENTS.get(r["arm"], r["arm"]), r["runs"], max(r["n"]), of(r | {"n": max(r["n"])}, "hit"),
+             cell(r, "cost_per_session", money), r["used_semlith"] if r["arm"] != "g" else "—",
+             f"{r['quotes_not_in_document']} of {r['quotes_checked']}"] for r in agents]
+    return (out + "\n\nHeadless Claude Code on the same questions; the answer is up to five documents, each with a "
+            "quote. A quote that shares no six-word run with the text semlith extracted from the document it names "
+            "was written, not read.\n\n"
+            + table(["model", "arm", "runs", "questions", "found", "cost / session", "sessions calling semlith",
+                     "top quotes not in the named document"], body)
+            + "\n\n`python3 bench/scorecard/documents/agent_round.py run g,s,sx && python3 "
+            "bench/scorecard/documents/agent_round.py score`")
+
+
 def ledger(directory):
     doc = json.load(open(os.path.join(directory, "savings.json")))
     t = doc["total"]
@@ -167,11 +210,12 @@ def main():
     ap.add_argument("--agent", default=os.path.join(HOME, "agent", "corpus-round.json"))
     ap.add_argument("--ledger", default=os.path.dirname(sorted(glob.glob(os.path.join(RESULTS, "ledger", "*", "savings.json")))[-1])
                     if glob.glob(os.path.join(RESULTS, "ledger", "*", "savings.json")) else None)
+    ap.add_argument("--documents", default=newest_documents("score.json"))
     ap.add_argument("--readme", help="write the tables between this file's scorecard:begin/end markers")
     a = ap.parse_args()
     parts = []
     for fn, arg in ((swe, a.swe), (coderag, a.coderag), (repobench, a.repobench), (competitors, a.competitors),
-                    (agent, a.agent), (ledger, a.ledger)):
+                    (agent, a.agent), (documents, a.documents), (ledger, a.ledger)):
         if arg and os.path.exists(arg):
             parts.append(fn(arg))
         else:

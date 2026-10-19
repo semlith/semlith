@@ -728,6 +728,21 @@ From 0.37.0-rc.7:
 |---|---|
 | Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
+### 0.44.1
+
+`FORMAT_VERSION` does not move, and no library API, CLI flag, MCP schema,
+route or `settings.json` key changes.
+
+| Surface | Change |
+|---|---|
+| Graph | In Rust, Python, Go, JavaScript and TypeScript (Svelte and Vue scripts too), a call with no receiver and no type in its path (`lane(id)`, `crate::accel::lane(..)`) no longer counts a same-named method as a candidate when a free function answers to the name, so it resolves instead of reading as ambiguous. This is decided when an edge is read, so every existing store answers this way at once: `neighbors`, `impact`, `trace`, `path`, `brief`, the portal Graph and `store::edges_in_resolved`. Other languages are unchanged. |
+| Graph | In the same languages, a bare call inside a method to the method's own name (`fn lane(&self) { lane(id) }`) is a `calls` edge to the free function instead of being dropped as recursion. Existing stores gain these edges as their files are re-indexed. |
+| Graph, symbols | A function declared directly in a class, interface or object body has kind `method` (was `function` for Python, Kotlin, Scala and C++). Go methods are qualified `T::F` by their receiver type (was the package, `a::F`); a C++ out-of-line definition is qualified by its scope (`Foo::bar`, `ns::helper`), and one in a lower-case scope is kind `function`. A file's two same-named definitions each keep their own outgoing edges (the first used to take all of them). A bare call inside a class to a name the class defines carries the class as its hint where a bare call can mean `this.f()`, and in a Python class body. All of this is written at extraction, so a store shows it file by file as files are re-indexed; a store read by 0.44.0 afterwards keeps the new rows. No column or format change. |
+| Graph | A Rust call never resolves into another crate's `tests/`, `benches/` or `examples/` file, and a Rust enum variant receiver (`Kind::Catchup.f()`) is typed as its enum. A lower-case module path that names no candidate's file, module or import (`std::env::current_dir()`) stays ambiguous even with one candidate; an inline module's function is named by its path. Decided when an edge is read, except the receiver type, which a file gains when it is re-indexed. |
+| Graph | JavaScript member calls carry their object as a hint (at re-index), and JavaScript/TypeScript `this.f()` / `super.f()` are receiver calls; a grouped Rust `use {..}` ranks the modules it names (when read). |
+| Symbols | A Rust `fn` outside any `impl` or `trait` (in a `mod` body) has kind `function`, was `method`; a method of an `impl` whose type names nothing (`Box<dyn Error>`) is qualified by its trait. At re-index. |
+| Portal | Dialogs scroll instead of squashing a child on a short window (`.modal > *` keeps its height). |
+
 ### 0.44.0
 
 `FORMAT_VERSION` does not move. The binary registers no remote lane, so its

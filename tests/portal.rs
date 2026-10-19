@@ -1775,3 +1775,17 @@ fn the_portal_doc_has_a_section_for_every_page() {
         );
     }
 }
+
+/// Every dialog scrolls instead of clipping (0.44.1). `.modal` is a flex
+/// column capped at the window's height; without this rule a child with
+/// `overflow: hidden` (the folder picker's `.card`) has an automatic minimum
+/// height of zero, so a short window squashed it and hid its content with no
+/// scrollbar. Found on semlith-cloud's operator dialog, which shares the rule.
+#[test]
+fn a_dialog_child_keeps_its_height_so_the_dialog_scrolls() {
+    let compact: String = STYLE.split_whitespace().collect();
+    assert!(
+        compact.contains(".modal>*{flex-shrink:0;}"),
+        "style.css lost `.modal > * {{ flex-shrink: 0; }}`"
+    );
+}
