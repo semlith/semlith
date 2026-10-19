@@ -7705,4 +7705,29 @@ fn typed(e: &Enabled) {
             ("method".to_string(), "SinkError::error_message".to_string())
         );
     }
+
+    /// The no-receiver rule counts only candidates still standing: a Rust
+    /// call whose only free namesakes sit in another crate's tests/ (or are
+    /// Python, whose tests/ is no Rust crate) kept nothing at all, and the
+    /// edge lost every definition (`get(&m)` on a closure parameter in
+    /// ripgrep against flask's tests).
+    #[test]
+    fn the_no_receiver_rule_counts_only_candidates_left() {
+        let lib = "pub struct G;\n\nimpl G {\n    pub fn get(&self) {}\n}\n";
+        let caller = "fn attach(get: impl Fn()) {\n    get();\n}\n";
+        let helper = "fn get() {}\n";
+        let py = "def outer():\n    def get():\n        pass\n";
+        let db = store(&[
+            ("crates/a/src/lib.rs", lib),
+            ("crates/b/src/hiargs.rs", caller),
+            ("crates/a/tests/t.rs", helper),
+            ("flask/tests/test_x.py", py),
+        ]);
+        let out = crate::store::edges_in_resolved(&db, "get", &dependency_kinds()).unwrap();
+        let call = out
+            .iter()
+            .find(|i| i.end.symbol.name == "attach")
+            .expect("attach calls get");
+        assert!(!call.means.is_empty(), "{call:#?}");
+    }
 }

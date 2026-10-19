@@ -2724,7 +2724,9 @@ fn reachable(
     // that name in tests/accel.rs. ponytail: a `tests` module directory
     // inside `src/` reads as one too; only test code calls into it.
     if lang == Some("rust") {
-        let reached = |p: &str| separate_crate(p).is_none_or(|dir| src_path.starts_with(dir));
+        let reached = |p: &str| {
+            !p.ends_with(".rs") || separate_crate(p).is_none_or(|dir| src_path.starts_with(dir))
+        };
         if candidates
             .iter()
             .zip(&keep)
@@ -2746,7 +2748,11 @@ fn reachable(
     };
     let receiver_free = lang.is_some_and(crate::graph::no_implicit_receiver);
     let no_this = (bare && receiver_free) || (caller_top_level && hint.is_none());
-    if no_this && candidates.iter().any(|c| free_function(c)) {
+    let free_left = candidates
+        .iter()
+        .zip(&keep)
+        .any(|(c, k)| *k && free_function(c));
+    if no_this && free_left {
         for (k, c) in keep.iter_mut().zip(candidates) {
             *k = *k && !owned_by_type(c);
         }
