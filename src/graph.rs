@@ -1345,6 +1345,7 @@ fn collect(
                 // one that does.
                 hint: hint.and_then(|h| {
                     rust.and_then(|fields| receiver_type(h, text, fields))
+                        .or_else(|| rust.and_then(|_| token_variant_owner(h, text)))
                         .or_else(|| hint_text(h, text))
                 }),
                 method,
@@ -1598,6 +1599,34 @@ fn receiver_type(receiver: tree_sitter::Node, text: &str, fields: &RustFields) -
     expr_ty(receiver, text, fields, 0)
         .map(|t| t.name)
         .filter(|name| !STD_TYPES.contains(&name.as_str()))
+}
+
+/// [`expr_ty`]'s enum variant rule for a receiver inside a macro's arguments,
+/// where the tree holds tokens rather than a path: `Kind :: Catchup` before
+/// `.lane()` in `assert_eq!(Kind::Catchup.lane(), 1)` names `Kind`.
+fn token_variant_owner(variant: tree_sitter::Node, text: &str) -> Option<String> {
+    let upper = |s: &str| s.starts_with(char::is_uppercase);
+    if !upper(&text[variant.byte_range()]) {
+        return None;
+    }
+    let separator = variant
+        .prev_sibling()
+        .filter(|s| &text[s.byte_range()] == "::")?;
+    let owner = &text[separator.prev_sibling()?.byte_range()];
+    if !upper(owner) {
+        return None;
+    }
+    if owner != "Self" {
+        return Some(owner.to_string());
+    }
+    let mut at = variant.parent();
+    while let Some(n) = at {
+        if n.kind() == "function_item" {
+            return rust_owner(n, text);
+        }
+        at = n.parent();
+    }
+    None
 }
 
 /// The type an expression evaluates to, where the source states it.
@@ -7591,11 +7620,14 @@ fn typed(e: &Enabled) {
     }
 
     /// An enum variant is a value of its enum: `Kind::Catchup.lane()` is
-    /// `Kind::lane`, not any other type's `lane`.
+    /// `Kind::lane`, not any other type's `lane`, in an expression and in a
+    /// macro's arguments alike.
     #[test]
     fn a_rust_enum_variant_receiver_names_its_enum() {
-        let rs = "enum Kind {\n    Catchup,\n}\n\nimpl Kind {\n    fn lane(&self) -> u8 {\n        1\n    }\n}\n\nstruct Other;\n\nimpl Other {\n    fn lane(&self) -> u8 {\n        2\n    }\n}\n\nfn first() -> u8 {\n    Kind::Catchup.lane()\n}\n";
+        let rs = "enum Kind {\n    Catchup,\n}\n\nimpl Kind {\n    fn lane(&self) -> u8 {\n        1\n    }\n}\n\nstruct Other;\n\nimpl Other {\n    fn lane(&self) -> u8 {\n        2\n    }\n}\n\nfn first() -> u8 {\n    Kind::Catchup.lane()\n}\n\nfn second() {\n    assert_eq!(Kind::Catchup.lane(), 1);\n}\n";
         let db = store(&[("src/jobs.rs", rs)]);
         settles_at(&db, "first", "lane", "src/jobs.rs", 6);
+        // The same receiver inside a macro's arguments.
+        settles_at(&db, "second", "lane", "src/jobs.rs", 6);
     }
 }
