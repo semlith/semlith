@@ -171,6 +171,17 @@ pub(crate) fn no_implicit_receiver(lang: &str) -> bool {
     )
 }
 
+/// Whether a bare `helper()` inside a class body can be `this.helper()`: the
+/// languages [`no_implicit_receiver`] leaves out because of it. PHP and
+/// Objective-C are not here — a member there is reached only through `$this`
+/// or `self` — and neither is any language without classes.
+fn implicit_receiver(lang: &str) -> bool {
+    matches!(
+        lang,
+        "java" | "kotlin" | "scala" | "groovy" | "csharp" | "cpp" | "swift" | "dart" | "ruby"
+    )
+}
+
 /// Every language the graph covers, in the table's own order.
 pub fn languages() -> Vec<&'static str> {
     crate::filter::LANGUAGES
@@ -755,15 +766,22 @@ fn queries(lang: &'static str, language: &Language, tags: &str) -> &'static [Que
 struct Def {
     kind: String,
     name: String,
-    /// The type a Rust method belongs to — the `impl` or `trait` block around
-    /// it — which the tree says and the enclosing-definition rule cannot,
-    /// because an `impl` block is not a definition of its own.
+    /// The type a method belongs to where the tree says so outside any class
+    /// body: a Rust `impl` or `trait` block, a Go receiver, a C++ out-of-line
+    /// `Foo::bar` — which the enclosing-definition rule cannot see, because
+    /// none of them is a definition of its own.
     owner: Option<String>,
+    /// What a Go method calls its receiver (`t` in `func (t *T) F()`), the
+    /// name that plays `self` inside it.
+    receiver: Option<String>,
     start: usize,
     end: usize,
     start_line: u32,
     end_line: u32,
 }
+
+/// The definition kinds a method can be declared inside.
+const CLASS_KINDS: &[&str] = &["class", "interface", "object"];
 
 /// A reference found in the tree, with the byte offset that places it inside a
 /// definition.
@@ -771,6 +789,9 @@ struct Ref {
     name: String,
     kind: &'static str,
     at: usize,
+    /// Where the referenced name itself starts. Two captures of one call
+    /// agree on it even when they captured different nodes around it.
+    name_at: usize,
     line: u32,
     hint: Option<String>,
     /// The call went through a receiver (`x.f()`), so it means a method.
@@ -959,9 +980,21 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         start_line: 1,
         end_line: text.lines().count().max(1) as u32,
     }];
-    let mut edges: Vec<Edge> = Vec::new();
+    // Each edge with the definition it leaves from, so two definitions of
+    // one name in a file (`A::new` and `B::new`) each keep their calls.
+    let mut edges: Vec<(Option<usize>, Edge)> = Vec::new();
 
     let parents = enclosing_each(&defs);
+    // A function declared in a class body is a method of it. Kotlin, Python
+    // and C++ grammars tag both as functions, and a member then read the same
+    // as a top-level function the file's module name happens to qualify
+    // (`A::helper` in A.kt), so the resolver could not tell them apart.
+    for i in 0..defs.len() {
+        let in_class = parents[i].is_some_and(|p| CLASS_KINDS.contains(&defs[p].kind.as_str()));
+        if defs[i].kind == "function" && in_class {
+            defs[i].kind = "method".to_string();
+        }
+    }
     for (i, def) in defs.iter().enumerate() {
         let parent = parents[i].map(|p| defs[p].name.clone());
         // The owner outranks the enclosing definition: `Fleet::search_preferring`
@@ -987,27 +1020,33 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
             continue;
         }
         match parent {
-            Some(p) => edges.push(Edge {
-                from: p,
-                to: def.name.clone(),
-                kind: "contains".to_string(),
-                confidence: EXTRACTED.to_string(),
-                hint: None,
-                // A structural edge has no call site, so it carries the line
-                // the definition itself starts on rather than nothing: that is
-                // where the source says the containment happens.
-                line: Some(def.start_line),
-                from_module: false,
-            }),
-            None => edges.push(Edge {
-                from: module.clone(),
-                to: def.name.clone(),
-                kind: "defines".to_string(),
-                confidence: EXTRACTED.to_string(),
-                hint: None,
-                line: Some(def.start_line),
-                from_module: true,
-            }),
+            Some(p) => edges.push((
+                parents[i],
+                Edge {
+                    from: p,
+                    to: def.name.clone(),
+                    kind: "contains".to_string(),
+                    confidence: EXTRACTED.to_string(),
+                    hint: None,
+                    // A structural edge has no call site, so it carries the line
+                    // the definition itself starts on rather than nothing: that is
+                    // where the source says the containment happens.
+                    line: Some(def.start_line),
+                    from_module: false,
+                },
+            )),
+            None => edges.push((
+                None,
+                Edge {
+                    from: module.clone(),
+                    to: def.name.clone(),
+                    kind: "defines".to_string(),
+                    confidence: EXTRACTED.to_string(),
+                    hint: None,
+                    line: Some(def.start_line),
+                    from_module: true,
+                },
+            )),
         }
     }
 
@@ -1032,7 +1071,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         // and a cycle there hung the whole file (cobra completions.go).
         for _ in 0..defs.len() {
             let i = at?;
-            if defs[i].kind == "class" {
+            if CLASS_KINDS.contains(&defs[i].kind.as_str()) {
                 return Some(defs[i].name.clone());
             }
             at = parents[i];
@@ -1040,14 +1079,45 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         None
     };
 
-    // Calls through a receiver, by line and name. The bundled query captures
-    // `self.go()` a second time with no receiver, and that copy must not read
-    // as a bare call. ponytail: a line holding both `go(x.go())` loses the
-    // bare one; key on the call's span if that ever matters.
-    let through: std::collections::HashSet<(u32, &str)> = refs
+    // The class definition a reference sits in, by index: the nearest
+    // enclosing definition of a class kind.
+    let class_at = |at: Option<usize>| -> Option<usize> {
+        let mut at = at;
+        for _ in 0..defs.len() {
+            let i = at?;
+            if CLASS_KINDS.contains(&defs[i].kind.as_str()) {
+                return Some(i);
+            }
+            at = parents[i];
+        }
+        None
+    };
+    // A bare call to a name the enclosing class itself defines means that
+    // member: inside a class body where a bare `helper()` is `this.helper()`
+    // (Java, Kotlin, C#, C++, Swift and the rest of `implicit_receiver`), and
+    // in a Python class body itself, where `x = deco(1)` reads the class's
+    // own namespace — though never from inside a Python method, where it
+    // reads the module's.
+    let member = |holder: Option<usize>, name: &str| -> Option<String> {
+        let class = if implicit_receiver(lang) {
+            class_at(holder)?
+        } else if lang == "python" {
+            holder.filter(|h| CLASS_KINDS.contains(&defs[*h].kind.as_str()))?
+        } else {
+            return None;
+        };
+        (0..defs.len())
+            .any(|j| parents[j] == Some(class) && defs[j].name == name && j != class)
+            .then(|| defs[class].name.clone())
+    };
+
+    // Where each call through a receiver names its target. The bundled query
+    // captures `self.go()` a second time with no receiver, and that copy must
+    // not read as a bare call; `go(x.go())` still has one.
+    let through: std::collections::HashSet<usize> = refs
         .iter()
         .filter(|r| r.method || r.on_self)
-        .map(|r| (r.line, r.name.as_str()))
+        .map(|r| r.name_at)
         .collect();
     let holders = innermost_at(&defs, refs.iter().map(|r| r.at), None);
     for (reference, holder) in refs.iter().zip(holders) {
@@ -1057,16 +1127,29 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
             None => module.clone(),
         };
         let owner = class_of(holder);
+        // Go names its receiver instead of calling it `self`: `t.F()` inside
+        // `func (t *T) G()` goes through the method's own receiver.
+        let go_self = lang == "go"
+            && reference
+                .hint
+                .as_ref()
+                .is_some_and(|h| enclosing.and_then(|d| d.receiver.as_ref()) == Some(h));
+        let on_self = reference.on_self || go_self;
+        let member = match (&reference.hint, on_self, reference.kind) {
+            (None, false, "calls") => member(holder, &reference.name),
+            _ => None,
+        };
         // A receiver is what the call went through: its type where the
         // source states it, `self`'s class, or the receiver's own name. A
         // Python object the file imported as a module (`import json` then
         // `json.loads()`) is a module path, not a receiver.
-        let lead = match (&reference.hint, reference.on_self) {
+        let lead = match (&reference.hint, on_self) {
+            (_, true) if go_self => owner.clone(),
             (Some(h), _) => Some(h.clone()),
             (None, true) => owner.clone(),
-            (None, false) => None,
+            (None, false) => member.clone(),
         };
-        let method = reference.method
+        let method = (reference.method || go_self)
             && !(lang == "python"
                 && !reference.on_self
                 && lead.as_ref().is_some_and(|l| {
@@ -1084,7 +1167,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
             && match &lead {
                 None => {
                     method
-                        || through.contains(&(reference.line, reference.name.as_str()))
+                        || through.contains(&reference.name_at)
                         || !(in_method && no_implicit_receiver(lang))
                 }
                 Some(l) => owner.as_ref() == Some(l) || (!method && l == "Self"),
@@ -1109,17 +1192,20 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         let hint = if method {
             Some(format!("{RECEIVER}{}", lead.unwrap_or_default()))
         } else {
-            reference.hint.clone()
+            reference.hint.clone().or(member)
         };
-        edges.push(Edge {
-            from,
-            to: reference.name.clone(),
-            kind: reference.kind.to_string(),
-            confidence: confidence.to_string(),
-            hint,
-            line: Some(reference.line),
-            from_module: enclosing.is_none(),
-        });
+        edges.push((
+            holder,
+            Edge {
+                from,
+                to: reference.name.clone(),
+                kind: reference.kind.to_string(),
+                confidence: confidence.to_string(),
+                hint,
+                line: Some(reference.line),
+                from_module: enclosing.is_none(),
+            },
+        ));
     }
 
     // One call can be captured by both the bundled query and the supplement,
@@ -1127,9 +1213,10 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
     // alone would keep whichever landed first; ordering by confidence and then
     // by whether a hint is present makes the best-informed copy of each edge
     // the one that survives.
-    edges.sort_by(|a, b| {
+    edges.sort_by(|(x, a), (y, b)| {
         (
             &a.from,
+            x,
             &a.to,
             &a.kind,
             a.from_module,
@@ -1141,6 +1228,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         )
             .cmp(&(
                 &b.from,
+                y,
                 &b.to,
                 &b.kind,
                 b.from_module,
@@ -1151,9 +1239,10 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 b.line,
             ))
     });
-    edges.dedup_by(|a, b| {
-        (&a.from, &a.to, &a.kind, a.from_module) == (&b.from, &b.to, &b.kind, b.from_module)
+    edges.dedup_by(|(x, a), (y, b)| {
+        (&a.from, x, &a.to, &a.kind, a.from_module) == (&b.from, y, &b.to, &b.kind, b.from_module)
     });
+    let edges = edges.into_iter().map(|(_, e)| e).collect();
 
     Ok(Some(Extraction { symbols, edges }))
 }
@@ -1248,6 +1337,7 @@ fn collect(
                 name: target,
                 kind,
                 at: node.start_byte(),
+                name_at: name.map_or(node.start_byte(), |n| n.start_byte()),
                 line: node.start_position().row as u32 + 1,
                 // A receiver whose type the source states is a better lead
                 // than its variable name: `store.search_preferring()` names a
@@ -1274,6 +1364,17 @@ fn collect(
                 definition_span(node, name)
             };
             let raw = &text[name.byte_range()];
+            let scope = scope_owner(name, text);
+            let go = go_receiver(span, text);
+            // `void ns::helper() {}` is a namespace's function, which the
+            // grammar tags as a method because of its qualified name.
+            // ponytail: case decides type vs namespace (`Foo::` vs `ns::`), the
+            // convention nearly every C++ codebase keeps; a lower-case class
+            // defined out of line reads as a namespace function.
+            let kind = match &scope {
+                Some(s) if kind == "method" && !s.starts_with(char::is_uppercase) => "function",
+                _ => kind,
+            };
             defs.push(Def {
                 kind: kind.to_string(),
                 name: if kind == "heading" {
@@ -1281,7 +1382,11 @@ fn collect(
                 } else {
                     raw.to_string()
                 },
-                owner: rust.and_then(|_| rust_owner(span, text)),
+                owner: match rust {
+                    Some(_) => rust_owner(span, text),
+                    None => go.as_ref().map(|(ty, _)| ty.clone()).or(scope),
+                },
+                receiver: go.and_then(|(_, name)| name),
                 start: span.start_byte(),
                 end: span.end_byte(),
                 start_line: span.start_position().row as u32 + 1,
@@ -1313,6 +1418,7 @@ fn markdown_sections(text: &str) -> Vec<Def> {
                 kind: "heading".to_string(),
                 name: h.title.clone(),
                 owner: None,
+                receiver: None,
                 start: byte(h.line as usize - 1),
                 end: byte(end_line)
                     .saturating_sub(1)
@@ -1387,6 +1493,36 @@ impl RustFields {
         }
         out
     }
+}
+
+/// The type a Go method's receiver names, and the receiver's own name: `T`
+/// and `t` for `func (t *T) F()` and for `func (t T[K]) F()`. Without it a method was qualified by its package
+/// (`a::F`), and no type the source states could ever select it.
+fn go_receiver(node: tree_sitter::Node, text: &str) -> Option<(String, Option<String>)> {
+    let receiver = node.child_by_field_name("receiver")?;
+    let mut cursor = receiver.walk();
+    let parameter = receiver
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "parameter_declaration")?;
+    let ty = &text[parameter.child_by_field_name("type")?.byte_range()];
+    let ty = ty.trim_start_matches('*');
+    let ty = ty.split('[').next().unwrap_or(ty).trim();
+    let name = parameter
+        .child_by_field_name("name")
+        .map(|n| text[n.byte_range()].to_string());
+    (!ty.is_empty()).then(|| (ty.to_string(), name))
+}
+
+/// The class or namespace a C++ out-of-line definition names before its own
+/// name: `Foo` for `void Foo::bar()`, `ns` for `void a::ns::helper()`.
+fn scope_owner(name: tree_sitter::Node, text: &str) -> Option<String> {
+    let parent = name
+        .parent()
+        .filter(|p| p.kind() == "qualified_identifier")?;
+    let scope = &text[parent.child_by_field_name("scope")?.byte_range()];
+    let last = scope.rsplit("::").next().unwrap_or(scope);
+    let last = last.split('<').next().unwrap_or(last).trim();
+    (!last.is_empty()).then(|| last.to_string())
 }
 
 /// The type a Rust definition is a member of: the nearest `impl` or `trait`
@@ -4910,6 +5046,7 @@ mod tests {
                         kind: ["function", "class"][next(2)].to_string(),
                         name: ["a", "b", "c"][next(3)].to_string(),
                         owner: None,
+                        receiver: None,
                         start,
                         end,
                         start_line: 1,
@@ -5701,8 +5838,9 @@ mod tests {
             symbols: &[
                 ("MaxHolders", "constant"),
                 ("Lock", "object"),
-                ("helper", "function"),
-                ("acquire", "function"),
+                // Members of `object Lock`, reached as `Lock.helper()`.
+                ("helper", "method"),
+                ("acquire", "method"),
             ],
             edges: &[("acquire", "helper", "calls")],
         },
@@ -7277,5 +7415,135 @@ fn typed(e: &Enabled) {
         let db = store(&[("src/A.java", java)]);
         let out = crate::store::edges_out(&db, "helper", &dependency_kinds()).unwrap();
         assert!(out.iter().all(|e| e.symbol.name != "helper"), "{out:#?}");
+    }
+
+    /// `from`'s call to `to` settled on the definition starting at `line` in
+    /// `path`, for when two definitions share a qualified name.
+    fn settles_at(db: &rusqlite::Connection, from: &str, to: &str, path: &str, line: u32) {
+        let out = crate::store::edges_out(db, from, &dependency_kinds()).unwrap();
+        let hits: Vec<_> = out
+            .iter()
+            .filter(|e| e.symbol.name == to && e.kind == "calls")
+            .collect();
+        assert_eq!(hits.len(), 1, "{from} -> {to} did not settle: {hits:#?}");
+        assert!(
+            [RESOLVED, EXTRACTED].contains(&hits[0].confidence.as_str()),
+            "{from} -> {to} is {}: {hits:#?}",
+            hits[0].confidence
+        );
+        assert_eq!(
+            (hits[0].symbol.path.as_str(), hits[0].symbol.start_line),
+            (path, line),
+            "{from} -> {to}: {hits:#?}"
+        );
+    }
+
+    fn kind_of(db: &rusqlite::Connection, name: &str, line: u32) -> String {
+        db.query_row(
+            "SELECT kind FROM symbols WHERE name = ?1 AND start_line = ?2",
+            rusqlite::params![name, line],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// #247: a top-level `fun helper()` in A.kt is qualified `A::helper`, the
+    /// same as `class A`'s member. The member is a method now, the top-level
+    /// one is a free function, `main`'s bare call (no `this` at the top
+    /// level) means the top-level one and `run`'s means the member.
+    #[test]
+    fn kotlin_top_level_functions_and_members_are_told_apart() {
+        let kt = "fun helper() {}\n\nfun main() {\n    helper()\n}\n\nclass A {\n    fun helper() {}\n    fun run() {\n        helper()\n    }\n}\n";
+        let db = store(&[("src/A.kt", kt)]);
+        assert_eq!(kind_of(&db, "helper", 1), "function");
+        assert_eq!(kind_of(&db, "helper", 8), "method");
+        settles_at(&db, "main", "helper", "src/A.kt", 1);
+        settles_at(&db, "run", "helper", "src/A.kt", 8);
+    }
+
+    /// #248: a Go method is qualified by its receiver type, so `t.F()` on the
+    /// method's own receiver and the method expression `T.F(t)` settle on
+    /// `T::F`, and a bare `F()` on the package's function.
+    #[test]
+    fn go_methods_are_qualified_by_their_receiver_type() {
+        let go = "package a\n\ntype T struct{}\n\nfunc F() {}\n\nfunc (t T) F() {}\n\nfunc (t *T) G() {\n\tt.F()\n}\n\nfunc H() {\n\tF()\n}\n\nfunc K(t T) {\n\tT.F(t)\n}\n";
+        let db = store(&[("a/a.go", go)]);
+        let qualified: String = db
+            .query_row(
+                "SELECT qualified FROM symbols WHERE name = 'F' AND kind = 'method'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(qualified, "T::F");
+        settles_at(&db, "G", "F", "a/a.go", 7);
+        settles_at(&db, "H", "F", "a/a.go", 5);
+        settles_at(&db, "K", "F", "a/a.go", 7);
+    }
+
+    /// In a Python class body a bare name reads the class's own namespace:
+    /// `x = deco(1)` is `C.deco`, not the module's `deco`.
+    #[test]
+    fn python_class_body_call_means_the_class_def() {
+        let py = "def deco(f):\n    return f\n\n\nclass C:\n    def deco(f):\n        return f\n\n    x = deco(1)\n\n    def m(self):\n        return deco(2)\n";
+        let db = store(&[("pkg/m.py", py)]);
+        settles_at(&db, "C", "deco", "pkg/m.py", 6);
+        // From inside a method a bare name reads the module, never the class.
+        settles_at(&db, "m", "deco", "pkg/m.py", 1);
+    }
+
+    /// Two definitions of one name in one file keep their own calls: `B::new`
+    /// calling `helper()` was written onto `A::new`, the first `new`, and the
+    /// call site on line 5 was lost.
+    #[test]
+    fn same_named_definitions_in_one_file_keep_their_own_calls() {
+        let rs = "fn helper() {}\nstruct A;\nimpl A { fn new() -> A { helper(); A } }\nstruct B;\nimpl B { fn new() -> B { helper(); B } }\n";
+        let db = store(&[("src/x.rs", rs)]);
+        let n = neighbours(&db, "helper", &[], false, &Scope::all()).unwrap();
+        let mut lines: Vec<_> = n
+            .callers
+            .iter()
+            .filter(|c| c.symbol.name == "new")
+            .map(|c| (c.symbol.start_line, c.line, c.confidence.clone()))
+            .collect();
+        lines.sort();
+        assert_eq!(
+            lines,
+            vec![
+                (3, Some(3), RESOLVED.to_string()),
+                (5, Some(5), RESOLVED.to_string())
+            ]
+        );
+    }
+
+    /// `go(self.go())` inside `S::go`: the receiver call is recursion, the
+    /// bare call on the same line is the free fn and is kept.
+    #[test]
+    fn a_bare_call_beside_a_receiver_copy_on_its_line_is_kept() {
+        let rs = "fn go(x: u8) {}\nstruct S;\nimpl S {\n    fn go(&self) -> u8 {\n        go(self.go());\n        0\n    }\n}\n";
+        let db = store(&[("src/r.rs", rs)]);
+        settles_at(&db, "go", "go", "src/r.rs", 1);
+    }
+
+    /// A C++ out-of-line definition is qualified by the scope it names, in
+    /// any file: `Foo::bar` is a method of `Foo`, `ns::helper` a function of
+    /// the namespace.
+    #[test]
+    fn cpp_out_of_line_definitions_are_qualified_by_their_scope() {
+        let cpp = "void Foo::bar() {}\nvoid ns::helper() {}\n";
+        let db = store(&[("src/impl.cpp", cpp)]);
+        let row = |name: &str| -> (String, String) {
+            db.query_row(
+                "SELECT kind, qualified FROM symbols WHERE name = ?1",
+                [name],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(row("bar"), ("method".to_string(), "Foo::bar".to_string()));
+        assert_eq!(
+            row("helper"),
+            ("function".to_string(), "ns::helper".to_string())
+        );
     }
 }

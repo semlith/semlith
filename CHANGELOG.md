@@ -24,7 +24,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stores answer this way without a re-index.
 - **A method that calls the free function of its own name records the
   call.** `fn lane(&self, id) { lane(id) }` was read as recursion and
-  dropped. Existing stores gain these edges as their files are re-indexed.
+  dropped, and so was the bare `go(..)` in `go(self.go())`.
+- **Two definitions of one name in one file keep their own calls.** Every
+  call `B::new` made was written onto `A::new`, the first `new` in the file,
+  and the call sites `B::new` had were lost; the same for each class's
+  `__init__` in a Python module. Each call now leaves from the definition
+  that holds it.
+- **Members and top-level functions are told apart in every language.** A
+  function declared in a class, interface or object body is a `method` (Python,
+  Kotlin, Scala and C++ grammars called them functions), so a top-level
+  `fun helper()` in `A.kt` no longer reads as a member of `class A`: a bare
+  call from the top level means it, and a bare call inside `class A` means the
+  member. In a class body where a bare call can be `this.f()` (Java, Kotlin,
+  C#, C++, Swift, Scala, Dart, Ruby), and in a Python class body itself, a
+  call to a name the class defines settles on that member.
+- **Go methods are qualified by their receiver type** (`T::F`, was the
+  package's `a::F`), so `t.F()` on a method's own receiver and `T.F(t)`
+  settle on the method; a C++ out-of-line definition is qualified by the
+  scope it names (`Foo::bar`, `ns::helper`) in whatever file it sits.
+- The extractor changes above take effect as files are re-indexed; the
+  resolver changes answer at once.
 - **Portal dialogs scroll instead of clipping.** On a short window the
   folder picker's list, or a long confirm, was squashed with no scrollbar;
   the dialog scrolls now.

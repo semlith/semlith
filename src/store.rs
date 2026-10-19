@@ -2138,10 +2138,13 @@ pub fn write_extraction(
     spans: &[(u32, u32, i64)],
 ) -> Result<(usize, usize)> {
     // Name to id, for the edges below. A file may define the same name
-    // twice — two `new` methods on two types — and the first wins, because
-    // an edge out of this file names its source by name and nothing here
-    // can tell them apart either.
+    // twice — two `new` methods on two types — so an edge leaves from the
+    // narrowest of them whose lines hold the line it was written on, and from
+    // the first when none does. Until 0.44.1 the first always won, and every
+    // call the second made was lost.
     let mut ids: std::collections::HashMap<&str, (i64, bool)> = std::collections::HashMap::new();
+    let mut extents: std::collections::HashMap<&str, Vec<(i64, u32, u32)>> =
+        std::collections::HashMap::new();
     // The file's own symbol, which an edge marked `from_module` leaves from
     // even when a definition shares its name.
     let mut module_id: Option<i64> = None;
@@ -2158,6 +2161,13 @@ pub fn write_extraction(
         if module && module_id.is_none() {
             module_id = Some(id);
         }
+        if !module {
+            extents.entry(symbol.name.as_str()).or_default().push((
+                id,
+                symbol.start_line,
+                symbol.end_line,
+            ));
+        }
         match ids.get(symbol.name.as_str()) {
             None => {
                 ids.insert(symbol.name.as_str(), (id, module));
@@ -2173,10 +2183,18 @@ pub fn write_extraction(
 
     let mut written = 0;
     for edge in &extraction.edges {
+        let covering = edge.line.and_then(|line| {
+            extents
+                .get(edge.from.as_str())?
+                .iter()
+                .filter(|(_, start, end)| (*start..=*end).contains(&line))
+                .min_by_key(|(_, start, end)| end - start)
+                .map(|(id, _, _)| *id)
+        });
         let src = match module_id {
             Some(id) if edge.from_module => id,
-            _ => match ids.get(edge.from.as_str()) {
-                Some(id) => *id,
+            _ => match covering.or_else(|| ids.get(edge.from.as_str()).copied()) {
+                Some(id) => id,
                 None => continue,
             },
         };
@@ -2461,7 +2479,8 @@ fn edges_out_below(
         None => String::new(),
     };
     let sql = format!(
-        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path, src.start_line, e.line
+        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path, src.start_line, e.line,
+                src.id, src.kind, src.qualified
          FROM symbols src
          JOIN files srcf ON srcf.id = src.file_id
          JOIN edges e ON e.src = src.id
@@ -2488,6 +2507,12 @@ fn edges_out_below(
             src_path: r.get(11)?,
             src_line: r.get(12)?,
             line: r.get(13)?,
+            src_id: r.get(14)?,
+            src_top_level: top_level(
+                &r.get::<_, String>(15)?,
+                &r.get::<_, String>(16)?,
+                &r.get::<_, String>(11)?,
+            ),
         })
     })?;
     let reached = rows.collect::<Result<Vec<_>, _>>()?;
@@ -2504,6 +2529,10 @@ struct Reached {
     src_path: String,
     src_line: u32,
     line: Option<u32>,
+    /// The definition the edge leaves from, and whether it sits at its file's
+    /// top level (see [`top_level`]).
+    src_id: i64,
+    src_top_level: bool,
 }
 
 /// Turn candidate rows into resolved edges.
@@ -2514,12 +2543,14 @@ struct Reached {
 /// answer, so a caller that used to read this list top to bottom still reads
 /// it in the same order.
 fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
-    // (source file, target name, edge kind, hint) — one edge in the source.
-    type Key = (String, String, String, Option<String>);
+    // (source definition, source file, target name, edge kind, hint) — one
+    // edge in the source.
+    type Key = (i64, String, String, String, Option<String>);
     let mut order: Vec<Key> = Vec::new();
     let mut groups: std::collections::HashMap<Key, Vec<Reached>> = std::collections::HashMap::new();
     for row in reached {
         let key = (
+            row.src_id,
             row.src_path.clone(),
             row.symbol.name.clone(),
             row.kind.clone(),
@@ -2540,11 +2571,12 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
     let mut out = Vec::new();
     for key in order {
         let mut candidates = groups.remove(&key).unwrap_or_default();
-        let (src_path, _, kind, hint) = &key;
+        let (_, src_path, _, kind, hint) = &key;
+        let top = candidates.first().is_some_and(|c| c.src_top_level);
         // What the call cannot mean (see `reachable`) is not ranked, and an
         // unsettled call does not list it either.
         let rows: Vec<&SymbolRow> = candidates.iter().map(|c| &c.symbol).collect();
-        let mut reach = reachable(kind, &rows, src_path, hint.as_deref()).into_iter();
+        let mut reach = reachable(kind, &rows, src_path, hint.as_deref(), top).into_iter();
         candidates.retain(|_| reach.next().unwrap_or(true));
         // A structural edge names a definition in its own file, on the line
         // the edge records; anything elsewhere with that name is not it.
@@ -2569,8 +2601,15 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
         let definitions = candidates.len();
 
         let rows: Vec<&SymbolRow> = candidates.iter().map(|c| &c.symbol).collect();
-        let (picked, settled) =
-            choose_for(db, kind, &rows, src_path, hint.as_deref(), &mut imports)?;
+        let (picked, settled) = choose_for(
+            db,
+            kind,
+            &rows,
+            src_path,
+            hint.as_deref(),
+            top,
+            &mut imports,
+        )?;
         // A receiver's edge that did not settle lists only what a method call
         // can mean; any other unsettled edge lists every candidate, as before.
         let receiver = hint
@@ -2620,9 +2659,10 @@ fn choose_for(
     candidates: &[&SymbolRow],
     src_path: &str,
     hint: Option<&str>,
+    caller_top_level: bool,
     imports: &mut std::collections::HashMap<String, Vec<String>>,
 ) -> Result<(Vec<bool>, bool)> {
-    let reach = reachable(kind, candidates, src_path, hint);
+    let reach = reachable(kind, candidates, src_path, hint, caller_top_level);
     if reach.iter().all(|r| *r) {
         return choose(db, candidates, src_path, hint, imports);
     }
@@ -2658,12 +2698,15 @@ fn choose_for(
 /// function. Only when a free function answers to the name: with none, the
 /// call may leave the corpus and is ranked as before. A hint that reads as a
 /// type (`Enabled::lane(..)`, `Self::new`) is a path to a method and keeps
-/// every candidate.
+/// every candidate. In any language, a bare call made at a file's top level
+/// (`caller_top_level`, see [`top_level`]) has no `this` to imply either:
+/// `helper()` in Kotlin's top-level `main` is not `class A`'s member.
 fn reachable(
     kind: &str,
     candidates: &[&SymbolRow],
     src_path: &str,
     hint: Option<&str>,
+    caller_top_level: bool,
 ) -> Vec<bool> {
     let mut keep = vec![true; candidates.len()];
     if kind != "calls" {
@@ -2674,12 +2717,19 @@ fn reachable(
             *k = c.kind != "module";
         }
     }
-    let bare = hint.is_none_or(|h| {
-        !h.starts_with(crate::graph::RECEIVER) && !h.chars().next().is_some_and(char::is_uppercase)
-    });
-    let receiver_free = crate::filter::language_of_path(src_path)
-        .is_some_and(|l| crate::graph::no_implicit_receiver(l.name));
-    if bare && receiver_free && candidates.iter().any(|c| free_function(c)) {
+    let lang = crate::filter::language_of_path(src_path).map(|l| l.name);
+    // Go writes `pkg.F()` and `t.F()` alike, and only the extractor knows
+    // which receivers are the method's own; any other lead may be a value.
+    let bare = match lang {
+        Some("go") => hint.is_none(),
+        _ => hint.is_none_or(|h| {
+            !h.starts_with(crate::graph::RECEIVER)
+                && !h.chars().next().is_some_and(char::is_uppercase)
+        }),
+    };
+    let receiver_free = lang.is_some_and(crate::graph::no_implicit_receiver);
+    let no_this = (bare && receiver_free) || (caller_top_level && hint.is_none());
+    if no_this && candidates.iter().any(|c| free_function(c)) {
         for (k, c) in keep.iter_mut().zip(candidates) {
             *k = *k && !owned_by_type(c);
         }
@@ -2751,16 +2801,29 @@ fn choose(
     Ok((keep, settled))
 }
 
-/// Whether a definition is a function no receiver can reach: not a method,
-/// and not owned by a type (`main::run`, Python's `helpers::make_response`,
-/// a function in `mod tests`). A method's owner is a type, upper case first.
-fn free_function(c: &SymbolRow) -> bool {
-    c.kind == "function"
-        && owner_of(&c.qualified).is_none_or(|o| !o.chars().next().is_some_and(char::is_uppercase))
+/// Whether a definition sits at its file's top level, where no `this` is in
+/// scope: the file's module symbol, or a function the file's own module name
+/// qualifies (`accel::lane` in accel.rs, `A::helper` in A.kt).
+fn top_level(kind: &str, qualified: &str, path: &str) -> bool {
+    let module = std::path::Path::new(path).file_stem();
+    kind == "module"
+        || (kind == "function" && owner_of(qualified).is_none_or(|o| module == Some(o.as_ref())))
 }
 
-/// What only a receiver can call: a method (Go's are qualified by their
-/// package, so the kind is what says so), or a function a type owns
+/// Whether a definition is a function no receiver can reach: not a method,
+/// and not owned by a type (`main::run`, Python's `helpers::make_response`,
+/// a function in `mod tests`). A method's owner is a type, upper case first —
+/// unless it is the file's own module name: `fun helper()` at the top of
+/// A.kt is qualified `A::helper`, and is no member of anything.
+fn free_function(c: &SymbolRow) -> bool {
+    let module = std::path::Path::new(&c.path).file_stem();
+    c.kind == "function"
+        && owner_of(&c.qualified).is_none_or(|o| {
+            !o.chars().next().is_some_and(char::is_uppercase) || module == Some(o.as_ref())
+        })
+}
+
+/// What only a receiver can call: a method, or a function a type owns
 /// (Python's `C::f`).
 fn owned_by_type(c: &SymbolRow) -> bool {
     c.kind == "method" || (c.kind == "function" && !free_function(c))
@@ -2883,7 +2946,10 @@ pub fn owner_of(qualified: &str) -> Option<&str> {
 /// 4. Nothing placed it.
 fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[String]) -> u8 {
     let typed = hint.filter(|h| h.chars().next().is_some_and(char::is_uppercase));
-    if typed.is_some_and(|t| owner_of(&candidate.qualified) == Some(t)) {
+    // A top-level function its upper-case file names (`A::helper` in A.kt)
+    // shares the qualified name of `class A`'s member, and is no member.
+    let in_type = !top_level(&candidate.kind, &candidate.qualified, &candidate.path);
+    if in_type && typed.is_some_and(|t| owner_of(&candidate.qualified) == Some(t)) {
         return 0;
     }
     let candidate = candidate.path.as_str();
@@ -3171,6 +3237,7 @@ pub fn edges_in_resolved(db: &Connection, name: &str, kinds: &[String]) -> Resul
                 &refs,
                 &caller.path,
                 hint.as_deref(),
+                top_level(&caller.kind, &caller.qualified, &caller.path),
                 &mut imports,
             )?
         };
