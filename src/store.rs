@@ -2138,10 +2138,13 @@ pub fn write_extraction(
     spans: &[(u32, u32, i64)],
 ) -> Result<(usize, usize)> {
     // Name to id, for the edges below. A file may define the same name
-    // twice — two `new` methods on two types — and the first wins, because
-    // an edge out of this file names its source by name and nothing here
-    // can tell them apart either.
+    // twice — two `new` methods on two types — so an edge leaves from the
+    // narrowest of them whose lines hold the line it was written on, and from
+    // the first when none does. Until 0.44.1 the first always won, and every
+    // call the second made was lost.
     let mut ids: std::collections::HashMap<&str, (i64, bool)> = std::collections::HashMap::new();
+    let mut extents: std::collections::HashMap<&str, Vec<(i64, u32, u32)>> =
+        std::collections::HashMap::new();
     // The file's own symbol, which an edge marked `from_module` leaves from
     // even when a definition shares its name.
     let mut module_id: Option<i64> = None;
@@ -2158,6 +2161,13 @@ pub fn write_extraction(
         if module && module_id.is_none() {
             module_id = Some(id);
         }
+        if !module {
+            extents.entry(symbol.name.as_str()).or_default().push((
+                id,
+                symbol.start_line,
+                symbol.end_line,
+            ));
+        }
         match ids.get(symbol.name.as_str()) {
             None => {
                 ids.insert(symbol.name.as_str(), (id, module));
@@ -2173,10 +2183,18 @@ pub fn write_extraction(
 
     let mut written = 0;
     for edge in &extraction.edges {
+        let covering = edge.line.and_then(|line| {
+            extents
+                .get(edge.from.as_str())?
+                .iter()
+                .filter(|(_, start, end)| (*start..=*end).contains(&line))
+                .min_by_key(|(_, start, end)| end - start)
+                .map(|(id, _, _)| *id)
+        });
         let src = match module_id {
             Some(id) if edge.from_module => id,
-            _ => match ids.get(edge.from.as_str()) {
-                Some(id) => *id,
+            _ => match covering.or_else(|| ids.get(edge.from.as_str()).copied()) {
+                Some(id) => id,
                 None => continue,
             },
         };
@@ -2461,7 +2479,8 @@ fn edges_out_below(
         None => String::new(),
     };
     let sql = format!(
-        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path, src.start_line, e.line
+        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path, src.start_line, e.line,
+                src.id, src.kind, src.qualified
          FROM symbols src
          JOIN files srcf ON srcf.id = src.file_id
          JOIN edges e ON e.src = src.id
@@ -2488,6 +2507,12 @@ fn edges_out_below(
             src_path: r.get(11)?,
             src_line: r.get(12)?,
             line: r.get(13)?,
+            src_id: r.get(14)?,
+            src_top_level: top_level(
+                &r.get::<_, String>(15)?,
+                &r.get::<_, String>(16)?,
+                &r.get::<_, String>(11)?,
+            ),
         })
     })?;
     let reached = rows.collect::<Result<Vec<_>, _>>()?;
@@ -2504,6 +2529,10 @@ struct Reached {
     src_path: String,
     src_line: u32,
     line: Option<u32>,
+    /// The definition the edge leaves from, and whether it sits at its file's
+    /// top level (see [`top_level`]).
+    src_id: i64,
+    src_top_level: bool,
 }
 
 /// Turn candidate rows into resolved edges.
@@ -2514,12 +2543,14 @@ struct Reached {
 /// answer, so a caller that used to read this list top to bottom still reads
 /// it in the same order.
 fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
-    // (source file, target name, edge kind, hint) — one edge in the source.
-    type Key = (String, String, String, Option<String>);
+    // (source definition, source file, target name, edge kind, hint) — one
+    // edge in the source.
+    type Key = (i64, String, String, String, Option<String>);
     let mut order: Vec<Key> = Vec::new();
     let mut groups: std::collections::HashMap<Key, Vec<Reached>> = std::collections::HashMap::new();
     for row in reached {
         let key = (
+            row.src_id,
             row.src_path.clone(),
             row.symbol.name.clone(),
             row.kind.clone(),
@@ -2540,15 +2571,13 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
     let mut out = Vec::new();
     for key in order {
         let mut candidates = groups.remove(&key).unwrap_or_default();
-        let (src_path, _, kind, hint) = &key;
-        // A call never means a module, unless nothing else has the name (see
-        // `choose_for`), and an unsettled call does not list one either.
-        if kind == "calls"
-            && candidates.iter().any(|c| c.symbol.kind == "module")
-            && candidates.iter().any(|c| c.symbol.kind != "module")
-        {
-            candidates.retain(|c| c.symbol.kind != "module");
-        }
+        let (_, src_path, _, kind, hint) = &key;
+        let top = candidates.first().is_some_and(|c| c.src_top_level);
+        // What the call cannot mean (see `reachable`) is not ranked, and an
+        // unsettled call does not list it either.
+        let rows: Vec<&SymbolRow> = candidates.iter().map(|c| &c.symbol).collect();
+        let mut reach = reachable(kind, &rows, src_path, hint.as_deref(), top).into_iter();
+        candidates.retain(|_| reach.next().unwrap_or(true));
         // A structural edge names a definition in its own file, on the line
         // the edge records; anything elsewhere with that name is not it.
         if structural(kind) {
@@ -2572,8 +2601,15 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
         let definitions = candidates.len();
 
         let rows: Vec<&SymbolRow> = candidates.iter().map(|c| &c.symbol).collect();
-        let (picked, settled) =
-            choose_for(db, kind, &rows, src_path, hint.as_deref(), &mut imports)?;
+        let (picked, settled) = choose_for(
+            db,
+            kind,
+            &rows,
+            src_path,
+            hint.as_deref(),
+            top,
+            &mut imports,
+        )?;
         // A receiver's edge that did not settle lists only what a method call
         // can mean; any other unsettled edge lists every candidate, as before.
         let receiver = hint
@@ -2615,30 +2651,120 @@ fn structural(kind: &str) -> bool {
     matches!(kind, "defines" | "contains")
 }
 
-/// [`choose`] for an edge of `kind`. A call never means a module: ripgrep's
-/// main.rs declares `mod search;` beside `fn search`, and the module made the
-/// bare call `search(&args, mode)` a tie. Modules are candidates only when
-/// nothing else answers to the name.
+/// [`choose`] for an edge of `kind`, over only the candidates it can reach
+/// (see [`reachable`]).
 fn choose_for(
     db: &Connection,
     kind: &str,
     candidates: &[&SymbolRow],
     src_path: &str,
     hint: Option<&str>,
+    caller_top_level: bool,
     imports: &mut std::collections::HashMap<String, Vec<String>>,
 ) -> Result<(Vec<bool>, bool)> {
-    let module = |c: &&SymbolRow| c.kind == "module";
-    if kind != "calls" || !candidates.iter().any(module) || candidates.iter().all(module) {
+    let reach = reachable(kind, candidates, src_path, hint, caller_top_level);
+    if reach.iter().all(|r| *r) {
         return choose(db, candidates, src_path, hint, imports);
     }
-    let callable: Vec<&SymbolRow> = candidates.iter().filter(|c| !module(c)).copied().collect();
+    let callable: Vec<&SymbolRow> = candidates
+        .iter()
+        .zip(&reach)
+        .filter(|(_, r)| **r)
+        .map(|(c, _)| *c)
+        .collect();
     let (picked, settled) = choose(db, &callable, src_path, hint, imports)?;
     let mut picked = picked.into_iter();
-    let keep = candidates
+    let keep = reach
         .iter()
-        .map(|c| !module(c) && picked.next().unwrap_or(false))
+        .map(|r| *r && picked.next().unwrap_or(false))
         .collect();
     Ok((keep, settled))
+}
+
+/// Which of `candidates` an edge of `kind` written in `src_path` with `hint`
+/// can mean at all, before anything is ranked.
+///
+/// A call never means a module: ripgrep's main.rs declares `mod search;`
+/// beside `fn search`, and the module made the bare call `search(&args, mode)`
+/// a tie. Modules are candidates only when nothing else answers to the name.
+///
+/// And a call with no receiver never means a method where the language has no
+/// implicit receiver ([`crate::graph::no_implicit_receiver`]): `lane(id)` beside
+/// `impl Enabled { fn lane(&self, ..) }` in accel.rs, or
+/// `crate::accel::lane("ane")` in daemon.rs, can only be the free fn
+/// `accel::lane`, and the tie with `Enabled::lane` hid both callers from the
+/// cloud's impact check when semlith#245 changed its return type. The mirror
+/// of [`through_receiver`], which never lets a receiver call mean a free
+/// function. Only when a free function answers to the name: with none, the
+/// call may leave the corpus and is ranked as before. A hint that reads as a
+/// type (`Enabled::lane(..)`, `Self::new`) is a path to a method and keeps
+/// every candidate. In any language, a bare call made at a file's top level
+/// (`caller_top_level`, see [`top_level`]) has no `this` to imply either:
+/// `helper()` in Kotlin's top-level `main` is not `class A`'s member.
+fn reachable(
+    kind: &str,
+    candidates: &[&SymbolRow],
+    src_path: &str,
+    hint: Option<&str>,
+    caller_top_level: bool,
+) -> Vec<bool> {
+    let mut keep = vec![true; candidates.len()];
+    if kind != "calls" {
+        return keep;
+    }
+    if candidates.iter().any(|c| c.kind != "module") {
+        for (k, c) in keep.iter_mut().zip(candidates) {
+            *k = c.kind != "module";
+        }
+    }
+    let lang = crate::filter::language_of_path(src_path).map(|l| l.name);
+    // A Rust file under a crate's `tests/`, `benches/` or `examples/` is a
+    // crate of its own, reachable only from beside it: the cloud's
+    // `semlith::accel::lane(..)` tied src/accel.rs's `lane` with a helper of
+    // that name in tests/accel.rs. ponytail: a `tests` module directory
+    // inside `src/` reads as one too; only test code calls into it.
+    if lang == Some("rust") {
+        let reached = |p: &str| {
+            !p.ends_with(".rs") || separate_crate(p).is_none_or(|dir| src_path.starts_with(dir))
+        };
+        if candidates
+            .iter()
+            .zip(&keep)
+            .any(|(c, k)| *k && reached(&c.path))
+        {
+            for (k, c) in keep.iter_mut().zip(candidates) {
+                *k = *k && reached(&c.path);
+            }
+        }
+    }
+    // Go writes `pkg.F()` and `t.F()` alike, and JavaScript `ns.f()` and
+    // `obj.f()`: only the extractor knows which leads are receivers, so
+    // there only a call with no lead at all is bare.
+    let bare = match lang {
+        Some("go" | "javascript" | "typescript" | "svelte" | "vue") => hint.is_none(),
+        _ => hint.is_none_or(|h| {
+            !h.starts_with(crate::graph::RECEIVER)
+                && !h.chars().next().is_some_and(char::is_uppercase)
+        }),
+    };
+    let receiver_free = lang.is_some_and(crate::graph::no_implicit_receiver);
+    let no_this = (bare && receiver_free) || (caller_top_level && hint.is_none());
+    // A module path drops methods only for a free function it places: in
+    // flask's drive, `d.fixtures.bulk()` named fixtures.py, which holds the
+    // method `Fixtures.bulk` and no free `bulk`.
+    let placed = |c: &SymbolRow| {
+        hint.is_none_or(|h| names_file(h, &c.path, src_path) || owner_of(&c.qualified) == Some(h))
+    };
+    let free_left = candidates
+        .iter()
+        .zip(&keep)
+        .any(|(c, k)| *k && free_function(c) && placed(c));
+    if no_this && free_left {
+        for (k, c) in keep.iter_mut().zip(candidates) {
+            *k = *k && !owned_by_type(c);
+        }
+    }
+    keep
 }
 
 /// Which of `candidates` an edge written in `src_path` with `hint` means, and
@@ -2665,14 +2791,20 @@ fn choose(
     if let Some(lead) = hint.and_then(|h| h.strip_prefix(crate::graph::RECEIVER)) {
         return Ok(through_receiver(candidates, src_path, lead));
     }
-    if candidates.len() == 1 {
+    // A module path (`std::env::current_dir()`, `os.getcwd()`) says where the
+    // target lives, so one that names no candidate's file, module or import
+    // went somewhere the store does not hold: the edge stays unsettled even
+    // with one candidate left. ripgrep's `std::env::current_dir()` was
+    // resolved onto `hiargs::current_dir` this way.
+    let path_hint = hint.filter(|h| !h.chars().next().is_some_and(char::is_uppercase));
+    if candidates.len() == 1 && path_hint.is_none() {
         return Ok((vec![true], true));
     }
     let mut ranks: Vec<u8> = candidates
         .iter()
         .map(|c| rank(c, src_path, hint, &[]))
         .collect();
-    if survivors(&ranks) != 1 && ranks.contains(&UNRANKED) {
+    if (survivors(&ranks) != 1 || path_hint.is_some()) && ranks.contains(&UNRANKED) {
         if !imports.contains_key(src_path) {
             let found = file_imports(db, src_path)?;
             imports.insert(src_path.to_string(), found);
@@ -2685,6 +2817,9 @@ fn choose(
     }
     let best = ranks.iter().copied().min().unwrap_or(UNRANKED);
     let mut keep: Vec<bool> = ranks.iter().map(|r| *r == best).collect();
+    if path_hint.is_some() && best == UNRANKED {
+        return Ok((keep, false));
+    }
     if best < UNRANKED && keep.iter().filter(|k| **k).count() > 1 {
         let near: Vec<usize> = candidates
             .iter()
@@ -2705,12 +2840,48 @@ fn choose(
     Ok((keep, settled))
 }
 
+/// The directory, separator included, that makes a Rust file a crate of its
+/// own: `semlith/tests/` for `semlith/tests/accel.rs`. `None` for a file of
+/// the library or binary.
+fn separate_crate(path: &str) -> Option<&str> {
+    let mut start = 0;
+    for (i, c) in path.char_indices() {
+        if c == '/' || c == '\\' {
+            if matches!(&path[start..i], "tests" | "benches" | "examples") {
+                return Some(&path[..=i]);
+            }
+            start = i + 1;
+        }
+    }
+    None
+}
+
+/// Whether a definition sits at its file's top level, where no `this` is in
+/// scope: the file's module symbol, or a function the file's own module name
+/// qualifies (`accel::lane` in accel.rs, `A::helper` in A.kt).
+fn top_level(kind: &str, qualified: &str, path: &str) -> bool {
+    let module = std::path::Path::new(path).file_stem();
+    kind == "module"
+        || (kind == "function" && owner_of(qualified).is_none_or(|o| module == Some(o.as_ref())))
+}
+
 /// Whether a definition is a function no receiver can reach: not a method,
 /// and not owned by a type (`main::run`, Python's `helpers::make_response`,
-/// a function in `mod tests`). A method's owner is a type, upper case first.
+/// a function in `mod tests`). A method's owner is a type, upper case first —
+/// unless it is the file's own module name: `fun helper()` at the top of
+/// A.kt is qualified `A::helper`, and is no member of anything.
 fn free_function(c: &SymbolRow) -> bool {
+    let module = std::path::Path::new(&c.path).file_stem();
     c.kind == "function"
-        && owner_of(&c.qualified).is_none_or(|o| !o.chars().next().is_some_and(char::is_uppercase))
+        && owner_of(&c.qualified).is_none_or(|o| {
+            !o.chars().next().is_some_and(char::is_uppercase) || module == Some(o.as_ref())
+        })
+}
+
+/// What only a receiver can call: a method, or a function a type owns
+/// (Python's `C::f`).
+fn owned_by_type(c: &SymbolRow) -> bool {
+    c.kind == "method" || (c.kind == "function" && !free_function(c))
 }
 
 /// What a call through a receiver (`x.run()`, `self.flush()`) means.
@@ -2729,8 +2900,7 @@ fn through_receiver(candidates: &[&SymbolRow], src_path: &str, lead: &str) -> (V
     // What a receiver can call: a method, or a function a type owns. With
     // none in the store the call leaves the corpus, and the edge lists what
     // shares the name, never a module (`searcher.search()` is not search.rs).
-    let method = |c: &SymbolRow| c.kind == "method" || (c.kind == "function" && !free_function(c));
-    let methods: Vec<bool> = candidates.iter().map(|c| method(c)).collect();
+    let methods: Vec<bool> = candidates.iter().map(|c| owned_by_type(c)).collect();
     let callable: Vec<bool> = candidates.iter().map(|c| c.kind != "module").collect();
     let pool = if methods.contains(&true) {
         methods
@@ -2754,7 +2924,7 @@ fn through_receiver(candidates: &[&SymbolRow], src_path: &str, lead: &str) -> (V
         let mut typed: Vec<bool> = candidates
             .iter()
             .zip(&pool)
-            .map(|(c, p)| *p && method(c) && owner_of(&c.qualified) == Some(lead))
+            .map(|(c, p)| *p && owned_by_type(c) && owner_of(&c.qualified) == Some(lead))
             .collect();
         if typed.iter().filter(|t| **t).count() > 1 {
             let near: Vec<usize> = candidates
@@ -2776,6 +2946,19 @@ fn through_receiver(candidates: &[&SymbolRow], src_path: &str, lead: &str) -> (V
             1 => return (typed, true),
             0 => {}
             _ => return (typed, false),
+        }
+    }
+    // `this.close()` where `this` is an object literal or a function's own
+    // object, a type the extractor cannot name: the one method of that name
+    // in the calling file is the one meant.
+    if lead.is_empty() {
+        let here: Vec<bool> = candidates
+            .iter()
+            .zip(&pool)
+            .map(|(c, p)| *p && c.path == src_path)
+            .collect();
+        if here.iter().filter(|h| **h).count() == 1 {
+            return (here, true);
         }
     }
     (pool, false)
@@ -2831,9 +3014,14 @@ pub fn owner_of(qualified: &str) -> Option<&str> {
 /// 4. Nothing placed it.
 fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[String]) -> u8 {
     let typed = hint.filter(|h| h.chars().next().is_some_and(char::is_uppercase));
-    if typed.is_some_and(|t| owner_of(&candidate.qualified) == Some(t)) {
+    // A top-level function its upper-case file names (`A::helper` in A.kt)
+    // shares the qualified name of `class A`'s member, and is no member.
+    let in_type = !top_level(&candidate.kind, &candidate.qualified, &candidate.path);
+    if in_type && typed.is_some_and(|t| owner_of(&candidate.qualified) == Some(t)) {
         return 0;
     }
+    // An inline `mod m { fn f() }` is named by `m::f()` as surely as m.rs is.
+    let in_named_module = hint.is_some_and(|h| owner_of(&candidate.qualified) == Some(h));
     let candidate = candidate.path.as_str();
     // A module path (`flask.Flask`, `index::read`) names where the target
     // is, so the calling file's own namesake wins only when the path names
@@ -2850,12 +3038,23 @@ fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[St
     if candidate == src_path && path_hint.is_none_or(names_caller) {
         return 1;
     }
-    if hint.is_some_and(|h| names_file(h, candidate, src_path)) {
+    if in_named_module || hint.is_some_and(|h| names_file(h, candidate, src_path)) {
         return 2;
     }
+    // Split on anything that is not part of a name, so a grouped
+    // `use super::{gdrive::{url, get_json}, oauth::TokenSet}` yields
+    // `gdrive` rather than one segment of braces, commas and newlines. A
+    // call that names its module counts only the imports that name it too:
+    // `std::env::current_dir()` is not placed by `use crate::dir::{..}`.
+    fn segments(i: &str) -> Vec<&str> {
+        i.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
     if imports.iter().any(|i| {
-        i.split(['/', '.', ':', '\\'])
-            .any(|segment| !segment.is_empty() && names_file(segment, candidate, src_path))
+        let parts = segments(i);
+        path_hint.is_none_or(|h| parts.contains(&h))
+            && parts.iter().any(|s| names_file(s, candidate, src_path))
     }) {
         return 3;
     }
@@ -3119,6 +3318,7 @@ pub fn edges_in_resolved(db: &Connection, name: &str, kinds: &[String]) -> Resul
                 &refs,
                 &caller.path,
                 hint.as_deref(),
+                top_level(&caller.kind, &caller.qualified, &caller.path),
                 &mut imports,
             )?
         };

@@ -5,6 +5,90 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.44.1] - 2026-10-19
+
+### Added
+
+- **The documents benchmark is in the repository.** `bench/scorecard/documents/`
+  holds the 127 frozen questions about passages inside 53 public documents
+  (PDF, Word, PowerPoint, Excel, OpenDocument, EPUB, RTF, notebooks, CSV), a
+  fetch step that downloads each from its publisher and checks its SHA-256,
+  the four retrieval arms and the headless Claude Code round, and the raw
+  scores of the run behind the numbers. Re-run on 0.44.1: `semlith_search`
+  finds the passage within 4k tokens for 116 of 127 questions, against 34 for
+  `rga` and 7 for `rg`; on Opus, an agent with semlith finds 124 of 127 and
+  quotes nothing it did not read, an agent with Grep, Glob and Read 80, with
+  41 of its 127 top quotes not in the document it names.
+- **The README's first screen** carries the install line, a three-command
+  quick start and the link to the scorecard.
+
+### Fixed
+
+- **A call with no receiver resolves to the function it names, not a tie
+  with a method.** `crate::accel::lane("ane")` in daemon.rs, and a bare
+  `lane(id)` beside `impl Enabled { fn lane(&self, ..) }`, were left
+  ambiguous between the free fn `accel::lane` and `Enabled::lane`, so
+  `semlith_neighbors`, `semlith_impact` and the cloud's impact check did not
+  list them as callers (semlith#245 changed `lane`'s return type and the
+  check said nothing outside the PR broke). In Rust, Python, Go and
+  JavaScript/TypeScript a call that is neither `x.f()` nor `Type::f()` cannot
+  reach a method, so when a free function answers to the name it is the one
+  meant. `Type::f()` still means the method, and languages where a bare call
+  inside a class can be `this.f()` (Java, Kotlin, C#, Swift, Ruby, PHP and the
+  rest) are unchanged. Resolution happens when an edge is read, so existing
+  stores answer this way without a re-index.
+- **A method that calls the free function of its own name records the
+  call.** `fn lane(&self, id) { lane(id) }` was read as recursion and
+  dropped, and so was the bare `go(..)` in `go(self.go())`.
+- **Two definitions of one name in one file keep their own calls.** Every
+  call `B::new` made was written onto `A::new`, the first `new` in the file,
+  and the call sites `B::new` had were lost; the same for each class's
+  `__init__` in a Python module. Each call now leaves from the definition
+  that holds it.
+- **Members and top-level functions are told apart in every language.** A
+  function declared in a class, interface or object body is a `method` (Python,
+  Kotlin, Scala and C++ grammars called them functions), so a top-level
+  `fun helper()` in `A.kt` no longer reads as a member of `class A`: a bare
+  call from the top level means it, and a bare call inside `class A` means the
+  member. In a class body where a bare call can be `this.f()` (Java, Kotlin,
+  C#, C++, Swift, Scala, Dart, Ruby), and in a Python class body itself, a
+  call to a name the class defines settles on that member.
+- **Go methods are qualified by their receiver type** (`T::F`, was the
+  package's `a::F`), so `t.F()` on a method's own receiver and `T.F(t)`
+  settle on the method; a C++ out-of-line definition is qualified by the
+  scope it names (`Foo::bar`, `ns::helper`) in whatever file it sits.
+- **A Rust integration test is not a library function.** A file under a
+  crate's `tests/`, `benches/` or `examples/` is reachable only from beside
+  it, so `semlith::accel::lane(..)` from another repository no longer ties
+  with a `lane` helper in `tests/accel.rs`. An enum variant receiver names its
+  enum: `Kind::Catchup.lane()` resolves to `Kind::lane`, inside a macro's
+  arguments too.
+- **A call into the standard library no longer lands on a namesake in your
+  code.** A module path that names none of the store's files, modules or
+  imports (`std::env::current_dir()`) stays unsettled instead of resolving to
+  the one `current_dir` the corpus happens to define; an inline
+  `mod m { fn f() }` is named by `m::f()`.
+- **JavaScript member calls are calls through a receiver.** `store.search()`
+  and `view.sel.clear()` carry their object as a hint, as in TypeScript
+  (they read as bare calls), and `this.f()` / `super.f()` are receiver calls;
+  a `this` whose type nothing names settles on the one method of that name in
+  the file.
+- **A grouped Rust `use` places what it imports.** `use super::{Item,
+  gdrive::{base, url}}` now ranks gdrive.rs for a bare `url(..)`; the import
+  list was split only on `/ . : \`, so braces and commas hid every module.
+- **A Rust `fn` in a module body is a function** (`mod tests { fn b() }` was
+  tagged a method), and a method of `impl Trait for Box<dyn Error>` belongs to
+  the trait.
+- The extractor changes above take effect as files are re-indexed; the
+  resolver changes answer at once.
+- **A live Slack token no longer reads as a typed placeholder by chance.**
+  The secret scanner looked for a run like `12345678` across the whole token,
+  so `…3312-3456786…` spelled one over the `-` and a real token scored 55,
+  under the floor it refuses at; runs are read inside one segment now.
+- **Portal dialogs scroll instead of clipping.** On a short window the
+  folder picker's list, or a long confirm, was squashed with no scrollbar;
+  the dialog scrolls now.
+
 ## [0.44.0] - 2026-10-18
 
 ### Added

@@ -157,6 +157,31 @@ pub fn has_graph(lang: &str) -> bool {
     grammar(lang).is_some()
 }
 
+/// Whether a bare `f()` in this language can only mean a function, never a
+/// method of the type around the call. True for Rust, Python, Go and
+/// JavaScript and TypeScript (Svelte and Vue scripts included): a method there
+/// is reached through `self.`, `this.` or a value. Java, Kotlin, Scala,
+/// Groovy, C#, C++, Objective-C, Swift, Dart, Ruby and PHP are left out, as is
+/// every language not named here, because inside a class body a bare
+/// `helper()` can be `this.helper()`.
+pub(crate) fn no_implicit_receiver(lang: &str) -> bool {
+    matches!(
+        lang,
+        "rust" | "python" | "go" | "javascript" | "typescript" | "svelte" | "vue"
+    )
+}
+
+/// Whether a bare `helper()` inside a class body can be `this.helper()`: the
+/// languages [`no_implicit_receiver`] leaves out because of it. PHP and
+/// Objective-C are not here — a member there is reached only through `$this`
+/// or `self` — and neither is any language without classes.
+fn implicit_receiver(lang: &str) -> bool {
+    matches!(
+        lang,
+        "java" | "kotlin" | "scala" | "groovy" | "csharp" | "cpp" | "swift" | "dart" | "ruby"
+    )
+}
+
 /// Every language the graph covers, in the table's own order.
 pub fn languages() -> Vec<&'static str> {
     crate::filter::LANGUAGES
@@ -427,6 +452,13 @@ fn supplement(lang: &str) -> &'static str {
                   (unary_expression) (binary_expression)
                   (call_expression) (new_expression)
                 ])) @definition.constant
+            ; `store.search(...)`, `view.sel.clear()`: the object is the hint,
+            ; as in TypeScript. Without it every member call read as a bare
+            ; one.
+            (call_expression
+              function: (member_expression
+                object: (_) @hint
+                property: (property_identifier) @name)) @reference.call
         "#
         }
         "php" => {
@@ -741,15 +773,22 @@ fn queries(lang: &'static str, language: &Language, tags: &str) -> &'static [Que
 struct Def {
     kind: String,
     name: String,
-    /// The type a Rust method belongs to — the `impl` or `trait` block around
-    /// it — which the tree says and the enclosing-definition rule cannot,
-    /// because an `impl` block is not a definition of its own.
+    /// The type a method belongs to where the tree says so outside any class
+    /// body: a Rust `impl` or `trait` block, a Go receiver, a C++ out-of-line
+    /// `Foo::bar` — which the enclosing-definition rule cannot see, because
+    /// none of them is a definition of its own.
     owner: Option<String>,
+    /// What a Go method calls its receiver (`t` in `func (t *T) F()`), the
+    /// name that plays `self` inside it.
+    receiver: Option<String>,
     start: usize,
     end: usize,
     start_line: u32,
     end_line: u32,
 }
+
+/// The definition kinds a method can be declared inside.
+const CLASS_KINDS: &[&str] = &["class", "interface", "object"];
 
 /// A reference found in the tree, with the byte offset that places it inside a
 /// definition.
@@ -757,12 +796,17 @@ struct Ref {
     name: String,
     kind: &'static str,
     at: usize,
+    /// Where the referenced name itself starts. Two captures of one call
+    /// agree on it even when they captured different nodes around it.
+    name_at: usize,
     line: u32,
     hint: Option<String>,
     /// The call went through a receiver (`x.f()`), so it means a method.
     method: bool,
     /// That receiver is `self`, `this` or `cls`: the enclosing class.
     on_self: bool,
+    /// That receiver is `super`: a method, of a class the call does not name.
+    on_super: bool,
 }
 
 /// The deepest nesting a block grammar is given. tree-sitter-md and
@@ -945,9 +989,21 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         start_line: 1,
         end_line: text.lines().count().max(1) as u32,
     }];
-    let mut edges: Vec<Edge> = Vec::new();
+    // Each edge with the definition it leaves from, so two definitions of
+    // one name in a file (`A::new` and `B::new`) each keep their calls.
+    let mut edges: Vec<(Option<usize>, Edge)> = Vec::new();
 
     let parents = enclosing_each(&defs);
+    // A function declared in a class body is a method of it. Kotlin, Python
+    // and C++ grammars tag both as functions, and a member then read the same
+    // as a top-level function the file's module name happens to qualify
+    // (`A::helper` in A.kt), so the resolver could not tell them apart.
+    for i in 0..defs.len() {
+        let in_class = parents[i].is_some_and(|p| CLASS_KINDS.contains(&defs[p].kind.as_str()));
+        if defs[i].kind == "function" && in_class {
+            defs[i].kind = "method".to_string();
+        }
+    }
     for (i, def) in defs.iter().enumerate() {
         let parent = parents[i].map(|p| defs[p].name.clone());
         // The owner outranks the enclosing definition: `Fleet::search_preferring`
@@ -973,27 +1029,33 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
             continue;
         }
         match parent {
-            Some(p) => edges.push(Edge {
-                from: p,
-                to: def.name.clone(),
-                kind: "contains".to_string(),
-                confidence: EXTRACTED.to_string(),
-                hint: None,
-                // A structural edge has no call site, so it carries the line
-                // the definition itself starts on rather than nothing: that is
-                // where the source says the containment happens.
-                line: Some(def.start_line),
-                from_module: false,
-            }),
-            None => edges.push(Edge {
-                from: module.clone(),
-                to: def.name.clone(),
-                kind: "defines".to_string(),
-                confidence: EXTRACTED.to_string(),
-                hint: None,
-                line: Some(def.start_line),
-                from_module: true,
-            }),
+            Some(p) => edges.push((
+                parents[i],
+                Edge {
+                    from: p,
+                    to: def.name.clone(),
+                    kind: "contains".to_string(),
+                    confidence: EXTRACTED.to_string(),
+                    hint: None,
+                    // A structural edge has no call site, so it carries the line
+                    // the definition itself starts on rather than nothing: that is
+                    // where the source says the containment happens.
+                    line: Some(def.start_line),
+                    from_module: false,
+                },
+            )),
+            None => edges.push((
+                None,
+                Edge {
+                    from: module.clone(),
+                    to: def.name.clone(),
+                    kind: "defines".to_string(),
+                    confidence: EXTRACTED.to_string(),
+                    hint: None,
+                    line: Some(def.start_line),
+                    from_module: true,
+                },
+            )),
         }
     }
 
@@ -1018,7 +1080,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         // and a cycle there hung the whole file (cobra completions.go).
         for _ in 0..defs.len() {
             let i = at?;
-            if defs[i].kind == "class" {
+            if CLASS_KINDS.contains(&defs[i].kind.as_str()) {
                 return Some(defs[i].name.clone());
             }
             at = parents[i];
@@ -1026,6 +1088,46 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         None
     };
 
+    // The class definition a reference sits in, by index: the nearest
+    // enclosing definition of a class kind.
+    let class_at = |at: Option<usize>| -> Option<usize> {
+        let mut at = at;
+        for _ in 0..defs.len() {
+            let i = at?;
+            if CLASS_KINDS.contains(&defs[i].kind.as_str()) {
+                return Some(i);
+            }
+            at = parents[i];
+        }
+        None
+    };
+    // A bare call to a name the enclosing class itself defines means that
+    // member: inside a class body where a bare `helper()` is `this.helper()`
+    // (Java, Kotlin, C#, C++, Swift and the rest of `implicit_receiver`), and
+    // in a Python class body itself, where `x = deco(1)` reads the class's
+    // own namespace — though never from inside a Python method, where it
+    // reads the module's.
+    let member = |holder: Option<usize>, name: &str| -> Option<String> {
+        let class = if implicit_receiver(lang) {
+            class_at(holder)?
+        } else if lang == "python" {
+            holder.filter(|h| CLASS_KINDS.contains(&defs[*h].kind.as_str()))?
+        } else {
+            return None;
+        };
+        (0..defs.len())
+            .any(|j| parents[j] == Some(class) && defs[j].name == name && j != class)
+            .then(|| defs[class].name.clone())
+    };
+
+    // Where each call through a receiver names its target. The bundled query
+    // captures `self.go()` a second time with no receiver, and that copy must
+    // not read as a bare call; `go(x.go())` still has one.
+    let through: std::collections::HashSet<usize> = refs
+        .iter()
+        .filter(|r| r.method || r.on_self)
+        .map(|r| r.name_at)
+        .collect();
     let holders = innermost_at(&defs, refs.iter().map(|r| r.at), None);
     for (reference, holder) in refs.iter().zip(holders) {
         let enclosing = holder.map(|h| &defs[h]);
@@ -1034,16 +1136,33 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
             None => module.clone(),
         };
         let owner = class_of(holder);
+        // Go names its receiver instead of calling it `self`: `t.F()` inside
+        // `func (t *T) G()` goes through the method's own receiver.
+        let go_self = lang == "go"
+            && reference
+                .hint
+                .as_ref()
+                .is_some_and(|h| enclosing.and_then(|d| d.receiver.as_ref()) == Some(h));
+        let on_self = reference.on_self || go_self;
+        let member = match (&reference.hint, on_self, reference.kind) {
+            (None, false, "calls") => member(holder, &reference.name),
+            _ => None,
+        };
         // A receiver is what the call went through: its type where the
         // source states it, `self`'s class, or the receiver's own name. A
         // Python object the file imported as a module (`import json` then
         // `json.loads()`) is a module path, not a receiver.
-        let lead = match (&reference.hint, reference.on_self) {
+        let lead = match (&reference.hint, on_self) {
+            (_, true) if go_self => owner.clone(),
             (Some(h), _) => Some(h.clone()),
             (None, true) => owner.clone(),
-            (None, false) => None,
+            (None, false) => member.clone(),
         };
-        let method = reference.method
+        // `this.close()` goes through a receiver; JavaScript and TypeScript
+        // capture it as a hint, which drops `this`, and it read as bare.
+        let this_call = (on_self || reference.on_super)
+            && matches!(lang, "javascript" | "typescript" | "svelte" | "vue");
+        let method = (reference.method || go_self || this_call)
             && !(lang == "python"
                 && !reference.on_self
                 && lead.as_ref().is_some_and(|l| {
@@ -1053,10 +1172,17 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         // same name through anything but the caller's own class is not
         // recursion: `Fleet::search_preferring` calling
         // `store.search_preferring()`, or helpers.py's `make_response` calling
-        // `current_app.make_response(args)` (2026-10-14 audit, G2).
+        // `current_app.make_response(args)` (2026-10-14 audit, G2). Nor is a
+        // bare call inside a method where no implicit receiver exists:
+        // `fn lane(&self, id) { lane(id) }` in an `impl` calls the free fn.
+        let in_method = owner.is_some() || enclosing.is_some_and(|d| d.kind == "method");
         let recursion = from == reference.name
             && match &lead {
-                None => true,
+                None => {
+                    method
+                        || through.contains(&reference.name_at)
+                        || !(in_method && no_implicit_receiver(lang))
+                }
                 Some(l) => owner.as_ref() == Some(l) || (!method && l == "Self"),
             };
         if recursion {
@@ -1079,17 +1205,20 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         let hint = if method {
             Some(format!("{RECEIVER}{}", lead.unwrap_or_default()))
         } else {
-            reference.hint.clone()
+            reference.hint.clone().or(member)
         };
-        edges.push(Edge {
-            from,
-            to: reference.name.clone(),
-            kind: reference.kind.to_string(),
-            confidence: confidence.to_string(),
-            hint,
-            line: Some(reference.line),
-            from_module: enclosing.is_none(),
-        });
+        edges.push((
+            holder,
+            Edge {
+                from,
+                to: reference.name.clone(),
+                kind: reference.kind.to_string(),
+                confidence: confidence.to_string(),
+                hint,
+                line: Some(reference.line),
+                from_module: enclosing.is_none(),
+            },
+        ));
     }
 
     // One call can be captured by both the bundled query and the supplement,
@@ -1097,9 +1226,10 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
     // alone would keep whichever landed first; ordering by confidence and then
     // by whether a hint is present makes the best-informed copy of each edge
     // the one that survives.
-    edges.sort_by(|a, b| {
+    edges.sort_by(|(x, a), (y, b)| {
         (
             &a.from,
+            x,
             &a.to,
             &a.kind,
             a.from_module,
@@ -1111,6 +1241,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         )
             .cmp(&(
                 &b.from,
+                y,
                 &b.to,
                 &b.kind,
                 b.from_module,
@@ -1121,9 +1252,10 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 b.line,
             ))
     });
-    edges.dedup_by(|a, b| {
-        (&a.from, &a.to, &a.kind, a.from_module) == (&b.from, &b.to, &b.kind, b.from_module)
+    edges.dedup_by(|(x, a), (y, b)| {
+        (&a.from, x, &a.to, &a.kind, a.from_module) == (&b.from, y, &b.to, &b.kind, b.from_module)
     });
+    let edges = edges.into_iter().map(|(_, e)| e).collect();
 
     Ok(Some(Extraction { symbols, edges }))
 }
@@ -1218,6 +1350,7 @@ fn collect(
                 name: target,
                 kind,
                 at: node.start_byte(),
+                name_at: name.map_or(node.start_byte(), |n| n.start_byte()),
                 line: node.start_position().row as u32 + 1,
                 // A receiver whose type the source states is a better lead
                 // than its variable name: `store.search_preferring()` names a
@@ -1225,11 +1358,13 @@ fn collect(
                 // one that does.
                 hint: hint.and_then(|h| {
                     rust.and_then(|fields| receiver_type(h, text, fields))
+                        .or_else(|| rust.and_then(|_| token_variant_owner(h, text)))
                         .or_else(|| hint_text(h, text))
                 }),
                 method,
                 on_self: hint
                     .is_some_and(|h| matches!(&text[h.byte_range()], "self" | "this" | "cls")),
+                on_super: hint.is_some_and(|h| &text[h.byte_range()] == "super"),
             });
         }
 
@@ -1244,6 +1379,28 @@ fn collect(
                 definition_span(node, name)
             };
             let raw = &text[name.byte_range()];
+            let scope = scope_owner(name, text);
+            let go = go_receiver(span, text);
+            let owner = match rust {
+                Some(_) => rust_owner(span, text),
+                None => go.as_ref().map(|(ty, _)| ty.clone()).or(scope.clone()),
+            };
+            // `void ns::helper() {}` is a namespace's function, which the
+            // grammar tags as a method because of its qualified name; so is a
+            // Rust `fn` in a `mod tests { }` body, which the grammar shapes
+            // like an `impl`'s.
+            // ponytail: case decides type vs namespace (`Foo::` vs `ns::`), the
+            // convention nearly every C++ codebase keeps; a lower-case class
+            // defined out of line reads as a namespace function.
+            let namespace = match &scope {
+                Some(s) => !s.starts_with(char::is_uppercase),
+                None => rust.is_some() && owner.is_none(),
+            };
+            let kind = if kind == "method" && namespace {
+                "function"
+            } else {
+                kind
+            };
             defs.push(Def {
                 kind: kind.to_string(),
                 name: if kind == "heading" {
@@ -1251,7 +1408,8 @@ fn collect(
                 } else {
                     raw.to_string()
                 },
-                owner: rust.and_then(|_| rust_owner(span, text)),
+                owner,
+                receiver: go.and_then(|(_, name)| name),
                 start: span.start_byte(),
                 end: span.end_byte(),
                 start_line: span.start_position().row as u32 + 1,
@@ -1283,6 +1441,7 @@ fn markdown_sections(text: &str) -> Vec<Def> {
                 kind: "heading".to_string(),
                 name: h.title.clone(),
                 owner: None,
+                receiver: None,
                 start: byte(h.line as usize - 1),
                 end: byte(end_line)
                     .saturating_sub(1)
@@ -1359,14 +1518,50 @@ impl RustFields {
     }
 }
 
+/// The type a Go method's receiver names, and the receiver's own name: `T`
+/// and `t` for `func (t *T) F()` and for `func (t T[K]) F()`. Without it a method was qualified by its package
+/// (`a::F`), and no type the source states could ever select it.
+fn go_receiver(node: tree_sitter::Node, text: &str) -> Option<(String, Option<String>)> {
+    let receiver = node.child_by_field_name("receiver")?;
+    let mut cursor = receiver.walk();
+    let parameter = receiver
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "parameter_declaration")?;
+    let ty = &text[parameter.child_by_field_name("type")?.byte_range()];
+    let ty = ty.trim_start_matches('*');
+    let ty = ty.split('[').next().unwrap_or(ty).trim();
+    let name = parameter
+        .child_by_field_name("name")
+        .map(|n| text[n.byte_range()].to_string());
+    (!ty.is_empty()).then(|| (ty.to_string(), name))
+}
+
+/// The class or namespace a C++ out-of-line definition names before its own
+/// name: `Foo` for `void Foo::bar()`, `ns` for `void a::ns::helper()`.
+fn scope_owner(name: tree_sitter::Node, text: &str) -> Option<String> {
+    let parent = name
+        .parent()
+        .filter(|p| p.kind() == "qualified_identifier")?;
+    let scope = &text[parent.child_by_field_name("scope")?.byte_range()];
+    let last = scope.rsplit("::").next().unwrap_or(scope);
+    let last = last.split('<').next().unwrap_or(last).trim();
+    (!last.is_empty()).then(|| last.to_string())
+}
+
 /// The type a Rust definition is a member of: the nearest `impl` or `trait`
 /// block around it. A function nested inside another function, or a module in
-/// between, belongs to neither.
+/// between, belongs to neither. An `impl Trait for Box<dyn Error>`, whose type
+/// names nothing, is the trait's.
 fn rust_owner(node: tree_sitter::Node, text: &str) -> Option<String> {
     let mut at = node.parent();
     while let Some(n) = at {
         match n.kind() {
-            "impl_item" => return rust_type_name(n.child_by_field_name("type")?, text),
+            "impl_item" => {
+                return n
+                    .child_by_field_name("type")
+                    .and_then(|t| rust_type_name(t, text))
+                    .or_else(|| rust_type_name(n.child_by_field_name("trait")?, text));
+            }
             "trait_item" => {
                 return n
                     .child_by_field_name("name")
@@ -1434,6 +1629,34 @@ fn receiver_type(receiver: tree_sitter::Node, text: &str, fields: &RustFields) -
         .filter(|name| !STD_TYPES.contains(&name.as_str()))
 }
 
+/// [`expr_ty`]'s enum variant rule for a receiver inside a macro's arguments,
+/// where the tree holds tokens rather than a path: `Kind :: Catchup` before
+/// `.lane()` in `assert_eq!(Kind::Catchup.lane(), 1)` names `Kind`.
+fn token_variant_owner(variant: tree_sitter::Node, text: &str) -> Option<String> {
+    let upper = |s: &str| s.starts_with(char::is_uppercase);
+    if !upper(&text[variant.byte_range()]) {
+        return None;
+    }
+    let separator = variant
+        .prev_sibling()
+        .filter(|s| &text[s.byte_range()] == "::")?;
+    let owner = &text[separator.prev_sibling()?.byte_range()];
+    if !upper(owner) {
+        return None;
+    }
+    if owner != "Self" {
+        return Some(owner.to_string());
+    }
+    let mut at = variant.parent();
+    while let Some(n) = at {
+        if n.kind() == "function_item" {
+            return rust_owner(n, text);
+        }
+        at = n.parent();
+    }
+    None
+}
+
 /// The type an expression evaluates to, where the source states it.
 fn expr_ty(node: tree_sitter::Node, text: &str, fields: &RustFields, depth: u8) -> Option<Ty> {
     if depth > 8 {
@@ -1472,6 +1695,30 @@ fn expr_ty(node: tree_sitter::Node, text: &str, fields: &RustFields, depth: u8) 
                 .child_by_field_name("value")
                 .or_else(|| node.named_child(0))?;
             expr_ty(inner, text, fields, depth + 1)
+        }
+        // An enum variant is a value of its enum: `Kind::Catchup.lane()`
+        // calls `Kind::lane`, and `Self::Catchup` is the `impl`'s type.
+        "scoped_identifier" => {
+            let variant = &text[node.child_by_field_name("name")?.byte_range()];
+            let path = &text[node.child_by_field_name("path")?.byte_range()];
+            let owner = path.rsplit("::").next().unwrap_or(path);
+            if !variant.starts_with(char::is_uppercase) || !owner.starts_with(char::is_uppercase) {
+                return None;
+            }
+            if owner != "Self" {
+                return Some(Ty {
+                    name: owner.to_string(),
+                    elem: None,
+                });
+            }
+            let mut at = node.parent();
+            while let Some(n) = at {
+                if n.kind() == "function_item" {
+                    return rust_owner(n, text).map(|name| Ty { name, elem: None });
+                }
+                at = n.parent();
+            }
+            None
         }
         _ => None,
     }
@@ -4880,6 +5127,7 @@ mod tests {
                         kind: ["function", "class"][next(2)].to_string(),
                         name: ["a", "b", "c"][next(3)].to_string(),
                         owner: None,
+                        receiver: None,
                         start,
                         end,
                         start_line: 1,
@@ -5671,8 +5919,9 @@ mod tests {
             symbols: &[
                 ("MaxHolders", "constant"),
                 ("Lock", "object"),
-                ("helper", "function"),
-                ("acquire", "function"),
+                // Members of `object Lock`, reached as `Lock.helper()`.
+                ("helper", "method"),
+                ("acquire", "method"),
             ],
             edges: &[("acquire", "helper", "calls")],
         },
@@ -6951,5 +7200,610 @@ mod audit_tests {
         }
         assert_eq!(distinct, names.len() as i64);
         assert!(crate::store::builtin_targets(&db).unwrap() >= 7);
+    }
+}
+
+/// semlith#245: a free function beside a method of the same name.
+///
+/// `pub fn lane(id)` and `impl Enabled { fn lane(&self, id) }` both sit in
+/// src/accel.rs. A bare `lane(id)` there tied at rank 1, and
+/// `crate::accel::lane("ane")` from daemon.rs tied at rank 2, so both callers
+/// were ambiguous and the cloud impact check missed them. In a language with
+/// no implicit receiver a call that is neither `x.f()` nor `Type::f()` cannot
+/// reach a method, so it means the free function.
+#[cfg(test)]
+mod tie_tests {
+    use super::*;
+
+    /// A store holding each `(path, source)` pair, written by the writer
+    /// `index_set` uses.
+    fn store(files: &[(&str, &str)]) -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::store::prepare_for_tests(&db);
+        for (path, text) in files {
+            let file = crate::store::insert_file(&db, path, path, text.len() as u64, 0).unwrap();
+            let e = extract(Path::new(path), text).unwrap().unwrap();
+            crate::store::write_extraction(&db, &e, file, &[]).unwrap();
+        }
+        db
+    }
+
+    const ACCEL: &str = r#"pub fn lane(id: &str) -> Option<u8> {
+    if id == "ane" { Some(1) } else { None }
+}
+
+pub struct Enabled;
+
+impl Enabled {
+    pub fn lane(&self, id: &str) -> bool {
+        id == "ane"
+    }
+}
+
+pub fn warm() {
+    lane("ane");
+}
+
+fn typed(e: &Enabled) {
+    Enabled::lane(e, "x");
+}
+"#;
+
+    /// `from`'s call to `to` settled on the definition at `path` named
+    /// `qualified`, from both ends: `edges_out` from the caller, and the
+    /// caller row `neighbours` lists for the callee.
+    fn settles_on(db: &rusqlite::Connection, from: &str, to: &str, path: &str, qualified: &str) {
+        let out = crate::store::edges_out(db, from, &dependency_kinds()).unwrap();
+        let hits: Vec<_> = out.iter().filter(|e| e.symbol.name == to).collect();
+        assert_eq!(hits.len(), 1, "{from} -> {to} did not settle: {hits:#?}");
+        assert!(
+            [RESOLVED, EXTRACTED].contains(&hits[0].confidence.as_str()),
+            "{from} -> {to} is {}: {hits:#?}",
+            hits[0].confidence
+        );
+        assert_eq!(
+            (
+                hits[0].symbol.path.as_str(),
+                hits[0].symbol.qualified.as_str()
+            ),
+            (path, qualified),
+            "{from} -> {to}"
+        );
+        let n = neighbours(db, to, &[], false, &Scope::all()).unwrap();
+        let caller: Vec<_> = n.callers.iter().filter(|c| c.symbol.name == from).collect();
+        assert_eq!(caller.len(), 1, "{from} as a caller of {to}: {caller:#?}");
+        assert!(
+            [RESOLVED, EXTRACTED].contains(&caller[0].confidence.as_str()),
+            "{from} as a caller of {to} is {}: {caller:#?}",
+            caller[0].confidence
+        );
+        assert_eq!(
+            caller[0].means.as_deref(),
+            Some(qualified),
+            "{from} as a caller of {to}"
+        );
+    }
+
+    /// semlith#245, in-file: `warm()` calls `lane("ane")` beside both the free
+    /// `accel::lane` and `Enabled::lane`. Rust has no implicit `self`, so the
+    /// bare call is the free function.
+    #[test]
+    fn rust_bare_call_beside_a_method_means_the_free_function() {
+        let db = store(&[("src/accel.rs", ACCEL)]);
+        settles_on(&db, "warm", "lane", "src/accel.rs", "accel::lane");
+    }
+
+    /// semlith#245, from daemon.rs: `crate::accel::lane("ane")` names
+    /// accel.rs, which holds both `lane`s; a module path never reaches a
+    /// method, so `run` is a resolved caller of the free function.
+    #[test]
+    fn rust_module_path_call_means_the_free_function() {
+        let db = store(&[
+            ("src/accel.rs", ACCEL),
+            (
+                "src/daemon.rs",
+                "fn run() {\n    crate::accel::lane(\"ane\");\n}\n",
+            ),
+        ]);
+        settles_on(&db, "run", "lane", "src/accel.rs", "accel::lane");
+    }
+
+    /// semlith#245, cross-root: the cloud worker calls
+    /// `semlith::accel::lane("remote")` from another repository root.
+    #[test]
+    fn rust_module_path_call_from_another_root_means_the_free_function() {
+        let db = store(&[
+            ("semlith/src/accel.rs", ACCEL),
+            (
+                "semlith-cloud/src/bin/worker.rs",
+                "fn warm_remote() {\n    semlith::accel::lane(\"remote\");\n}\n",
+            ),
+        ]);
+        settles_on(
+            &db,
+            "warm_remote",
+            "lane",
+            "semlith/src/accel.rs",
+            "accel::lane",
+        );
+    }
+
+    const PYTHON_M: &str = "def f():\n    return 1\n\n\nclass C:\n    def f(self):\n        return 2\n\n\ndef g():\n    f()\n";
+
+    /// Python reaches a method only through `self.f()` or `C.f()`: a bare
+    /// `f()` in m.py, beside `def f()` and `class C: def f(self)`, is the
+    /// module's function. Python records the method as a function owned by
+    /// `C` (`C::f`).
+    #[test]
+    fn python_bare_call_beside_a_method_means_the_free_function() {
+        let db = store(&[("pkg/m.py", PYTHON_M)]);
+        settles_on(&db, "g", "f", "pkg/m.py", "m::f");
+    }
+
+    /// `from m import f` imports the module's function, never `C.f`: both sat
+    /// in the imported file and tied at rank 3.
+    #[test]
+    fn python_imported_bare_call_means_the_free_function() {
+        let db = store(&[
+            ("pkg/m.py", PYTHON_M),
+            ("pkg/user.py", "from m import f\n\n\ndef h():\n    f()\n"),
+        ]);
+        settles_on(&db, "h", "f", "pkg/m.py", "m::f");
+    }
+
+    /// JavaScript reaches a class method only through `this.f()`: a bare
+    /// `f()` beside `function f()` and `class C { f() {} }` is the function.
+    #[test]
+    fn javascript_bare_call_beside_a_method_means_the_free_function() {
+        let db = store(&[(
+            "web/a.js",
+            "function f() {\n  return 1;\n}\n\nclass C {\n  f() {\n    return 2;\n  }\n}\n\nfunction g() {\n  f();\n}\n",
+        )]);
+        settles_on(&db, "g", "f", "web/a.js", "a::f");
+    }
+
+    /// The TypeScript form of the JavaScript case.
+    #[test]
+    fn typescript_bare_call_beside_a_method_means_the_free_function() {
+        let db = store(&[(
+            "web/a.ts",
+            "function f(): number {\n  return 1;\n}\n\nclass C {\n  f(): number {\n    return 2;\n  }\n}\n\nfunction g(): void {\n  f();\n}\n",
+        )]);
+        settles_on(&db, "g", "f", "web/a.ts", "a::f");
+    }
+
+    /// Go reaches a method only through a value (`t.F()`): a bare `F()` beside
+    /// `func F()` and `func (t T) F()` is the function. Go records the method
+    /// as kind "method" qualified by the package (`a::F`), not by `T`.
+    #[test]
+    fn go_bare_call_beside_a_method_means_the_free_function() {
+        let db = store(&[(
+            "go/a.go",
+            "package a\n\ntype T struct{}\n\nfunc F() int { return 1 }\n\nfunc (t T) F() int { return 2 }\n\nfunc G() {\n\tF()\n}\n",
+        )]);
+        let out = crate::store::edges_out(&db, "G", &dependency_kinds()).unwrap();
+        let hits: Vec<_> = out.iter().filter(|e| e.symbol.name == "F").collect();
+        assert_eq!(hits.len(), 1, "G -> F did not settle: {hits:#?}");
+        assert_eq!(hits[0].confidence, RESOLVED, "{hits:#?}");
+        assert_eq!(hits[0].symbol.kind, "function", "{hits:#?}");
+        assert_eq!(hits[0].symbol.start_line, 5, "{hits:#?}");
+        let n = neighbours(&db, "F", &[], false, &Scope::all()).unwrap();
+        assert!(
+            n.callers
+                .iter()
+                .any(|c| c.symbol.name == "G" && c.confidence == RESOLVED),
+            "{:?}",
+            n.callers
+        );
+    }
+
+    /// Guard: `Enabled::lane(e, "x")` names the type, so tier 0 settles it on
+    /// the method — the free `lane` beside it does not take it.
+    #[test]
+    fn rust_type_path_call_still_means_the_method() {
+        let db = store(&[("src/accel.rs", ACCEL)]);
+        settles_on(&db, "typed", "lane", "src/accel.rs", "Enabled::lane");
+    }
+
+    /// Guard: Java has an implicit `this`, so `helper()` inside `class A`
+    /// is `A.helper`, not `Util.helper` elsewhere. Today it settles on the
+    /// method in the calling file (rank 1); Java records both as methods.
+    #[test]
+    fn java_bare_call_keeps_the_implicit_receiver() {
+        let db = store(&[
+            (
+                "java/A.java",
+                "class A {\n    void helper() {}\n    void run() {\n        helper();\n    }\n}\n",
+            ),
+            (
+                "java/Util.java",
+                "class Util {\n    static void helper() {}\n}\n",
+            ),
+        ]);
+        settles_on(&db, "run", "helper", "java/A.java", "A::helper");
+    }
+
+    /// Guard: Kotlin has an implicit `this`, so `helper()` inside `class A`
+    /// is the member, even with a top-level `fun helper()` in util.kt — the
+    /// one free function a rule for receiver-less languages would wrongly
+    /// prefer. Today the member settles at rank 1.
+    #[test]
+    fn kotlin_bare_call_keeps_the_implicit_receiver() {
+        let db = store(&[
+            (
+                "kt/A.kt",
+                "class A {\n    fun helper() {}\n    fun run() {\n        helper()\n    }\n}\n",
+            ),
+            ("kt/util.kt", "fun helper() {}\n"),
+        ]);
+        settles_on(&db, "run", "helper", "kt/A.kt", "A::helper");
+    }
+
+    /// Guard: `crate::m::g()` where m.rs holds only methods named `g` — on
+    /// two types — has no free function to prefer, so it stays a tie.
+    #[test]
+    fn rust_module_path_call_with_only_methods_stays_ambiguous() {
+        let db = store(&[
+            (
+                "src/m.rs",
+                "pub struct S;\npub struct T;\n\nimpl S {\n    pub fn g(&self) {}\n}\n\nimpl T {\n    pub fn g(&self) {}\n}\n",
+            ),
+            ("src/daemon.rs", "fn other() {\n    crate::m::g();\n}\n"),
+        ]);
+        let out = crate::store::edges_out(&db, "other", &dependency_kinds()).unwrap();
+        let hits: Vec<_> = out.iter().filter(|e| e.symbol.name == "g").collect();
+        assert_eq!(hits.len(), 2, "{hits:#?}");
+        assert!(hits.iter().all(|e| e.confidence == AMBIGUOUS), "{hits:#?}");
+        let n = neighbours(&db, "g", &[], false, &Scope::all()).unwrap();
+        assert!(
+            n.callers.iter().any(|c| c.symbol.name == "other"
+                && c.confidence == AMBIGUOUS
+                && c.means.is_none()),
+            "{:?}",
+            n.callers
+        );
+    }
+
+    /// A method that wraps the free function of its own name:
+    /// `impl Enabled { fn lane(&self, id) { lane(id) } }`. The bare call was
+    /// read as recursion and recorded nothing, so impact never saw it. With no
+    /// implicit receiver it is a call to the free fn, in Rust and Python alike.
+    #[test]
+    fn a_method_calling_the_free_function_of_its_name_is_a_call() {
+        let rust = "pub fn lane(id: &str) -> Option<u8> {\n    None\n}\n\npub struct Enabled;\n\nimpl Enabled {\n    pub fn lane(&self, id: &str) -> bool {\n        lane(id).is_some()\n    }\n}\n";
+        let db = store(&[("src/accel.rs", rust)]);
+        settles_on(&db, "lane", "lane", "src/accel.rs", "accel::lane");
+        let python = "def f():\n    return 1\n\n\nclass C:\n    def f(self):\n        return f()\n";
+        let db = store(&[("pkg/m.py", python)]);
+        settles_on(&db, "f", "f", "pkg/m.py", "m::f");
+    }
+
+    /// Recursion still adds no self-edge: a free fn calling itself, a method
+    /// calling itself through `self`, and a Java method's bare call to its
+    /// own name, which there can be `this.helper()`.
+    #[test]
+    fn recursion_still_records_no_edge() {
+        let rust = "fn count(n: u32) -> u32 {\n    if n == 0 { 0 } else { count(n - 1) }\n}\n\nstruct S;\n\nimpl S {\n    fn walk(&self) {\n        self.walk();\n    }\n}\n";
+        let db = store(&[("src/r.rs", rust)]);
+        for name in ["count", "walk"] {
+            let out = crate::store::edges_out(&db, name, &dependency_kinds()).unwrap();
+            assert!(
+                out.iter().all(|e| e.symbol.name != name),
+                "{name}: {out:#?}"
+            );
+        }
+        let java = "class A {\n    void helper() {\n        helper();\n    }\n}\n";
+        let db = store(&[("src/A.java", java)]);
+        let out = crate::store::edges_out(&db, "helper", &dependency_kinds()).unwrap();
+        assert!(out.iter().all(|e| e.symbol.name != "helper"), "{out:#?}");
+    }
+
+    /// `from`'s call to `to` settled on the definition starting at `line` in
+    /// `path`, for when two definitions share a qualified name.
+    fn settles_at(db: &rusqlite::Connection, from: &str, to: &str, path: &str, line: u32) {
+        let out = crate::store::edges_out(db, from, &dependency_kinds()).unwrap();
+        let hits: Vec<_> = out
+            .iter()
+            .filter(|e| e.symbol.name == to && e.kind == "calls")
+            .collect();
+        assert_eq!(hits.len(), 1, "{from} -> {to} did not settle: {hits:#?}");
+        assert!(
+            [RESOLVED, EXTRACTED].contains(&hits[0].confidence.as_str()),
+            "{from} -> {to} is {}: {hits:#?}",
+            hits[0].confidence
+        );
+        assert_eq!(
+            (hits[0].symbol.path.as_str(), hits[0].symbol.start_line),
+            (path, line),
+            "{from} -> {to}: {hits:#?}"
+        );
+    }
+
+    fn kind_of(db: &rusqlite::Connection, name: &str, line: u32) -> String {
+        db.query_row(
+            "SELECT kind FROM symbols WHERE name = ?1 AND start_line = ?2",
+            rusqlite::params![name, line],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// #247: a top-level `fun helper()` in A.kt is qualified `A::helper`, the
+    /// same as `class A`'s member. The member is a method now, the top-level
+    /// one is a free function, `main`'s bare call (no `this` at the top
+    /// level) means the top-level one and `run`'s means the member.
+    #[test]
+    fn kotlin_top_level_functions_and_members_are_told_apart() {
+        let kt = "fun helper() {}\n\nfun main() {\n    helper()\n}\n\nclass A {\n    fun helper() {}\n    fun run() {\n        helper()\n    }\n}\n";
+        let db = store(&[("src/A.kt", kt)]);
+        assert_eq!(kind_of(&db, "helper", 1), "function");
+        assert_eq!(kind_of(&db, "helper", 8), "method");
+        settles_at(&db, "main", "helper", "src/A.kt", 1);
+        settles_at(&db, "run", "helper", "src/A.kt", 8);
+    }
+
+    /// #248: a Go method is qualified by its receiver type, so `t.F()` on the
+    /// method's own receiver and the method expression `T.F(t)` settle on
+    /// `T::F`, and a bare `F()` on the package's function.
+    #[test]
+    fn go_methods_are_qualified_by_their_receiver_type() {
+        let go = "package a\n\ntype T struct{}\n\nfunc F() {}\n\nfunc (t T) F() {}\n\nfunc (t *T) G() {\n\tt.F()\n}\n\nfunc H() {\n\tF()\n}\n\nfunc K(t T) {\n\tT.F(t)\n}\n";
+        let db = store(&[("a/a.go", go)]);
+        let qualified: String = db
+            .query_row(
+                "SELECT qualified FROM symbols WHERE name = 'F' AND kind = 'method'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(qualified, "T::F");
+        settles_at(&db, "G", "F", "a/a.go", 7);
+        settles_at(&db, "H", "F", "a/a.go", 5);
+        settles_at(&db, "K", "F", "a/a.go", 7);
+    }
+
+    /// In a Python class body a bare name reads the class's own namespace:
+    /// `x = deco(1)` is `C.deco`, not the module's `deco`.
+    #[test]
+    fn python_class_body_call_means_the_class_def() {
+        let py = "def deco(f):\n    return f\n\n\nclass C:\n    def deco(f):\n        return f\n\n    x = deco(1)\n\n    def m(self):\n        return deco(2)\n";
+        let db = store(&[("pkg/m.py", py)]);
+        settles_at(&db, "C", "deco", "pkg/m.py", 6);
+        // From inside a method a bare name reads the module, never the class.
+        settles_at(&db, "m", "deco", "pkg/m.py", 1);
+    }
+
+    /// Two definitions of one name in one file keep their own calls: `B::new`
+    /// calling `helper()` was written onto `A::new`, the first `new`, and the
+    /// call site on line 5 was lost.
+    #[test]
+    fn same_named_definitions_in_one_file_keep_their_own_calls() {
+        let rs = "fn helper() {}\nstruct A;\nimpl A { fn new() -> A { helper(); A } }\nstruct B;\nimpl B { fn new() -> B { helper(); B } }\n";
+        let db = store(&[("src/x.rs", rs)]);
+        let n = neighbours(&db, "helper", &[], false, &Scope::all()).unwrap();
+        let mut lines: Vec<_> = n
+            .callers
+            .iter()
+            .filter(|c| c.symbol.name == "new")
+            .map(|c| (c.symbol.start_line, c.line, c.confidence.clone()))
+            .collect();
+        lines.sort();
+        assert_eq!(
+            lines,
+            vec![
+                (3, Some(3), RESOLVED.to_string()),
+                (5, Some(5), RESOLVED.to_string())
+            ]
+        );
+    }
+
+    /// `go(self.go())` inside `S::go`: the receiver call is recursion, the
+    /// bare call on the same line is the free fn and is kept.
+    #[test]
+    fn a_bare_call_beside_a_receiver_copy_on_its_line_is_kept() {
+        let rs = "fn go(x: u8) {}\nstruct S;\nimpl S {\n    fn go(&self) -> u8 {\n        go(self.go());\n        0\n    }\n}\n";
+        let db = store(&[("src/r.rs", rs)]);
+        settles_at(&db, "go", "go", "src/r.rs", 1);
+    }
+
+    /// A C++ out-of-line definition is qualified by the scope it names, in
+    /// any file: `Foo::bar` is a method of `Foo`, `ns::helper` a function of
+    /// the namespace.
+    #[test]
+    fn cpp_out_of_line_definitions_are_qualified_by_their_scope() {
+        let cpp = "void Foo::bar() {}\nvoid ns::helper() {}\n";
+        let db = store(&[("src/impl.cpp", cpp)]);
+        let row = |name: &str| -> (String, String) {
+            db.query_row(
+                "SELECT kind, qualified FROM symbols WHERE name = ?1",
+                [name],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(row("bar"), ("method".to_string(), "Foo::bar".to_string()));
+        assert_eq!(
+            row("helper"),
+            ("function".to_string(), "ns::helper".to_string())
+        );
+    }
+
+    /// A Rust integration test is a crate of its own: the cloud worker's
+    /// `semlith::accel::lane("remote")` tied src/accel.rs's `lane` with a
+    /// helper `lane` in tests/accel.rs. The test file's own call still means
+    /// its own helper.
+    #[test]
+    fn a_rust_test_crate_is_reachable_only_from_beside_it() {
+        let tests = "fn lane(id: &str) -> bool {\n    id == \"cpu\"\n}\n\n#[test]\nfn t() {\n    lane(\"cpu\");\n}\n";
+        let db = store(&[
+            ("semlith/src/accel.rs", ACCEL),
+            ("semlith/tests/accel.rs", tests),
+            (
+                "semlith-cloud/src/bin/worker.rs",
+                "fn warm_remote() {\n    semlith::accel::lane(\"remote\");\n}\n",
+            ),
+        ]);
+        settles_at(&db, "warm_remote", "lane", "semlith/src/accel.rs", 1);
+        settles_at(&db, "t", "lane", "semlith/tests/accel.rs", 1);
+    }
+
+    /// An enum variant is a value of its enum: `Kind::Catchup.lane()` is
+    /// `Kind::lane`, not any other type's `lane`, in an expression and in a
+    /// macro's arguments alike.
+    #[test]
+    fn a_rust_enum_variant_receiver_names_its_enum() {
+        let rs = "enum Kind {\n    Catchup,\n}\n\nimpl Kind {\n    fn lane(&self) -> u8 {\n        1\n    }\n}\n\nstruct Other;\n\nimpl Other {\n    fn lane(&self) -> u8 {\n        2\n    }\n}\n\nfn first() -> u8 {\n    Kind::Catchup.lane()\n}\n\nfn second() {\n    assert_eq!(Kind::Catchup.lane(), 1);\n}\n";
+        let db = store(&[("src/jobs.rs", rs)]);
+        settles_at(&db, "first", "lane", "src/jobs.rs", 6);
+        // The same receiver inside a macro's arguments.
+        settles_at(&db, "second", "lane", "src/jobs.rs", 6);
+    }
+
+    /// A Rust `fn` inside `mod tests { }` is a function: the grammar shapes
+    /// a module body like an `impl`'s and tagged it a method, so the 0.44.1
+    /// rule dropped it and ripgrep's escape.rs tests called a `b` in
+    /// another repository (found by the ground-truth pass).
+    #[test]
+    fn a_rust_fn_in_a_module_body_is_a_function() {
+        let escape = "#[cfg(test)]\nmod tests {\n    fn b(s: &str) -> String {\n        s.to_string()\n    }\n\n    #[test]\n    fn empty() {\n        b(\"\");\n    }\n}\n";
+        let other = "struct G;\n\nimpl G {\n    fn b(&self) {}\n}\n";
+        let py = "def outer():\n    def b():\n        pass\n    return b\n";
+        let db = store(&[
+            ("crates/cli/src/escape.rs", escape),
+            ("crates/index/src/literal.rs", other),
+            ("tests/test_x.py", py),
+        ]);
+        assert_eq!(kind_of(&db, "b", 3), "function");
+        settles_at(&db, "empty", "b", "crates/cli/src/escape.rs", 3);
+    }
+
+    /// A module path naming nothing the store holds leaves the store:
+    /// ripgrep's `std::env::current_dir()` was resolved onto the one
+    /// `current_dir` in hiargs.rs. An inline `mod m { fn f() }` is still
+    /// named by `m::f()`.
+    #[test]
+    fn a_module_path_naming_nothing_here_does_not_settle() {
+        let hiargs = "pub fn current_dir() -> u8 {\n    0\n}\n";
+        let walk = "use crate::dir::{Ignore, IgnoreBuilder};\n\nfn get_or_set_current_dir() {\n    std::env::current_dir();\n}\n\nmod m {\n    pub fn f() {}\n}\n\nfn g() {\n    m::f();\n}\n";
+        let other = "fn f() {}\n";
+        // A method of that name in a file the caller imports for something
+        // else places nothing for a path that names `env`.
+        let dir = "pub struct IgnoreBuilder;\n\nimpl IgnoreBuilder {\n    pub fn current_dir(&self) {}\n}\n";
+        let db = store(&[
+            ("crates/core/flags/hiargs.rs", hiargs),
+            ("crates/ignore/src/walk.rs", walk),
+            ("crates/other/src/lib.rs", other),
+            ("crates/ignore/src/dir.rs", dir),
+        ]);
+        let out =
+            crate::store::edges_out(&db, "get_or_set_current_dir", &dependency_kinds()).unwrap();
+        assert!(
+            out.iter()
+                .all(|e| e.symbol.name != "current_dir" || e.confidence == AMBIGUOUS),
+            "{out:#?}"
+        );
+        settles_at(&db, "g", "f", "crates/ignore/src/walk.rs", 8);
+    }
+
+    /// `impl SinkError for Box<dyn Error>` names no type, so its methods are
+    /// the trait's rather than free functions of the file.
+    #[test]
+    fn a_method_of_an_unnameable_impl_belongs_to_its_trait() {
+        let sink = "pub trait SinkError {\n    fn error_message(m: &str) -> Self;\n}\n\nimpl SinkError for Box<dyn std::error::Error> {\n    fn error_message(m: &str) -> Self {\n        m.into()\n    }\n}\n";
+        let db = store(&[("src/sink.rs", sink)]);
+        let row: (String, String) = db
+            .query_row(
+                "SELECT kind, qualified FROM symbols WHERE name = 'error_message' AND start_line = 6",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            ("method".to_string(), "SinkError::error_message".to_string())
+        );
+    }
+
+    /// The no-receiver rule counts only candidates still standing: a Rust
+    /// call whose only free namesakes sit in another crate's tests/ (or are
+    /// Python, whose tests/ is no Rust crate) kept nothing at all, and the
+    /// edge lost every definition (`get(&m)` on a closure parameter in
+    /// ripgrep against flask's tests).
+    #[test]
+    fn the_no_receiver_rule_counts_only_candidates_left() {
+        let lib = "pub struct G;\n\nimpl G {\n    pub fn get(&self) {}\n}\n";
+        let caller = "fn attach(get: impl Fn()) {\n    get();\n}\n";
+        let helper = "fn get() {}\n";
+        let py = "def outer():\n    def get():\n        pass\n";
+        let db = store(&[
+            ("crates/a/src/lib.rs", lib),
+            ("crates/b/src/hiargs.rs", caller),
+            ("crates/a/tests/t.rs", helper),
+            ("flask/tests/test_x.py", py),
+        ]);
+        let out = crate::store::edges_in_resolved(&db, "get", &dependency_kinds()).unwrap();
+        let call = out
+            .iter()
+            .find(|i| i.end.symbol.name == "attach")
+            .expect("attach calls get");
+        assert!(!call.means.is_empty(), "{call:#?}");
+    }
+
+    /// JavaScript member calls are receiver calls, not bare ones:
+    /// `this.close()` inside an object literal's method means that object's
+    /// `close` in the same file, and `view.sel.clear()` is not the file's
+    /// free `clear` (both read as bare calls once the rule existed).
+    #[test]
+    fn javascript_member_calls_are_not_bare() {
+        let js = "const menu = {\n  close() {\n    return 1;\n  },\n  ensure() {\n    this.close();\n  },\n};\n\nfunction close() {}\n\nfunction clear() {}\n\nfunction paint(view) {\n  view.sel.clear();\n}\n";
+        let db = store(&[("src/app.js", js)]);
+        settles_at(&db, "ensure", "close", "src/app.js", 2);
+        let out = crate::store::edges_out(&db, "paint", &dependency_kinds()).unwrap();
+        assert!(
+            out.iter()
+                .all(|e| e.symbol.name != "clear" || e.confidence == AMBIGUOUS),
+            "{out:#?}"
+        );
+    }
+
+    /// A TypeScript `this.f()` names its class and settles on `C.f`, beside
+    /// a free `f` of the same file.
+    #[test]
+    fn typescript_this_call_means_the_class_method() {
+        let ts = "function f() {}\n\nclass C {\n  f() {}\n  g() {\n    this.f();\n  }\n}\n";
+        let db = store(&[("src/c.ts", ts)]);
+        settles_at(&db, "g", "f", "src/c.ts", 4);
+    }
+
+    /// A Python attribute named like an imported module is no module path to
+    /// a free function: `d.fixtures.bulk()` in flask's drive is
+    /// `Fixtures.bulk`, and fixtures.py holds no free `bulk`.
+    #[test]
+    fn a_module_path_drops_methods_only_for_a_free_function_it_places() {
+        let fixtures = "class Fixtures:\n    def bulk(self):\n        return 1\n";
+        let other = "def bulk():\n    return 2\n";
+        let caller = "import fixtures\n\n\ndef run(d):\n    d.fixtures.bulk()\n";
+        let db = store(&[
+            ("drive/fixtures.py", fixtures),
+            ("drive/other.py", other),
+            ("drive/findings.py", caller),
+        ]);
+        settles_at(&db, "run", "bulk", "drive/fixtures.py", 2);
+    }
+
+    /// A grouped Rust `use` places what it imports: atlassian.rs's
+    /// `use super::{Item, gdrive::{base, url}};` names gdrive.rs, so a bare
+    /// `url(..)` there is gdrive's `url`.
+    #[test]
+    fn a_grouped_rust_use_places_its_module() {
+        let gdrive = "pub(super) fn url(base: &str) -> String {\n    base.to_string()\n}\n";
+        let daemon = "fn url() -> u8 {\n    0\n}\n";
+        let atlassian = "use super::{\n    Item,\n    gdrive::{base, url},\n};\n\nfn account() {\n    url(\"x\");\n}\n";
+        let db = store(&[
+            ("cloud/src/connectors/gdrive.rs", gdrive),
+            ("core/src/daemon.rs", daemon),
+            ("cloud/src/connectors/atlassian.rs", atlassian),
+        ]);
+        settles_at(&db, "account", "url", "cloud/src/connectors/gdrive.rs", 1);
     }
 }

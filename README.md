@@ -1,13 +1,40 @@
 <div align="center">
 
 <img src="https://raw.githubusercontent.com/semlith/semlith/main/assets/semlith-logo.png"
-     alt="Semlith" width="128" height="128">
+     alt="Semlith" width="96" height="96">
 
 # Semlith
 
-**A local vector store and code graph for AI agents.** Index your code and
-documents once, keep the index current as you save, and answer an agent's
-questions in milliseconds — without anything leaving the machine.
+**A local vector store and code graph for AI agents, on your own machine.**
+
+[Install](#install) · [Quick start](#quick-start) · [Agents](#use-it-from-an-agent) ·
+[Portal](#the-portal) · [Benchmarks](#benchmarks) · [Docs](#documentation)
+
+</div>
+
+Install (macOS and Linux; Windows and other routes [below](#install)):
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/semlith/semlith/main/install.sh | sh
+```
+
+Then, in any folder of code or documents:
+
+```sh
+semlith index .                      # one store; the embedding model downloads once
+semlith search "where is retry backoff handled"
+semlith doctor                       # every agent client found, registered and reachable
+```
+
+**Benchmarks:** SWE-bench, CodeRAG-Bench, agents on Opus, and PDF, Office and
+EPUB documents, each number with the command that reproduces it, on the
+[scorecard page](bench/scorecard/README.md).
+
+Index your code and documents once, keep the index current as you save, and
+answer an agent's questions in milliseconds — without anything leaving the
+machine.
+
+<div align="center">
 
 [![ci](https://github.com/semlith/semlith/actions/workflows/ci.yml/badge.svg)](https://github.com/semlith/semlith/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/semlith.svg?logo=rust)](https://crates.io/crates/semlith)
@@ -17,9 +44,6 @@ questions in milliseconds — without anything leaving the machine.
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#install)
 [![mcp](https://img.shields.io/badge/MCP-server-6E56CF.svg)](https://modelcontextprotocol.io)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-
-[Install](#install) · [Quick start](#quick-start) · [Agents](#use-it-from-an-agent) ·
-[Portal](#the-portal) · [Benchmarks](#benchmarks) · [Docs](#documentation)
 
 </div>
 
@@ -325,6 +349,8 @@ number are on the [scorecard page](bench/scorecard/README.md).**
 | SWE-bench Verified, median tokens to the first right file | **224** | 15 491 grep then read | 500 |
 | CodeRAG-Bench DS-1000, NDCG@10 | **0.260** | 0.158 BM25 | 513 |
 | Agents (Opus), cost per correct answer | **$0.065** | $0.072 grep only | 50 × 3 runs |
+| Documents (PDF, Office, EPUB, …), passage found within 4k tokens | **116/127** | 34/127 rga | 127 |
+| Agents (Opus) on those documents, passage found | **124/127** | 80/127 grep only | 127 |
 | Real sessions, tokens sent against whole files read | **75.2× fewer** | | 1,575 retrievals |
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/bench/swe-hit-dark.svg"><img src="docs/images/bench/swe-hit-light.svg" alt="SWE-bench: semlith puts the right file in the top 10 for 72-77 % of instances, against 47 % for grep then read" width="760"></picture>

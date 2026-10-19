@@ -209,6 +209,13 @@ fn the_writer_stores_the_same_rows_for_the_same_corpus() {
 // is the file's. Nobody ran this ignored test between that commit and 0.44.0
 // (bisected: green on e7e3bf2~1, these rows on e7e3bf2). The 0.44.0 macro
 // call edges (#244) change no row here; the corpus has no call in a macro.
+//
+// 0.44.1 moved the symbol and edge digests, no count, diffed row by row
+// against the 0.44.0 binary on this corpus: Lock.scala's `helper` and
+// `acquire` are methods of `object Lock`; the bare `helper()` inside a class
+// in Lock.cs, Main.java and Lock.scala carries its class as the hint; and
+// Lock.hs's call leaves from the `acquire` equation on line 9 that holds it,
+// not the type signature of the same name on line 8.
 const PINNED_COUNTS: [(&str, i64); 4] = [
     ("chunks", 48),
     ("fts", 48),
@@ -217,8 +224,8 @@ const PINNED_COUNTS: [(&str, i64); 4] = [
 ];
 const PINNED_DIGESTS: [(&str, &str); 3] = [
     ("chunks", "c15da193b747a888"),
-    ("symbols", "086ea783c20cdd27"),
-    ("edges", "b52593a6b8771b51"),
+    ("symbols", "ac2e379447362e1f"),
+    ("edges", "1569aa673075c9d7"),
 ];
 
 /// A graph list that fails leaves the search standing on the two lists that

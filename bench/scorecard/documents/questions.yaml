@@ -1,0 +1,1005 @@
+questions:
+- id: fmt-001
+  target: fmt-001
+  path: csv/cisa-known-exploited-vulnerabilities.csv
+  shape: topic
+  query: Which known exploited vulnerability entry describes a path traversal flaw in Broadcom VMware
+    vCenter that lets an attacker execute arbitrary code?
+  note: The CVE-2026-59310 row lists the Broadcom VMware vCenter path traversal vulnerability allowing
+    arbitrary code execution.
+- id: fmt-002
+  target: fmt-002
+  path: csv/cisa-known-exploited-vulnerabilities.csv
+  shape: paraphrase
+  query: Which catalogue entry covers an unexplained flaw in the single sign-on part of Oracle's app server,
+    letting outsiders tamper with integrity?
+  note: The CVE-2012-0518 row describes an unspecified vulnerability in the Oracle Application Server
+    Single Sign-On component affecting integrity.
+- id: fmt-003
+  target: fmt-003
+  path: csv/cisa-known-exploited-vulnerabilities.csv
+  shape: topic
+  query: Which Docker Desktop Community Edition privilege escalation lets local users plant a trojan docker-credential-wincred.exe
+    file?
+  note: The CVE-2019-15752 row describes privilege escalation via a trojan docker-credential-wincred.exe
+    placed in the Docker Desktop program data folder.
+- id: fmt-005
+  target: fmt-005
+  path: docx/au-dhs-annual-report-2014-15.docx
+  shape: topic
+  query: What does the annual report say about the department's supplier diversity strategy and its Supply
+    Nation membership for Indigenous procurement?
+  note: The passage lists the Supplier Diversity Strategy, Supply Nation membership and the 2015 Supply
+    Nation Government Member of the Year recognition.
+- id: fmt-007
+  target: fmt-007
+  path: docx/dfe-send-speech-language-evidence-summary.docx
+  shape: topic
+  query: Where does the evidence summary give an example of an English teacher pre-teaching Tier 2 vocabulary
+    when reading a novel with a class?
+  note: The passage describes an English teacher pre-teaching critical and high-utility Tier 2 vocabulary
+    for analysing a novel.
+- id: fmt-008
+  target: fmt-008
+  path: docx/dfe-send-speech-language-evidence-summary.docx
+  shape: paraphrase
+  query: What determines how much a child can juggle in their head at one moment, and why do wordy, tricky
+    activities overload children who find talking and listening hard?
+  note: The passage explains that working memory has limited capacity affected by task complexity and
+    language demands, which raises cognitive load for pupils with SLC needs.
+- id: fmt-009
+  target: fmt-009
+  path: docx/dfe-send-speech-language-evidence-summary.docx
+  shape: topic
+  query: What does the evidence summary say about the link between speech, language and communication
+    needs and behaviour problems in pupils?
+  note: The passage cites that 81% of children with emotional and behavioural disorders have language
+    difficulties and cautions about small sample sizes.
+- id: fmt-011
+  target: fmt-011
+  path: docx/geoscience-australia-local-wind-assessment-methodology.docx
+  shape: topic
+  query: What approximate roughness length does the wind methodology give for terrain category 3 suburban
+    housing and category 4 large city centres?
+  note: The passage defines terrain categories 3 and 4 with roughness lengths of about 0.2 m and 2 m.
+- id: fmt-012
+  target: fmt-012
+  path: docx/geoscience-australia-local-wind-assessment-methodology.docx
+  shape: paraphrase
+  query: In cyclone-prone regions, why is the wind direction factor set to one for every compass bearing,
+    and what single factor applies to major structural elements?
+  note: The passage explains that in regions B, C and D the direction multiplier is unity because cyclone
+    and thunderstorm gusts have little directional effect, with 0.95 for major structural elements.
+- id: fmt-014
+  target: fmt-014
+  path: docx/nasa-cfe-requirements.docx
+  shape: paraphrase
+  query: How should checks on spacecraft flight code be divided across stages so effort isn't wasted repeating
+    the same work?
+  note: The passage says each qualification testing level matches a level of the problem definition and
+    an efficient test program only does what is necessary at each level.
+- id: fmt-015
+  target: fmt-015
+  path: docx/nasa-cfe-requirements.docx
+  shape: topic
+  query: Where does the cFE requirements document describe the reference flight software development process
+    and its layers from spacecraft down to software products?
+  note: The passage introduces the reference FSW development process in Figure A-1, its layers, and notes
+    Goddard has no standard process.
+- id: fmt-016
+  target: fmt-016
+  path: docx/oasis-sarif-2-1-0-spec.docx
+  shape: paraphrase
+  query: In SARIF, how many substitution values must a message supply when its strings reference numbered
+    slots like {3} and {5}?
+  note: The passage says the arguments array must have as many elements as the highest placeholder index
+    requires, e.g. at least 6 for {5}.
+- id: fmt-017
+  target: fmt-017
+  path: docx/oasis-sarif-2-1-0-spec.docx
+  shape: topic
+  query: How does the SARIF spec define logically identical versus logically distinct results across successive
+    runs, and why are they grouped into equivalence classes?
+  note: The passage defines logically identical and logically distinct results and says result management
+    systems group them into equivalence classes.
+- id: fmt-018
+  target: fmt-018
+  path: docx/oasis-sarif-2-1-0-spec.docx
+  shape: paraphrase
+  query: In SARIF, how can a file of externally stored run data point to a JSON definition describing
+    which format version it follows?
+  note: The passage specifies the externalProperties $schema property holding a URI for the JSON schema
+    of the external property file format.
+- id: fmt-019
+  target: fmt-019
+  path: docx/oasis-stix-2-1-spec.docx
+  shape: topic
+  query: How does the STIX threat actor type vocabulary describe a sensationalist and how it differs from
+    an activist?
+  note: The passage defines a sensationalist as seeking embarrassment and notoriety without a political
+    goal, unlike an activist.
+- id: fmt-020
+  target: fmt-020
+  path: docx/oasis-stix-2-1-spec.docx
+  shape: paraphrase
+  query: In STIX, can a single threat intelligence write-up carry several category labels at once, and
+    must every kind of item inside it be named as a category?
+  note: The passage says report types are not mutually exclusive and object types present only as evidence
+    or context need not be included.
+- id: fmt-021
+  target: fmt-021
+  path: docx/oasis-stix-2-1-spec.docx
+  shape: topic
+  query: What forward and reverse relationships does STIX 2.1 define for the Observed Data object?
+  note: Section 4.14.2 states there are no forward relationships defined for Observed Data beyond common
+    relationships and explains the reverse relationships listing.
+- id: fmt-023
+  target: fmt-023
+  path: docx/parks-australia-ashmore-cartier-management-plan.docx
+  shape: topic
+  query: What does the Ashmore Reef management plan say about tourism and recreation, such as commercial
+    tour operators bringing scuba divers and bird watchers?
+  note: Section 5.3 says tour operators visit intermittently for diving and bird watching, visitors arrive
+    by boat, and the remote location limits numbers.
+- id: fmt-024
+  target: fmt-024
+  path: docx/parks-australia-ashmore-cartier-management-plan.docx
+  shape: paraphrase
+  query: Under the original 1974 agreement, which two islets of Ashmore Reef could foreign customary fishing
+    crews land on to collect drinking supplies, and could they shelter nearby?
+  note: The passage confines landings to East Islet and Middle Islet for fresh water and allows vessels
+    to shelter without going ashore.
+- id: fmt-025
+  target: fmt-025
+  path: docx/wa-gov-digital-content-writing-guide.docx
+  shape: topic
+  query: What does the WA digital content writing guide say about apostrophes for possession, plural abbreviations
+    like CDs and decades like 1980s?
+  note: The passage gives apostrophe rules for possession and says not to use apostrophes for plural abbreviations
+    or decades.
+- id: fmt-026
+  target: fmt-026
+  path: docx/wa-gov-digital-content-writing-guide.docx
+  shape: paraphrase
+  query: When mentioning another state agency on a website, should I write its full title followed by
+    the short form in brackets, and do I need 'the' before it?
+  note: The passage says to name other departments in full with the acronym in brackets and that 'the'
+    is not required before an acronym like DBCA.
+- id: fmt-027
+  target: fmt-027
+  path: docx/wa-gov-digital-content-writing-guide.docx
+  shape: topic
+  query: What does the WA writing guide say about capitalising headings and subheadings in sentence case,
+    with examples like Applying for a visa?
+  note: The passage says to use sentence case for headings and subheadings with examples, and title case
+    for proper nouns.
+- id: fmt-028
+  target: fmt-028
+  path: epub/gutenberg-art-of-war.epub
+  shape: paraphrase
+  query: Does the translator's introduction quote a sample of the old French rendering of Sun Tzu about
+    listing officers and their talents?
+  note: The passage quotes the French version (Sun-tse) on recording the names and abilities of all officers
+    as an example.
+- id: fmt-029
+  target: fmt-029
+  path: epub/gutenberg-art-of-war.epub
+  shape: topic
+  query: What commentary accompanies Sun Tzu's saying that success in warfare comes from accommodating
+    ourselves to the enemy's purpose, including the advice to feign stupidity?
+  note: The passage gives verse 60 with Ts'ao Kung's 'feign stupidity' and Chang Yu's notes on luring
+    or delaying the enemy.
+- id: fmt-030
+  target: fmt-030
+  path: epub/gutenberg-art-of-war.epub
+  shape: paraphrase
+  query: Which genealogy makes Sun Pin a grandson of Sun Wu, and why does the translator reject that lineage
+    as impossible on dates?
+  note: The passage recounts Sun Wu's family line and dismisses Sun Pin being his grandson as chronologically
+    impossible given the 341 B.C. victory.
+- id: fmt-032
+  target: fmt-032
+  path: epub/gutenberg-common-sense.epub
+  shape: paraphrase
+  query: Why did Paine think a religious society issuing a public statement on the colonial quarrel endangered
+    both faith and social peace?
+  note: The passage lists reasons the testimony dishonours its authors, first that making religion a party
+    in political disputes endangers society.
+- id: fmt-033
+  target: fmt-033
+  path: epub/gutenberg-common-sense.epub
+  shape: topic
+  query: Where does Common Sense propose a Continental Conference with twenty-six members of Congress
+    and representatives of the people at large?
+  note: The passage proposes a Continental Conference of twenty-six members of Congress, two members from
+    each assembly and five representatives per province.
+- id: fmt-034
+  target: fmt-034
+  path: epub/gutenberg-federalist-papers.epub
+  shape: paraphrase
+  query: Would the national legislature unfairly favour landowners, financiers, merchants or manufacturers,
+    or elevate the rich and well-connected?
+  note: The passage questions whether the national government would favour particular interests or 'the
+    wealthy and the well-born'.
+- id: fmt-035
+  target: fmt-035
+  path: epub/gutenberg-federalist-papers.epub
+  shape: topic
+  query: Where does Federalist No. 12 by Hamilton discuss the utility of the Union in respect to revenue
+    and the prosperity of commerce?
+  note: The passage opens Federalist No. 12 on how the Union promotes revenue and calls commerce the most
+    productive source of national wealth.
+- id: fmt-036
+  target: fmt-036
+  path: epub/gutenberg-federalist-papers.epub
+  shape: paraphrase
+  query: Can the chief executive name replacement senators while Congress is on break, or is that a misreading
+    of the clauses?
+  note: The passage quotes the recess appointment clause and says the deduced power to fill Senate vacancies
+    is not even colorable.
+- id: fmt-037
+  target: fmt-037
+  path: epub/gutenberg-origin-of-species.epub
+  shape: topic
+  query: Where does Darwin discuss aphides giving sweet excretion to ants and whether any instinct exists
+    for the exclusive good of another species?
+  note: The passage says aphides probably do not excrete for the sole good of ants and no animal acts
+    for the exclusive good of another species.
+- id: fmt-038
+  target: fmt-038
+  path: epub/gutenberg-origin-of-species.epub
+  shape: paraphrase
+  query: Why does Darwin think inability to breed between distinct kinds is no more a designed feature
+    than trees' resistance to being joined by grafting?
+  note: The passage likens sterility to grafting difficulty and summarises that first-cross sterility
+    depends partly on early embryo death while hybrid sterility comes from disturbed organisation.
+- id: fmt-039
+  target: fmt-039
+  path: epub/gutenberg-origin-of-species.epub
+  shape: topic
+  query: Where does Darwin argue the wild aboriginal stocks of domestic pigeon breeds cannot simply have
+    become extinct, unlike the rock-pigeon?
+  note: The passage argues the supposed aboriginal stocks are unlikely extinct because birds breeding
+    on precipices and good fliers are rarely exterminated.
+- id: fmt-040
+  target: fmt-040
+  path: epub/gutenberg-study-in-scarlet.epub
+  shape: paraphrase
+  query: In the Holmes novel, how are the starving man and the little girl received when brought down
+    into the wagon train of religious settlers?
+  note: The passage describes the escort leading the two strangers through crowds of Mormon pilgrims to
+    a conspicuous waggon drawn by six horses.
+- id: fmt-041
+  target: fmt-041
+  path: epub/gutenberg-study-in-scarlet.epub
+  shape: topic
+  query: In A Study in Scarlet, where does Jefferson Hope win Lucy Ferrier's affection and ride up to
+    tell her he is leaving?
+  note: The passage shows Jefferson Hope winning Lucy's affection and arriving one summer evening to say
+    he is leaving.
+- id: fmt-042
+  target: fmt-042
+  path: epub/gutenberg-study-in-scarlet.epub
+  shape: paraphrase
+  query: In the Holmes novel, what do the riders find on top of the desert hill, a gaunt bearded stranger
+    lying beside a huge rock?
+  note: The passage describes scouts climbing the slope and finding a tall, thin, long-bearded man against
+    a giant boulder.
+- id: fmt-043
+  target: fmt-043
+  path: ipynb/pdsh-numpy-array-basics.ipynb
+  shape: topic
+  query: What does the NumPy chapter say about arrays having a fixed type, so floating-point values inserted
+    into integer arrays are truncated?
+  note: The passage warns that NumPy arrays have a fixed type so a float inserted into an integer array
+    is silently truncated.
+- id: fmt-044
+  target: fmt-044
+  path: ipynb/pdsh-numpy-array-basics.ipynb
+  shape: paraphrase
+  query: If I leave out the bounds and stride when grabbing part of a NumPy array, what does it assume,
+    for instance when taking every second item?
+  note: The passage gives the defaults start=0, stop=size of dimension, step=1 and one-dimensional slicing
+    examples.
+- id: fmt-045
+  target: fmt-045
+  path: ipynb/pdsh-numpy-array-basics.ipynb
+  shape: topic
+  query: What are the basics of NumPy arrays covered in this chapter, such as attributes, indexing, slicing,
+    reshaping and joining arrays?
+  note: The passage introduces the NumPy array basics chapter and the categories of array manipulation
+    it covers.
+- id: fmt-046
+  target: fmt-046
+  path: ipynb/pdsh-pandas-aggregation-grouping.ipynb
+  shape: paraphrase
+  query: How can I loop through each category produced by a pandas split-by-key operation and print its
+    size?
+  note: The passage shows iteration over groups with a for loop over planets.groupby('method') printing
+    each group's shape.
+- id: fmt-047
+  target: fmt-047
+  path: ipynb/pdsh-pandas-aggregation-grouping.ipynb
+  shape: topic
+  query: How does column indexing work on a pandas GroupBy object to return a SeriesGroupBy for one column?
+  note: The passage explains GroupBy column indexing, selecting orbital_period to get a SeriesGroupBy.
+- id: fmt-048
+  target: fmt-048
+  path: ipynb/pdsh-pandas-aggregation-grouping.ipynb
+  shape: paraphrase
+  query: What is the pandas split-by-category object really, and what are the four main things you can
+    do with it?
+  note: The passage describes the GroupBy object as a collection of DataFrames whose key operations are
+    aggregate, filter, transform and apply.
+- id: fmt-049
+  target: fmt-049
+  path: ipynb/pdsh-support-vector-machines.ipynb
+  shape: topic
+  query: In the SVM notebook, why do the support vectors stay the same when the training points double
+    from 60 to 120?
+  note: The passage shows doubling training points from 60 to 120 leaves the fit unchanged because the
+    support vectors are the same.
+- id: fmt-050
+  target: fmt-050
+  path: ipynb/pdsh-support-vector-machines.ipynb
+  shape: paraphrase
+  query: How can I shrink thousands of pixel values from portraits into fewer features before feeding
+    them to a margin-based classifier?
+  note: The passage explains using PCA with 150 components as a preprocessor packaged with SVC via make_pipeline
+    for face images.
+- id: fmt-051
+  target: fmt-051
+  path: ipynb/pdsh-support-vector-machines.ipynb
+  shape: topic
+  query: How does the notebook fit a support vector classifier with SVC using a linear kernel and a very
+    large C parameter?
+  note: The passage fits SVC with kernel='linear' and C=1E10 to the sample data.
+- id: fmt-058
+  target: fmt-058
+  path: odp/levelling-up-fund-developing-economic-case.odp
+  shape: paraphrase
+  query: Which gains from a regeneration bid can be given a money value, like higher land prices, quicker
+    journeys or less crime?
+  note: The slide says impacts should be monetised consistently with the Green Book and lists monetisable
+    benefits such as land value uplift and reduced travel times.
+- id: fmt-059
+  target: fmt-059
+  path: odp/levelling-up-fund-developing-economic-case.odp
+  shape: topic
+  query: How should Levelling Up Fund bids adjust costs for optimism bias according to the Green Book?
+  note: The optimism bias slide says costs should be uplifted by an appropriate optimism bias using Green
+    Book adjustments when specific data is lacking.
+- id: fmt-060
+  target: fmt-060
+  path: odp/levelling-up-fund-developing-economic-case.odp
+  shape: paraphrase
+  query: How do I convert money spent and gained in later years into today's terms, and can I just add
+    the price rise rate on top?
+  note: The slide says to present values on a present value basis, discount real values, and never add
+    inflation and discount rates together.
+- id: fmt-061
+  target: fmt-061
+  path: odp/montreal-2012-resident-satisfaction-survey-fr.odp
+  shape: topic
+  query: Which caveat does the Montreal 2012 satisfaction survey give about the Charbonneau commission
+    and the former mayor's resignation affecting perceptions?
+  note: The passage notes the survey coincided with the Charbonneau commission and the former mayor's
+    resignation, which may have tinted perception results.
+- id: fmt-063
+  target: fmt-063
+  path: odp/montreal-2012-resident-satisfaction-survey-fr.odp
+  shape: topic
+  query: What share of Montreal residents attributed responsibility for services like transport, the 311
+    contact centres and emergency road works to the city?
+  note: The passage lists those services and says between 82% and 88% of Montrealers attribute them to
+    the City.
+- id: fmt-064
+  target: fmt-064
+  path: ods/geospatial-commission-authoritative-data-assessment-tool.ods
+  shape: paraphrase
+  query: Can the authoritative data assessment be used for non-mapping datasets, and what should I pick
+    for the location precision question?
+  note: The passage says the tool can be adapted to non-geospatial datasets and to select N/A for Positional
+    Accuracy without affecting the quality score.
+- id: fmt-067
+  target: fmt-067
+  path: ods/phe-aaa-screening-minimum-dataset-dictionary.ods
+  shape: topic
+  query: In the AAA screening dataset dictionary, which field records the category of person who made
+    the eligibility recommendation, such as a relative or GP?
+  note: Field 1.11.4 Person category codes who made the eligibility recommendation (subject, relative/carer,
+    programme, GP, clinician).
+- id: fmt-068
+  target: fmt-068
+  path: ods/phe-aaa-screening-minimum-dataset-dictionary.ods
+  shape: paraphrase
+  query: Which item stores the written-out calendar period in which a patient's booked aortic aneurysm
+    visit falls, alongside the year it falls in?
+  note: Fields 2.1.6 Appointment Month Name and 2.1.7 Appointment Year are derived from the appointment
+    date time.
+- id: fmt-069
+  target: fmt-069
+  path: ods/phe-aaa-screening-minimum-dataset-dictionary.ods
+  shape: topic
+  query: Which AAA screening dataset fields record when the vascular specialist's assessment outcome was
+    reported to the patient and to the GP?
+  note: Fields 6.7 Date Patient Informed and 6.8 Date GP Informed record when the vascular specialist
+    outcome was reported.
+- id: fmt-070
+  target: fmt-070
+  path: odt/dhsc-nhs-continuing-healthcare-checklist-guidance.odt
+  shape: paraphrase
+  query: Why does the NHS funded care screening form ask for personal particulars, on what legal grounds,
+    and are identities stripped out?
+  note: The passage explains the PLDS equality data collection, its GDPR Article 6(1)(c) lawful basis
+    and pseudonymisation removing identifiers.
+- id: fmt-071
+  target: fmt-071
+  path: odt/dhsc-nhs-continuing-healthcare-checklist-guidance.odt
+  shape: topic
+  query: How does the continuing healthcare checklist describe cognition needs where the person struggles
+    to make decisions about key aspects of their lives?
+  note: The passage describes cognitive impairment levels where the individual cannot make decisions on
+    most issues and is at high risk of harm.
+- id: fmt-072
+  target: fmt-072
+  path: odt/dhsc-nhs-continuing-healthcare-checklist-guidance.odt
+  shape: paraphrase
+  query: If someone was previously found ineligible and nothing has changed, can staff skip the screening
+    tool, and where must the choice be written down?
+  note: The passage lists cases where a Checklist is unnecessary and says the decision and reasons should
+    be recorded in the patient's notes.
+- id: fmt-073
+  target: fmt-073
+  path: odt/govuk-lgbt-veterans-review-audio-testimony-guidance.odt
+  shape: topic
+  query: How can I submit spoken testimony to the LGBT Veterans Review using Google Keep, and what happens
+    to my email address?
+  note: The passage introduces the Google Keep oral testimony guidance and says personal details like
+    email will be deleted at the end of the Review.
+- id: fmt-074
+  target: fmt-074
+  path: odt/govuk-lgbt-veterans-review-audio-testimony-guidance.odt
+  shape: paraphrase
+  query: Must I answer every prompt when making a voice recording for the veterans review, and should
+    I check the automatic transcript?
+  note: The passage says not all questions need answers, explains recording with the microphone button
+    and asks you to check the transcription.
+- id: fmt-075
+  target: fmt-075
+  path: odt/govuk-lgbt-veterans-review-audio-testimony-guidance.odt
+  shape: topic
+  query: What support organisations and alternative contact does the LGBT Veterans Review guidance give
+    if the voice recording method doesn't work?
+  note: The passage gives the veterans support organisations link and the contact email for submitting
+    evidence in another format.
+- id: fmt-076
+  target: fmt-076
+  path: odt/libreoffice-gs52-introducing-libreoffice.odt
+  shape: paraphrase
+  query: Which LibreOffice component lets me build forms, reports and queries over relational tables,
+    and which engines like HSQLDB does it include?
+  note: The Base section describes its forms, reports and queries tools, the HSQLDB and PostgreSQL engines
+    and ODBC/JDBC support.
+- id: fmt-077
+  target: fmt-077
+  path: odt/libreoffice-gs52-introducing-libreoffice.odt
+  shape: topic
+  query: How do I show or hide individual icons on a LibreOffice toolbar using Visible Buttons, and dock
+    a floating toolbar?
+  note: The passage explains Visible Buttons, Customize Toolbar and Dock Toolbar options.
+- id: fmt-078
+  target: fmt-078
+  path: odt/libreoffice-gs52-introducing-libreoffice.odt
+  shape: paraphrase
+  query: Where can I find plug-ins that add features to the office suite, and do some come bundled already?
+  note: The passage says several extensions are installed with the program and others are available from
+    the official extensions repository.
+- id: fmt-079
+  target: fmt-079
+  path: pdf/arxiv-attention-is-all-you-need.pdf
+  shape: topic
+  query: Where does the Transformer paper claim to be the first transduction model relying entirely on
+    self-attention without RNNs or convolution?
+  note: The passage states the Transformer is the first transduction model relying entirely on self-attention,
+    after mentioning end-to-end memory networks.
+- id: fmt-080
+  target: fmt-080
+  path: pdf/arxiv-attention-is-all-you-need.pdf
+  shape: paraphrase
+  query: What is the hidden size of the per-position feed-forward sublayer in the Transformer, compared
+    to its 512 model width?
+  note: The passage gives the FFN formula and states input/output dimensionality 512 with inner-layer
+    dimensionality 2048.
+- id: fmt-081
+  target: fmt-081
+  path: pdf/arxiv-attention-is-all-you-need.pdf
+  shape: topic
+  query: Which figure in the Transformer paper shows encoder self-attention heads in layer 5 following
+    a long-distance dependency of the verb 'making'?
+  note: 'Figure 3 caption: many heads attend to the distant dependency of ''making'', completing ''making...more
+    difficult''.'
+- id: fmt-082
+  target: fmt-082
+  path: pdf/arxiv-bert.pdf
+  shape: paraphrase
+  query: Is it worth running BERT's pre-training for a million steps instead of half a million, judging
+    by MNLI dev accuracy?
+  note: 'Appendix C.1 answers yes: BERT-Base gains almost 1.0% MNLI accuracy at 1M steps versus 500k.'
+- id: fmt-083
+  target: fmt-083
+  path: pdf/arxiv-bert.pdf
+  shape: topic
+  query: Where does the BERT paper argue that unidirectional left-to-right language models like OpenAI
+    GPT restrict pre-trained representations for token-level tasks such as question answering?
+  note: The intro says standard LMs are unidirectional, GPT tokens attend only to previous tokens, which
+    is harmful for token-level tasks like QA.
+- id: fmt-084
+  target: fmt-084
+  path: pdf/arxiv-bert.pdf
+  shape: paraphrase
+  query: By what margin did BERT-Large beat the ESIM+ELMo baseline and OpenAI GPT on the SWAG commonsense
+    continuation benchmark, and with which learning rate?
+  note: SWAG fine-tuning used 3 epochs, lr 2e-5, batch 16, and BERT-Large beat ESIM+ELMo by 27.1% and
+    GPT by 8.3%.
+- id: fmt-085
+  target: fmt-085
+  path: pdf/arxiv-lora.pdf
+  shape: topic
+  query: How does the LoRA appendix interpret the feature amplification factor of about 20 at rank 4 compared
+    with only about 2 at rank 64?
+  note: At r=4 about four task-specific feature directions per layer are amplified by roughly 20, while
+    at r=64 the factor is only around 2.
+- id: fmt-087
+  target: fmt-087
+  path: pdf/arxiv-lora.pdf
+  shape: topic
+  query: How does LoRA compare with prefix-based approaches on the DART and WebNLG datasets in the additional
+    GPT-2 experiments?
+  note: Appendix F.1 reports LoRA performs better than or on par with prefix-based approaches on DART
+    and WebNLG, and explains why LoRA+PL is slightly worse.
+- id: fmt-089
+  target: fmt-089
+  path: pdf/arxiv-rag.pdf
+  shape: topic
+  query: What does the RAG paper say about retrieval collapse, where the retriever returns the same documents
+    and the generator learns to ignore them?
+  note: Once retrieval collapses to the same documents, the generator ignores them and RAG performs like
+    BART, possibly due to less need for factual knowledge or longer targets.
+- id: fmt-091
+  target: fmt-091
+  path: pdf/arxiv-resnet.pdf
+  shape: topic
+  query: Why does the ResNet paper prefer identity shortcuts over a square projection matrix Ws, and what
+    happens when the residual function has only a single layer?
+  note: Identity mapping suffices and is economical so Ws is only used to match dimensions; a single-layer
+    F behaves like a linear layer with no observed advantage.
+- id: fmt-093
+  target: fmt-093
+  path: pdf/arxiv-resnet.pdf
+  shape: topic
+  query: What localization error does the ResNet-101 based RPN achieve on ImageNet compared with the 33.1%
+    center-crop error of prior work?
+  note: The RPN with ResNet-101 cuts center-crop localization error from 33.1% to 13.3%, with 11.7% dense
+    multi-scale and 14.4% top-5 localization error.
+- id: fmt-094
+  target: fmt-094
+  path: pdf/irs-pub-15-employer-tax-guide.pdf
+  shape: paraphrase
+  query: What combined social security and Medicare percentages apply under section 3509 when a business
+    misclassified a worker and also failed to file the required information returns?
+  note: If required information returns weren't issued, section 3509 rates are 8.68% for social security
+    and 2.03% for Medicare (versus 7.44% and 1.74% otherwise).
+- id: fmt-095
+  target: fmt-095
+  path: pdf/irs-pub-15-employer-tax-guide.pdf
+  shape: topic
+  query: What does the employer tax guide say about shareholders requesting voluntary federal income tax
+    withholding on Alaska Native Corporation dividends using Form W-4V?
+  note: An ANC shareholder may request voluntary withholding on dividends and distributions by giving
+    the ANC a completed Form W-4V (Notice 2013-77).
+- id: fmt-096
+  target: fmt-096
+  path: pdf/irs-pub-15-employer-tax-guide.pdf
+  shape: paraphrase
+  query: When is a person considered to have acted deliberately in not paying over withheld payroll taxes
+    to the government?
+  note: Willfully means voluntarily, consciously and intentionally, including knowing trust fund taxes
+    aren't being paid or recklessly disregarding obvious risks.
+- id: fmt-097
+  target: fmt-097
+  path: pdf/nist-ai-rmf-1-0.pdf
+  shape: topic
+  query: How does the NIST AI RMF suggest managing risk from a lack of explainability, such as tailoring
+    descriptions to the user's role, knowledge and skill level?
+  note: Explainability risk is managed by describing how the AI system functions tailored to the user,
+    and interpretability risk by communicating why a prediction was made.
+- id: fmt-098
+  target: fmt-098
+  path: pdf/nist-ai-rmf-1-0.pdf
+  shape: paraphrase
+  query: What is the difference between knowing how an AI model works internally and grasping what its
+    outputs mean for its intended purpose?
+  note: Explainability is the representation of the mechanisms behind operation, while interpretability
+    is the meaning of output in the context of the designed purpose.
+- id: fmt-101
+  target: fmt-101
+  path: pdf/nist-csf-2-0.pdf
+  shape: topic
+  query: How does the CSF describe executives, managers and practitioners sharing information to create
+    Organizational Profiles and close gaps between Current and Target Profiles?
+  note: Executives provide priorities and risk direction, managers work with practitioners to create profiles,
+    and both implement actions to close Current-Target gaps.
+- id: fmt-102
+  target: fmt-102
+  path: pdf/nist-csf-2-0.pdf
+  shape: paraphrase
+  query: Which CSF maturity level has executives weighing cyber threats alongside financial and other
+    business concerns across the whole organization?
+  note: Tier 4 Adaptive describes an organization-wide risk-informed approach where executives monitor
+    cybersecurity risks in the same context as financial risks.
+- id: fmt-103
+  target: fmt-103
+  path: pdf/nist-sp-800-218-ssdf.pdf
+  shape: topic
+  query: What does the SSDF recommend for securely deploying, operating and maintaining development toolchains,
+    such as pipelines-as-code and reproducible builds?
+  note: 'PO.3.2 lists examples: assess tool security, integrate tools, use code-based toolchain configuration,
+    implement reproducible builds, and update tools.'
+- id: fmt-105
+  target: fmt-105
+  path: pdf/nist-sp-800-218-ssdf.pdf
+  shape: topic
+  query: What examples does the SSDF give for reviewing the software design against security requirements
+    and risk models and recording design review findings?
+  note: The examples call for reviewing the design against requirements and risk models, fixing failures,
+    changing design or risk response, and recording design review findings.
+- id: fmt-106
+  target: fmt-106
+  path: pdf/nist-sp-800-61r2-incident-handling.pdf
+  shape: paraphrase
+  query: If the on-call security team doesn't pick up when called about a breach, how long should the
+    caller wait before trying again?
+  note: The escalation process says to duplicate the initial contact and wait a brief time, perhaps 15
+    minutes, since phones fail or people have emergencies.
+- id: fmt-107
+  target: fmt-107
+  path: pdf/nist-sp-800-61r2-incident-handling.pdf
+  shape: topic
+  query: What does the incident handling guide say about creating a follow-up report for each incident,
+    including a formal chronology and monetary damage estimate?
+  note: Follow-up reports with a formal chronology and damage estimate matter for legal reasons and prosecution
+    and are kept per record retention policies.
+- id: fmt-108
+  target: fmt-108
+  path: pdf/nist-sp-800-61r2-incident-handling.pdf
+  shape: paraphrase
+  query: What portable grab bag of investigation gear should a breach response team keep packed and ready,
+    and what goes in it?
+  note: A jump kit is a portable case of materials needed during an investigation, kept ready at all times,
+    holding many of the listed items.
+- id: fmt-109
+  target: fmt-109
+  path: pdf/nist-sp-800-63b-authentication.pdf
+  shape: topic
+  query: What does SP 800-63B say about reauthentication from a federation or assertion and session correlation
+    between the CSP and RP?
+  note: Section 7.2.1 says the federation protocol establishes no session between CSP and RP, so no correlation
+    between their sessions may be assumed.
+- id: fmt-110
+  target: fmt-110
+  path: pdf/nist-sp-800-63b-authentication.pdf
+  shape: paraphrase
+  query: When must an identity provider cut the link between a login token and someone's account, for
+    instance after they die or turn out to be fraudulent?
+  note: Revocation removes the authenticator-credential binding and must happen promptly on identity ceasing
+    to exist, subscriber request, or loss of eligibility.
+- id: fmt-113
+  target: fmt-113
+  path: pdf/rfc9110-http-semantics-v2.pdf
+  shape: topic
+  query: What does RFC 9110 say about a strong validator being unique across all versions of a resource's
+    representations, given that cache entries can persist for a long time?
+  note: Because cache entries may persist arbitrarily long, a strong validator is unique across all versions
+    of a resource's representations over time but not across resources.
+- id: fmt-114
+  target: fmt-114
+  path: pdf/rfc9110-http-semantics-v2.pdf
+  shape: paraphrase
+  query: How should an origin server treat a header in an incoming PUT or POST which points back to where
+    the client first obtained the enclosed data?
+  note: An origin server receiving Content-Location in a request treats it as transitory context, may
+    use it for processing or links, but must not alter request semantics.
+- id: fmt-115
+  target: fmt-115
+  path: pptx/dfe-send-what-is-inclusive-teaching-slides.pptx
+  shape: topic
+  query: How does the inclusive teaching facilitation guidance suggest adapting the session to 50 or 75
+    minutes, for example by limiting optional slides and how many responses you elicit?
+  note: The guidance says the session flexes to 75 or 50 minutes by limiting or adding optional slides
+    and adjusting reflection and discussion time.
+- id: fmt-116
+  target: fmt-116
+  path: pptx/dfe-send-what-is-inclusive-teaching-slides.pptx
+  shape: paraphrase
+  query: After quoting the EEF guidance, what does the course ask teachers to reflect on about a class
+    they currently teach, such as its impact and the obstacles they face?
+  note: Slide 15 asks how far teachers take the combined universal and adaptive approach with a current
+    class, its impact, and the barriers where they don't.
+- id: fmt-117
+  target: fmt-117
+  path: pptx/dfe-send-what-is-inclusive-teaching-slides.pptx
+  shape: topic
+  query: Where does the inclusive teaching deck ask staff to reflect on developing positive relationships,
+    such as communicating high expectations and helping learners form friendships, then discuss in pairs?
+  note: The reflection slide lists positive-relationship elements and asks what staff did and how it helped
+    learners with additional needs, then to discuss in pairs.
+- id: fmt-118
+  target: fmt-118
+  path: pptx/fsa-safer-food-better-business-lecturers.pptx
+  shape: paraphrase
+  query: Can a trained catering student carry out the food safety diary checks and sign it, and who must
+    then verify and countersign it?
+  note: A nominated trained level 3 student may conduct checks and sign the SFBB diary, but the lecturer
+    in charge must always check and countersign it.
+- id: fmt-119
+  target: fmt-119
+  path: pptx/fsa-safer-food-better-business-lecturers.pptx
+  shape: topic
+  query: What are the aim and learning outcomes of the first Safer Food Better Business lesson for college
+    catering lecturers?
+  note: Lesson 1 introduces SFBB and safe methods for due diligence, with outcomes on legal requirements,
+    safe methods, opening and closing checks, and diary entries.
+- id: fmt-120
+  target: fmt-120
+  path: pptx/fsa-safer-food-better-business-lecturers.pptx
+  shape: paraphrase
+  query: What is a chef confirming when they put their name and date in the food safety diary at the close
+    of every shift?
+  note: Signing the diary confirms opening and closing checks were done, staff were supervised in safe
+    methods, and problems were recorded ('recording by exception').
+- id: fmt-121
+  target: fmt-121
+  path: pptx/geoscience-australia-canning-basin-presentation.pptx
+  shape: topic
+  query: In the Canning Basin presentation, which data columns are combined in the well data integration
+    figure, such as gamma ray logs, fluid inclusions and XRD mineralogy?
+  note: 'The well data integration slide lists seven columns: depth, chemostratigraphy, GR/DT/RHOB logs,
+    core lithology, fluid inclusion results, ICP and XRD.'
+- id: fmt-123
+  target: fmt-123
+  path: pptx/geoscience-australia-canning-basin-presentation.pptx
+  shape: topic
+  query: Which Larapintine petroleum systems are recognized in the Canning Basin, and which is deemed
+    most prospective in the Kidson Sub-basin?
+  note: Three Larapintine petroleum systems (2, 3 and 4) are recognized, and Larapintine 2 is deemed most
+    prospective in the Kidson Sub-basin.
+- id: fmt-124
+  target: fmt-124
+  path: pptx/govuk-prevent-duty-higher-education-intro.pptx
+  shape: paraphrase
+  query: Which Prevent case study describes someone restricting entry to the campus faith space to people
+    sharing their beliefs, and another about an anti-war protest?
+  note: Case study 3 covers a student controlling prayer room access and case study 4 a student shouting
+    accusations at a peaceful Iraq war demonstration.
+- id: fmt-125
+  target: fmt-125
+  path: pptx/govuk-prevent-duty-higher-education-intro.pptx
+  shape: topic
+  query: Which types of terrorist threat does the Prevent duty higher education training list, such as
+    incel-related, single issue and Northern Ireland-related extremism?
+  note: Slide 8 lists terrorist threats alphabetically, from anarchist and single-issue extremism to incel-related
+    and Northern Ireland-related terrorism.
+- id: fmt-126
+  target: fmt-126
+  path: pptx/govuk-prevent-duty-higher-education-intro.pptx
+  shape: paraphrase
+  query: What common myths make the anti-radicalisation duty contentious in universities, such as spying
+    on learners or curbing academic freedom, and what does the duty actually expect?
+  note: The slide lists misconceptions like snooping and interfering with academic freedom, then the Prevent
+    duty expectations such as risk assessment and staff training.
+- id: fmt-127
+  target: fmt-127
+  path: pptx/nasa-trick-advanced-topics.pptx
+  shape: topic
+  query: What warning does the Trick advanced training give about setting rt_priority to 1 on a single
+    processor computer without napping?
+  note: Setting rt_priority = 1 runs at maximum priority, and on a single processor with no napping it
+    shuts out all shells and input devices.
+- id: fmt-128
+  target: fmt-128
+  path: pptx/nasa-trick-advanced-topics.pptx
+  shape: paraphrase
+  query: In a Trick simulation, how can I see how much time every job used per frame and map job numbers
+    back to function names?
+  note: DP_rt_jobs shows per-job times per frame, DP_rt_timeline plots executing jobs against real time,
+    and S_job_execution maps job IDs to names.
+- id: fmt-130
+  target: fmt-130
+  path: pptx/pspc-gc-hr-pay-change-management-culture-strategy.pptx
+  shape: paraphrase
+  query: How will the government HR and pay overhaul use user personas and journey mapping to shape learning
+    materials for different roles?
+  note: Change impact assessment feeds personas and journey maps that become inputs to training materials,
+    including role-based process training.
+- id: fmt-131
+  target: fmt-131
+  path: pptx/pspc-gc-hr-pay-change-management-culture-strategy.pptx
+  shape: topic
+  query: Which change management resources are coming in summer 2026 for GC organizations, such as key
+    success metrics, journey maps and a training playbook?
+  note: 'The slide lists summer 2026 deliverables: key success metrics, journey maps, a training plan
+    and playbook, and change management templates.'
+- id: fmt-132
+  target: fmt-132
+  path: pptx/pspc-gc-hr-pay-change-management-culture-strategy.pptx
+  shape: paraphrase
+  query: In the plan for reaching staff across government about the HR and pay overhaul, who should act
+    as its public figurehead and what are managers asked to do?
+  note: The Strategic Outreach Plan has leaders be the face of the change, managers stay informed and
+    encourage teams, plus tactics like lobby roadshows.
+- id: fmt-133
+  target: fmt-133
+  path: pptx/pspc-pay-backlog-reduction-ai-update.pptx
+  shape: topic
+  query: What did modelling show about using the AI tool with 30 compensation advisors on acting and leave
+    without pay cases to bring forward pay stabilization?
+  note: The small-scale scenario with 30 advisors on 54,000 acting and LWOP cases could bring pay stabilization
+    forward by 2-4 weeks.
+- id: fmt-134
+  target: fmt-134
+  path: pptx/pspc-pay-backlog-reduction-ai-update.pptx
+  shape: paraphrase
+  query: How many minutes does an acting pay case take a human administrator compared with the AI helper,
+    and with both working together?
+  note: Baseline assessments show 50 minutes for a pay administrator, 0.5 for the AI virtual assistant,
+    and 10 with a human in the loop.
+- id: fmt-135
+  target: fmt-135
+  path: pptx/pspc-pay-backlog-reduction-ai-update.pptx
+  shape: topic
+  query: What next steps are planned for the pay backlog AI virtual assistant, such as validating accuracy
+    by random sampling and onboarding more compensation advisors?
+  note: Next steps include more case types, onboarding more advisors, random-sample accuracy validation,
+    and using new AI to validate the tool.
+- id: fmt-136
+  target: fmt-136
+  path: rtf/dcms-armitt-report-london-2012-showcase.rtf
+  shape: paraphrase
+  query: How much in high-value overseas deals did UK officials help firms win in the past year, and how
+    many smaller companies got help entering new markets?
+  note: The Government helped UK businesses secure over £800m of overseas contracts and supported over
+    20,000 SMEs into new markets, with ECGD support too.
+- id: fmt-137
+  target: fmt-137
+  path: rtf/dcms-armitt-report-london-2012-showcase.rtf
+  shape: topic
+  query: How does the London 2012 Armitt report foreword describe the Olympic site before regeneration
+    and the number of firms that helped build the Park?
+  note: The foreword says the site was neglected with trolleys and polluted soil, and 1,600 firms, 98%
+    UK-registered, built it on time and budget.
+- id: fmt-138
+  target: fmt-138
+  path: rtf/dcms-armitt-report-london-2012-showcase.rtf
+  shape: paraphrase
+  query: What did UK Trade & Investment's five-year plan promise exporters and foreign investors coming
+    into Britain after the 2011 trade and investment white paper?
+  note: Britain Open for Business set out targeting high-growth SMEs, winning high-value overseas opportunities
+    and delivering quality inward investment.
+- id: fmt-139
+  target: fmt-139
+  path: rtf/oaic-guide-foi-statistical-returns-2011-12.rtf
+  shape: topic
+  query: In the OAIC guide to FOI statistical returns, what counts as full access versus partial access
+    for items 3A and 3B, such as an edited copy?
+  note: 3A covers decisions granting full access, while 3B covers partial access such as an edited copy
+    or refusal of some of several documents.
+- id: fmt-140
+  target: fmt-140
+  path: rtf/oaic-guide-foi-statistical-returns-2011-12.rtf
+  shape: paraphrase
+  query: Where should an agency report freedom of information spending on photocopying, postage and travel,
+    and what falls under litigation or staff training?
+  note: The cost table defines general administrative, general legal advice, litigation and training cost
+    categories, counted separately for FOI and IPS.
+- id: fmt-141
+  target: fmt-141
+  path: rtf/oaic-guide-foi-statistical-returns-2011-12.rtf
+  shape: topic
+  query: Which requests should be left out of item 3C of the FOI statistical return, such as deemed refusals,
+    and when is a request recorded as withdrawn?
+  note: 3C excludes deemed refusals and alternative-form access, 3D includes only full transfers, and
+    3E counts withdrawn requests under set conditions.
+- id: fmt-143
+  target: fmt-143
+  path: xlsx/cdc-nchs-npals-2022-adsc-services-user-codebook.xlsx
+  shape: topic
+  query: In the adult day services user codebook, how many participants need both help from another person
+    and an assistive device for toileting?
+  note: The TOILHLP row for value 3 = BOTH shows 30 participants (5.12%).
+- id: fmt-144
+  target: fmt-144
+  path: xlsx/cdc-nchs-npals-2022-adsc-services-user-codebook.xlsx
+  shape: paraphrase
+  query: What share of adult day center participants currently use rides to doctor or dentist visits,
+    according to the services-use codebook?
+  note: TRANSMSERV shows 86 (30.04%) yes and 350 (69.4%) no for transportation to medical or dental appointments.
+- id: fmt-145
+  target: fmt-145
+  path: xlsx/dfe-breakfast-clubs-early-adopters-data-dictionary.xlsx
+  shape: topic
+  query: In the breakfast clubs data dictionary, which variable and code record parents strongly agreeing
+    they spend less time preparing breakfast on school days?
+  note: an_impact_routine_02 uses code 1 for Strongly agree with spending less time preparing breakfast
+    on school days.
+- id: fmt-146
+  target: fmt-146
+  path: xlsx/dfe-breakfast-clubs-early-adopters-data-dictionary.xlsx
+  shape: paraphrase
+  query: Which survey field records families citing that their kid simply likes the school morning meal
+    scheme as a key draw for taking part?
+  note: an_bc_reasons_attend_02 records 'My child enjoys going' as a top reason for attending the free
+    breakfast club (0 No, 1 Yes).
+- id: fmt-147
+  target: fmt-147
+  path: xlsx/dfe-breakfast-clubs-early-adopters-data-dictionary.xlsx
+  shape: topic
+  query: In the breakfast clubs data dictionary, what code stands for a child attending the free breakfast
+    club for one to three months?
+  note: For an_time_freebc, code 3 means 1-3 months (code 2 means 1-4 weeks).
+- id: fmt-148
+  target: fmt-148
+  path: xlsx/giaa-audit-risk-committee-self-assessment-tool.xlsx
+  shape: paraphrase
+  query: Which self-assessment item asks whether the audit panel probes major risks in depth and challenges
+    how managers are mitigating them?
+  note: Question 39 asks whether the committee has undertaken deep dives into significant risks to review
+    and challenge management's mitigation.
+- id: fmt-149
+  target: fmt-149
+  path: xlsx/giaa-audit-risk-committee-self-assessment-tool.xlsx
+  shape: topic
+  query: Which audit committee self-assessment questions cover induction for new committee members, including
+    public sector accountability training and the organisation's vision and purpose?
+  note: Questions 18, 19a and 19b ask about induction with accountability training and engagement on objectives,
+    risk profile, vision and purpose.
+- id: fmt-150
+  target: fmt-150
+  path: xlsx/giaa-audit-risk-committee-self-assessment-tool.xlsx
+  shape: paraphrase
+  query: Which audit panel self-check items ask about having the right mix of skills, someone with up-to-date
+    finance background, and power to bring in outside experts?
+  note: Questions 13 to 16 cover appointment letters, required skills, recent financial experience and
+    co-opting specialist advice.
+- id: fmt-152
+  target: fmt-152
+  path: xlsx/mitre-attack-enterprise-v19-2.xlsx
+  shape: paraphrase
+  query: Which known implant lets intruders keep a foothold on hacked edge appliances and run whatever
+    Lua code they send it?
+  note: S1188 Line Runner is a persistent backdoor and web shell for uploading and executing arbitrary
+    Lua scripts, tied to ArcaneDoor.
+- id: fmt-153
+  target: fmt-153
+  path: xlsx/mitre-attack-enterprise-v19-2.xlsx
+  shape: topic
+  query: What does the ATT&CK catalog say about Cobian RAT, the backdoor remote access tool observed since
+    2016?
+  note: S0338 Cobian RAT is described as a backdoor remote access tool observed since 2016, targeting
+    Windows.
+- id: fmt-157
+  target: fmt-157
+  path: xlsx/nist-sp800-53r5-control-catalog.xlsx
+  shape: topic
+  query: Which NIST SP 800-53 control enhancement requires external system service providers to identify
+    the functions, ports, protocols and services needed to use their services?
+  note: SA-9(2) requires providers to identify functions, ports, protocols and services, useful for restricting
+    functions or blocking ports.
+- id: fmt-159
+  target: fmt-159
+  path: xlsx/nist-sp800-53r5-control-catalog.xlsx
+  shape: topic
+  query: Which SP 800-53 control discussion says encrypting links and transmitting in continuous, fixed
+    or random patterns prevents deriving intelligence from communication patterns?
+  note: The fragment says encrypting links and fixed or random transmission prevents intelligence derivation,
+    with protected distribution systems as a physical alternative.

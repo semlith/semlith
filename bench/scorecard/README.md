@@ -10,8 +10,8 @@ behind each one.
 Run on one M1 MacBook Air (4P+4E, 8 GB) in October 2026, indexing on its Neural
 Engine. SWE-bench and the competitor table ran on the 0.38.0 build; CodeRAG-Bench,
 RepoBench-R and the agent round ran on 0.36.0, whose search path is the same for
-these image-free corpora. Each figure is the median of the runs named, with the
-spread when it is not zero. Results are published as measured, including where
+these image-free corpora; the documents round ran on 0.44.1. Each figure is the
+median of the runs named, with the spread when it is not zero. Results are published as measured, including where
 another tool wins.
 
 The baselines are what an agent does without semlith. *BM25* ranks the files one
@@ -127,6 +127,29 @@ Headless Claude Code on 50 held-out questions generated from the code of a 70-re
 
 `python3 bench/scorecard/agent/corpus_round.py`
 
+### Documents
+
+127 questions about passages inside 53 public documents fetched from their publishers' own URLs, in 11 formats: PDF, Word, PowerPoint, Excel, OpenDocument text, sheets and slides, EPUB, RTF, notebooks and CSV (two mailing-list archives sit beside them, with no questions). A passage is found when a delivered excerpt is in the gold document and shares a run of six words with the gold passage, whichever extractor produced it.
+
+| arm | runs | found within 2k tokens | 4k | 8k | right document within 4k | median tokens to the first find |
+|---|---|---|---|---|---|---|
+| rg, BM25 | 3 | 6/127 | 7/127 | 9/127 | 15/127 | 1416 |
+| rga (rg with document adapters), BM25 | 3 | 28/127 | 34/127 | 41/127 | 77/127 | 1008 |
+| semlith_search, k 50 | 3 | 114/127 | 116/127 | 121/127 | 127/127 | 11 |
+| semlith_brief | 3 | 80/127 | 80/127 | 80/127 | 126/127 | 16 |
+
+`python3 bench/scorecard/documents/documents.py run && python3 bench/scorecard/documents/documents.py score <run dir>`
+
+Headless Claude Code on the same questions; the answer is up to five documents, each with a quote. A quote that shares no six-word run with the text semlith extracted from the document it names was written, not read.
+
+| model | arm | runs | questions | found | cost / session | sessions calling semlith | top quotes not in the named document |
+|---|---|---|---|---|---|---|---|
+| opus | grep (Grep, Glob, Read) | 1 | 127 | 80/127 | $0.067 | — | 41 of 127 |
+| opus | semlith installed, Grep built in | 1 | 127 | 124/127 | $0.043 | 127 | 0 of 126 |
+| opus | semlith and Read only | 1 | 127 | 122/127 | $0.042 | 127 | 0 of 123 |
+
+`python3 bench/scorecard/documents/agent_round.py run g,s,sx && python3 bench/scorecard/documents/agent_round.py score`
+
 ### Savings in real sessions
 
 The owner's own ledger across 8 stores, benchmark stores excluded: 1,575 retrievals, 87 % credited (measured/modelled). The excerpts returned were 1,281,313 tokens; the whole files they came from, 96,399,209 — 75.2x across all stores, 50.7x for the median store. That comparison is an upper bound on what reading would have cost, not a measurement of it; the agent table is the head-to-head. Counted under 0.38.0's rules: from 0.42.0 the whole-file side of a PDF, an Office file, an EPUB, a notebook or an HTML page is the text the store holds for it rather than its bytes over four, which lowers the saving for document stores, and this figure was not re-measured under that rule.
@@ -144,7 +167,10 @@ the commit it was built from), the machine and the SHA-256 of every result file.
 
 Nothing this harness downloads, clones, indexes or writes lives in the
 repository. It all goes under `SCORECARD_HOME`, `~/semlith-bench/scorecard` by
-default, and none of `bench/` is part of the published crate.
+default, and none of `bench/` is part of the published crate. The one exception
+is the documents round's score files and their `MANIFEST.json`, committed under
+`documents/runs/<run>/`; its documents, store and raw tool output stay under
+`SCORECARD_HOME/documents`.
 
 ### What you need
 
@@ -155,6 +181,9 @@ default, and none of `bench/` is part of the published crate.
 - For the competitor arms, the nine tools; `competitors/README.md` says where
   each comes from and how its adapter calls it. Sourcebot needs Docker.
 - For the agent round, Claude Code signed in (`claude -p`).
+- For the documents round, `curl` and PyYAML, and for its rga arm
+  [ripgrep-all](https://github.com/phiresky/ripgrep-all) with poppler's
+  `pdftotext` and `pandoc` on `PATH`.
 
 ### Downloads
 
@@ -167,6 +196,7 @@ default, and none of `bench/` is part of the published crate.
 | CodeRAG-Bench task sets and corpora | Hugging Face `code-rag-bench/*` | about 16 MB |
 | RepoEval function-level tasks and repositories | the URLs CodeRAG-Bench's own `retrieval/create/repoeval.py` uses | about 25 MB zipped |
 | RepoBench-R test splits | Hugging Face `tianyang/repobench-r` | about 0.7 GB |
+| The documents round's 53 documents (`python3 bench/scorecard/documents/documents.py fetch`, each checked against its SHA-256; Project Gutenberg rebuilds its EPUBs monthly, CISA's catalogue changes daily and NIST builds one spreadsheet on request, so a fresh fetch of those seven gets newer bytes, reported in `fetch.json` and the run's MANIFEST; `fetch --from DIR` takes them from an earlier fetch whose bytes still match, which is how the published run used all 53 pinned) | the publishers' own URLs in `documents/manifest.jsonl`: arXiv, NIST, the IRS, the RFC Editor, OASIS, NASA, GOV.UK, Australian and Canadian government portals, MITRE, the CDC, LibreOffice, Project Gutenberg, the Python Data Science Handbook, Apache's mailing lists, CISA | 61.7 MB |
 
 ### The runs
 
@@ -176,11 +206,14 @@ default, and none of `bench/` is part of the published crate.
 | CodeRAG-Bench | `uv run --with pyarrow python bench/scorecard/coderag.py run` then `... score <run dir>` | about an hour, mostly indexing the 34 003 library pages |
 | RepoBench-R | `uv run --with pyarrow python bench/scorecard/repobench.py run` then `... score <run dir>` | about 2 h for the default sample of 500 per configuration and level; `--sample 0` runs all 48 000 |
 | Competitors | `python3.11 bench/scorecard/competitors_swe.py walk` then `... score`; to run the slow tools beside the fast ones, give them their own `--out DIR` with `SEMLITH_VECTOR_CACHE_MB=0` (otherwise semlith's first index of a repository there reuses the vectors the first walk cached, and the budget is no longer against a cold index), and score with `--also DIR=tool,tool` | depends on the tools; each is stopped where its indexing passes four times semlith's on the same instances |
+| Documents | `python3 bench/scorecard/documents/documents.py fetch`, then `... index`, `... run` and `... score <run dir>` (the score files land in `documents/runs/<run>/`); the agent round is `python3 bench/scorecard/documents/agent_round.py run g,s,sx` then `... score`. With `SEMLITH_BIN` naming the binary to measure; every semlith runs under the scratch home `SCORECARD_HOME/documents/home` with `SEMLITH_ACCEL=ane` and `SEMLITH_LEDGER=0` | fetch about 7 minutes (one Apache list archive takes five); index about 6 minutes; the four arms three times each, under 2 minutes; the agent round about 45 minutes at three sessions at a time, and $19.17 on Opus for its 381 sessions on the published run |
 | Savings in real sessions | `python3 bench/scorecard/ledger_savings.py` | seconds; reads this machine's own ledger |
 | The tables and charts on this page | `python3 bench/scorecard/report.py --readme bench/scorecard/README.md` then `python3 bench/scorecard/charts.py` | seconds |
 
 Each run resumes where it stopped: results append one line per (instance, arm,
-run) to `rows.jsonl`, and a line already there is not run again.
+run) to `rows.jsonl`, and a line already there is not run again. The documents
+round's agent sessions resume the same way; its four deterministic arms take two
+minutes and always run whole, into a new run directory.
 
 ### What each arm is
 
@@ -193,6 +226,20 @@ run) to `rows.jsonl`, and a line already there is not run again.
   benchmark's own documents.
 - **competitors**: `competitors/`, one adapter per tool, each calling that
   tool's own CLI or server as its documentation describes.
+- **documents round**: *rg, BM25* is the same term weighting over `rg`'s raw
+  bytes, returning ±3-line blocks in rank order; *rga* is that over
+  ripgrep-all, which opens PDF, docx, odt, EPUB and notebooks through poppler
+  and pandoc (it has no adapter for pptx, xlsx, ods, odp or rtf), with a file's
+  length taken as the text its adapter yields; *semlith_search* (k 50, excerpt
+  format) and *semlith_brief* go through one long-lived `semlith mcp` over a
+  store of the 53 documents. The agent arms are the code round's flags in
+  `documents/files`: *grep* has Grep, Glob and Read; *semlith installed* adds
+  `semlith mcp`, the skill and the hooks; *semlith and Read only* takes Grep and
+  Glob away. Every semlith runs with `SEMLITH_HOME` set to a scratch home under
+  `SCORECARD_HOME/documents`. The questions and their gold passages are frozen
+  (`documents/questions.yaml`, `FROZEN.sha256`; the writers' brief is
+  `documents/write_questions.md`), and the harness refuses to run if either
+  changes.
 
 Tokens are counted at four bytes each over what an arm returns, in the order it
 returns it, so a budget means the same thing for every arm.
