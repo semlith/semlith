@@ -2778,14 +2778,20 @@ fn choose(
     if let Some(lead) = hint.and_then(|h| h.strip_prefix(crate::graph::RECEIVER)) {
         return Ok(through_receiver(candidates, src_path, lead));
     }
-    if candidates.len() == 1 {
+    // A module path (`std::env::current_dir()`, `os.getcwd()`) says where the
+    // target lives, so one that names no candidate's file, module or import
+    // went somewhere the store does not hold: the edge stays unsettled even
+    // with one candidate left. ripgrep's `std::env::current_dir()` was
+    // resolved onto `hiargs::current_dir` this way.
+    let path_hint = hint.filter(|h| !h.chars().next().is_some_and(char::is_uppercase));
+    if candidates.len() == 1 && path_hint.is_none() {
         return Ok((vec![true], true));
     }
     let mut ranks: Vec<u8> = candidates
         .iter()
         .map(|c| rank(c, src_path, hint, &[]))
         .collect();
-    if survivors(&ranks) != 1 && ranks.contains(&UNRANKED) {
+    if (survivors(&ranks) != 1 || path_hint.is_some()) && ranks.contains(&UNRANKED) {
         if !imports.contains_key(src_path) {
             let found = file_imports(db, src_path)?;
             imports.insert(src_path.to_string(), found);
@@ -2798,6 +2804,9 @@ fn choose(
     }
     let best = ranks.iter().copied().min().unwrap_or(UNRANKED);
     let mut keep: Vec<bool> = ranks.iter().map(|r| *r == best).collect();
+    if path_hint.is_some() && best == UNRANKED {
+        return Ok((keep, false));
+    }
     if best < UNRANKED && keep.iter().filter(|k| **k).count() > 1 {
         let near: Vec<usize> = candidates
             .iter()
@@ -2985,6 +2994,8 @@ fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[St
     if in_type && typed.is_some_and(|t| owner_of(&candidate.qualified) == Some(t)) {
         return 0;
     }
+    // An inline `mod m { fn f() }` is named by `m::f()` as surely as m.rs is.
+    let in_named_module = hint.is_some_and(|h| owner_of(&candidate.qualified) == Some(h));
     let candidate = candidate.path.as_str();
     // A module path (`flask.Flask`, `index::read`) names where the target
     // is, so the calling file's own namesake wins only when the path names
@@ -3001,7 +3012,7 @@ fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[St
     if candidate == src_path && path_hint.is_none_or(names_caller) {
         return 1;
     }
-    if hint.is_some_and(|h| names_file(h, candidate, src_path)) {
+    if in_named_module || hint.is_some_and(|h| names_file(h, candidate, src_path)) {
         return 2;
     }
     if imports.iter().any(|i| {

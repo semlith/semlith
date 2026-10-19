@@ -1536,12 +1536,18 @@ fn scope_owner(name: tree_sitter::Node, text: &str) -> Option<String> {
 
 /// The type a Rust definition is a member of: the nearest `impl` or `trait`
 /// block around it. A function nested inside another function, or a module in
-/// between, belongs to neither.
+/// between, belongs to neither. An `impl Trait for Box<dyn Error>`, whose type
+/// names nothing, is the trait's.
 fn rust_owner(node: tree_sitter::Node, text: &str) -> Option<String> {
     let mut at = node.parent();
     while let Some(n) = at {
         match n.kind() {
-            "impl_item" => return rust_type_name(n.child_by_field_name("type")?, text),
+            "impl_item" => {
+                return n
+                    .child_by_field_name("type")
+                    .and_then(|t| rust_type_name(t, text))
+                    .or_else(|| rust_type_name(n.child_by_field_name("trait")?, text));
+            }
             "trait_item" => {
                 return n
                     .child_by_field_name("name")
@@ -7655,5 +7661,48 @@ fn typed(e: &Enabled) {
         ]);
         assert_eq!(kind_of(&db, "b", 3), "function");
         settles_at(&db, "empty", "b", "crates/cli/src/escape.rs", 3);
+    }
+
+    /// A module path naming nothing the store holds leaves the store:
+    /// ripgrep's `std::env::current_dir()` was resolved onto the one
+    /// `current_dir` in hiargs.rs. An inline `mod m { fn f() }` is still
+    /// named by `m::f()`.
+    #[test]
+    fn a_module_path_naming_nothing_here_does_not_settle() {
+        let hiargs = "pub fn current_dir() -> u8 {\n    0\n}\n";
+        let walk = "fn get_or_set_current_dir() {\n    std::env::current_dir();\n}\n\nmod m {\n    pub fn f() {}\n}\n\nfn g() {\n    m::f();\n}\n";
+        let other = "fn f() {}\n";
+        let db = store(&[
+            ("crates/core/flags/hiargs.rs", hiargs),
+            ("crates/ignore/src/walk.rs", walk),
+            ("crates/other/src/lib.rs", other),
+        ]);
+        let out =
+            crate::store::edges_out(&db, "get_or_set_current_dir", &dependency_kinds()).unwrap();
+        assert!(
+            out.iter()
+                .all(|e| e.symbol.name != "current_dir" || e.confidence == AMBIGUOUS),
+            "{out:#?}"
+        );
+        settles_at(&db, "g", "f", "crates/ignore/src/walk.rs", 6);
+    }
+
+    /// `impl SinkError for Box<dyn Error>` names no type, so its methods are
+    /// the trait's rather than free functions of the file.
+    #[test]
+    fn a_method_of_an_unnameable_impl_belongs_to_its_trait() {
+        let sink = "pub trait SinkError {\n    fn error_message(m: &str) -> Self;\n}\n\nimpl SinkError for Box<dyn std::error::Error> {\n    fn error_message(m: &str) -> Self {\n        m.into()\n    }\n}\n";
+        let db = store(&[("src/sink.rs", sink)]);
+        let row: (String, String) = db
+            .query_row(
+                "SELECT kind, qualified FROM symbols WHERE name = 'error_message' AND start_line = 6",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            ("method".to_string(), "SinkError::error_message".to_string())
+        );
     }
 }
