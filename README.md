@@ -67,8 +67,9 @@ the few spans that answer the question. Semlith finds them.
   symbols connect.
 - **Always current.** A watcher re-embeds a file when you save it. There is no
   build step and nothing to go stale against your working tree.
-- **Local by design.** No API keys, no network at query time, a portal bound to
-  `127.0.0.1` only. Model weights are the one download, pinned by digest.
+- **Local by design.** No API keys, no network at query time until you connect
+  a cloud org, a portal bound to `127.0.0.1` only. Model weights and
+  acceleration packs are the only downloads, each pinned by digest.
 - **Made for agents.** An MCP server with sixteen tools, registered in your
   agent clients by one command, and a ledger of every retrieval with the tokens
   it saved.
@@ -93,11 +94,11 @@ irm https://raw.githubusercontent.com/semlith/semlith/main/install.ps1 | iex
 ```
 <!-- install-oneliners:end -->
 
-The installer picks the release for your machine, checks it against the
-release's `SHA256SUMS`, unpacks it into `~/.semlith/bin` and runs `semlith
-setup`. Setup puts semlith on your `PATH`, downloads the embedding model,
-registers semlith with the agent clients it finds, and installs the daemon as a
-login service. Run `semlith setup` again at any time to repair an install;
+The installer picks the release for your machine, verifies the ed25519
+signature on the release's `SHA256SUMS`, checks the archive against it,
+unpacks it into `~/.semlith/bin` and runs `semlith setup`. Setup puts semlith
+on your `PATH`, downloads the embedding model, registers semlith with the agent
+clients it finds, and installs the daemon as a login service. Run `semlith setup` again at any time to repair an install;
 `--yes` takes every default.
 
 | Variable | Effect |
@@ -193,7 +194,8 @@ semlith doctor    # checks each client can actually reach it, and says how to fi
 ```
 
 `setup` registers the MCP server at user scope in every client with a
-registration command — 12 clients are documented and launched in CI,
+registration command — 12 clients are documented, and every stanza is run
+against the binary in `tests/clients.rs`;
 [docs/clients.md](docs/clients.md) has every stanza and the HTTP transport. It
 also installs the semlith Agent Skill, a steering hook that suggests the
 semlith call when an agent is about to grep, and a read-only research agent.
@@ -381,7 +383,7 @@ these drifts from its source:
 | image types | **5** |
 | MCP tools | **16** |
 | CLI commands | **36** |
-| agent clients, each launched and answered in `tests/clients.rs` | **12** |
+| agent clients, each setup stanza run against the binary in `tests/clients.rs` | **12** |
 | prebuilt targets | **4** |
 
 **Measured** on a 4P+4E Apple silicon laptop, with the command that reproduces

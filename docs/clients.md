@@ -129,9 +129,9 @@ folder. `--strict` is kept as the name for `gate`.
 Gate exists because, on code, an agent with Grep reaches for Grep. On 50
 held-out code questions with Opus 5.5, no wording of the instructions, tool
 descriptions or soft hook moved it (0 to 5 of 50 sessions called semlith). Under
-`gate`, 44 of 50 did, with two more correct answers and about 31 % more cost per
-session. It stays opt-in. On documents it is the other way round: 116 of 127
-sessions called semlith unforced (#189).
+`gate`, about 45 of 50 did, with two more correct answers and about 12 % more
+cost per session (`bench/scorecard/README.md`). It stays opt-in. On documents it
+is the other way round: 127 of 127 sessions called semlith unforced (#189).
 
 ```json hook path=~/.claude/settings.json
 {
