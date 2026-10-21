@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.1] - 2026-10-21
+
+### Changed
+
+- **The README and the clients guide say what the binary does.** "Local by
+  design" now says a search stays on the machine until a cloud org is
+  connected (then it reaches that org too, as `docs/security.md` says), and
+  that model weights and acceleration packs are the downloads, each pinned by
+  digest. The installer paragraph names the ed25519 signature check on
+  `SHA256SUMS` before the archive check. The clients row and setup paragraph
+  say `tests/clients.rs` runs every documented setup stanza against the
+  binary, rather than that the clients are launched. `docs/clients.md`'s gate
+  figures follow the scorecard: about 45 of 50 sessions, about 12 % more cost,
+  and 127 of 127 document sessions calling semlith. Docs only; the binary is
+  0.45.0's.
+
 ## [0.45.0] - 2026-10-21
 
 ### Added
