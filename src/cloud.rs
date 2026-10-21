@@ -773,8 +773,15 @@ pub fn lag(seconds: Option<i64>) -> String {
     }
 }
 
-/// The three cards `semlith cloud status` prints.
-pub fn render_status(entry: &Entry, status: &Value, version: Option<&str>) -> String {
+/// The three cards `semlith cloud status` prints. `here` is the org's stores
+/// this machine has connected (`connected_here`), so each store line says
+/// whether it is one of them.
+pub fn render_status(
+    entry: &Entry,
+    status: &Value,
+    version: Option<&str>,
+    here: &[String],
+) -> String {
     let org = &status["org"];
     let s = |v: &Value| v.as_str().unwrap_or("—").to_string();
     let mut out = String::new();
@@ -820,6 +827,11 @@ pub fn render_status(entry: &Entry, status: &Value, version: Option<&str>) -> St
         if let Some(mcp) = status["mcp_url"].as_str() {
             out.push_str(&format!(" · reach {mcp}?store={name}"));
         }
+        out.push_str(if here.contains(&name) {
+            " · connected here"
+        } else {
+            " · not connected here"
+        });
         out.push('\n');
         for source in store["sources"].as_array().into_iter().flatten() {
             out.push_str(&format!(
@@ -858,7 +870,27 @@ pub fn render_status(entry: &Entry, status: &Value, version: Option<&str>) -> St
             usage["queue"]["waiting"].as_i64().unwrap_or(0),
         ));
     }
+    if stores
+        .iter()
+        .any(|store| !here.contains(&s(&store["name"])))
+    {
+        out.push_str(&format!(
+            "`semlith cloud connect {}` adds the stores not connected here\n",
+            entry.org
+        ));
+    }
     out.trim_end().to_string()
+}
+
+/// The stores of the entry's org this machine has connected, by their cloud
+/// name: registry remote entries matched on org and host together, so a
+/// same-named store of another org or host is never counted.
+pub fn connected_here(entry: &Entry) -> Vec<String> {
+    remote_stores()
+        .into_iter()
+        .filter(|(_, r)| r.org == entry.org && r.host == entry.host)
+        .map(|(_, r)| r.store)
+        .collect()
 }
 
 /// 1234567 as 1,234,567.
@@ -2819,6 +2851,7 @@ mod tests {
                 "index_chunks": 12400, "cap_chunks": 100000, "queue": { "running": 0, "waiting": 0 } }),
             ),
             None,
+            &[],
         );
         assert!(
             chunks.contains("12,400 of 100,000 chunks indexed"),
@@ -2832,6 +2865,7 @@ mod tests {
                 "index_minutes": 2, "cap_minutes": 100, "queue": { "running": 0, "waiting": 0 } }),
             ),
             None,
+            &[],
         );
         assert!(minutes.contains("2 of 100 index minutes"), "{minutes}");
         assert!(!minutes.contains("chunks"), "{minutes}");

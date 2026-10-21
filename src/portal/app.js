@@ -5541,7 +5541,7 @@ function storesList() {
               pill(r.badge, "blue", { dot: false }),
             ),
           ),
-          el("div", { class: "card-foot" }, el("span", { class: "grow", text: "Settings › Cloud has their sources, revisions and lag" }), btn({ class: "btn xs", onclick: () => go("settings", "cloud") }, "Open Cloud")),
+          el("div", { class: "card-foot" }, el("span", { class: "grow", text: "Settings › Cloud has their sources, revisions and lag, and connects stores added in the cloud later" }), btn({ class: "btn xs", onclick: () => go("settings", "cloud") }, "Open Cloud")),
         )
       : null,
   );
@@ -10223,6 +10223,9 @@ function cloudOrgCard(o, C) {
   const org = st?.status?.org || {};
   const remote = (C.remote || []).filter((r) => r.org === o.org && r.host === o.host);
   const listed = st?.status?.stores || [];
+  // Stores the host offers that this machine has not connected. Only from an
+  // answer: an org checking, unreachable or refused claims nothing.
+  const missing = reach === "connected" ? listed.filter((s) => !remote.some((r) => r.store === s.name)) : [];
   return el(
     "div",
     { class: "card" },
@@ -10247,7 +10250,15 @@ function cloudOrgCard(o, C) {
     ),
     remote.length
       ? remote.map((r) => remoteStoreBlock(r, listed.find((x) => x.name === r.store), reach === "connected" ? o.org : null))
-      : el("div", { class: "card-b col gap6" }, el("span", { class: "muted t-sm", text: "No store of this org is connected on this machine." }), el("div", { class: "row" }, btn({ class: "btn sm", onclick: () => connectCloud(o) }, "Connect its stores"))),
+      : el("div", { class: "card-b" }, el("span", { class: "muted t-sm", text: "No store of this org is connected on this machine." })),
+    missing.length
+      ? el(
+          "div",
+          { class: "card-b col gap6" },
+          missing.map((s) => el("div", { class: "row gap8" }, el("span", { class: "t-m t13", text: `${o.org}/${s.name}` }), pill("not connected here", "amber", { dot: false, sm: true }), el("span", { class: "muted t-xs grow", text: `${s.state || "—"} · ${n(s.files || 0)} files · ${n(s.chunks || 0)} chunks` }))),
+          el("div", { class: "row" }, btn({ class: "btn sm", onclick: () => connectCloud(o) }, "Sync new stores")),
+        )
+      : null,
   );
 }
 
@@ -10348,7 +10359,9 @@ function cloudSendCard(C) {
 }
 
 async function connectCloud(o) {
-  const out = await act(() => post("/api/cloud/connect", { org: o.org }), (x) => `Connected ${plural((x && x.connected || []).length, "store")} of ${o.org}`);
+  // Connect re-writes every store the org offers; the toast counts the new ones.
+  const before = new Set((data.cloud?.remote || []).map((r) => r.name));
+  const out = await act(() => post("/api/cloud/connect", { org: o.org }), (x) => `Added ${plural(((x && x.connected) || []).filter((name) => !before.has(name)).length, "store")} of ${o.org}`);
   if (out) await loadMany(["cloud", "stores", "about"], true), loadCloudStatus(true);
 }
 

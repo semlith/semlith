@@ -1079,7 +1079,14 @@ reachability pill (`connected`, `unreachable`, `refused`) with the reason, read 
 `/api/cloud/status` when opened and on **Check again** — the one request this page
 makes to the host; and a card per remote store with its state, files, chunks, each
 source's revision and lag, and a folder field with **Push** (`semlith cloud push`).
-An org with no store connected offers **Connect its stores**.
+Below them, every store the host's answer lists that this machine has not
+connected is named `<org>/<store>` with a `not connected here` pill, its state,
+files and chunks — a store the org added after this machine connected, or every
+store when none is. **Sync new stores** adds them (`semlith cloud connect <org>`,
+add only: a store the cloud no longer offers stays until Disconnect) and toasts how
+many were new. While the host is checking, unreachable or refused, nothing is
+flagged. `semlith cloud status` says the same, `connected here` or `not connected
+here` on each store line.
 
 **Ledger sync** has a switch per local store (`semlith cloud sync <store>
 on|off`), off by default, with the last send. **What leaves this machine** lists
@@ -1087,7 +1094,8 @@ each kind of request and what it carries. **Reports and replay** fetches a cloud
 report (`semlith cloud report`) or sends one transcript you pick (`semlith cloud
 replay`), after a confirmation. Remote stores also appear on Stores and in Search's
 store picker with a `remote · <org>` badge, and their hits merge into search results
-by score.
+by score. The Stores page's Remote stores card points here for stores added in the
+cloud later; it makes no cloud request itself.
 
 ### About
 

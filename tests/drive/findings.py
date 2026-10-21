@@ -6171,6 +6171,142 @@ def _(d):
     no_console_errors(d, "Settings › Cloud")
 
 
+def stub_org_host(stores):
+    """A loopback Semlith Cloud org host for `acme`, offering `stores`.
+
+    Only the two routes `cloud login` and the Cloud section ask: whoami and
+    the org's status. Set `server.refuse` to answer the status with a 403.
+    """
+    import http.server
+    import threading
+
+    status = {
+        "org": {"slug": "acme", "name": "Acme", "plan": "team", "status": "active"},
+        "stores": [{"name": n, "state": "fresh", "files": 3, "chunks": 9, "sources": []} for n in stores],
+    }
+
+    class Host(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            path = self.path.split("?")[0]
+            code, body = 404, {"error": {"code": "not_found", "message": "No such route."}}
+            if path == "/v1/whoami":
+                code, body = 200, {"org": {"slug": "acme", "plan": "team"}}
+            elif path == "/v1/orgs/acme/status" and server.refuse:
+                code, body = 403, {"error": {"code": "forbidden", "message": "This token cannot read acme."}}
+            elif path == "/v1/orgs/acme/status":
+                code, body = 200, status
+            data = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Host)
+    server.refuse = False
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+ACME_CARD = "[...document.querySelectorAll('#main .card')].find(c => /Acme · acme|^acme/.test(c.innerText))"
+
+
+def acme_card(d):
+    return d.eval("(%s || {innerText: ''}).innerText" % ACME_CARD)
+
+
+def flagged(card):
+    """The stores the org card marks as not connected here, by local name."""
+    return sorted(re.findall(r"(acme/\S+)\s+not connected here", card))
+
+
+@finding("v6.36", "Settings › Cloud flags a store the org added after this machine connected, and Sync new stores brings it in")
+def _(d):
+    long_name = "a-store-with-a-long-name-for-phones"
+    host = stub_org_host(["platform", "docs", "billing", long_name])
+    url = "http://127.0.0.1:%d" % host.server_address[1]
+    registry = os.path.join(os.environ.get("SEMLITH_HOME") or os.path.join(os.path.expanduser("~"), ".semlith"), "registry.json")
+    semlith = fixtures.semlith_bin()
+    try:
+        fixtures.run([semlith, "cloud", "login", "--host", url, "--token", "sml_live_7f3c" + "A" * 39])
+
+        # A host that refuses the status: nothing is claimed about its stores.
+        host.refuse = True
+        open_clean(d, "settings/cloud", fresh=True)
+        d.wait_for("(%s || {innerText: ''}).innerText.includes('refused')" % ACME_CARD, timeout=30,
+                   what="the org card to say the host refused")
+        card = acme_card(d)
+        if "not connected here" in card or "Sync new stores" in card:
+            fail("a refused host's stores are flagged or offered:\n%s" % card)
+        if "No store of this org is connected on this machine." not in card:
+            fail("the card lost its none-connected line:\n%s" % card)
+
+        # None connected, host answering: every store flagged, with the button.
+        host.refuse = False
+        press_in(d, ACME_CARD, "Check again")
+        d.wait_for("(%s || {innerText: ''}).innerText.includes('not connected here')" % ACME_CARD, timeout=30,
+                   what="the org card to flag the org's stores")
+        card = acme_card(d)
+        want("stores flagged with none connected", flagged(card),
+             ["acme/" + long_name, "acme/billing", "acme/docs", "acme/platform"])
+        if "No store of this org is connected on this machine." not in card or "Sync new stores" not in card:
+            fail("with none connected the card should say so and offer Sync new stores:\n%s" % card)
+
+        # Connected once with one store; the org has three more.
+        fixtures.run([semlith, "cloud", "connect", "acme", "--store", "platform"])
+        open_clean(d, "settings/cloud", fresh=True)
+        d.wait_for("(%s || {innerText: ''}).innerText.includes('not connected here')" % ACME_CARD, timeout=30,
+                   what="the org card to flag the stores this machine has not connected")
+        card = acme_card(d)
+        want("stores flagged with platform connected", flagged(card),
+             ["acme/" + long_name, "acme/billing", "acme/docs"])
+        if "Sync new stores" not in card:
+            fail("no Sync new stores button beside the flagged stores:\n%s" % card)
+
+        # Readable at phone width: nothing in the card wider than its box.
+        d.set_viewport(390, 844, mobile=True)
+        try:
+            pause(d, 300)
+            wide = d.eval("[...(%s).querySelectorAll('*')].filter(e => e.scrollWidth > e.clientWidth + 2"
+                          " && getComputedStyle(e).overflowX === 'visible').map(e => e.className)" % ACME_CARD)
+            if wide:
+                fail("the org card overflows at 390px: %r" % wide)
+        finally:
+            d.reset_viewport()
+
+        press_in(d, ACME_CARD, "Sync new stores")
+        d.wait_for("[...document.querySelectorAll('.toast')].some(t => /Added 3 stores of acme/.test(t.innerText))",
+                   what="a toast counting only the three new stores")
+        d.wait_for("!(%s || {innerText: ''}).innerText.includes('not connected here')" % ACME_CARD,
+                   what="the flags to go once the stores are connected")
+        if "Sync new stores" in acme_card(d):
+            fail("Sync new stores is still offered with every store connected")
+        with open(registry) as f:
+            remote = sorted(json.load(f).get("remote", {}))
+        want("the registry's remote stores", remote,
+             ["acme/" + long_name, "acme/billing", "acme/docs", "acme/platform"])
+
+        # The Stores page says where stores added later are connected. It
+        # draws Welcome until a local store exists.
+        a_store(d)
+        open_clean(d, "stores", fresh=True)
+        d.wait_for("document.querySelector('#main').innerText.includes('Remote stores')", what="the Remote stores card")
+        if "connects stores added in the cloud later" not in view_text(d):
+            fail("the Remote stores card does not point at Settings › Cloud for new stores")
+        no_console_errors(d, "Settings › Cloud and Stores with a cloud org")
+    finally:
+        for args in (["cloud", "disconnect", "acme"], ["cloud", "logout", "acme"]):
+            try:
+                fixtures.run([semlith] + args)
+            except fixtures.FixtureError:
+                pass
+        host.shutdown()
+        d.open_view("settings/cloud", fresh=True)
+
+
 @finding("v6.35", "Settings › About states this binary's facts from the daemon")
 def _(d):
     open_clean(d, "settings/about", fresh=True)
