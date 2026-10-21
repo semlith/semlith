@@ -1688,9 +1688,21 @@ fn the_cloud_section_draws_both_states() {
         "\"Disconnect\"",
         "syncing ${on} of",
         "· cloud: ",
+        "pill(\"not connected here\"",
+        "\"Sync new stores\"",
+        "connects stores added in the cloud later",
     ] {
         assert!(APP_JS.contains(needle), "app.js lost `{needle}`");
     }
+    // The org card offers to sync only stores the host's answer listed, and
+    // the old connect button that showed only with none connected is gone.
+    let card = &APP_JS[APP_JS.find("function cloudOrgCard(").unwrap()..];
+    let card = &card[..card.find("\n}").unwrap()];
+    assert!(
+        card.contains("reach === \"connected\" ? listed.filter("),
+        "the org card flags stores without an answer from the host"
+    );
+    assert!(!APP_JS.contains("Connect its stores"));
     let off = &APP_JS[APP_JS.find("function seCloudOff()").unwrap()..];
     // `\n}` and not `\n}\n`: a Windows checkout ends lines with CRLF.
     let off = &off[..off.find("\n}").unwrap()];

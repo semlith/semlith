@@ -430,6 +430,11 @@ fn connect_then_disconnect_leaves_the_registry_byte_for_byte() {
     assert!(o.status.success(), "{}", out(&o));
     let text = String::from_utf8_lossy(&o.stdout);
     assert!(text.contains("12,400 of 100,000 chunks indexed"), "{text}");
+    // Every store the org offers is connected: none is flagged, and the
+    // connect command is not suggested.
+    assert!(text.contains("connected here"), "{text}");
+    assert!(!text.contains("not connected here"), "{text}");
+    assert!(!text.contains("semlith cloud connect"), "{text}");
 
     let o = semlith(home.path(), &["cloud", "disconnect", "acme"]);
     assert!(o.status.success(), "{}", out(&o));
@@ -459,6 +464,27 @@ fn connect_takes_only_the_stores_named_and_refuses_one_it_cannot_reach() {
     let reg = registry(home.path());
     assert!(reg["remote"]["acme/docs"].is_object());
     assert!(reg["remote"].get("acme/platform").is_none());
+
+    // The status says which of the org's stores this machine has, and how to
+    // bring in the rest.
+    let o = semlith(home.path(), &["cloud", "status", "acme"]);
+    assert!(o.status.success(), "{}", out(&o));
+    let text = String::from_utf8_lossy(&o.stdout);
+    let line = |store: &str| {
+        text.lines()
+            .find(|l| l.trim_start().starts_with(&format!("{store}  ")))
+            .unwrap_or_else(|| panic!("no line for {store}: {text}"))
+            .to_string()
+    };
+    assert!(line("docs").ends_with(" · connected here"), "{text}");
+    assert!(
+        line("platform").ends_with(" · not connected here"),
+        "{text}"
+    );
+    assert!(
+        text.contains("`semlith cloud connect acme` adds the stores not connected here"),
+        "{text}"
+    );
 
     // Listed with the badge by the read commands, with no local store at all.
     for command in ["stats", "files"] {

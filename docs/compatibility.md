@@ -728,6 +728,17 @@ From 0.37.0-rc.7:
 |---|---|
 | Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
+### 0.45.0
+
+`FORMAT_VERSION` does not move, and no route, MCP schema, registry or
+`settings.json` key changes. No new request is made.
+
+| Surface | Change |
+|---|---|
+| CLI | `semlith cloud status` ends each store line with ` · connected here` or ` · not connected here`, and adds a line naming `semlith cloud connect <org>` when any store is not connected here. `--json` is unchanged. |
+| Portal | Settings › Cloud lists the stores the host offers that are not connected on this machine, with **Sync new stores** (`POST /api/cloud/connect`, add only), which replaces **Connect its stores**. The Stores page's Remote stores footer points there. |
+| Library | **Break:** `cloud::render_status` takes a fourth argument, the org's store names connected here; `cloud::connected_here(entry)` returns them. |
+
 ### 0.44.1
 
 `FORMAT_VERSION` does not move, and no library API, CLI flag, MCP schema,
