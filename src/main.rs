@@ -5692,7 +5692,12 @@ fn run_cloud(what: CloudCommand, stores: &[PathBuf]) -> Result<()> {
             } else {
                 println!(
                     "{}",
-                    cloud::render_status(&entry, &status, version.as_deref())
+                    cloud::render_status(
+                        &entry,
+                        &status,
+                        version.as_deref(),
+                        &cloud::connected_here(&entry)
+                    )
                 );
             }
         }
