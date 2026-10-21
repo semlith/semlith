@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.0] - 2026-10-21
+
+### Added
+
+- **Settings › Cloud shows the org's stores this machine has not connected.**
+  The registry's remote list is what `semlith cloud connect` wrote, so a
+  store the org created in the cloud afterwards never appeared locally, and
+  the page offered to connect only when no store was connected at all. Now
+  the org card lists each store the host offers that is not connected here,
+  with a `not connected here` pill and its state, files and chunks, and
+  **Sync new stores** adds them through the same connect the CLI runs. It is
+  add only, and nothing is flagged unless the host answered. No new request:
+  it reads the status the card already fetches.
+- **`semlith cloud status` says which stores are connected here.** Each store
+  line ends `connected here` or `not connected here`, read from the local
+  registry for that org and host, and when any is not, a closing line names
+  `semlith cloud connect <org>`.
+- **The Stores page's Remote stores card** says Settings › Cloud connects
+  stores added in the cloud later.
+
 ## [0.44.1] - 2026-10-19
 
 ### Added
