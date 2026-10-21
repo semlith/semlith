@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Stores page's Remote stores card** says Settings › Cloud connects
   stores added in the cloud later.
 
+### Security
+
+- **rustls-webpki 0.103.16 and webpki-roots 1.0.10** (RUSTSEC-2026-0382,
+  RUSTSEC-2026-0381, both 2026-10-19): certificate verification could accept
+  the distrusted emSign intermediates. semlith's HTTPS calls (the cloud,
+  model downloads, `semlith add`, update checks) go through them.
+
 ## [0.44.1] - 2026-10-19
 
 ### Added
