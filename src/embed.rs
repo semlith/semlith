@@ -1509,17 +1509,7 @@ mod tests {
 
     /// The model cache tests share, so a scratch copy needs no download.
     fn model_cache() -> PathBuf {
-        std::env::var_os("SEMLITH_MODEL_CACHE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home_dir().join(".cache").join("semlith").join("models"))
-    }
-
-    fn home_dir() -> PathBuf {
-        PathBuf::from(
-            std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .unwrap(),
-        )
+        crate::model_cache_dir().unwrap()
     }
 
     /// Audit SEC-004 (2026-10-23): a granite file whose bytes changed while

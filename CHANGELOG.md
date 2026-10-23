@@ -75,8 +75,13 @@ is accepted. Each fix comes with a test that fails on 0.45.1.
   - The Core ML pack installs a lock with every package pinned by hash, and
     CI audits it beside both Cargo lockfiles.
   - `ttf-parser` and `paste` stay unmaintained with no replacement upstream,
-    so their ignores carry today's reasons. A PDF with a malformed embedded
-    font is refused inside the parse worker while the daemon stays up.
+    so their ignores carry today's reasons. ttf-parser reads only fonts
+    semlith picks for its own PDF reports. lopdf calls it only to write a PDF,
+    never when an indexed PDF is read. The font readers that do see indexed
+    PDFs run in the parse worker. `tests/parse_pdf.rs` indexes a PDF whose
+    embedded Type 1 font overflows its reader's stack, and one whose CFF font
+    panics. The first is refused as a crash, the second as having no text, and
+    the daemon stays up.
 - **A secret scan gates every push (SEC-002).** gitleaks runs over the tree,
   with a rule for crates.io tokens. Publishing has gone through Trusted
   Publishing since 0.41.0, and the stale local token is gone.
