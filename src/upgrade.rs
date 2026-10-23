@@ -215,12 +215,11 @@ pub fn apply(tag: Option<String>) -> Result<()> {
 /// already there: a directory or a symlink planted at the name would
 /// otherwise be written into and then trusted (audit SEC-004, 2026-10-23).
 fn make_work(work: &Path) -> Result<()> {
+    // Only unix sets a mode; Windows inherits the parent directory's ACL.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder.create(work).with_context(|| {
         format!(
             "creating {} (one that already exists is refused, never reused)",
