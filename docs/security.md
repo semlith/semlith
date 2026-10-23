@@ -397,7 +397,7 @@ its source, size, when it happens and whether it is cached.
 | The Core ML pack (148 MB) | this repository's GitHub release | `semlith setup` on Apple silicon, or `semlith accel on ane` |
 | llama.cpp, TensorRT for RTX, OpenVINO | GitHub releases, `files.pythonhosted.org` | only when you turn on that experimental lane |
 | ONNX Runtime | `cdn.pyke.io` (pinned by `ort-sys`) | at build time, for `cargo install`, source builds and the macOS and Windows release archives, which link it in |
-| `semlith add <url>` | that URL | when you run it |
+| `semlith add <url>` | that URL, directly: never through a proxy, whatever `HTTPS_PROXY` or `ALL_PROXY` say, so every address it reaches is checked here | when you run it |
 | `semlith upgrade` | `github.com` | when you run it |
 | Semlith Cloud | the host you signed in to | only after `semlith cloud login` |
 
@@ -414,6 +414,20 @@ the archive is the one the release names; the signature proves who made the
 release. If the key ever changes, one release trusts both the old and the new
 key, so an older binary can still upgrade to it.
 
+**Only a commit on main becomes a release.** From v0.46.0 the release workflow
+refuses a tag on any commit `main` does not contain before it builds anything;
+only an organisation admin can create a `v*` tag; and the signing key is held
+by a `release` environment that only `v*` tags can deploy to, in a job with no
+write token. Before that, anyone who could push a branch and a tag got a
+release signed with the project key. Both installers check that the archive's
+attestation was made by `release.yml` for the tag being installed, not merely by
+something in the repository, and refuse a `latest` older than the release they
+ship with (`semlith upgrade` already refused to go back). `semlith upgrade`
+unpacks the bytes whose signature and checksum it checked, never a copy written
+out and opened again, into a directory it has just created for itself; an
+archive entry with a colon or a Windows device name in it is refused there as
+in a pack.
+
 `--airgap` refuses every download unless it is already in the model cache, and
 names what it refused. An accelerator lane runs in its own worker process, so a
 driver crash ends that worker and its lane, not the daemon. The llama.cpp server
@@ -428,7 +442,10 @@ parse worker: this same binary started again as `semlith __parse-worker`,
 spoken to over pipes, pooled so there is one per thread that parses. A worker
 has a deadline (30 seconds, and one more per MiB of input) and a memory limit
 (2 GiB of allocations, `SEMLITH_PARSE_MEMORY_MB` to change it; on Linux and
-Windows the operating system enforces it for C code too). Before 0.40.0 a
+Windows the operating system enforces it for C code too, and on macOS, which
+will not lower a process's address-space limit, the daemon reads each worker's
+memory footprint every 25 ms and ends one that passes the limit, so a parse
+overshoots it by at most what it allocates in 25 ms, about 13 MiB on an M1). Before 0.40.0 a
 606-byte Markdown file of nested blockquotes aborted the daemon through a C
 assertion in tree-sitter-md — tree-sitter-yaml has the same one — and under
 launchd or systemd the service then crash-looped for as long as the file sat in
@@ -491,10 +508,17 @@ is a separate decision semlith has not made.
 
 **The parse worker is not a sandbox.** It runs as you, with your files, and can
 open what you can. It bounds what a crashing or runaway parser costs; it does
-not stop a parser bug that reads or writes files. On macOS the memory limit
-covers Rust's allocations only, because Darwin does not enforce a lower
-`RLIMIT_AS`; the deadline bounds the rest. The embedding model and ONNX Runtime
-run in the daemon.
+not stop a parser bug that reads or writes files. Before 0.46.0 the memory
+limit covered only Rust's allocations on macOS, and the deadline bounded the
+rest. The embedding model and ONNX Runtime run in the daemon.
+
+**A process running as you can change a checked download.** The model cache is
+yours alone, and every download is checked against its pinned digest, but the
+files of an unpacked pack are checked against a list semlith wrote when it
+unpacked them, and ONNX Runtime opens the embedding model's graph by path. A
+process running as you that writes the cache while the daemon runs could change
+either after the check. Such a process can already replace the binary itself, so
+semlith does not try to defend against it.
 
 **Downgrading below 0.14.0 gives back what was refused.** A 0.13.0 binary opens
 every store 0.14.0 and later wrote, ignores the trusted list, and reads a `0700`
@@ -508,8 +532,16 @@ every pull request:
 
 - `tests/security.rs`, one test per finding of the 2026-10-14 audit, each of
   which failed on the release before its fix;
-- `cargo deny` (advisories, licences, sources; `deny.toml`) and `cargo audit`
-  with a freshly fetched advisory database, as required checks.
+- `tests/security.rs`, `tests/install.rs` and the unit tests added for the two
+  audits of 2026-10-23, each of which failed on 0.45.1 before its fix;
+- `cargo deny` (advisories, licences, bans and sources over every feature's
+  dependency graph, yanked crates refused; `deny.toml`) and `cargo audit` with a
+  freshly fetched advisory database, over `Cargo.lock`, the fuzz harness's
+  lockfile and the Core ML pack's hashed Python lock;
+- gitleaks over the tree, which fails on any credential, a crates.io token
+  included;
+- the self-tests of the two scripts that decide what CI runs and what a
+  release signs (`.github/changes-test.sh`, `.github/verify-tag-test.sh`).
 
 And on a schedule, weekly and on demand: `cargo-fuzz` targets for the HTTP
 request head, the Markdown and code chunkers and every format reader (Office
@@ -524,9 +556,10 @@ Publishing, so no long-lived crates.io token exists.
 | 0.14.0 | header token, fetch-metadata check, trusted stores, pinned weights, index boundary, deny-list |
 | 0.40.0 | parse worker and poison journal, read-only agent keys, no global MCP lock, link-safe reads, signed releases, git without repository config, llama key off argv, config writes keep modes, refused secrets scrubbed, HTTP head deadlines |
 | 0.41.0 | `.git` and credential directories refused anywhere, token out of logs, digests checked before load, overrides out of release builds, quoting, linear scan and graph, bounded pattern and grep, `add` connects to the checked address, refused repeated headers, owner-only files, foreign-store check, keyed ledger, local-only search, export escaping, CI gate, fuzzing, Trusted Publishing |
+| 0.46.0 | releases only from main, signing key in a tag-only environment, one permission per release job, installers pin provenance and refuse an old `latest`, `add` never through a proxy, more reserved ranges, upgrade unpacks the checked bytes into a fresh directory, colon and device names refused in archives, macOS parser memory watchdog, isolation headers, every lockfile audited, secret scan, CI lane selection that embedded docs and renames cannot dodge |
 
 Every rule on this page except the content scan closes a finding from the
-security audit of 0.13.0 or of 0.39.0, and each shipped with the test that would
-have caught it. `CHANGELOG.md` lists them by finding id;
+security audit of 0.13.0, of 0.39.0 or of 0.45.1 (two, 2026-10-23), and each
+shipped with the test that would have caught it. `CHANGELOG.md` lists them by finding id;
 [compatibility.md](compatibility.md) records the four that broke something 0.13.0
 did, with the way back for each.

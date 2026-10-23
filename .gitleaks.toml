@@ -1,0 +1,36 @@
+# gitleaks configuration for the `secrets` job in .github/workflows/ci.yml,
+# which scans the checked-out tree (SEC-002, 2026-10-23 audit). The default
+# rules apply in full; each allowlist below names one made-up value by its
+# exact spelling, so any other secret in the same file still fails.
+#
+# semlith is itself a credential scanner, so its tests and the retrieval
+# corpus (a copy of its own source) carry fake tokens on purpose: each one is
+# there to prove a file holding it is flagged. The ghp_ and npm_ ones fail
+# their checksums; none grants access to anything.
+
+title = "semlith"
+
+[extend]
+useDefault = true
+
+# A crates.io API token, which is what publishing semlith takes. Publishing
+# goes through Trusted Publishing, so one in the tree is always a mistake.
+[[rules]]
+id = "crates-io-api-token"
+description = "crates.io API token"
+regex = '''\bcio[a-zA-Z0-9]{32}\b'''
+keywords = ["cio"]
+
+[[allowlists]]
+description = "made-up tokens in the credential-scan tests and the retrieval corpus"
+regexes = [
+    '''^ghp_EXAMPLEaaaaBBBBccccDDDDeeeeFFFF12345$''',
+    '''^ghp_R8x2Kq9LmP4vTz7Wn3Yb6Hc1Jd5Fg0Se2Uaq$''',
+    '''^ghp_aaaaBBBBccccDDDDeeeeFFFFgggg12345678$''',
+    '''^npm_EXAMPLEaaaaBBBBccccDDDDeeeeFFFF12345$''',
+    '''^npm_aaaaBBBBccccDDDDeeeeFFFFgggg12345678$''',
+    '''^sk_live_EXAMPLEaaaaBBBB1234$''',
+    '''^sk_live_aaaaBBBBccccDDDD1234$''',
+    '''^zq_live_7fG2kLm9Qx4Rt8Vw1Yb6Nc3Hd5Js0Pa$''',
+    '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk$''',
+]

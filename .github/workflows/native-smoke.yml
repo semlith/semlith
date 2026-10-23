@@ -13,7 +13,8 @@ name: native-smoke
 #   ssh    open a tmate shell on each runner after the smoke, for poking by
 #          hand. The session is tied to the dispatching user's SSH keys.
 #   hunt   let Claude Code loose on the installed binary with a bug-finding
-#          brief, and upload its report. Needs the ANTHROPIC_API_KEY secret.
+#          brief, and upload its report. Needs the ANTHROPIC_BUGHUNT_KEY secret,
+#          a budget-capped key: the agent runs Bash on a runner.
 
 on:
   # Release pull requests into develop, which is where a release lands. A pull
@@ -93,13 +94,17 @@ jobs:
           DRAFT: ${{ github.event.pull_request.draft }}
         run: bash .github/changes.sh
 
+      # The input reaches the script through the environment, never pasted
+      # into it (SEC-015, 2026-10-23 audit).
       - id: pick
         shell: bash
+        env:
+          OS: ${{ inputs.os || 'all' }}
         run: |
-          if [ "${{ inputs.os || 'all' }}" = all ]; then
+          if [ "$OS" = all ]; then
             echo 'os=["ubuntu-latest","macos-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
           else
-            echo 'os=["${{ inputs.os }}"]' >> "$GITHUB_OUTPUT"
+            printf 'os=["%s"]\n' "$OS" >> "$GITHUB_OUTPUT"
           fi
 
   # On a pull request the checks are about the code under review, so this
@@ -258,12 +263,20 @@ jobs:
         shell: bash
         run: npm install -g @anthropic-ai/claude-code@2.1.300
 
+      # Its own key, capped by budget, because an agent with Bash on a runner
+      # can be talked by what it reads into printing what it holds (SEC-015).
+      # Without the key the step says so and does nothing.
       - name: Bug hunt
         if: inputs.hunt && always()
         shell: bash
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_BUGHUNT_KEY }}
         run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::notice::the ANTHROPIC_BUGHUNT_KEY secret is not set; skipping the bug hunt"
+            echo "skipped: no ANTHROPIC_BUGHUNT_KEY" > "hunt-${{ matrix.os }}.md"
+            exit 0
+          fi
           claude -p "$(cat .github/hunt-prompt.md)" \
             --allowedTools "Bash,Read,Write,Glob,Grep" \
             --max-turns 80 \
@@ -326,7 +339,7 @@ jobs:
           "$PY" -m venv drive-venv
           VPY=drive-venv/bin/python
           [ -x "$VPY" ] || VPY=drive-venv/Scripts/python
-          "$VPY" -m pip install --quiet --disable-pip-version-check websocket-client
+          "$VPY" -m pip install --quiet --disable-pip-version-check websocket-client==1.8.0
           PY="$VPY"
 
           # Its own store home and its own port. Starting from an empty home is
@@ -368,6 +381,7 @@ jobs:
           # daemon is still up. The agent key starts `sml_`; `--api-key` is
           # how a llama-server key used to be passed.
           if [ "$RUNNER_OS" = Windows ]; then
+            # shellcheck disable=SC2016 # PowerShell's $_, not the shell's
             powershell -NoProfile -Command \
               'Get-CimInstance Win32_Process | ForEach-Object { $_.CommandLine }' > argv.txt
           else

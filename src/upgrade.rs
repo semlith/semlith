@@ -205,10 +205,27 @@ pub fn apply(tag: Option<String>) -> Result<()> {
         .context("the running binary has no directory")?
         .to_path_buf();
     let work = dir.join(format!(".semlith-upgrade-{}", std::process::id()));
-    std::fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
+    make_work(&work)?;
     let result = swap(&base, &archive, &work, &current, &tag);
     std::fs::remove_dir_all(&work).ok();
     result
+}
+
+/// Make the work directory new, owner-only on unix, and refuse one that is
+/// already there: a directory or a symlink planted at the name would
+/// otherwise be written into and then trusted (audit SEC-004, 2026-10-23).
+fn make_work(work: &Path) -> Result<()> {
+    // Only unix sets a mode; Windows inherits the parent directory's ACL.
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(work).with_context(|| {
+        format!(
+            "creating {} (one that already exists is refused, never reused)",
+            work.display()
+        )
+    })
 }
 
 /// The download, the signature, the checksum and the rename, with the working
@@ -250,10 +267,9 @@ fn swap(base: &str, archive: &str, work: &Path, current: &Path, tag: &str) -> Re
         );
     }
 
-    let downloaded = work.join(archive);
-    std::fs::write(&downloaded, &bytes)
-        .with_context(|| format!("writing {}", downloaded.display()))?;
-    let fresh = unpack(&downloaded, work)?;
+    // From the bytes just checked, not a copy written out and opened again: a
+    // file on disk can change between the check and the read (audit SEC-004).
+    let fresh = unpack(&bytes, work)?;
 
     // Rename first, replace second. Windows will not overwrite a running
     // executable but will rename one out of the way, and the same two renames
@@ -486,7 +502,7 @@ fn verify_sshsig(message: &[u8], armoured: &[u8], trusted: &[Vec<u8>]) -> Result
 /// Every regular file in the archive is extracted, not only the binary: from
 /// 0.14.0 the Linux archives carry `libonnxruntime.so` beside it. Returns the
 /// binary.
-fn unpack(archive: &Path, into: &Path) -> Result<PathBuf> {
+fn unpack(archive: &[u8], into: &Path) -> Result<PathBuf> {
     let name = if cfg!(windows) {
         "semlith.exe"
     } else {
@@ -494,9 +510,8 @@ fn unpack(archive: &Path, into: &Path) -> Result<PathBuf> {
     };
 
     if cfg!(windows) {
-        let file = std::fs::File::open(archive)
-            .with_context(|| format!("opening {}", archive.display()))?;
-        let mut zip = zip::ZipArchive::new(file).context("reading the release zip")?;
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))
+            .context("reading the release zip")?;
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i).context("reading a zip entry")?;
             if entry.is_dir() {
@@ -516,9 +531,7 @@ fn unpack(archive: &Path, into: &Path) -> Result<PathBuf> {
             std::fs::write(&out, bytes).with_context(|| format!("writing {}", out.display()))?;
         }
     } else {
-        let file = std::fs::File::open(archive)
-            .with_context(|| format!("opening {}", archive.display()))?;
-        untar(flate2::read::GzDecoder::new(file), into)?;
+        untar(flate2::read::GzDecoder::new(archive), into)?;
     }
 
     let out = into.join(name);
@@ -545,7 +558,9 @@ fn is_library(path: &Path) -> bool {
 /// The release archives hold exactly one directory — `semlith-vX.Y.Z-<target>/`
 /// — and everything is inside it. A path with no directory, more than one
 /// level, a `..` component, an absolute root or a backslash is not something
-/// these archives contain, so it is skipped rather than interpreted.
+/// these archives contain, so it is skipped rather than interpreted. Every
+/// component also has to pass [`crate::packs::inside`], so a colon or a
+/// Windows device name is refused here as it is for a pack (audit SEC-014).
 fn strip_leading_dir(path: &str) -> Option<&str> {
     if path.contains('\\') || path.starts_with('/') {
         return None;
@@ -554,6 +569,7 @@ fn strip_leading_dir(path: &str) -> Option<&str> {
     if rest.is_empty() || rest.contains('/') || rest == ".." || rest == "." {
         return None;
     }
+    crate::packs::inside(path)?;
     Some(rest)
 }
 
@@ -940,6 +956,105 @@ mod tests {
         assert_eq!(strip_leading_dir("bare-file"), None);
         assert_eq!(strip_leading_dir("dir\\windows\\path"), None);
         assert_eq!(strip_leading_dir("dir/"), None);
+    }
+
+    /// Audit SEC-014 (2026-10-23): the release reader refuses what the pack
+    /// reader refuses — a colon, which on Windows is a drive or a stream, and
+    /// a device name, which on Windows is not a file at all.
+    #[test]
+    fn an_archive_entry_with_a_colon_or_a_device_name_is_refused() {
+        for name in [
+            "top/C:evil",
+            "top/semlith.exe:x",
+            "top/CON",
+            "top/nul.txt",
+            "top/Aux",
+            "top/com1.log",
+            "top/LPT9",
+        ] {
+            assert_eq!(strip_leading_dir(name), None, "{name} was accepted");
+        }
+        for name in ["top/console.txt", "top/nulls", "top/COM10"] {
+            assert!(strip_leading_dir(name).is_some(), "{name} was refused");
+        }
+    }
+
+    /// Audit SEC-004 (2026-10-23): the release is unpacked from the bytes
+    /// whose checksum was checked, so the archive is never written to disk
+    /// and read back, and the work directory holds only what it carried.
+    #[test]
+    fn a_release_is_unpacked_from_the_bytes_that_were_checked() {
+        let name = if cfg!(windows) {
+            "semlith.exe"
+        } else {
+            "semlith"
+        };
+        let entry = format!("semlith-v9.9.9-x/{name}");
+        let mut bytes = Vec::new();
+        if cfg!(windows) {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+            zip.start_file(entry.as_str(), zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut zip, b"fresh").unwrap();
+            zip.finish().unwrap();
+        } else {
+            let mut header = [0u8; 512];
+            header[..entry.len()].copy_from_slice(entry.as_bytes());
+            header[100..107].copy_from_slice(b"0000755");
+            header[124..135].copy_from_slice(b"00000000005");
+            header[156] = b'0';
+            let mut tar = header.to_vec();
+            tar.extend(b"fresh");
+            tar.resize(1024 + 1024, 0);
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), Default::default());
+            std::io::Write::write_all(&mut gz, &tar).unwrap();
+            bytes = gz.finish().unwrap();
+        }
+
+        let t = tempfile::tempdir().unwrap();
+        let out = unpack(&bytes, t.path()).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"fresh");
+        let held: Vec<_> = std::fs::read_dir(t.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            held,
+            [name],
+            "the work directory held more than the release"
+        );
+    }
+
+    /// Audit SEC-004 (2026-10-23): the work directory is made new by this
+    /// run, so one that is already there — planted, or a symlink to somewhere
+    /// else — is refused rather than written into.
+    #[test]
+    fn a_work_directory_that_already_exists_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let existing = t.path().join(".semlith-upgrade-1");
+        std::fs::create_dir(&existing).unwrap();
+        assert!(
+            make_work(&existing).is_err(),
+            "an existing directory was used"
+        );
+
+        #[cfg(unix)]
+        {
+            let elsewhere = t.path().join("elsewhere");
+            std::fs::create_dir(&elsewhere).unwrap();
+            let link = t.path().join(".semlith-upgrade-2");
+            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+            assert!(make_work(&link).is_err(), "a symlinked directory was used");
+        }
+
+        let fresh = t.path().join(".semlith-upgrade-3");
+        make_work(&fresh).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&fresh).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "the work directory is {mode:o}");
+        }
     }
 
     /// What ships beside the binary and what does not.

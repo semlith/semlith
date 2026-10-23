@@ -1576,6 +1576,11 @@ fn write_whole(stream: &mut TcpStream, response: Response) -> std::io::Result<()
     ));
     head.push_str("X-Content-Type-Options: nosniff\r\n");
     head.push_str("Referrer-Policy: no-referrer\r\n");
+    // No device the portal never asks for, no window shared with another
+    // origin, and nothing here embeddable by one (SEC-015, 2026-10-23 audit).
+    head.push_str("Permissions-Policy: camera=(), microphone=(), geolocation=()\r\n");
+    head.push_str("Cross-Origin-Opener-Policy: same-origin\r\n");
+    head.push_str("Cross-Origin-Resource-Policy: same-origin\r\n");
     // The token lives in the first URL. Nothing here may be stored by a proxy
     // that does not exist, but a browser's back-forward cache holding a
     // rotated token is a real thing to avoid.

@@ -232,6 +232,13 @@ struct Worker {
     /// says why it aborted: out of memory, or out of stack.
     stderr: Arc<Mutex<Vec<u8>>>,
     stderr_reader: Option<std::thread::JoinHandle<()>>,
+    /// macOS: the footprint past which the parent ends the worker, in bytes —
+    /// its own idle footprint and the memory limit.
+    #[cfg(target_os = "macos")]
+    cap: u64,
+    /// macOS: whether this worker has read no file before this one.
+    #[cfg(target_os = "macos")]
+    fresh: bool,
 }
 
 impl Drop for Worker {
@@ -326,17 +333,35 @@ fn spawn() -> Result<Worker, Stop> {
             }
         })
         .ok();
+    // Measured once, at hello: 4 MB for a release build on an M1, 6 to 10 MB
+    // for a debug one. What the worker holds after a file is no baseline —
+    // malloc keeps freed pages, measured at 66 MB after a 71 MB parse.
+    #[cfg(target_os = "macos")]
+    let cap = footprint(child.id()).map_or(0, |(now, _)| now) + memory_limit() as u64;
     Ok(Worker {
         child,
         stdin: BufWriter::new(stdin),
         answers,
         stderr,
         stderr_reader,
+        #[cfg(target_os = "macos")]
+        cap,
+        #[cfg(target_os = "macos")]
+        fresh: true,
     })
 }
 
 fn call(op: u8, path: &Path, payload: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Stop> {
     let taken = IDLE.lock().unwrap_or_else(|p| p.into_inner()).pop();
+    call_on(op, path, payload, taken)
+}
+
+fn call_on(
+    op: u8,
+    path: &Path,
+    payload: &[u8],
+    taken: Option<Worker>,
+) -> Result<(Vec<u8>, Vec<u8>), Stop> {
     let mut worker = match taken {
         Some(w) => w,
         None => spawn()?,
@@ -366,20 +391,115 @@ fn call(op: u8, path: &Path, payload: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Stop>
         }
     }
     let limit = deadline(payload.len());
-    match worker.answers.recv_timeout(limit) {
-        Ok(Ok(answer)) => {
+    match wait(&mut worker, limit) {
+        Waited::Answer(Ok(answer)) => {
+            #[cfg(target_os = "macos")]
+            {
+                worker.fresh = false;
+            }
             let mut idle = IDLE.lock().unwrap_or_else(|p| p.into_inner());
             if idle.len() < MAX_IDLE {
                 idle.push(worker);
             }
             Ok(answer)
         }
-        Err(RecvTimeoutError::Timeout) => Err(Stop::Crashed(format!(
+        Waited::Timeout => Err(Stop::Crashed(format!(
             "parser timed out after {}",
             seconds(limit)
         ))),
-        Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => Err(Stop::Crashed(died(worker))),
+        // A worker that read other files first still holds what malloc kept
+        // of them, so its footprint overstates this file's. One fresh worker
+        // gets the file before it is refused.
+        #[cfg(target_os = "macos")]
+        Waited::Memory(_) if !worker.fresh => {
+            drop(worker);
+            call_on(op, path, payload, None)
+        }
+        #[cfg(target_os = "macos")]
+        Waited::Memory(peak) => Err(Stop::Crashed(format!(
+            "{}: the worker peaked at {} MiB against a cap of {} MiB",
+            over_limit(),
+            peak >> 20,
+            worker.cap >> 20
+        ))),
+        Waited::Answer(Err(_)) | Waited::Gone => Err(Stop::Crashed(died(worker))),
     }
+}
+
+/// What came of waiting on a worker's answer.
+enum Waited {
+    Answer(std::io::Result<(Vec<u8>, Vec<u8>)>),
+    Timeout,
+    Gone,
+    /// macOS: past its footprint cap and ended; the peak it reached, in bytes.
+    #[cfg(target_os = "macos")]
+    Memory(u64),
+}
+
+#[cfg(not(target_os = "macos"))]
+fn wait(worker: &mut Worker, limit: Duration) -> Waited {
+    match worker.answers.recv_timeout(limit) {
+        Ok(answer) => Waited::Answer(answer),
+        Err(RecvTimeoutError::Timeout) => Waited::Timeout,
+        Err(RecvTimeoutError::Disconnected) => Waited::Gone,
+    }
+}
+
+/// How often the parent reads a macOS worker's footprint while it parses.
+#[cfg(target_os = "macos")]
+const POLL: Duration = Duration::from_millis(25);
+
+/// Wait for the answer, reading the worker's footprint every [`POLL`]: Darwin
+/// will not lower RLIMIT_AS, so a C parser's mallocs, which the counting
+/// allocator never sees, are bounded here instead.
+#[cfg(target_os = "macos")]
+fn wait(worker: &mut Worker, limit: Duration) -> Waited {
+    let end = std::time::Instant::now() + limit;
+    loop {
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Waited::Timeout;
+        }
+        match worker.answers.recv_timeout(left.min(POLL)) {
+            Ok(answer) => return Waited::Answer(answer),
+            Err(RecvTimeoutError::Disconnected) => return Waited::Gone,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if let Some((now, peak)) = footprint(worker.child.id())
+            && now > worker.cap
+        {
+            let _ = worker.child.kill();
+            // The kernel's own high-water mark, read again once the worker is
+            // stopped, so the peak reported counts what it added after the poll.
+            let peak = footprint(worker.child.id()).map_or(peak, |(_, p)| p.max(peak));
+            return Waited::Memory(peak);
+        }
+    }
+}
+
+/// A process's physical footprint now and at its highest, in bytes — the
+/// figure Activity Monitor shows, C's mallocs included.
+#[cfg(target_os = "macos")]
+fn footprint(pid: u32) -> Option<(u64, u64)> {
+    // SAFETY: an all-integer struct zeroed as a live local, and the flavour
+    // that writes exactly that struct; nothing is read through a pointer after.
+    unsafe {
+        let mut info: libc::rusage_info_v4 = std::mem::zeroed();
+        let got = libc::proc_pid_rusage(
+            pid as libc::c_int,
+            libc::RUSAGE_INFO_V4,
+            (&raw mut info).cast(),
+        );
+        (got == 0).then_some((info.ri_phys_footprint, info.ri_lifetime_max_phys_footprint))
+    }
+}
+
+/// The refusal for a file that needed more memory than a worker may have.
+fn over_limit() -> String {
+    format!(
+        "parser ran past its memory limit ({} MiB; {MEMORY_ENV} raises it)",
+        memory_limit() / (1024 * 1024)
+    )
 }
 
 fn seconds(d: Duration) -> String {
@@ -399,10 +519,7 @@ fn died(mut worker: Worker) -> String {
     let said = String::from_utf8_lossy(&worker.stderr.lock().unwrap_or_else(|p| p.into_inner()))
         .into_owned();
     if said.contains("memory allocation of") {
-        return format!(
-            "parser ran past its memory limit ({} MiB; {MEMORY_ENV} raises it)",
-            memory_limit() / (1024 * 1024)
-        );
+        return over_limit();
     }
     if said.contains("has overflowed its stack") {
         return "parser overflowed its stack".to_string();
@@ -629,10 +746,14 @@ unsafe impl GlobalAlloc for Counting {
 
 fn limit_memory(limit: usize) {
     LIMIT.store(limit, Ordering::Relaxed);
-    // ponytail: the counting allocator bounds Rust's allocations everywhere;
-    // tree-sitter's own mallocs are bounded on Linux here and on Windows by the
-    // job object, and on macOS only by the deadline — Darwin refuses a lower
-    // RLIMIT_AS. Route tree-sitter through `set_allocator` if that matters.
+    // The counting allocator bounds Rust's allocations everywhere; tree-sitter's
+    // own mallocs are bounded on Linux here, on Windows by the job object, and
+    // on macOS — Darwin refuses a lower RLIMIT_AS — by the parent reading the
+    // worker's footprint while it parses (`wait`).
+    // ponytail: that is a poll, so a parse can overshoot the cap by what it
+    // allocates in one 25 ms interval before it is killed — about 13 MiB at the
+    // 500 MB/s a release parse allocates on an M1, 1 to 3 MiB measured in a
+    // debug build. A cap with no overshoot needs tree-sitter's `set_allocator`.
     #[cfg(target_os = "linux")]
     {
         let mapped = std::fs::read_to_string("/proc/self/statm")

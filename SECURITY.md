@@ -51,8 +51,9 @@ This decides what is and is not a vulnerability.
   portal keep one search here. Every other outbound request is one somebody
   asked for: model weights and accelerator packs (each pinned by digest in
   [docs/models.md](docs/models.md) and checked before they are loaded),
-  `semlith add <url>` (one request; public addresses only unless
-  `SEMLITH_ADD_ALLOW_PRIVATE=1` is set, which `semlith doctor` reports),
+  `semlith add <url>` (one request, made directly and never through a proxy;
+  public addresses only unless `SEMLITH_ADD_ALLOW_PRIVATE=1` is set, which
+  `semlith doctor` reports),
   `semlith upgrade` (`https://github.com` only; a release binary cannot be
   pointed at another origin, and the archive's signature is checked), and
   Semlith Cloud (a token goes only to the host it was stored with). At build
@@ -121,6 +122,12 @@ This decides what is and is not a vulnerability.
   worker is involved, idle connections are capped at eight per peer and 48 in
   all, connections in service at 32, and a panicking route answers 500
   without losing its worker.
+- **The release pipeline.** A release is signed only for a `v*` tag, which
+  only an organisation admin can create, on a commit `main` contains; the key
+  is held by a `release` environment only such a tag can deploy to; and the
+  installers check the attestation was made by `release.yml` for that tag. A
+  way to get a signed release, or an attestation the installers accept, out of
+  anything else is worth reporting.
 - **The directory-listing route.** The portal's folder picker lists directories
   under `$HOME`. It canonicalises before checking containment, so `..` and
   symlinks are resolved first; a path that escapes the check is a bug.
@@ -137,6 +144,10 @@ This decides what is and is not a vulnerability.
   elsewhere, and never in a log file. `/api/about` answers the daemon's pid,
   binary path and store and model folders to whoever holds that token, by
   design: it is the owner's own portal.
+- A process running as you changing semlith's model cache after a download was
+  checked (see
+  [docs/security.md](docs/security.md#what-is-not-covered)): it could replace
+  the binary just as well.
 - Another process on this machine using a token it obtained legitimately. The
   token guards against a web page and a stray process, not against a user who
   can read your home directory.
