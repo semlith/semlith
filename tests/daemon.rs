@@ -756,6 +756,20 @@ fn every_response_carries_the_policy_and_no_cors_header() {
             "{route} has no policy:\n{}",
             answer.headers
         );
+        // SEC-015 (2026-10-23 audit): the isolation headers ZAP found missing.
+        for header in [
+            "X-Content-Type-Options: nosniff",
+            "Referrer-Policy: no-referrer",
+            "Permissions-Policy: camera=(), microphone=(), geolocation=()",
+            "Cross-Origin-Opener-Policy: same-origin",
+            "Cross-Origin-Resource-Policy: same-origin",
+        ] {
+            assert!(
+                answer.headers.contains(header),
+                "{route} lacks {header}:\n{}",
+                answer.headers
+            );
+        }
         assert!(
             !answer
                 .headers

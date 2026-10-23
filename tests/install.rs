@@ -80,9 +80,10 @@ fn sha256(path: &Path) -> String {
 }
 
 /// Serve `routes` on an ephemeral loopback port and return the origin to hand
-/// `SEMLITH_RELEASES_ORIGIN`. The thread lives until the test process exits;
-/// the script only makes two requests and never comes back.
-fn serve(routes: HashMap<String, Vec<u8>>) -> String {
+/// `SEMLITH_RELEASES_ORIGIN`. A path in `redirects` answers 302 to its value,
+/// as `/releases/latest` does on GitHub. The thread lives until the test
+/// process exits; the script makes a handful of requests and never comes back.
+fn serve(routes: HashMap<String, Vec<u8>>, redirects: HashMap<String, String>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("an ephemeral port");
     let port = listener.local_addr().expect("the bound address").port();
     std::thread::spawn(move || {
@@ -107,12 +108,13 @@ fn serve(routes: HashMap<String, Vec<u8>>) -> String {
                     Ok(_) => {}
                 }
             }
-            let (status, body) = match routes.get(&path) {
-                Some(body) => ("200 OK", body.clone()),
-                None => ("404 Not Found", Vec::new()),
+            let (status, body, location) = match (routes.get(&path), redirects.get(&path)) {
+                (Some(body), _) => ("200 OK", body.clone(), String::new()),
+                (None, Some(to)) => ("302 Found", Vec::new(), format!("Location: {to}\r\n")),
+                (None, None) => ("404 Not Found", Vec::new(), String::new()),
             };
             let head = format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 {status}\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             let _ = stream.write_all(head.as_bytes());
@@ -177,6 +179,11 @@ struct Release {
 }
 
 fn release(corrupt: bool, signed: Signed) -> Release {
+    release_with_latest(corrupt, signed, TAG)
+}
+
+/// A release whose `/releases/latest` redirects to `latest`'s tag page.
+fn release_with_latest(corrupt: bool, signed: Signed, latest: &str) -> Release {
     let dir = tempfile::tempdir().expect("a temp dir");
     let root = dir.path();
     let name = format!("semlith-{TAG}-{}", target());
@@ -255,6 +262,10 @@ fn release(corrupt: bool, signed: Signed) -> Release {
         );
     }
 
+    let tag_page = format!("/semlith/semlith/releases/tag/{latest}");
+    routes.insert(tag_page.clone(), Vec::new());
+    let redirects = HashMap::from([("/semlith/semlith/releases/latest".to_string(), tag_page)]);
+
     let home = root.join("home");
     let semlith_home = root.join("semlith-home");
     fs::create_dir_all(&home).expect("create a fake HOME");
@@ -262,7 +273,7 @@ fn release(corrupt: bool, signed: Signed) -> Release {
         _dir: dir,
         home,
         semlith_home,
-        origin: serve(routes),
+        origin: serve(routes, redirects),
         trusted,
     }
 }
@@ -294,10 +305,30 @@ fn script_pointed_at(origin: &str, trusted: &str, into: &Path) -> PathBuf {
 }
 
 fn install(release: &Release) -> std::process::Output {
+    install_with(release, Some(TAG), None)
+}
+
+/// `install.sh` pinned to `version`, or resolving `latest` when it is `None`,
+/// with `bin` (holding a stand-in `gh`) first on the PATH when given.
+fn install_with(
+    release: &Release,
+    version: Option<&str>,
+    bin: Option<&Path>,
+) -> std::process::Output {
     let script = script_pointed_at(&release.origin, &release.trusted, &release.home);
-    Command::new("sh")
-        .arg(&script)
-        .env("SEMLITH_VERSION", TAG)
+    let mut command = Command::new("sh");
+    command.arg(&script);
+    match version {
+        Some(version) => command.env("SEMLITH_VERSION", version),
+        None => command.env_remove("SEMLITH_VERSION"),
+    };
+    if let Some(bin) = bin {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut dirs = vec![bin.to_path_buf()];
+        dirs.extend(std::env::split_paths(&path));
+        command.env("PATH", std::env::join_paths(dirs).expect("a PATH"));
+    }
+    command
         .env("SEMLITH_HOME", &release.semlith_home)
         .env("HOME", &release.home)
         // A fixture has no attestation; a token in the developer's shell would
@@ -449,4 +480,80 @@ fn refuses_a_release_signed_by_another_key() {
         return;
     }
     refused(&release(false, Signed::Untrusted), "signature check failed");
+}
+
+/// Audit SEC-007 (2026-10-23): whoever can edit release assets can point the
+/// `latest` link at an old build. The installer resolves `latest` and refuses
+/// anything older than the floor it ships with, before downloading a byte.
+#[test]
+fn refuses_a_latest_older_than_the_floor() {
+    if !have_ssh_keygen() {
+        return;
+    }
+    let release = release_with_latest(false, Signed::Trusted, "v0.45.1");
+    let out = install_with(&release, None, None);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "install.sh installed v0.45.1:\n{said}"
+    );
+    assert!(
+        said.contains("the latest release resolved to v0.45.1, older than"),
+        "install.sh failed without naming the floor:\n{said}"
+    );
+    assert!(
+        !release.semlith_home.join("bin").exists(),
+        "the bin directory was created despite the refusal:\n{said}"
+    );
+
+    // And a latest at or above the floor installs.
+    let release = release_with_latest(false, Signed::Trusted, TAG);
+    let out = install_with(&release, None, None);
+    assert!(
+        out.status.success(),
+        "install.sh refused the latest {TAG}:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Audit SEC-007 (2026-10-23): an attestation proves only that something in
+/// the repository built the archive. The installer asks gh for one signed by
+/// release.yml for this tag; the stand-in gh confirms only that question.
+#[test]
+fn the_provenance_check_is_pinned_to_the_release_workflow_and_tag() {
+    if !have_ssh_keygen() {
+        return;
+    }
+    let release = release(false, Signed::Trusted);
+    let bin = release.home.join("fake-bin");
+    fs::create_dir_all(&bin).expect("a bin directory for the stand-in gh");
+    let gh = bin.join("gh");
+    fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in\n  *\" --repo semlith/semlith --signer-workflow semlith/semlith/.github/workflows/release.yml --source-ref refs/tags/{TAG} \"*) exit 0 ;;\nesac\necho \"stand-in gh: unpinned call: $*\" >&2\nexit 1\n"
+        ),
+    )
+    .expect("write the stand-in gh");
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("make it executable");
+
+    let out = install_with(&release, Some(TAG), Some(&bin));
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "install.sh refused the pinned check:\n{said}"
+    );
+    assert!(
+        said.contains("Provenance verified:"),
+        "install.sh did not report the provenance check passing:\n{said}"
+    );
 }

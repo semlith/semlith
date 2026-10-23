@@ -26,7 +26,7 @@ fields), so two builds from the same pins are byte-identical.
 
 ```sh
 uv venv --python 3.11 /tmp/coreml-venv
-uv pip install --python /tmp/coreml-venv/bin/python -r requirements.txt
+uv pip install --python /tmp/coreml-venv/bin/python --require-hashes -r requirements.lock
 /tmp/coreml-venv/bin/python convert.py --out /tmp/coreml-pack          # fetches the HF model at the pinned revision
 /tmp/coreml-venv/bin/python placement.py /tmp/coreml-pack/semlith-coreml-1        # exits 1 if an ANE model puts < 95 % of ops on the Neural Engine
 /tmp/coreml-venv/bin/python verify.py /tmp/coreml-pack/semlith-coreml-1           # cosine vs fp32 on tests/fixtures/coreml, chunks/s
@@ -36,6 +36,7 @@ uv pip install --python /tmp/coreml-venv/bin/python -r requirements.txt
 override). The first load of each ANE model compiles it for the Neural Engine
 and takes minutes; macOS caches the result.
 
-Change anything that alters the pack's bytes (models, `requirements.txt`) → bump
+Change anything that alters the pack's bytes (models, `requirements.txt` and the
+`requirements.lock` regenerated from it, see its header) → bump
 `PACK_VERSION` in `convert.py`, dispatch the workflow with that version, and
 update the pinned URL and SHA-256 in the binary.

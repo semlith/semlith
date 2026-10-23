@@ -14,248 +14,261 @@
     SEMLITH_YES      set to 1 to answer yes to every `semlith setup` prompt
     SEMLITH_NO_SERVICE  set to 1 to skip installing the daemon as a logon task
 #>
-$ErrorActionPreference = 'Stop'
+# Everything runs in one script block, so `irm ... | iex` leaves no variable or
+# preference behind in the caller's session, and a download cut off part-way
+# has no closing brace and runs nothing. The TLS setting below is process-wide,
+# so it is put back afterwards.
+$protocol = [Net.ServicePointManager]::SecurityProtocol
+try { & {
+    $ErrorActionPreference = 'Stop'
 
-# Before the first request. Windows PowerShell 5.1, which is what ships in the
-# box and what `irm ... | iex` runs on most machines, defaults to SSL 3.0 and
-# TLS 1.0, and github.com has refused both for years: without this the script
-# fails with an unhelpful "could not create SSL/TLS secure channel" on exactly
-# the machines it is written for. PowerShell 7 negotiates this itself and is
-# unaffected by setting it.
-#
-# ASCII only, deliberately: PSScriptAnalyzer asks for a byte-order mark the
-# moment this file stops being ASCII, and a BOM on a script people pipe into
-# `iex` is a thing to avoid.
-#
-# Assigned rather than OR-ed in, so SSL 3.0, TLS 1.0 and TLS 1.1 are not left
-# enabled beside it. PowerShell 7's Invoke-WebRequest does not read this
-# setting, so there the same floor goes on every request as -SslProtocol.
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$web = @{ UseBasicParsing = $true }
-if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey('SslProtocol')) {
-    $web.SslProtocol = 'Tls12'
-    if ([enum]::GetNames([Microsoft.PowerShell.Commands.WebSslProtocol]) -contains 'Tls13') {
-        $web.SslProtocol = 'Tls12, Tls13'
-    }
-}
-
-$repo = 'semlith/semlith'
-# One origin, with no way to be told another, as in install.sh: the clean
-# install workflow rewrites this line in a copy rather than setting a variable.
-$origin = 'https://github.com'
-# The keys a release may be signed with, one allowed_signers line each, the
-# same list as SIGNING_KEYS in src/upgrade.rs (key id
-# SHA256:a5oJmrakIwDHEWTDWqWe51Ttt6m2tQ0dsGzIqyxDuxs). A key rotation ships
-# both keys for one release: add the new key as a second entry here, in
-# install.sh and in upgrade.rs, publish that release still signed by the old
-# key, then sign with the new one and drop the old entry a release later.
-$signers = @(
-    'semlith-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICMTHiHMzeSHzzc+8UDZHUzJcvb6XGUBb+TJdFes91xm'
-)
-$arch = $env:PROCESSOR_ARCHITECTURE
-if ($arch -ne 'AMD64' -and $arch -ne 'ARM64') {
-    throw "semlith has no prebuilt Windows binary for $arch."
-}
-# One Windows target is built; on ARM64 it runs under Windows 11's x64 emulation.
-if ($arch -eq 'ARM64') {
-    Write-Information 'No native ARM64 build yet; installing the x64 binary, which Windows emulates.' -InformationAction Continue
-}
-$target = 'x86_64-pc-windows-msvc'
-
-if ($env:SEMLITH_VERSION) {
-    $tag = $env:SEMLITH_VERSION
-}
-else {
-    Write-Information 'Resolving the latest semlith release...' -InformationAction Continue
-    $latest = Invoke-WebRequest -Uri "$origin/$repo/releases/latest" @web
-    $response = $latest.BaseResponse
-    if ($response.ResponseUri) {
-        $resolved = $response.ResponseUri.AbsoluteUri
-    }
-    else {
-        $resolved = $response.RequestMessage.RequestUri.AbsoluteUri
-    }
-    $tag = $resolved.Split('/')[-1]
-}
-if ($tag -notmatch '^v') {
-    throw "could not resolve a release tag (got '$tag')"
-}
-
-$name = "semlith-$tag-$target"
-$archive = "$name.zip"
-$base = "$origin/$repo/releases/download/$tag"
-Write-Information "Installing semlith $tag for $target" -InformationAction Continue
-
-$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('semlith-' + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $tmp | Out-Null
-try {
-    $archivePath = Join-Path $tmp $archive
-    $sumsPath = Join-Path $tmp 'SHA256SUMS'
-    $sigPath = Join-Path $tmp 'SHA256SUMS.sig'
-
-    Write-Information "Downloading $archive" -InformationAction Continue
-    Invoke-WebRequest -Uri "$base/$archive" -OutFile $archivePath @web
-    Write-Information 'Downloading SHA256SUMS' -InformationAction Continue
-    Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sumsPath @web
-    Write-Information 'Downloading SHA256SUMS.sig' -InformationAction Continue
-    try {
-        Invoke-WebRequest -Uri "$base/SHA256SUMS.sig" -OutFile $sigPath @web
-    }
-    catch {
-        throw "$tag has no SHA256SUMS.sig, so it cannot be verified. Releases before v0.40.0 are unsigned and this installer does not install them; nothing was installed"
-    }
-
-    # The signature proves SHA256SUMS came from whoever holds the semlith
-    # release key, which a stolen GitHub token does not give anyone. Checked
-    # with `ssh-keygen -Y verify` because current Windows 10 and 11 ship it, so
-    # there is no extra tool to fetch first. Releases before v0.40.0 are
-    # unsigned and this installer refuses them: that is the price of failing
-    # closed.
-    Write-Information 'Verifying signature' -InformationAction Continue
-    $sshKeygen = Get-Command ssh-keygen -ErrorAction SilentlyContinue
-    if (-not $sshKeygen) {
-        throw 'need ssh-keygen (OpenSSH 8.1 or later) to verify the release signature: add the OpenSSH Client under Settings > Apps > Optional features, or run: Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0; nothing was installed'
-    }
-    # Written without a byte-order mark and with LF endings, which is what
-    # ssh-keygen reads an allowed_signers file as.
-    $allowedPath = Join-Path $tmp 'allowed_signers'
-    [IO.File]::WriteAllText($allowedPath, (($signers -join "`n") + "`n"))
-    # The message goes to ssh-keygen's stdin as the file's own bytes.
-    # Start-Process redirects a file without re-encoding it; a PowerShell pipe
-    # would turn it into text first and the signature would not match.
-    $verifyOut = Join-Path $tmp 'verify.out'
-    $verifyErr = Join-Path $tmp 'verify.err'
-    $verifyArgs = @('-Y', 'verify', '-f', "`"$allowedPath`"", '-I', 'semlith-release', '-n', 'file', '-s', "`"$sigPath`"")
-    $verify = Start-Process -FilePath $sshKeygen.Source -ArgumentList $verifyArgs -RedirectStandardInput $sumsPath -RedirectStandardOutput $verifyOut -RedirectStandardError $verifyErr -NoNewWindow -Wait -PassThru
-    if ($verify.ExitCode -ne 0) {
-        Get-Content -Path $verifyOut, $verifyErr -ErrorAction SilentlyContinue | Write-Warning
-        throw 'signature check failed: SHA256SUMS is not signed by the semlith release key (ssh-keygen -Y needs OpenSSH 8.1 or later); nothing was installed'
-    }
-    Write-Information 'Signature verified: SHA256SUMS is signed by the semlith release key' -InformationAction Continue
-
-    Write-Information 'Verifying checksum' -InformationAction Continue
-    $pattern = '\s' + [regex]::Escape($archive) + '$'
-    $line = Get-Content -Path $sumsPath | Where-Object { $_ -match $pattern } | Select-Object -First 1
-    if (-not $line) {
-        throw "SHA256SUMS has no entry for $archive"
-    }
-    $expected = ($line -split '\s+')[0]
-    $actual = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash
-    if ($actual -ne $expected) {
-        throw "checksum mismatch: $archive hashes to $actual but SHA256SUMS says $expected; nothing was installed"
-    }
-
-    # The checksum proves the archive matches SHA256SUMS, and the signature
-    # that SHA256SUMS is the project's. The attestation proves who built it:
-    # signed for the archive's digest by this repository's release workflow.
-    # gh is optional, so its absence is said rather than fatal; a gh that
-    # checks and does not confirm is fatal.
-    $manual = "To check it yourself: gh attestation verify $archive --repo $repo"
-    # Attestations start with v0.36.0: an older tag has none to check.
-    if ($tag -match '^v0\.([0-9]|[12][0-9]|3[0-5])\.') {
-        Write-Information "Provenance not verified: $tag predates release attestations (v0.36.0)" -InformationAction Continue
-    }
-    elseif (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-        Write-Information "Provenance not verified: gh is not installed. $manual" -InformationAction Continue
-    }
-    else {
-        Write-Information 'Verifying provenance with gh attestation verify' -InformationAction Continue
-        # Continue around the native call: Windows PowerShell can turn a native
-        # command's stderr into errors, and 'Stop' would end the script on gh's
-        # first line of output instead of on its exit code.
-        $ErrorActionPreference = 'Continue'
-        & gh attestation verify $archivePath --repo $repo
-        $status = $LASTEXITCODE
-        $ErrorActionPreference = 'Stop'
-        if ($status -eq 0) {
-            Write-Information "Provenance verified: $archive was built by $repo's release workflow" -InformationAction Continue
+    # Before the first request. Windows PowerShell 5.1, which is what ships in the
+    # box and what `irm ... | iex` runs on most machines, defaults to SSL 3.0 and
+    # TLS 1.0, and github.com has refused both for years: without this the script
+    # fails with an unhelpful "could not create SSL/TLS secure channel" on exactly
+    # the machines it is written for. PowerShell 7 negotiates this itself and is
+    # unaffected by setting it.
+    #
+    # ASCII only, deliberately: PSScriptAnalyzer asks for a byte-order mark the
+    # moment this file stops being ASCII, and a BOM on a script people pipe into
+    # `iex` is a thing to avoid.
+    #
+    # Assigned rather than OR-ed in, so SSL 3.0, TLS 1.0 and TLS 1.1 are not left
+    # enabled beside it. PowerShell 7's Invoke-WebRequest does not read this
+    # setting, so there the same floor goes on every request as -SslProtocol.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $web = @{ UseBasicParsing = $true }
+    if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey('SslProtocol')) {
+        $web.SslProtocol = 'Tls12'
+        if ([enum]::GetNames([Microsoft.PowerShell.Commands.WebSslProtocol]) -contains 'Tls13') {
+            $web.SslProtocol = 'Tls12, Tls13'
         }
-        elseif ($status -eq 4) {
-            # gh's documented "needs authentication" code: the check never ran.
-            Write-Information "Provenance not verified: gh is not logged in (gh auth login). $manual" -InformationAction Continue
+    }
+
+    $repo = 'semlith/semlith'
+    # One origin, with no way to be told another, as in install.sh: the clean
+    # install workflow rewrites this line in a copy rather than setting a variable.
+    $origin = 'https://github.com'
+    # The keys a release may be signed with, one allowed_signers line each, the
+    # same list as SIGNING_KEYS in src/upgrade.rs (key id
+    # SHA256:a5oJmrakIwDHEWTDWqWe51Ttt6m2tQ0dsGzIqyxDuxs). A key rotation ships
+    # both keys for one release: add the new key as a second entry here, in
+    # install.sh and in upgrade.rs, publish that release still signed by the old
+    # key, then sign with the new one and drop the old entry a release later.
+    $signers = @(
+        'semlith-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICMTHiHMzeSHzzc+8UDZHUzJcvb6XGUBb+TJdFes91xm'
+    )
+    # The oldest release `latest` may resolve to, as in install.sh.
+    $floor = 'v0.46.0'
+    $arch = $env:PROCESSOR_ARCHITECTURE
+    if ($arch -ne 'AMD64' -and $arch -ne 'ARM64') {
+        throw "semlith has no prebuilt Windows binary for $arch."
+    }
+    # One Windows target is built; on ARM64 it runs under Windows 11's x64 emulation.
+    if ($arch -eq 'ARM64') {
+        Write-Information 'No native ARM64 build yet; installing the x64 binary, which Windows emulates.' -InformationAction Continue
+    }
+    $target = 'x86_64-pc-windows-msvc'
+
+    if ($env:SEMLITH_VERSION) {
+        $tag = $env:SEMLITH_VERSION
+    }
+    else {
+        Write-Information 'Resolving the latest semlith release...' -InformationAction Continue
+        $latest = Invoke-WebRequest -Uri "$origin/$repo/releases/latest" @web
+        $response = $latest.BaseResponse
+        if ($response.ResponseUri) {
+            $resolved = $response.ResponseUri.AbsoluteUri
         }
         else {
-            throw "provenance check failed: gh could not confirm $repo built $archive (gh 2.49+ needed); nothing was installed"
+            $resolved = $response.RequestMessage.RequestUri.AbsoluteUri
         }
+        $tag = $resolved.Split('/')[-1]
+    }
+    if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$') {
+        throw "could not resolve a release tag (got '$tag')"
+    }
+    if (-not $env:SEMLITH_VERSION -and [version]($tag.TrimStart('v') -replace '-.*') -lt [version]$floor.TrimStart('v')) {
+        throw "the latest release resolved to $tag, older than $floor; refusing to install an older build"
     }
 
-    Write-Information 'Unpacking' -InformationAction Continue
-    Expand-Archive -Path $archivePath -DestinationPath $tmp -Force
-    $exe = Join-Path (Join-Path $tmp $name) 'semlith.exe'
-    Unblock-File -Path $exe
+    $name = "semlith-$tag-$target"
+    $archive = "$name.zip"
+    $base = "$origin/$repo/releases/download/$tag"
+    Write-Information "Installing semlith $tag for $target" -InformationAction Continue
 
-    if ($env:SEMLITH_HOME) {
-        $binDir = Join-Path $env:SEMLITH_HOME 'bin'
-    }
-    else {
-        $binDir = Join-Path $HOME '.semlith\bin'
-    }
-    New-Item -ItemType Directory -Path $binDir -Force | Out-Null
-    $installed = Join-Path $binDir 'semlith.exe'
-
-    # Rename first, replace second: the same sequence `semlith upgrade` uses
-    # (`src/upgrade.rs`) and for the same reason. Windows will not let a file
-    # be written over an executable that is already there, and will refuse
-    # outright while a `semlith start` is holding it open; what it will always
-    # allow is renaming that executable out of the way. A single
-    # `Move-Item -Force` therefore worked on every clean machine and failed on
-    # every re-install with "Cannot create a file when that file already
-    # exists", which is the one case CI never sees because a runner is new.
-    $old = "$installed.old"
-    if (Test-Path -LiteralPath $installed) {
-        Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
-        Move-Item -LiteralPath $installed -Destination $old -Force
-    }
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('semlith-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
-        Move-Item -LiteralPath $exe -Destination $installed -Force
+        $archivePath = Join-Path $tmp $archive
+        $sumsPath = Join-Path $tmp 'SHA256SUMS'
+        $sigPath = Join-Path $tmp 'SHA256SUMS.sig'
+
+        Write-Information "Downloading $archive" -InformationAction Continue
+        Invoke-WebRequest -Uri "$base/$archive" -OutFile $archivePath @web
+        Write-Information 'Downloading SHA256SUMS' -InformationAction Continue
+        Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sumsPath @web
+        Write-Information 'Downloading SHA256SUMS.sig' -InformationAction Continue
+        try {
+            Invoke-WebRequest -Uri "$base/SHA256SUMS.sig" -OutFile $sigPath @web
+        }
+        catch {
+            throw "$tag has no SHA256SUMS.sig, so it cannot be verified. Releases before v0.40.0 are unsigned and this installer does not install them; nothing was installed"
+        }
+
+        # The signature proves SHA256SUMS came from whoever holds the semlith
+        # release key, which a stolen GitHub token does not give anyone. Checked
+        # with `ssh-keygen -Y verify` because current Windows 10 and 11 ship it, so
+        # there is no extra tool to fetch first. Releases before v0.40.0 are
+        # unsigned and this installer refuses them: that is the price of failing
+        # closed.
+        Write-Information 'Verifying signature' -InformationAction Continue
+        $sshKeygen = Get-Command ssh-keygen -ErrorAction SilentlyContinue
+        if (-not $sshKeygen) {
+            throw 'need ssh-keygen (OpenSSH 8.1 or later) to verify the release signature: add the OpenSSH Client under Settings > Apps > Optional features, or run: Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0; nothing was installed'
+        }
+        # Written without a byte-order mark and with LF endings, which is what
+        # ssh-keygen reads an allowed_signers file as.
+        $allowedPath = Join-Path $tmp 'allowed_signers'
+        [IO.File]::WriteAllText($allowedPath, (($signers -join "`n") + "`n"))
+        # The message goes to ssh-keygen's stdin as the file's own bytes.
+        # Start-Process redirects a file without re-encoding it; a PowerShell pipe
+        # would turn it into text first and the signature would not match.
+        $verifyOut = Join-Path $tmp 'verify.out'
+        $verifyErr = Join-Path $tmp 'verify.err'
+        $verifyArgs = @('-Y', 'verify', '-f', "`"$allowedPath`"", '-I', 'semlith-release', '-n', 'file', '-s', "`"$sigPath`"")
+        $verify = Start-Process -FilePath $sshKeygen.Source -ArgumentList $verifyArgs -RedirectStandardInput $sumsPath -RedirectStandardOutput $verifyOut -RedirectStandardError $verifyErr -NoNewWindow -Wait -PassThru
+        if ($verify.ExitCode -ne 0) {
+            Get-Content -Path $verifyOut, $verifyErr -ErrorAction SilentlyContinue | Write-Warning
+            throw 'signature check failed: SHA256SUMS is not signed by the semlith release key (ssh-keygen -Y needs OpenSSH 8.1 or later); nothing was installed'
+        }
+        Write-Information 'Signature verified: SHA256SUMS is signed by the semlith release key' -InformationAction Continue
+
+        Write-Information 'Verifying checksum' -InformationAction Continue
+        $pattern = '\s' + [regex]::Escape($archive) + '$'
+        $line = Get-Content -Path $sumsPath | Where-Object { $_ -match $pattern } | Select-Object -First 1
+        if (-not $line) {
+            throw "SHA256SUMS has no entry for $archive"
+        }
+        $expected = ($line -split '\s+')[0]
+        $actual = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash
+        if ($actual -ne $expected) {
+            throw "checksum mismatch: $archive hashes to $actual but SHA256SUMS says $expected; nothing was installed"
+        }
+
+        # The checksum proves the archive matches SHA256SUMS, and the signature
+        # that SHA256SUMS is the project's. The attestation proves who built it:
+        # signed for the archive's digest by this repository's release workflow.
+        # gh is optional, so its absence is said rather than fatal; a gh that
+        # checks and does not confirm is fatal.
+        $workflow = "$repo/.github/workflows/release.yml"
+        $manual = "To check it yourself: gh attestation verify $archive --repo $repo --signer-workflow $workflow --source-ref refs/tags/$tag"
+        # Attestations start with v0.36.0: an older tag has none to check.
+        if ($tag -match '^v0\.([0-9]|[12][0-9]|3[0-5])\.') {
+            Write-Information "Provenance not verified: $tag predates release attestations (v0.36.0)" -InformationAction Continue
+        }
+        elseif (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+            Write-Information "Provenance not verified: gh is not installed. $manual" -InformationAction Continue
+        }
+        else {
+            Write-Information 'Verifying provenance with gh attestation verify' -InformationAction Continue
+            # Continue around the native call: Windows PowerShell can turn a native
+            # command's stderr into errors, and 'Stop' would end the script on gh's
+            # first line of output instead of on its exit code.
+            $ErrorActionPreference = 'Continue'
+            & gh attestation verify $archivePath --repo $repo --signer-workflow $workflow --source-ref "refs/tags/$tag"
+            $status = $LASTEXITCODE
+            $ErrorActionPreference = 'Stop'
+            if ($status -eq 0) {
+                Write-Information "Provenance verified: $archive was built by $repo's release workflow" -InformationAction Continue
+            }
+            elseif ($status -eq 4) {
+                # gh's documented "needs authentication" code: the check never ran.
+                Write-Information "Provenance not verified: gh is not logged in (gh auth login). $manual" -InformationAction Continue
+            }
+            else {
+                throw "provenance check failed: gh could not confirm $repo's release workflow built $archive at $tag (gh 2.55+ needed); nothing was installed"
+            }
+        }
+
+        Write-Information 'Unpacking' -InformationAction Continue
+        Expand-Archive -Path $archivePath -DestinationPath $tmp -Force
+        $exe = Join-Path (Join-Path $tmp $name) 'semlith.exe'
+        Unblock-File -Path $exe
+
+        if ($env:SEMLITH_HOME) {
+            $binDir = Join-Path $env:SEMLITH_HOME 'bin'
+        }
+        else {
+            $binDir = Join-Path $HOME '.semlith\bin'
+        }
+        New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+        $installed = Join-Path $binDir 'semlith.exe'
+
+        # Rename first, replace second: the same sequence `semlith upgrade` uses
+        # (`src/upgrade.rs`) and for the same reason. Windows will not let a file
+        # be written over an executable that is already there, and will refuse
+        # outright while a `semlith start` is holding it open; what it will always
+        # allow is renaming that executable out of the way. A single
+        # `Move-Item -Force` therefore worked on every clean machine and failed on
+        # every re-install with "Cannot create a file when that file already
+        # exists", which is the one case CI never sees because a runner is new.
+        $old = "$installed.old"
+        if (Test-Path -LiteralPath $installed) {
+            Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
+            Move-Item -LiteralPath $installed -Destination $old -Force
+        }
+        try {
+            Move-Item -LiteralPath $exe -Destination $installed -Force
+        }
+        catch {
+            # Put back what was working before giving up: a failed install must not
+            # be the reason a machine has no semlith at all.
+            if (Test-Path -LiteralPath $old) {
+                Move-Item -LiteralPath $old -Destination $installed -Force
+            }
+            throw
+        }
+        # The old binary goes once it is no longer the running one. A daemon still
+        # holding it keeps it until the next install, exactly as `semlith upgrade`
+        # leaves `semlith.old` behind.
+        Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
+
+        Write-Information "Installed $installed" -InformationAction Continue
+    }
+    finally {
+        Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $hasSetup = $false
+    try {
+        & $installed setup --help *> $null
+        $hasSetup = ($LASTEXITCODE -eq 0)
     }
     catch {
-        # Put back what was working before giving up: a failed install must not
-        # be the reason a machine has no semlith at all.
-        if (Test-Path -LiteralPath $old) {
-            Move-Item -LiteralPath $old -Destination $installed -Force
+        $hasSetup = $false
+    }
+
+    if ($hasSetup) {
+        # The logon task is installed unless this says not to. A user who never
+        # reads a prompt is exactly the user a login service is for, and a piped
+        # install has no prompt to read.
+        $serviceArgs = @()
+        if ($env:SEMLITH_NO_SERVICE -eq '1') {
+            $serviceArgs = @('--no-service')
         }
-        throw
-    }
-    # The old binary goes once it is no longer the running one. A daemon still
-    # holding it keeps it until the next install, exactly as `semlith upgrade`
-    # leaves `semlith.old` behind.
-    Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
-
-    Write-Information "Installed $installed" -InformationAction Continue
-}
-finally {
-    Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
-}
-
-$hasSetup = $false
-try {
-    & $installed setup --help *> $null
-    $hasSetup = ($LASTEXITCODE -eq 0)
-}
-catch {
-    $hasSetup = $false
-}
-
-if ($hasSetup) {
-    # The logon task is installed unless this says not to. A user who never
-    # reads a prompt is exactly the user a login service is for, and a piped
-    # install has no prompt to read.
-    $serviceArgs = @()
-    if ($env:SEMLITH_NO_SERVICE -eq '1') {
-        $serviceArgs = @('--no-service')
-    }
-    if ($env:SEMLITH_YES -eq '1') {
-        & $installed setup --yes @serviceArgs
+        if ($env:SEMLITH_YES -eq '1') {
+            & $installed setup --yes @serviceArgs
+        }
+        else {
+            & $installed setup @serviceArgs
+        }
     }
     else {
-        & $installed setup @serviceArgs
+        Write-Information '' -InformationAction Continue
+        Write-Information "This release has no 'setup' command, so add semlith to your PATH:" -InformationAction Continue
+        Write-Information "    `$env:Path = '$binDir;' + `$env:Path" -InformationAction Continue
+        Write-Information 'To make that permanent, run:' -InformationAction Continue
+        Write-Information "    setx PATH `"$binDir;%PATH%`"" -InformationAction Continue
     }
-}
-else {
-    Write-Information '' -InformationAction Continue
-    Write-Information "This release has no 'setup' command, so add semlith to your PATH:" -InformationAction Continue
-    Write-Information "    `$env:Path = '$binDir;' + `$env:Path" -InformationAction Continue
-    Write-Information 'To make that permanent, run:' -InformationAction Continue
-    Write-Information "    setx PATH `"$binDir;%PATH%`"" -InformationAction Continue
-}
+} } finally { [Net.ServicePointManager]::SecurityProtocol = $protocol }

@@ -371,6 +371,13 @@ fn is_public(ip: &std::net::IpAddr) -> bool {
                 || v4.is_multicast()
                 // Carrier-grade NAT, which a home router's own subnet often is.
                 || (a == 100 && (64..128).contains(&b))
+                // Benchmarking, 198.18.0.0/15, where local proxy tools put
+                // their fake DNS answers; IETF protocol assignments,
+                // 192.0.0.0/24; the retired 6to4 relay anycast, 192.88.99.0/24
+                // (audit SEC-009, 2026-10-23).
+                || (a == 198 && (b & 0xfe) == 18)
+                || v4.octets()[..3] == [192, 0, 0]
+                || v4.octets()[..3] == [192, 88, 99]
                 // "This network", and the reserved block above the multicast
                 // range that includes 255.255.255.255.
                 || a == 0
@@ -382,8 +389,9 @@ fn is_public(ip: &std::net::IpAddr) -> bool {
                 || v6.is_multicast()
                 // Unique local addresses, fc00::/7.
                 || (v6.octets()[0] & 0xfe) == 0xfc
-                // Link-local, fe80::/10.
-                || (v6.octets()[0] == 0xfe && (v6.octets()[1] & 0xc0) == 0x80)
+                // Link-local, fe80::/10, and the deprecated site-local
+                // fec0::/10 (audit SEC-009).
+                || (v6.octets()[0] == 0xfe && (v6.octets()[1] & 0x80) == 0x80)
                 // An IPv4 address wearing an IPv6 hat is judged as the IPv4
                 // one: mapped (::ffff:0:0/96), compatible (::/96), NAT64
                 // (64:ff9b::/96, 64:ff9b:1::/48) and 6to4 (2002::/16), each
@@ -462,7 +470,11 @@ fn agent(resolver: impl ureq::unversioned::resolver::Resolver) -> ureq::Agent {
     // Deadlines, as every outbound agent in semlith has: a server that accepts
     // the connection and then drips a byte a minute held this call, and before
     // 0.40.0 every other agent's call with it.
+    // No proxy, whatever the environment says: through one the proxy resolves
+    // the name, so [`PublicOnly`] never sees the address that is reached
+    // (audit SEC-003, 2026-10-23).
     let config = ureq::Agent::config_builder()
+        .proxy(None)
         .timeout_connect(Some(std::time::Duration::from_secs(10)))
         .timeout_global(Some(std::time::Duration::from_secs(60)))
         .max_redirects(0)
@@ -473,6 +485,30 @@ fn agent(resolver: impl ureq::unversioned::resolver::Resolver) -> ureq::Agent {
         config,
         ureq::unversioned::transport::DefaultConnector::default(),
         PublicOnly(resolver),
+    )
+}
+
+/// A note for a failed fetch naming every proxy variable set, because on a
+/// network that needs one the failure would otherwise read as the host's.
+fn proxy_ignored() -> String {
+    let set: Vec<&str> = [
+        ("ALL_PROXY", "all_proxy"),
+        ("HTTPS_PROXY", "https_proxy"),
+        ("HTTP_PROXY", "http_proxy"),
+    ]
+    .into_iter()
+    .filter_map(|(upper, lower)| {
+        [upper, lower]
+            .into_iter()
+            .find(|v| std::env::var_os(v).is_some())
+    })
+    .collect();
+    if set.is_empty() {
+        return String::new();
+    }
+    format!(
+        " ({} is set; `semlith add` connects directly and never through a proxy)",
+        set.join(", ")
     )
 }
 
@@ -488,7 +524,7 @@ fn get(url: &str) -> Result<(String, String, Vec<u8>)> {
         let mut response = agent
             .get(&current)
             .call()
-            .with_context(|| format!("fetching {current}"))?;
+            .with_context(|| format!("fetching {current}{}", proxy_ignored()))?;
 
         let status = response.status().as_u16();
         if (300..400).contains(&status) {
@@ -823,8 +859,11 @@ mod tests {
         let plain = rebinding();
         let checked = plain.resolve(&uri, &config, timeout).unwrap();
         assert!(is_public(&checked[0].ip()));
+        // No proxy here either, so a proxy variable in the test's environment
+        // cannot send the control somewhere else.
         let unguarded = ureq::Agent::with_parts(
             ureq::Agent::config_builder()
+                .proxy(None)
                 .timeout_global(Some(std::time::Duration::from_secs(2)))
                 .build(),
             ureq::unversioned::transport::DefaultConnector::default(),
@@ -873,6 +912,50 @@ mod tests {
         }
         assert!(require_https("https://user:pw@example.com/x").is_err());
         assert!(require_https("https://example.com/a@b").is_ok());
+    }
+
+    /// Audit SEC-009 (2026-10-23): every IPv4 block that is not routed on the
+    /// public internet is refused, and the addresses either side of each
+    /// block pass.
+    #[test]
+    fn every_reserved_ipv4_block_is_refused_and_its_neighbours_are_not() {
+        for private in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "240.0.0.1",
+            "255.255.255.255",
+            "224.0.0.1",
+            "192.0.2.1",
+            "198.18.0.0",
+            "198.19.255.255",
+            "192.0.0.1",
+            "192.0.0.255",
+            "192.88.99.1",
+        ] {
+            let ip: std::net::IpAddr = private.parse().unwrap();
+            assert!(!is_public(&ip), "{private} passed as public");
+        }
+        for public in [
+            "8.8.8.8",
+            "198.17.255.255",
+            "198.20.0.0",
+            "192.0.1.0",
+            "192.88.98.255",
+            "192.88.100.0",
+            "100.128.0.1",
+        ] {
+            let ip: std::net::IpAddr = public.parse().unwrap();
+            assert!(is_public(&ip), "{public} refused as private");
+        }
+        let site_local: std::net::IpAddr = "fec0::1".parse().unwrap();
+        assert!(!is_public(&site_local), "fec0::1 passed as public");
+        let below: std::net::IpAddr = "fe7f:ffff::1".parse().unwrap();
+        assert!(is_public(&below), "fe7f:ffff::1 refused as private");
     }
 
     #[test]

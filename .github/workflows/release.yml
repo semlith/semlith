@@ -24,11 +24,22 @@ jobs:
   # they were not built from.
   # Skipped on a publish dispatch, and with it `build` and `release`, which
   # need it: publishing a crate must not rebuild or re-release the tag.
+  # Only a tag: a dispatch on a branch named like a version would otherwise
+  # build, sign and attest something no tag names (SEC-007, 2026-10-23 audit).
   verify:
-    if: ${{ !inputs.publish }}
+    if: ${{ !inputs.publish && github.ref_type == 'tag' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # A tag is cut from main, and main takes only reviewed pull requests from
+      # develop. Without this, anyone who could push a branch and a tag had a
+      # signed Latest release (SEC-001); creating v* tags is also limited to org
+      # admins by the tag-creation ruleset.
+      - name: Tag is on main
+        run: bash .github/verify-tag.sh "$GITHUB_REF_NAME" "$GITHUB_SHA" origin/main
       - name: Tag matches Cargo.toml
         run: |
           cargo_version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
@@ -87,14 +98,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        with:
-          key: ${{ matrix.target }}
+      # No build cache, and --locked: what ships is built from Cargo.lock as
+      # reviewed, never from a cache another run could have written (SEC-007).
 
       # The one thing that differs between these binaries and the one on
       # crates.io. Linux links nothing and loads the library packed beside it;
@@ -103,10 +115,10 @@ jobs:
       - name: Build
         run: |
           if [ -n "${{ matrix.runtime }}" ]; then
-            cargo build --release --target ${{ matrix.target }} \
+            cargo build --release --locked --target ${{ matrix.target }} \
               --no-default-features --features dynamic-ort
           else
-            cargo build --release --target ${{ matrix.target }}
+            cargo build --release --locked --target ${{ matrix.target }}
           fi
         shell: bash
 
@@ -137,9 +149,15 @@ jobs:
       - name: Shared libraries
         if: runner.os == 'Linux'
         run: |
+          set -euo pipefail
           binary="target/${{ matrix.target }}/release/semlith"
           echo "NEEDED entries for $binary:"
           readelf -d "$binary" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tee needed.txt
+          # No output is a readelf that failed, not a binary that needs nothing.
+          if [ ! -s needed.txt ]; then
+            echo "::error::readelf listed no NEEDED entries for $binary"
+            exit 1
+          fi
           if grep -Eq 'libssl|libcrypto|libopenblas' needed.txt; then
             echo "::error::the Linux binary still links a system library that has to be installed"
             exit 1
@@ -161,11 +179,17 @@ jobs:
       - name: glibc floor
         if: runner.os == 'Linux'
         run: |
+          set -euo pipefail
           binary="target/${{ matrix.target }}/release/semlith"
           floor=$(objdump -T "$binary" runtime/libonnxruntime.so \
             | grep -o 'GLIBC_[0-9.]*' | sort -V -u | tail -1)
           cxx=$(objdump -T "$binary" runtime/libonnxruntime.so \
             | grep -o 'GLIBCXX_[0-9.]*' | sort -V -u | tail -1)
+          # An empty floor sorts below 2.35 and would pass the check below.
+          if [ -z "$floor" ] || [ -z "$cxx" ]; then
+            echo "::error::objdump found no GLIBC or GLIBCXX symbol versions; the floor cannot be checked"
+            exit 1
+          fi
           echo "the packaged pair requires up to $floor and $cxx"
           echo "::notice::${{ matrix.target }} requires $floor and $cxx"
           echo "GLIBC_FLOOR=$floor" >> "$GITHUB_ENV"
@@ -211,18 +235,20 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
 
-  release:
+  # Three jobs where there was one, so each holds only what it needs
+  # (SEC-001, SEC-007): `sign` has the signing key, through the `release`
+  # environment that only v* tags can deploy to, and no write token; `attest`
+  # has the OIDC token and nothing else; `release` can write the Release and
+  # runs the one third-party action, with neither the key nor the OIDC token.
+  sign:
     needs: [verify, build]
+    if: ${{ github.ref_type == 'tag' }}
     runs-on: ubuntu-latest
-    # The one job that writes: it creates the Release and uploads the assets,
-    # and signs a provenance attestation for each of them. `id-token` is the
-    # OIDC token the signature is issued against; `attestations` stores it.
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
+    environment: release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -238,7 +264,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum * > SHA256SUMS
+          sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
 
       # The checksums prove only that the files were uploaded together; anyone
@@ -276,12 +302,51 @@ jobs:
           done
           ls -l ./*.sig
 
-      # Every file the release publishes: the archives, SHA256SUMS, their
-      # signatures and both installers. `gh attestation verify <file> --repo semlith/semlith` checks
-      # any of them, and the installers do exactly that for the archive.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: signed
+          path: dist/*
+          if-no-files-found: error
+
+  # Every file the release publishes: the archives, SHA256SUMS, their
+  # signatures and both installers. `gh attestation verify <file> --repo
+  # semlith/semlith --signer-workflow semlith/semlith/.github/workflows/release.yml`
+  # checks any of them, and the installers do exactly that for the archive.
+  # `id-token` is the OIDC token the signature is issued against;
+  # `attestations` stores it.
+  attest:
+    needs: sign
+    if: ${{ github.ref_type == 'tag' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: signed
+          path: dist
+
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*
+
+  # The one job that writes: it creates the Release and uploads the assets.
+  release:
+    needs: attest
+    if: ${{ github.ref_type == 'tag' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: signed
+          path: dist
 
       # Release titles drop the tag's leading "v": "Semlith 0.1.0".
       - name: Version
@@ -318,10 +383,27 @@ jobs:
           `SHA256:a5oJmrakIwDHEWTDWqWe51Ttt6m2tQ0dsGzIqyxDuxs`) with
           `echo "semlith-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICMTHiHMzeSHzzc+8UDZHUzJcvb6XGUBb+TJdFes91xm" > allowed_signers`
           and `ssh-keygen -Y verify -f allowed_signers -I semlith-release -n file -s SHA256SUMS.sig < SHA256SUMS`,
-          and its provenance with `gh attestation verify <file> --repo semlith/semlith`.
+          and its provenance with `gh attestation verify <file> --repo semlith/semlith --signer-workflow semlith/semlith/.github/workflows/release.yml`.
           EOF
           } >> notes.md
           cat notes.md
+
+      # Latest only for the highest version released, so a patch cut for an
+      # older line, or a re-run of an old tag, never moves the `latest` link
+      # that both installers resolve (SEC-007).
+      - name: Latest
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          highest=$( { gh release list --repo "$GITHUB_REPOSITORY" --exclude-pre-releases --limit 200 \
+            --json tagName --jq '.[].tagName'; echo "$GITHUB_REF_NAME"; } | sort -V | tail -1)
+          if [ "$highest" = "$GITHUB_REF_NAME" ] && [ "${GITHUB_REF_NAME#*-}" = "$GITHUB_REF_NAME" ]; then
+            echo "make=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "make=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "highest released: $highest"
 
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
@@ -330,6 +412,7 @@ jobs:
           body_path: notes.md
           # A tag with a suffix (v0.37.0-rc.1) is a release candidate.
           prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ steps.latest.outputs.make }}
 
   # crates.io by Trusted Publishing: no long-lived API token anywhere, only a
   # short-lived one crates.io issues against this workflow's OIDC identity, in

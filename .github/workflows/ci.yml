@@ -102,6 +102,15 @@ jobs:
 
       - run: cargo audit
 
+      # The two lockfiles the shipped binary never sees are still code that
+      # runs in CI: the fuzz harness and the Core ML pack's Python build
+      # (SEC-016, 2026-10-23 audit). The pack lock is hashed; nothing installs.
+      - run: cargo audit --file fuzz/Cargo.lock
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - run: uv tool run --from 'pip-audit==2.9.0' pip-audit --disable-pip --no-deps -r packs/coreml/requirements.lock
+
   # The rest of the supply-chain gate, from 0.41.0: every crate's licence
   # against the allow list in deny.toml, every source against crates.io, and
   # the advisories again with the two reviewed ignores written down beside
@@ -117,6 +126,33 @@ jobs:
       - run: cargo install cargo-deny --locked --version 0.20.2
 
       - run: cargo deny check
+
+  # No credential in the tree (SEC-002, 2026-10-23 audit): the default
+  # gitleaks rules plus one for crates.io tokens, with the made-up tokens the
+  # credential-scan tests use allowlisted by exact value in .gitleaks.toml.
+  # The gitleaks binary, checked against its digest, rather than
+  # gitleaks-action, which needs a paid licence for an organisation.
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$tarball"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+
+      - name: gitleaks over the tree
+        run: '"$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --redact --no-banner --exit-code 1'
 
   # The minimum Rust version the crate declares, built. `rust-version` in
   # Cargo.toml is a promise to anybody on an older toolchain, and nothing ever
@@ -158,7 +194,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: shellcheck
-        run: shellcheck install.sh
+        run: shellcheck install.sh .github/changes.sh .github/changes-test.sh .github/verify-tag.sh .github/verify-tag-test.sh
+
+      # The two scripts that decide what CI runs and what a release signs,
+      # each over a scratch repository.
+      - name: changes.sh and verify-tag.sh self-tests
+        run: |
+          bash .github/changes-test.sh
+          bash .github/verify-tag-test.sh
 
       # The scripts are pasted into a shell by people who have not read them, so
       # they stay short enough to read. Raised from 170 in 0.14.0, when
@@ -183,7 +226,7 @@ jobs:
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Force
           $found = Invoke-ScriptAnalyzer -Path install.ps1 -Severity Warning,Error
           $found | Format-Table -AutoSize
           if ($found) { throw "PSScriptAnalyzer reported $($found.Count) finding(s)" }
@@ -218,7 +261,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq mesa-vulkan-drivers libvulkan1 vulkan-tools
-          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
+          icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' | head -1)
           echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
           echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
 

@@ -24,7 +24,15 @@ proto="=${origin%%:*}"
 # and in upgrade.rs, publish that release still signed by the old key, then
 # sign with the new one and drop the old line a release later.
 signers='semlith-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICMTHiHMzeSHzzc+8UDZHUzJcvb6XGUBb+TJdFes91xm'
+# The oldest release `latest` may resolve to: a release with a security fix
+# raises it, so a moved `latest` link cannot install an older build (SEC-007).
+floor=v0.46.0
 say() { printf '%s\n' "$*"; }
+# Whether release $1 is older than $2, comparing major.minor.patch.
+older() {
+  awk -v a="${1#v}" -v b="${2#v}" 'BEGIN { split(a, x, /[.-]/); split(b, y, /[.-]/)
+    for (i = 1; i <= 3; i++) if (x[i] != y[i]) exit !(x[i] + 0 < y[i] + 0); exit 1 }'
+}
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 detect_target() {
@@ -100,22 +108,18 @@ pick_tools() {
       return 1
     }
     final_url() { curl --proto "$proto" --tlsv1.2 -fsSLI -o /dev/null -w '%{url_effective}' "$1"; }
-  elif command -v wget >/dev/null 2>&1; then
-    # GNU wget gets curl's floor: https only, TLS 1.2 or newer. busybox wget
-    # takes none of its long flags, so there every URL is checked by hand.
-    gnu=""
-    if wget --help 2>&1 | grep -q -- --https-only; then
-      gnu="--https-only --secure-protocol=TLSv1_2 --max-redirect=10"
-    fi
+  elif wget --help 2>&1 | grep -q -- --secure-protocol; then
+    # GNU wget: TLS 1.2 or newer, certificates checked by default. Its
+    # --https-only governs recursive downloads only, so each URL is checked here.
     https() { case "$1" in https://*) ;; *) die "refusing $1: not https" ;; esac; }
-    # shellcheck disable=SC2086 # $gnu is a list of flags, split on purpose
-    fetch() { https "$1"; wget -q $gnu ${gnu:+--show-progress} -O "$2" "$1"; }
-    # shellcheck disable=SC2086
+    fetch() { https "$1"; wget -q --secure-protocol=TLSv1_2 --show-progress -O "$2" "$1"; }
     final_url() {
       https "$1"
-      wget -q -S --spider $gnu "$1" 2>&1 |
+      wget -q -S --spider --secure-protocol=TLSv1_2 "$1" 2>&1 |
         sed -n 's/^[[:space:]]*Location:[[:space:]]*//p' | tail -n 1
     }
+  elif command -v wget >/dev/null 2>&1; then
+    die "busybox wget cannot be trusted to check TLS certificates; install curl"
   else
     die "need curl or wget to download semlith"
   fi
@@ -153,7 +157,8 @@ verify_signature() {
 # optional, so its absence is said rather than fatal; a gh that checks and does
 # not confirm is fatal.
 verify_provenance() {
-  manual="To check it yourself: gh attestation verify $archive --repo $repo"
+  workflow="$repo/.github/workflows/release.yml"
+  manual="To check it yourself: gh attestation verify $archive --repo $repo --signer-workflow $workflow --source-ref refs/tags/$tag"
   # Attestations start with v0.36.0: an older tag has none, and refusing it
   # would refuse every pinned install of a release that was never attested.
   case "$tag" in
@@ -165,12 +170,13 @@ verify_provenance() {
   fi
   say "Verifying provenance with gh attestation verify"
   status=0
-  gh attestation verify "$tmp/$archive" --repo "$repo" || status=$?
+  gh attestation verify "$tmp/$archive" --repo "$repo" --signer-workflow "$workflow" \
+    --source-ref "refs/tags/$tag" || status=$?
   case "$status" in
     0) say "Provenance verified: $archive was built by $repo's release workflow" ;;
     # gh's documented "needs authentication" code: the check never ran.
     4) say "Provenance not verified: gh is not logged in (gh auth login). $manual" ;;
-    *) die "provenance check failed: gh could not confirm $repo built $archive (gh 2.49+ needed); nothing was installed" ;;
+    *) die "provenance check failed: gh could not confirm $repo's release workflow built $archive at $tag (gh 2.55+ needed); nothing was installed" ;;
   esac
 }
 
@@ -207,10 +213,11 @@ main() {
     tag=$(final_url "$origin/$repo/releases/latest")
     tag=${tag##*/}
   fi
-  case "$tag" in
-    v*) ;;
-    *) die "could not resolve a release tag (got '$tag')" ;;
-  esac
+  printf '%s\n' "$tag" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?' ||
+    die "could not resolve a release tag (got '$tag')"
+  if [ -z "${SEMLITH_VERSION:-}" ] && older "$tag" "$floor"; then
+    die "the latest release resolved to $tag, older than $floor; refusing to install an older build"
+  fi
 
   name="semlith-$tag-$target"
   archive="$name.tar.gz"
