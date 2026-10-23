@@ -31,8 +31,6 @@ jobs:
     # Core ML conversion and compilation need macOS; arm64 like the machines it serves.
     runs-on: macos-15
     timeout-minutes: 90
-    permissions:
-      contents: write
     env:
       VERSION: ${{ inputs.version }}
       TAG: pack-coreml-v${{ inputs.version }}
@@ -81,27 +79,13 @@ jobs:
             ${{ runner.temp }}/coreml-pack/SHA256SUMS
             ${{ runner.temp }}/coreml-pack/semlith-coreml-${{ inputs.version }}/manifest.json
             ${{ runner.temp }}/coreml-pack/placement.json
-          if-no-files-found: warn
-
-      - name: Publish to the pack's release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cd "$RUNNER_TEMP/coreml-pack"
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
-              --title "Core ML pack v${VERSION}" \
-              --notes "Neural Engine and Core ML GPU models for semlith, built by the packs workflow from packs/coreml at ${GITHUB_SHA}. sha256: $(cut -d' ' -f1 SHA256SUMS)"
-          fi
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "semlith-coreml-${VERSION}.zip" SHA256SUMS
+          if-no-files-found: error
 
   llama:
     if: inputs.pack == 'llama'
     # llama.cpp's converter is plain Python; the GGUF is the same on any host.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    permissions:
-      contents: write
     env:
       VERSION: ${{ inputs.version }}
       TAG: pack-llama-v${{ inputs.version }}
@@ -130,16 +114,47 @@ jobs:
           path: |
             ${{ runner.temp }}/llama-pack/granite-embedding-small-english-r2-f16.gguf
             ${{ runner.temp }}/llama-pack/SHA256SUMS
-          if-no-files-found: warn
+          if-no-files-found: error
+
+  # Publishing is its own job: it downloads what the build job uploaded and runs
+  # nothing from the repository, PyPI or llama.cpp, so the token that can write
+  # a release never shares a runner with third-party code (SEC-007, 2026-10-23
+  # audit). The build jobs above hold only contents: read.
+  publish:
+    needs: [coreml, llama]
+    if: ${{ !cancelled() && (needs.coreml.result == 'success' || needs.llama.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      PACK: ${{ inputs.pack }}
+      VERSION: ${{ inputs.version }}
+      TAG: pack-${{ inputs.pack }}-v${{ inputs.version }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.pack }}-pack-${{ inputs.version }}
+          path: pack
 
       - name: Publish to the pack's release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cd "$RUNNER_TEMP/llama-pack"
+          cd pack
+          case "$PACK" in
+            coreml)
+              asset="semlith-coreml-${VERSION}.zip"
+              title="Core ML pack v${VERSION}"
+              notes="Neural Engine and Core ML GPU models for semlith, built by the packs workflow from packs/coreml at ${GITHUB_SHA}." ;;
+            llama)
+              asset=granite-embedding-small-english-r2-f16.gguf
+              title="llama.cpp pack v${VERSION}"
+              notes="granite-embedding-small-english-r2 as GGUF f16 for semlith's llama.cpp lane, built by the packs workflow from packs/llama at ${GITHUB_SHA}." ;;
+            *) echo "::error::unknown pack $PACK"; exit 1 ;;
+          esac
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
-              --title "llama.cpp pack v${VERSION}" \
-              --notes "granite-embedding-small-english-r2 as GGUF f16 for semlith's llama.cpp lane, built by the packs workflow from packs/llama at ${GITHUB_SHA}. sha256: $(cut -d' ' -f1 SHA256SUMS)"
+              --title "$title" --notes "$notes sha256: $(cut -d' ' -f1 SHA256SUMS)"
           fi
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber granite-embedding-small-english-r2-f16.gguf SHA256SUMS
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "$asset" SHA256SUMS
