@@ -25,6 +25,8 @@ case "$args" in
 esac
 EOF
 chmod +x "$work/bin/gh"
+# The runner's own values would leak into every case below.
+unset GITHUB_HEAD_REF GITHUB_REF_NAME GITHUB_EVENT_NAME ACTION BASE BEFORE HEAD_SHA DRAFT
 export PATH="$work/bin:$PATH" GITHUB_REPOSITORY=o/r WORKFLOW=ci.yml GITHUB_JOB=changes
 
 repo="$work/repo"

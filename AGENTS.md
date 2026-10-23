@@ -853,7 +853,9 @@ relaxation without an issue like
   GitHub, but only in the second a user asks: there is no startup check, no
   timer, and no banner that appears without a click. `semlith add` is the same
   shape from 0.11.0 — one request, for one URL, because somebody asked for it,
-  with no crawling and no re-fetching. The other downloads are model weights
+  with no crawling and no re-fetching, made directly and never through a proxy
+  (0.46.0): through one the proxy resolves the name, and `PublicOnly` would
+  check only the proxy's address. The other downloads are model weights
   and the pinned components the accelerator lanes run on:
   - the embedding model, once, on the first index, and `semlith setup`'s
     pre-fetch of the same file;
@@ -917,9 +919,16 @@ and `scripts` on every push. Everything slower waits on the `changes` job,
 which runs `.github/changes.sh`: a push that touched only prose (top-level or
 `.github/` Markdown, `docs/`, `assets/`, the licence files) skips `gpu`, `cuda`,
 `release-suites` and `mixed-vectors`, and so does a draft pull request until it
-is marked ready. A push is compared with the previous head only when this
-workflow's run on that head finished green; otherwise the whole pull request is
-compared with its base, so a cancelled run never lets code through untested.
+is marked ready. A file `src/` pulls in with `include_str!`/`include_bytes!`
+(`docs/clients.md`, `docs/skill/*`) is never prose, and a rename counts as both
+of its paths. A push is compared with the previous head only when this
+workflow's run on that head, on the same branch and event, finished green and
+its `changes` job printed `heavy=true`; otherwise the whole pull request is
+compared with its base (a push to a branch is code), so a cancelled run, a
+draft's fast lane or another branch's run never lets code through untested.
+`.github/changes-test.sh` and `.github/verify-tag-test.sh` are the scripts
+lane's self-tests for the two scripts; a change to either script changes its
+test in the same commit.
 `release-suites` runs each slow test on its own macOS runner and
 `mixed-vectors` each of its three runs on its own runner, with
 `mixed-vectors-median` writing the table. `native-smoke.yml` builds the binary
@@ -931,8 +940,21 @@ lane's downloads never are, because a no-GPU runner asserts it fetched none.
 ## Release
 
 Tags `v*` trigger `.github/workflows/release.yml`, which first verifies the tag
-matches `Cargo.toml`'s version. GitHub Actions must stay SHA-pinned with a
-trailing `# vN` comment for Dependabot. No Intel macOS target — ONNX Runtime
+is on `main` (`.github/verify-tag.sh`) and matches `Cargo.toml`'s version. Only
+an org admin can create a `v*` tag (the `tag-creation` ruleset; `tag-protection`
+separately stops one being moved or deleted, and neither is ever deleted, only
+its enforcement flipped). The signing key lives in the `release` environment,
+which only `v*` tags can deploy to, and only the `sign` job reads it; `attest`
+holds `id-token`, and `release` holds `contents: write` and runs the
+third-party release action. Keep each power in its one job (0.46.0, SEC-001
+and SEC-007 of the 2026-10-23 audit). Tag builds use `--locked` and no cache.
+GitHub Actions must stay SHA-pinned with a
+trailing `# vN` comment for Dependabot.
+
+**A release with a security fix raises the installers' floor.** `floor=` in
+`install.sh` and `$floor` in `install.ps1` are the oldest release a resolved
+`latest` may install; set both to the new version in any release whose
+predecessors should no longer be installable from `latest`. No Intel macOS target — ONNX Runtime
 stopped publishing `osx-x86_64`.
 
 The Linux jobs build with `--no-default-features --features dynamic-ort` and
