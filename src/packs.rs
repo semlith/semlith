@@ -272,18 +272,38 @@ pub fn remove(cache: &Path, pack: &Pack) -> Result<u64> {
 }
 
 /// A relative path inside an archive, refused if it could land anywhere but
-/// under the pack directory.
-fn inside(name: &str) -> Option<PathBuf> {
+/// under the pack directory. `upgrade` checks release entries with it too, so
+/// the two archive readers refuse the same names.
+///
+/// A colon or a device name is refused on every platform (audit SEC-014,
+/// 2026-10-23): on Windows `C:evil` is a drive-relative path that `join`
+/// lets replace the base, `x:stream` writes an alternate data stream, and
+/// `CON` or `nul.txt` opens a device. Archives semlith reads never hold
+/// either, so one rule everywhere costs nothing.
+pub(crate) fn inside(name: &str) -> Option<PathBuf> {
     let path = Path::new(name);
     let mut out = PathBuf::new();
     for part in path.components() {
         match part {
-            std::path::Component::Normal(p) => out.push(p),
+            std::path::Component::Normal(p) if ordinary(&p.to_string_lossy()) => out.push(p),
             std::path::Component::CurDir => {}
             _ => return None,
         }
     }
     (!out.as_os_str().is_empty()).then_some(out)
+}
+
+/// A path component with no colon that is not a Windows device name, with or
+/// without an extension, in any case.
+fn ordinary(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or("").trim_end().as_bytes();
+    let device = [&b"CON"[..], b"PRN", b"AUX", b"NUL"]
+        .iter()
+        .any(|d| stem.eq_ignore_ascii_case(d))
+        || (stem.len() == 4
+            && (stem[..3].eq_ignore_ascii_case(b"COM") || stem[..3].eq_ignore_ascii_case(b"LPT"))
+            && (b'1'..=b'9').contains(&stem[3]));
+    !part.contains(':') && !device
 }
 
 /// The path with its first component dropped: the archive's one top-level
@@ -547,5 +567,26 @@ mod tests {
             Some(PathBuf::from("ane/x.mil"))
         );
         assert_eq!(below_top(Path::new("top")), None);
+    }
+
+    /// Audit SEC-014 (2026-10-23): a colon is a drive or a stream on Windows
+    /// and a device name is not a file there, so both are refused everywhere.
+    #[test]
+    fn an_archive_path_with_a_colon_or_a_device_name_is_refused() {
+        for name in [
+            "top/C:evil",
+            "top/semlith.exe:x",
+            "top/CON",
+            "top/nul.txt",
+            "top/Aux",
+            "top/com1.log",
+            "top/LPT9",
+            "top/con.d/x",
+        ] {
+            assert_eq!(inside(name), None, "{name} was accepted");
+        }
+        for name in ["top/console.txt", "top/nulls", "top/COM10"] {
+            assert!(inside(name).is_some(), "{name} was refused");
+        }
     }
 }
