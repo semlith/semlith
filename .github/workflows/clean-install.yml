@@ -41,7 +41,7 @@ jobs:
         run: |
           case "$VERSION" in v[0-9]*) ;; *) echo "::error::version must be a tag such as v0.36.0"; exit 1 ;; esac
           gh release download "$VERSION" --repo "$REPO" --pattern install.sh
-          gh attestation verify install.sh --repo "$REPO"
+          gh attestation verify install.sh --repo "$REPO" --signer-workflow "$REPO/.github/workflows/release.yml" --source-ref "refs/tags/$VERSION"
 
       - name: Install
         env:
@@ -85,7 +85,7 @@ jobs:
           if ($env:VERSION -notmatch '^v[0-9]') { throw 'version must be a tag such as v0.36.0' }
           gh release download $env:VERSION --repo $env:REPO --pattern install.ps1
           if ($LASTEXITCODE -ne 0) { throw 'could not download install.ps1 from the release' }
-          gh attestation verify install.ps1 --repo $env:REPO
+          gh attestation verify install.ps1 --repo $env:REPO --signer-workflow "$env:REPO/.github/workflows/release.yml" --source-ref "refs/tags/$env:VERSION"
           if ($LASTEXITCODE -ne 0) { throw 'install.ps1 has no valid attestation' }
           $log = & powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 *>&1 | Out-String
           $code = $LASTEXITCODE
