@@ -1,6 +1,10 @@
 # Exact versions the 2026-09-28 M1 bench converted and measured with (Python 3.11).
 # A different torch or coremltools changes the traced graph and so the pack's bytes;
 # bump them only together with PACK_VERSION.
+# packs.yml installs requirements.lock, every transitive package pinned by hash; after
+# changing this file regenerate it with:
+#   MACOSX_DEPLOYMENT_TARGET=15.0 uv pip compile requirements.txt --python-version 3.11 \
+#     --python-platform aarch64-apple-darwin --generate-hashes --no-header -o requirements.lock
 torch==2.13.0
 transformers==5.17.0
 coremltools==9.0

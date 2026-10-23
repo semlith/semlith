@@ -102,6 +102,15 @@ jobs:
 
       - run: cargo audit
 
+      # The two lockfiles the shipped binary never sees are still code that
+      # runs in CI: the fuzz harness and the Core ML pack's Python build
+      # (SEC-016, 2026-10-23 audit). The pack lock is hashed; nothing installs.
+      - run: cargo audit --file fuzz/Cargo.lock
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - run: uv tool run --from 'pip-audit==2.9.0' pip-audit --disable-pip --no-deps -r packs/coreml/requirements.lock
+
   # The rest of the supply-chain gate, from 0.41.0: every crate's licence
   # against the allow list in deny.toml, every source against crates.io, and
   # the advisories again with the two reviewed ignores written down beside

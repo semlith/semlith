@@ -56,7 +56,7 @@ jobs:
       - name: Install the pinned requirements
         run: |
           uv venv --python 3.11 "$RUNNER_TEMP/venv"
-          uv pip install --python "$RUNNER_TEMP/venv/bin/python" -r requirements.txt
+          uv pip install --python "$RUNNER_TEMP/venv/bin/python" --require-hashes -r requirements.lock
 
       - name: Convert and compile
         run: |

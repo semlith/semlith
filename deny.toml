@@ -1,10 +1,16 @@
 # cargo deny check: licences, advisories, bans and sources for every crate in
 # Cargo.lock. Run on every push and pull request by the `deny` job in ci.yml.
 
+# Every feature's graph, not only the default one: the Linux release builds with
+# `dynamic-ort`, and a crate only that feature pulls in is still shipped.
+[graph]
+all-features = true
+
 [advisories]
+yanked = "deny"
 ignore = [
-    { id = "RUSTSEC-2024-0436", reason = "2026-10-15: paste is unmaintained, no vulnerability; pulled transitively via tokenizers, image and turbovec; no maintained replacement upstream" },
-    { id = "RUSTSEC-2026-0192", reason = "2026-10-15: ttf-parser is unmaintained, no vulnerability; pulled transitively via lopdf from pdf-extract; no maintained replacement upstream" },
+    { id = "RUSTSEC-2024-0436", reason = "2026-10-24: paste is unmaintained, no vulnerability; a proc-macro run at compile time only, pulled transitively via tokenizers, image and turbovec; no maintained replacement upstream" },
+    { id = "RUSTSEC-2026-0192", reason = "2026-10-24: ttf-parser is unmaintained, no vulnerability; direct for the PDF report over bundled and OS fonts, and transitive via lopdf from pdf-extract for indexed PDFs, which are read only inside the parse worker (tests/parse_worker.rs); no maintained replacement upstream" },
 ]
 
 [licenses]
@@ -31,6 +37,8 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
+# A `*` requirement lets any future release in, reviewed or not.
+wildcards = "deny"
 
 [sources]
 unknown-registry = "deny"
