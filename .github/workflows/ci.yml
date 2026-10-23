@@ -127,6 +127,33 @@ jobs:
 
       - run: cargo deny check
 
+  # No credential in the tree (SEC-002, 2026-10-23 audit): the default
+  # gitleaks rules plus one for crates.io tokens, with the made-up tokens the
+  # credential-scan tests use allowlisted by exact value in .gitleaks.toml.
+  # The gitleaks binary, checked against its digest, rather than
+  # gitleaks-action, which needs a paid licence for an organisation.
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$tarball"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+
+      - name: gitleaks over the tree
+        run: '"$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --redact --no-banner --exit-code 1'
+
   # The minimum Rust version the crate declares, built. `rust-version` in
   # Cargo.toml is a promise to anybody on an older toolchain, and nothing ever
   # checked it: every leg above is stable, so the declared floor could have
