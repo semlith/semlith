@@ -442,7 +442,10 @@ parse worker: this same binary started again as `semlith __parse-worker`,
 spoken to over pipes, pooled so there is one per thread that parses. A worker
 has a deadline (30 seconds, and one more per MiB of input) and a memory limit
 (2 GiB of allocations, `SEMLITH_PARSE_MEMORY_MB` to change it; on Linux and
-Windows the operating system enforces it for C code too). Before 0.40.0 a
+Windows the operating system enforces it for C code too, and on macOS, which
+will not lower a process's address-space limit, the daemon reads each worker's
+memory footprint every 25 ms and ends one that passes the limit, so a parse
+overshoots it by at most what it allocates in 25 ms, about 13 MiB on an M1). Before 0.40.0 a
 606-byte Markdown file of nested blockquotes aborted the daemon through a C
 assertion in tree-sitter-md — tree-sitter-yaml has the same one — and under
 launchd or systemd the service then crash-looped for as long as the file sat in
@@ -505,10 +508,9 @@ is a separate decision semlith has not made.
 
 **The parse worker is not a sandbox.** It runs as you, with your files, and can
 open what you can. It bounds what a crashing or runaway parser costs; it does
-not stop a parser bug that reads or writes files. On macOS the memory limit
-covers Rust's allocations only, because Darwin does not enforce a lower
-`RLIMIT_AS`; the deadline bounds the rest. The embedding model and ONNX Runtime
-run in the daemon.
+not stop a parser bug that reads or writes files. Before 0.46.0 the memory
+limit covered only Rust's allocations on macOS, and the deadline bounded the
+rest. The embedding model and ONNX Runtime run in the daemon.
 
 **A process running as you can change a checked download.** The model cache is
 yours alone, and every download is checked against its pinned digest, but the

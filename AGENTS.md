@@ -1025,11 +1025,13 @@ makes this set reviewable is being able to read the whole of it at once.
 | `tests/system_reading.rs` (windows) | `GlobalMemoryStatusEx` | As `system::platform`: a zeroed `MEMORYSTATUSEX` with `dwLength` set to its own size. Windows only. |
 | `worker::Counting` | `GlobalAlloc` over `System` | Every call forwards the caller's own layout and pointer to `System` unchanged; the count only decides whether to call it, and a refused allocation returns null, the documented failure. The limit is non-zero only inside a parse worker. |
 | `worker::limit_memory` (Linux) | `libc::setrlimit(RLIMIT_AS)` | A live local `rlimit` read by the call. Lowers this process's own limit, once, before any request is read. Linux only. |
+| `worker::footprint` (macOS, 0.46.0) | `libc::proc_pid_rusage(RUSAGE_INFO_V4)`, `mem::zeroed` | A zeroed live local `rusage_info_v4`, all integers, passed with the flavour that writes exactly that struct; nothing is read through a pointer afterwards. The pid is this process's own unreaped child, so it cannot have been reused. macOS only. |
 | `llama::job` (Windows) | as `llama::kill_on_close`, plus `JOB_OBJECT_LIMIT_PROCESS_MEMORY` | The same structure with `process_memory_limit` set; the parse worker's job uses it to cap the C half of a parser. |
 | `tests/parse_worker.rs` | `std::env::set_var` | The only test in its binary, before any worker is spawned or any other thread reads the environment. |
 | `tests/cuda.rs` (Linux x86_64), `accel::tests` | `std::env::set_var`/`remove_var` | Only that test in its binary reads the variable, and it is removed straight after. |
 | `tests/index_failure.rs`, `tests/priority.rs` | `std::env::set_var` | The fault variable is read only by the index pass the same test runs on its own thread, and removed afterwards. |
 | Test helpers in `embed`, `home`, `setup`, `upgrade` | `std::env::set_var` | Each guarded by a mutex that every test reading the variable also takes, and each restores what was there. |
 
-None of them holds a raw pointer across a call, and none is on a path that runs
-per file or per request.
+None of them holds a raw pointer across a call, and only `worker::footprint` is
+on a path that runs per file: the parent reads a macOS worker's footprint every
+25 ms while it parses, one syscall into a local.

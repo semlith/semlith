@@ -19,7 +19,7 @@ fn a_parser_that_dies_costs_one_worker_and_names_the_reason() {
         std::env::set_var("SEMLITH_FAULT_GRAPH_HANG", "graph-hang.rs");
         std::env::set_var("SEMLITH_FAULT_ALLOC", "alloc.txt");
         std::env::set_var("SEMLITH_PARSE_DEADLINE_MS", "3000");
-        std::env::set_var(worker::MEMORY_ENV, "256");
+        std::env::set_var(worker::MEMORY_ENV, "8");
     }
     worker::enable(env!("CARGO_BIN_EXE_semlith").into());
 
@@ -61,7 +61,7 @@ fn a_parser_that_dies_costs_one_worker_and_names_the_reason() {
 
     match worker::read(Path::new("alloc.txt"), b"x", false) {
         Err(Stop::Crashed(reason)) => assert!(
-            reason.starts_with("parser ran past its memory limit (256 MiB"),
+            reason.starts_with("parser ran past its memory limit (8 MiB"),
             "{reason}"
         ),
         other => panic!("an allocation past the limit was not contained: {other:?}"),
@@ -75,4 +75,43 @@ fn a_parser_that_dies_costs_one_worker_and_names_the_reason() {
             .unwrap()
             .is_ok()
     );
+
+    // macOS cannot lower RLIMIT_AS, so tree-sitter's own mallocs — which the
+    // counting allocator never sees — are bounded by the parent watching the
+    // worker's footprint. 600 KB of `a;` is about 2 MB of Rust and, measured
+    // on an M1, 191 MB of parse tree in a release build. The limit is 8 MiB
+    // because tree-sitter ends a parse at two seconds: on a loaded machine a
+    // debug parse reached only 14 MB in that time and slipped under 16 MiB.
+    #[cfg(target_os = "macos")]
+    {
+        // What one 25 ms poll lets a parse add before the worker is killed:
+        // 1 to 3 MiB measured in a debug build, about 13 MiB at a release
+        // parse's 500 MB/s.
+        const MARGIN_MB: u64 = 32;
+        let big = "fn f() {\n".to_string() + &"a;".repeat(300_000) + "\n}\n";
+        match worker::read(Path::new("big.rs"), big.as_bytes(), true) {
+            Err(Stop::Crashed(reason)) => {
+                assert!(
+                    reason.starts_with("parser ran past its memory limit (8 MiB"),
+                    "{reason}"
+                );
+                // "...: the worker peaked at P MiB against a cap of C MiB"
+                let mib = |after: &str| -> u64 {
+                    let at = reason.find(after).expect(after) + after.len();
+                    reason[at..].split(' ').next().unwrap().parse().unwrap()
+                };
+                let (peak, cap) = (mib("peaked at "), mib("cap of "));
+                assert!(
+                    (8..8 + 64).contains(&cap),
+                    "the cap is the limit and the worker's idle footprint: {reason}"
+                );
+                assert!(peak < cap + MARGIN_MB, "{reason}");
+            }
+            Ok(_) => panic!("native allocations past the cap were not contained: it parsed"),
+            Err(other) => panic!("not refused for memory: {other:?}"),
+        }
+        // The next file parses, in a fresh worker.
+        let next = worker::read(Path::new("ok.rs"), b"fn main() {}\n", true).expect("a clean read");
+        assert!(next.graph.unwrap().unwrap().is_some());
+    }
 }
