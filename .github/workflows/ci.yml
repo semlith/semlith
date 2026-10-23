@@ -194,7 +194,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: shellcheck
-        run: shellcheck install.sh .github/*.sh
+        run: shellcheck install.sh .github/changes.sh .github/changes-test.sh .github/verify-tag.sh .github/verify-tag-test.sh
 
       # The two scripts that decide what CI runs and what a release signs,
       # each over a scratch repository.
