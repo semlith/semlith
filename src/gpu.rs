@@ -409,8 +409,8 @@ pub fn fetch_webgpu(cache: &Path, progress: &mut dyn FnMut(u8)) -> Result<PathBu
     };
 
     let wheel_path = dir.join("plugin.whl");
-    download(wheel.url, &wheel_path, wheel.sha256, &mut report)?;
-    extract_plugin(&wheel_path, &dir)?;
+    let checked = download(wheel.url, &wheel_path, wheel.sha256, &mut report)?;
+    extract_plugin(checked, &dir)?;
     let _ = std::fs::remove_file(&wheel_path);
 
     fetch_fp16_into(&dir, &mut report)?;
@@ -468,16 +468,28 @@ pub fn plugin_bytes() -> u64 {
 
 /// Stream `url` to `to`, hashing as it goes, and refuse it unless the digest
 /// is the pinned one. A refused file is deleted, never kept.
+///
+/// Returns the handle whose bytes were hashed, at its start, so a caller that
+/// unpacks reads what was checked rather than whatever is at `to` by then
+/// (audit SEC-004, 2026-10-23). A handle rather than the bytes in memory: a
+/// pack is 150 MB, and the extracted files are read back from disk for the
+/// stamp either way.
 pub(crate) fn download(
     url: &str,
     to: &Path,
     sha256: &str,
     progress: &mut dyn FnMut(u64),
-) -> Result<()> {
+) -> Result<std::fs::File> {
     use sha2::{Digest, Sha256};
-    if to.exists() && crate::embed::digest(&std::fs::read(to)?) == sha256 {
-        progress(std::fs::metadata(to)?.len());
-        return Ok(());
+    use std::io::Seek;
+    if let Ok(mut held) = std::fs::File::open(to) {
+        let mut bytes = Vec::new();
+        held.read_to_end(&mut bytes)?;
+        if crate::embed::digest(&bytes) == sha256 {
+            held.rewind()?;
+            progress(bytes.len() as u64);
+            return Ok(held);
+        }
     }
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .https_only(true)
@@ -491,7 +503,12 @@ pub(crate) fn download(
         .call()
         .with_context(|| format!("fetching {url}"))?;
     let partial = to.with_extension("partial");
-    let mut out = std::fs::File::create(&partial)
+    let mut out = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&partial)
         .with_context(|| format!("writing {}", partial.display()))?;
     let mut reader = response.body_mut().as_reader();
     let mut hasher = Sha256::new();
@@ -508,13 +525,13 @@ pub(crate) fn download(
         progress(n as u64);
     }
     out.flush()?;
-    drop(out);
     let actual: String = hasher
         .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
     if actual != sha256 {
+        drop(out);
         let _ = std::fs::remove_file(&partial);
         bail!(
             "{url} does not match the digest semlith pins for it (expected {sha256}, got {actual}); \
@@ -523,13 +540,13 @@ pub(crate) fn download(
     }
     std::fs::rename(&partial, to).with_context(|| format!("placing {}", to.display()))?;
     crate::home::tighten_file(to);
-    Ok(())
+    out.rewind()?;
+    Ok(out)
 }
 
 /// The plugin's libraries, out of the wheel's `onnxruntime_ep_webgpu/`.
-fn extract_plugin(wheel: &Path, dir: &Path) -> Result<()> {
-    let file = std::fs::File::open(wheel)?;
-    let mut archive = zip::ZipArchive::new(file).context("reading the plugin wheel")?;
+fn extract_plugin(wheel: std::fs::File, dir: &Path) -> Result<()> {
+    let mut archive = zip::ZipArchive::new(wheel).context("reading the plugin wheel")?;
     let mut placed = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
@@ -822,6 +839,31 @@ pub fn choose(adapters: &[Adapter], named: Option<&str>) -> Option<(usize, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audit SEC-004 (2026-10-23): what a download hands back is the handle
+    /// whose bytes were hashed, so a file swapped in at the path after the
+    /// check is never what gets unpacked.
+    #[test]
+    fn a_download_hands_back_the_bytes_it_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let to = dir.path().join(".download-x");
+        std::fs::write(&to, b"genuine").unwrap();
+        let sha = crate::embed::digest(b"genuine");
+        let mut seen = 0;
+        let mut file = download("https://unused.invalid/x", &to, &sha, &mut |n| seen += n).unwrap();
+        assert_eq!(seen, 7);
+
+        // Windows will not rename over a file this process holds open.
+        #[cfg(unix)]
+        {
+            let planted = dir.path().join("planted");
+            std::fs::write(&planted, b"planted").unwrap();
+            std::fs::rename(&planted, &to).unwrap();
+        }
+        let mut held = Vec::new();
+        file.read_to_end(&mut held).unwrap();
+        assert_eq!(held, b"genuine");
+    }
 
     #[test]
     fn a_discrete_adapter_is_chosen_over_an_integrated_one_unless_one_is_named() {

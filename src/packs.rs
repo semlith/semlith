@@ -93,23 +93,12 @@ pub fn installed(cache: &Path, pack: &Pack) -> Option<PathBuf> {
         return dir.exists().then_some(dir);
     }
     let dir = pack.dir(cache);
+    // A stamp from before 0.41.0 is the version alone and says nothing about
+    // the files, so it is not a manifest and the pack is fetched again, once
+    // (audit SEC-004, 2026-10-23).
     let stamp = std::fs::read_to_string(dir.join(STAMP)).ok()?;
-    match serde_json::from_str::<Manifest>(&stamp) {
-        Ok(manifest) if manifest.version == pack.version && manifest.holds(&dir) => Some(dir),
-        Ok(_) => None,
-        // A stamp from before 0.41.0 is the version alone. The archive was
-        // checked when it was written; what is on disk now is recorded, and
-        // checked from here on.
-        // ponytail: trust on first use for pre-0.41.0 packs; re-fetch instead
-        // if a pack cache that old has to be distrusted.
-        Err(_) if stamp.trim() == pack.version => {
-            let manifest = Manifest::of(&dir, pack.version)?;
-            crate::home::write_private(&dir.join(STAMP), &serde_json::to_vec(&manifest).ok()?)
-                .ok()?;
-            Some(dir)
-        }
-        Err(_) => None,
-    }
+    let manifest: Manifest = serde_json::from_str(&stamp).ok()?;
+    (manifest.version == pack.version && manifest.holds(&dir)).then_some(dir)
 }
 
 /// Every unpacked file of a pack, as its stamp records it.
@@ -235,17 +224,23 @@ pub fn fetch(cache: &Path, pack: &Pack, progress: &mut dyn FnMut(u8)) -> Result<
             done += n;
             progress(((done * 100) / total).min(100) as u8);
         });
-        if let Err(e) = fetched {
-            // Nothing of a pack that failed its digest is kept.
-            let _ = std::fs::remove_dir_all(&dir);
-            return Err(e);
-        }
+        // The handle that was hashed, never the path opened again: a file
+        // swapped in at the path after the check is not what gets unpacked
+        // (audit SEC-004, 2026-10-23).
+        let archive = match fetched {
+            Ok(archive) => archive,
+            Err(e) => {
+                // Nothing of a pack that failed its digest is kept.
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e);
+            }
+        };
         let unpacked = match asset.form {
-            Form::Zip => unzip(&file, &dir, None),
-            Form::Wheel { prefix } => unzip(&file, &dir, Some(prefix)),
-            Form::TarGz => untar_gz(&file, &dir),
+            Form::Zip => unzip(archive, &dir, None),
+            Form::Wheel { prefix } => unzip(archive, &dir, Some(prefix)),
+            Form::TarGz => untar_gz(archive, &dir),
             Form::File { name } => {
-                std::fs::rename(&file, dir.join(name)).with_context(|| format!("placing {name}"))
+                place(archive, &dir.join(name)).with_context(|| format!("placing {name}"))
             }
         };
         if let Err(e) = unpacked {
@@ -315,9 +310,16 @@ fn below_top(path: &Path) -> Option<PathBuf> {
     (!rest.as_os_str().is_empty()).then_some(rest)
 }
 
-fn unzip(archive: &Path, into: &Path, wheel: Option<&str>) -> Result<()> {
-    let file = std::fs::File::open(archive)?;
-    let mut zip = zip::ZipArchive::new(file).context("reading the pack archive")?;
+/// A single-file asset, copied out of the checked handle.
+fn place(mut archive: std::fs::File, target: &Path) -> Result<()> {
+    let mut out = std::fs::File::create(target)?;
+    std::io::copy(&mut archive, &mut out)?;
+    crate::home::tighten_file(target);
+    Ok(())
+}
+
+fn unzip(archive: std::fs::File, into: &Path, wheel: Option<&str>) -> Result<()> {
+    let mut zip = zip::ZipArchive::new(archive).context("reading the pack archive")?;
     let mut placed = 0;
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i)?;
@@ -365,8 +367,8 @@ fn unzip(archive: &Path, into: &Path, wheel: Option<&str>) -> Result<()> {
 /// Enough of tar for a pack: regular files, nested, below one top-level
 /// directory. Links, devices and anything that would leave the directory are
 /// skipped, not followed.
-fn untar_gz(archive: &Path, into: &Path) -> Result<()> {
-    let mut reader = flate2::read::GzDecoder::new(std::fs::File::open(archive)?);
+fn untar_gz(archive: std::fs::File, into: &Path) -> Result<()> {
+    let mut reader = flate2::read::GzDecoder::new(archive);
     let mut header = [0u8; 512];
     let mut long_name: Option<String> = None;
     let mut placed = 0;
@@ -506,7 +508,9 @@ mod tests {
 
     /// Audit S15: a pack's unpacked files are checked on every load, not only
     /// the archive at download. A library swapped in the cache afterwards is a
-    /// pack that is not installed; a stamp from before 0.41.0 is upgraded.
+    /// pack that is not installed. A stamp from before 0.41.0, the version
+    /// alone, is not trusted either (audit SEC-004, 2026-10-23): it says
+    /// nothing about the files, so the pack is fetched again.
     #[test]
     fn a_pack_file_changed_after_its_check_is_not_installed() {
         let cache = tempfile::tempdir().unwrap();
@@ -520,13 +524,19 @@ mod tests {
         std::fs::write(dir.join("lib").join("libx.dylib"), b"genuine").unwrap();
         // The pre-0.41.0 stamp: the version alone.
         std::fs::write(dir.join(STAMP), "1").unwrap();
-        assert_eq!(installed(cache.path(), &pack), Some(dir.clone()));
-        assert!(
-            std::fs::read_to_string(dir.join(STAMP))
-                .unwrap()
-                .contains("libx.dylib"),
-            "the old stamp was not upgraded to a manifest"
+        assert_eq!(
+            installed(cache.path(), &pack),
+            None,
+            "a bare-version stamp counted as installed"
         );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(STAMP)).unwrap(),
+            "1",
+            "the bare-version stamp was rewritten as a manifest"
+        );
+
+        let manifest = Manifest::of(&dir, pack.version).unwrap();
+        std::fs::write(dir.join(STAMP), serde_json::to_vec(&manifest).unwrap()).unwrap();
         assert_eq!(installed(cache.path(), &pack), Some(dir.clone()));
 
         // Same size, written later: the size matches, so only the digest can

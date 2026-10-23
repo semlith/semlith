@@ -572,15 +572,27 @@ fn load_granite(
 ) -> Result<TextEmbedding> {
     link_runtime()?;
     let paths = granite_paths(&cache_dir, quiet, variant)?;
+    let [graph, weights] = variant.files();
+    // The bytes handed to the model are the bytes checked: the stamp is size
+    // and mtime, which a file changed in place can keep (audit SEC-004,
+    // 2026-10-23).
     let read = |name: &str| -> Result<Vec<u8>> {
-        let path = paths
+        let (path, expected) = paths
             .iter()
             .find(|(file, _)| *file == name)
             .map(|(_, path)| path)
+            .zip(
+                GRANITE_FILES[..4]
+                    .iter()
+                    .chain(&[graph, weights])
+                    .find(|(file, _)| *file == name)
+                    .map(|(_, sha)| *sha),
+            )
             .with_context(|| format!("{name} is not a file semlith pins a digest for"))?;
-        std::fs::read(path).with_context(|| format!("reading {}", path.display()))
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        verify_once(path, name, &bytes, expected)?;
+        Ok(bytes)
     };
-    let [graph, weights] = variant.files();
     let tokenizer_files = TokenizerFiles {
         tokenizer_file: read("tokenizer.json")?,
         config_file: read("config.json")?,
@@ -610,10 +622,25 @@ fn load_granite(
         .map_err(|e| anyhow::anyhow!("loading {GRANITE_NAME}: {e}"))
 }
 
+/// [`verify`] the bytes loaded from `path`, once per path per process: a
+/// writer loads the model once per session, and a session per worker would
+/// hash the same 52 MB each time.
+fn verify_once(path: &Path, name: &str, bytes: &[u8], expected: &str) -> Result<()> {
+    static CHECKED: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut checked = CHECKED.lock().unwrap_or_else(|e| e.into_inner());
+    if !checked.contains(path) {
+        verify(name, bytes, expected)?;
+        checked.insert(path.to_path_buf());
+    }
+    Ok(())
+}
+
 /// The graph file of one of granite's variants, fetched and verified, for a
 /// session built on ONNX Runtime directly. Its weights file sits beside it
 /// under the name the graph refers to, which is how ONNX Runtime finds them.
 pub fn granite_graph(cache_dir: &Path, quiet: bool, variant: Variant) -> Result<PathBuf> {
+    // Accepted residual (owner, 2026-10-24): ONNX Runtime opens the graph and weights by path, after the stamp check.
     let [graph, _] = variant.files();
     granite_paths(cache_dir, quiet, variant)?
         .into_iter()
@@ -1178,6 +1205,11 @@ pub const GRANITE_FILES: &[(&str, &str)] = &[
 /// refused by [`check_cache_dir`], so that attacker is this user. What the
 /// digests are actually for — a corrupted download, and an upstream repository
 /// whose bytes changed — moves a file's size or mtime every time.
+///
+/// From 0.46.0 `load_granite` also checks the bytes it loads, once per process
+/// (audit SEC-004), so for a fastembed load the stamp saves the second read,
+/// not the hash. A session built by path through [`granite_graph`] still
+/// relies on it.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Verified {
     revision: String,
@@ -1473,5 +1505,86 @@ mod tests {
         assert!(error.contains("0 B of an unknown size received"), "{error}");
         assert!(error.contains("semlith setup"), "{error}");
         let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    /// The model cache tests share, so a scratch copy needs no download.
+    fn model_cache() -> PathBuf {
+        std::env::var_os("SEMLITH_MODEL_CACHE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir().join(".cache").join("semlith").join("models"))
+    }
+
+    fn home_dir() -> PathBuf {
+        PathBuf::from(
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .unwrap(),
+        )
+    }
+
+    /// Audit SEC-004 (2026-10-23): a granite file whose bytes changed while
+    /// its size and mtime did not passes the stamp, and is refused at load
+    /// because the bytes loaded are the bytes checked.
+    #[test]
+    #[ignore = "needs the embedding model"]
+    fn a_granite_file_changed_after_its_stamp_is_refused_at_load() {
+        let repo = format!("models--{}", GRANITE_REPO.replace('/', "--"));
+        let from = model_cache().join(&repo);
+        let scratch = tempfile::tempdir().unwrap();
+        let cache = scratch.path().join("models");
+        let to = cache.join(&repo);
+        std::fs::create_dir_all(to.join("refs")).unwrap();
+        std::fs::copy(
+            from.join("refs").join(GRANITE_REVISION),
+            to.join("refs").join(GRANITE_REVISION),
+        )
+        .unwrap();
+        let snapshot = to.join("snapshots").join(GRANITE_REVISION);
+        for (name, _) in GRANITE_FILES {
+            let at = snapshot.join(name);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::copy(
+                from.join("snapshots").join(GRANITE_REVISION).join(name),
+                &at,
+            )
+            .unwrap();
+        }
+        record_verified_as(&snapshot, STAMP, GRANITE_REVISION, GRANITE_FILES);
+
+        // One whitespace byte for another: still JSON, same size, same mtime.
+        let file = snapshot.join("special_tokens_map.json");
+        let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let mut bytes = std::fs::read(&file).unwrap();
+        let at = bytes.iter().position(|b| *b == b'\n').unwrap();
+        bytes[at] = b' ';
+        std::fs::write(&file, &bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert!(
+            already_verified_as(&snapshot, STAMP, GRANITE_REVISION, GRANITE_FILES),
+            "the stamp no longer matches, so this is not the case under test"
+        );
+
+        let err = load_granite(cache, 512, true, 1, Variant::Int8)
+            .err()
+            .expect("a changed file loaded");
+        let said = format!("{err:#}");
+        assert!(said.contains("special_tokens_map.json"), "{said}");
+    }
+
+    /// Model load time, one load per process, for the record: run it three
+    /// times in `--release` and take the median.
+    #[test]
+    #[ignore = "needs the embedding model"]
+    fn granite_load_time() {
+        let started = std::time::Instant::now();
+        Model::Granite
+            .load_with_threads(model_cache(), 512, true, 1)
+            .unwrap();
+        println!("granite load: {} ms", started.elapsed().as_millis());
     }
 }
