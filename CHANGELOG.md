@@ -5,6 +5,104 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.46.0] - 2026-10-24
+
+The two security audits of 0.45.1 (2026-10-23) found nothing Critical or
+High. This release closes all eighteen of their findings, or records why one
+is accepted. Each fix comes with a test that fails on 0.45.1.
+
+### Security
+
+- **Only a commit on main can become a signed release (SEC-001).** Before,
+  any pushed `v*` tag was built, signed with the project key, attested and
+  published as Latest, so anyone who could push a branch and a tag could ship
+  a release every installer accepted. The release workflow now refuses a tag
+  whose commit `main` does not contain, before anything is built. Only an
+  organisation admin can create a `v*` tag. The signing key lives in a
+  `release` environment that only `v*` tags can deploy to.
+- **Each release job holds one permission (SEC-007).**
+  - `sign` holds the key and no write token. `attest` holds the OIDC token.
+    `release` writes the release and runs the one third-party action.
+  - Tag builds use `--locked` with no build cache.
+  - Checkouts drop their credentials.
+  - Latest moves only to the highest version released.
+  - The shared-library and glibc gates fail on empty `readelf` or `objdump`
+    output instead of passing.
+  - The packs workflow builds with a read-only token and publishes in a
+    separate job that runs no third-party code.
+- **The installers check who built a release, and refuse an old one
+  (SEC-007, SEC-015).** `install.sh` and `install.ps1` ask `gh` for an
+  attestation signed by `release.yml` for the tag being installed. They refuse
+  a resolved `latest` older than v0.46.0, and any tag that is not a whole
+  `vMAJOR.MINOR.PATCH`. `install.sh` refuses busybox wget. `install.ps1`
+  runs in one script block, so `irm | iex` leaves nothing in the caller's
+  session, and it restores the process-wide TLS setting afterwards.
+- **`semlith add` never fetches through a proxy (SEC-003).** ureq read
+  `ALL_PROXY`, `HTTPS_PROXY` and `HTTP_PROXY`. Through a proxy, the proxy
+  resolves the name, so the private-address guard checked only the proxy's
+  address. A failed fetch now names any proxy variable that is set.
+  198.18.0.0/15, 192.0.0.0/24, 192.88.99.0/24 and fec0::/10 are private
+  (SEC-009).
+- **`semlith upgrade` unpacks the bytes it checked (SEC-004, SEC-014).** It
+  used to write the checked archive out and open it again, in a work
+  directory that might already exist. It now unpacks from memory into a
+  directory it has just created, owner-only. Both archive readers refuse an
+  entry with a colon (a Windows drive-relative path or alternate data stream)
+  or a Windows device name.
+- **Packs and the embedding model are used as they were checked (SEC-004).**
+  A pack is extracted from the bytes that matched its digest. A bare-version
+  stamp from before 0.41.0 no longer counts as installed. The embedding
+  model's files are checked against their pinned digests once per process,
+  as they are loaded.
+- **On macOS, a native parser cannot grow past its worker's memory limit**
+  (the second audit's Medium). Darwin refuses a lower `RLIMIT_AS`, so the
+  limit used to cover only Rust's allocations, and the deadline bounded the
+  rest. The daemon now reads each worker's memory footprint every 25 ms and
+  ends one that passes its idle footprint plus the limit. The file is refused
+  with the peak and the cap, and the next file parses. A poll can overshoot by
+  what a parse allocates in 25 ms, about 13 MiB on an M1. A worker that has
+  already read other files gets the file once more on a fresh worker before
+  it is refused, because malloc keeps what earlier files freed.
+- **Isolation headers (SEC-015).** Every portal response sends
+  `Permissions-Policy`, `Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Resource-Policy: same-origin`.
+- **Every lockfile is audited (SEC-010, SEC-011, SEC-013, SEC-016).**
+  - `cargo deny` checks every feature's dependency graph (the Linux release
+    builds with `dynamic-ort`), and denies yanked crates and wildcard
+    requirements.
+  - The fuzz harness's lockfile moves to rustls-webpki 0.103.16,
+    webpki-roots 1.0.11 and zip 9.0.5.
+  - The Core ML pack installs a lock with every package pinned by hash, and
+    CI audits it beside both Cargo lockfiles.
+  - `ttf-parser` and `paste` stay unmaintained with no replacement upstream,
+    so their ignores carry today's reasons. A PDF with a malformed embedded
+    font is refused inside the parse worker while the daemon stays up.
+- **A secret scan gates every push (SEC-002).** gitleaks runs over the tree,
+  with a rule for crates.io tokens. Publishing has gone through Trusted
+  Publishing since 0.41.0, and the stale local token is gone.
+
+### Changed
+
+- **CI decides more carefully what is prose (SEC-005, SEC-006).**
+  `changes.sh` used to treat the agent rules, skill and clients guide that
+  `semlith setup` writes into users' clients as prose, because they live
+  under `docs/`. It now treats them as code. A rename counts as both of its
+  paths. A previous head is trusted only if its run, on the same branch, ran
+  the heavy lanes green. Self-tests cover it and the new tag check.
+- The bug hunt in `native-smoke.yml` reads its own budget-capped
+  `ANTHROPIC_BUGHUNT_KEY` and skips without it. Its tools are installed at
+  pinned versions.
+
+### Accepted
+
+- A process running as you that writes the model cache while the daemon runs
+  could change an unpacked pack's files, or the model graph ONNX Runtime opens
+  by path, after the check. Such a process can already replace the binary.
+  `docs/security.md` says so (SEC-004).
+- Two expired confidential-VM attestation tokens remain in the history behind
+  the v0.37.0-rc.5 and rc.6 tags, which the tag ruleset keeps immutable. They
+  grant nothing (SEC-012).
+
 ## [0.45.1] - 2026-10-21
 
 ### Changed
