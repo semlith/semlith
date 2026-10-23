@@ -167,7 +167,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: shellcheck
-        run: shellcheck install.sh
+        run: shellcheck install.sh .github/*.sh
+
+      # The two scripts that decide what CI runs and what a release signs,
+      # each over a scratch repository.
+      - name: changes.sh and verify-tag.sh self-tests
+        run: |
+          bash .github/changes-test.sh
+          bash .github/verify-tag-test.sh
 
       # The scripts are pasted into a shell by people who have not read them, so
       # they stay short enough to read. Raised from 170 in 0.14.0, when
@@ -227,7 +234,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq mesa-vulkan-drivers libvulkan1 vulkan-tools
-          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
+          icd=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' | head -1)
           echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
           echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
 
