@@ -7,35 +7,6 @@
 
 **Local search over your code and documents for AI agents.**
 
-[Install](#install) · [Quick start](#quick-start) · [Agents](#use-it-from-an-agent) ·
-[Portal](#the-portal) · [Benchmarks](#benchmarks) · [Docs](#documentation)
-
-</div>
-
-Install (macOS and Linux; Windows and other routes [below](#install)):
-
-```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/semlith/semlith/main/install.sh | sh
-```
-
-Then, in any folder of code or documents:
-
-```sh
-semlith index .                      # one store; the embedding model downloads once
-semlith search "where is retry backoff handled"
-semlith doctor                       # every agent client found, registered and reachable
-```
-
-**What it changes.** Asked 127 questions about 53 public documents, an Opus
-agent with Grep, Glob and Read found the passage 63 % of the time, and 41 of its
-127 top quotes appear nowhere in the document it named: it found the file by
-name, could not read it, and wrote something plausible. With semlith installed
-it found 98 %, and 0 of 126 quotes were made up. On single-repo code with a
-strong model it does not help: Opus scores 92 % with or without it. Every number
-and its command is on the [scorecard page](bench/scorecard/README.md).
-
-<div align="center">
-
 [![ci](https://github.com/semlith/semlith/actions/workflows/ci.yml/badge.svg)](https://github.com/semlith/semlith/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/semlith.svg?logo=rust)](https://crates.io/crates/semlith)
 [![downloads](https://img.shields.io/crates/d/semlith.svg)](https://crates.io/crates/semlith)
@@ -45,9 +16,15 @@ and its command is on the [scorecard page](bench/scorecard/README.md).
 [![mcp](https://img.shields.io/badge/MCP-server-6E56CF.svg)](https://modelcontextprotocol.io)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
+[Install](#install) · [Quick start](#quick-start) · [Agents](#use-it-from-an-agent) ·
+[Portal](#the-portal) · [Benchmarks](#benchmarks) · [Docs](#documentation)
+
 </div>
 
-<img src="docs/images/demo.gif" alt="semlith search answering one question from a PDF and one from a Word file, each with its file and line span" width="900">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/home-dark.webp">
+  <img src="docs/images/home-light.webp" alt="The Semlith portal's Home page, with one store indexing BurntSushi/ripgrep">
+</picture>
 
 ## Why Semlith
 
@@ -180,8 +157,11 @@ callees (25)
   ...
 ```
 
-Every hit is a `path:start-end` locator you can hand to an editor or an agent;
-`vf` says the vector and keyword lists both found it.
+Every hit is a `path:start-end` locator you can hand to an editor or an agent,
+and `vf` says the vector and keyword lists both found it. Documents answer the
+same way.
+
+<img src="docs/images/demo.gif" alt="semlith search answering one question from a PDF and one from a Word file, each with its file and line span" width="900">
 
 ## Use it from an agent
 
@@ -230,11 +210,6 @@ mcp-name: io.github.semlith/semlith
 write lock, watches its folders, re-embeds what you save, and serves a portal at
 `http://127.0.0.1:7365`. The URL with its session token is printed once, on
 stdout. [docs/portal.md](docs/portal.md) documents every page.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/home-dark.webp">
-  <img src="docs/images/home-light.webp" alt="The Semlith portal's Home page, with one store indexing BurntSushi/ripgrep">
-</picture>
 
 <table>
 <tr>
@@ -342,6 +317,13 @@ whole — 26× less, at 100 % coverage, counted with the store's own tokenizer.
 It is an upper bound: a file named by two answers is counted twice.
 
 ## Benchmarks
+
+Asked 127 questions about 53 public documents, an Opus agent with Grep, Glob and
+Read found the passage 63 % of the time, and 41 of its 127 top quotes appear
+nowhere in the document it named. It found the file by name, could not read it,
+and wrote something plausible. With Semlith installed it found 98 %, and 0 of
+126 quotes were made up. On single-repo code with a strong model it does not
+help, and Opus scores 92 % with or without it.
 
 Public code-retrieval benchmarks, run by [`bench/scorecard/`](bench/scorecard/README.md)
 on one M1 MacBook Air in October 2026 and published as measured, including where
