@@ -192,6 +192,131 @@ fn the_readme_states_the_number_of_prebuilt_targets() {
     );
 }
 
+/// The README with `\n` line endings. A Windows checkout gives it `\r\n`, and
+/// the first-screen and section checks below match on whole lines.
+fn lf() -> &'static str {
+    static TEXT: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| README.replace("\r\n", "\n"));
+    &TEXT
+}
+
+/// The text under one `## ` heading, up to the next.
+fn section(heading: &str) -> &'static str {
+    let rest = lf()
+        .split_once(&format!("\n{heading}\n"))
+        .unwrap_or_else(|| panic!("the README has no {heading:?} heading"))
+        .1;
+    rest.split_once("\n## ").map_or(rest, |(head, _)| head)
+}
+
+/// The first screen in the usual order: logo, name, tagline, badges, links,
+/// then the portal screenshot, and nothing else before `## Why Semlith`.
+///
+/// 0.46.1 put an install block, three commands and a bold finding paragraph
+/// between the tagline and the badges, and swapped the screenshot for a
+/// recording. Nothing failed, because nothing held the order. The owner read
+/// the live page and asked for the usual shape back, so it is asserted here.
+#[test]
+fn the_readme_first_screen_is_the_header_and_the_screenshot() {
+    let (top, _) = lf()
+        .split_once("\n## Why Semlith\n")
+        .expect("the README has a ## Why Semlith heading");
+    let at = |needle: &str| {
+        top.find(needle)
+            .unwrap_or_else(|| panic!("the first screen has no {needle:?}"))
+    };
+    const TAGLINE: &str = "**Local search over your code and documents for AI agents.**";
+    let order = [
+        at("assets/semlith-logo.png"),
+        at("\n# Semlith\n"),
+        at(TAGLINE),
+        at("[![ci]"),
+        at("[![license]"),
+        at("[Install](#install)"),
+        at("docs/images/home-dark.webp"),
+    ];
+    assert!(
+        order.windows(2).all(|w| w[0] < w[1]),
+        "the first screen is out of order; it must be logo, # Semlith, tagline, badges, \
+         section links, then the portal screenshot: {order:?}"
+    );
+    for badge in [
+        "ci",
+        "crates.io",
+        "downloads",
+        "docs.rs",
+        "msrv",
+        "platform",
+        "mcp",
+        "license",
+    ] {
+        let found = at(&format!("[![{badge}]"));
+        assert!(
+            order[2] < found && found < order[5],
+            "the {badge} badge is not between the tagline and the section links"
+        );
+    }
+    assert!(
+        top[order[2] + TAGLINE.len()..order[3]].trim().is_empty(),
+        "something sits between the tagline and the badges"
+    );
+    assert!(
+        top.trim_start().starts_with("<div align=\"center\">"),
+        "something comes before the centred header"
+    );
+    let after_header = top
+        .rsplit_once("</div>")
+        .expect("the centred header closes")
+        .1
+        .trim();
+    assert!(
+        after_header.starts_with("<picture>")
+            && after_header.ends_with("</picture>")
+            && after_header.matches("<picture>").count() == 1,
+        "only the portal screenshot may sit between the header and ## Why Semlith, found {after_header:?}"
+    );
+    assert!(!top.contains("```"), "a code block is on the first screen");
+    assert!(
+        !top.contains("demo.gif"),
+        "the recording is on the first screen"
+    );
+    assert!(
+        !top.contains("\n## "),
+        "a heading sits above ## Why Semlith"
+    );
+    let bold: Vec<&str> = top.lines().filter(|l| l.starts_with("**")).collect();
+    assert_eq!(
+        bold,
+        [TAGLINE],
+        "a bold lead paragraph is on the first screen"
+    );
+    assert_eq!(
+        README.matches("docs/images/home-dark.webp").count(),
+        1,
+        "the home screenshot is shown more than once"
+    );
+}
+
+/// What the first screen used to carry, where it lives now.
+#[test]
+fn the_documents_finding_and_the_recording_live_further_down() {
+    // Joined, so a figure wrapped across two lines still reads as one.
+    let bench = section("## Benchmarks")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for figure in ["41 of", "0 of 126", "63 %", "98 %", "92 %"] {
+        assert!(
+            bench.contains(figure),
+            "the Benchmarks section no longer states the documents finding ({figure:?})"
+        );
+    }
+    assert!(
+        section("## Quick start").contains("docs/images/demo.gif"),
+        "the recording is not in Quick start"
+    );
+}
+
 /// The release-shaped claims a grep can settle, kept here so they fail at the
 /// same moment the counts do.
 #[test]
