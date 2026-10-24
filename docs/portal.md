@@ -1069,8 +1069,12 @@ See [The two credentials](#the-two-credentials).
 
 ### Cloud
 
-**Not signed in:** what Semlith Cloud adds and the two commands to copy, `semlith
-cloud login <org>` and `semlith cloud connect <org>`. In this state nothing in the
+**Not signed in:** one sentence on the two products ("Semlith runs on your machine
+and is free. Semlith Cloud is the paid, hosted version. It keeps one index that
+every agent can reach, on any laptop, in the cloud or in CI, for you alone or your
+whole team."), a line saying this binary works without it and contacts nothing
+until you sign in, and the two commands to copy, `semlith cloud login <org>` and
+`semlith cloud connect <org>`. In this state nothing in the
 daemon contacts any host; it only checks for `~/.semlith/cloud.json`.
 
 **Signed in:** per org, its name, plan, the token's 13-character prefix (never the

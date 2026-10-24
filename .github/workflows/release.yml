@@ -419,6 +419,10 @@ jobs:
   # the `crates-io` environment. Never on a tag push. The release owner runs it
   # by hand once the clean-install workflow has passed on the published release:
   # `gh workflow run release.yml --ref v<version> -f publish=true`.
+  # The same OIDC identity then publishes server.json to the MCP registry:
+  # `mcp-publisher login github-oidc` grants io.github.<repository owner>/*, so
+  # io.github.semlith/semlith needs no owner token. A re-run after a registry
+  # failure skips the crate, which crates.io would refuse a second time.
   publish:
     if: github.event_name == 'workflow_dispatch' && inputs.publish && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -434,6 +438,43 @@ jobs:
       - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: auth
 
-      - run: cargo publish --locked
+      - run: |
+          if curl -fsS --proto '=https' --tlsv1.2 -o /dev/null -A "$UA" \
+            "https://crates.io/api/v1/crates/semlith/${GITHUB_REF_NAME#v}"; then
+            echo "crates.io already has ${GITHUB_REF_NAME#v}; not publishing it again"
+          else
+            cargo publish --locked
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          UA: semlith-release (github.com/semlith/semlith)
+
+      # The registry reads the visible mcp-name line from the README crates.io
+      # renders, which can trail the upload by a little.
+      - name: Wait for crates.io to serve the README
+        run: |
+          for _ in $(seq 60); do
+            if curl -fsSL --proto '=https' --tlsv1.2 -A "$UA" \
+              "https://crates.io/api/v1/crates/semlith/${GITHUB_REF_NAME#v}/readme" \
+              | grep 'mcp-name: io.github.semlith/semlith' > /dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "crates.io did not serve the ${GITHUB_REF_NAME#v} README within 10 minutes" >&2
+          exit 1
+        env:
+          UA: semlith-release (github.com/semlith/semlith)
+
+      # Pinned by digest, like every other download in this repository.
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/mcp-publisher.tar.gz" \
+            https://github.com/modelcontextprotocol/registry/releases/download/v1.8.3/mcp-publisher_linux_amd64.tar.gz
+          echo "29ed68536ad0bcf8a266d4666995f2b978740c049b8ad29a1c63fe845b2634cf  $RUNNER_TEMP/mcp-publisher.tar.gz" \
+            | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/mcp-publisher.tar.gz" -C "$RUNNER_TEMP" mcp-publisher
+
+      - run: |
+          "$RUNNER_TEMP/mcp-publisher" login github-oidc
+          "$RUNNER_TEMP/mcp-publisher" publish
