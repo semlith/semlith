@@ -340,7 +340,7 @@ on one M1 MacBook Air in October 2026 and published as measured, including where
 another tool wins. **Every table, every chart and the command that reproduces each
 number are on the [scorecard page](bench/scorecard/README.md).**
 
-| Benchmark | Semlith | baseline | instances |
+| Benchmark | semlith | baseline | instances |
 |---|---|---|---|
 | SWE-bench Verified, right file in the top 10 | **76.8 %** | 47.0 % grep then read | 500 |
 | SWE-bench Lite, right file in the top 10 | **72.3 %** | 47.3 % grep then read | 300 |
