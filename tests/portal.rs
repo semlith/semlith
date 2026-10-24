@@ -1725,7 +1725,10 @@ fn the_cloud_section_draws_both_states() {
         "This binary works without it and contacts nothing until you sign in.",
         "they can reach one URL.",
     ] {
-        assert!(off.contains(needle), "the not-connected state lost {needle:?}");
+        assert!(
+            off.contains(needle),
+            "the not-connected state lost {needle:?}"
+        );
     }
     for retired in ["organisation", "team ledger", "an org's stores"] {
         assert!(

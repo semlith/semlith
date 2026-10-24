@@ -357,10 +357,7 @@ fn the_readme_names_semlith_cloud_only_as_a_separate_service() {
         "`semlith upgrade`, the price table, Semlith Cloud and `semlith add`",
     ];
     for line in allowed {
-        assert!(
-            text.contains(line),
-            "the README no longer says {line:?}"
-        );
+        assert!(text.contains(line), "the README no longer says {line:?}");
     }
     assert_eq!(
         text.matches("Semlith Cloud").count(),
@@ -369,7 +366,12 @@ fn the_readme_names_semlith_cloud_only_as_a_separate_service() {
          bullet and the airgap list"
     );
     let lower = text.to_lowercase();
-    for pitch in ["for teams", "organisation knows", "organization knows", "team ledger"] {
+    for pitch in [
+        "for teams",
+        "organisation knows",
+        "organization knows",
+        "team ledger",
+    ] {
         assert!(
             !lower.contains(pitch),
             "the README pitches the hosted service ({pitch:?})"

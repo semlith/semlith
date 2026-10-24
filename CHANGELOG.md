@@ -5,6 +5,35 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.47.0] - 2026-10-24
+
+The README and the portal talk about Semlith. The binary does, sends and
+stores exactly what 0.46.4 did.
+
+### Changed
+
+- **The README names Semlith Cloud only as a separate hosted service.** The
+  Local by design bullet reads "no network at query time unless you sign in
+  to Semlith Cloud, a separate hosted service, with `semlith cloud login`",
+  and the `semlith cloud` row reads "Connects to Semlith Cloud, a separate
+  hosted service. Nothing contacts the network until `semlith cloud login`."
+  The airgap list still names it, as a network disclosure. `tests/readme.rs`
+  fails on any other mention and on "for teams", "organisation knows" or
+  "team ledger".
+- **Settings › Cloud, signed out, states the one sentence on both
+  products.** "Semlith runs on your machine and is free. Semlith Cloud is
+  the paid, hosted version. It keeps one index that every agent can reach,
+  on any laptop, in the cloud or in CI, for you alone or your whole team."
+  It replaces "An organisation's stores, hosted" and "a team ledger", and the
+  first point now says cloud sessions and CI can reach one URL. The portal's
+  sales-word test excepts that sentence and no other use of "team".
+  `docs/portal.md` describes the card as it reads.
+- **The MCP registry entry publishes itself.** The crates.io publish
+  dispatch in `release.yml` goes on to publish `server.json` as
+  `io.github.semlith/semlith`, logged in with the workflow's GitHub OIDC
+  identity, once crates.io serves the version's README. `mcp-publisher` is
+  pinned by digest. A re-run after a registry failure skips the crate.
+
 ## [0.46.4] - 2026-10-24
 
 Docs and metadata only. The binary behaves as 0.46.3.
