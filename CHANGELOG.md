@@ -5,6 +5,39 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.46.1] - 2026-10-24
+
+Docs, metadata and one workflow. The binary behaves as 0.46.0.
+
+### Added
+
+- **Listed in the official MCP registry.** `server.json` names the server
+  `io.github.semlith/semlith`, a cargo package run as `semlith mcp` over
+  stdio, and the README carries the `mcp-name` line the registry checks on
+  crates.io. `tests/readme.rs` fails when `server.json`'s version and the
+  crate's disagree.
+
+### Changed
+
+- **The README leads with what semlith changes for an agent.** The first
+  screen states the documents agent round (an Opus agent found 63 % of
+  passages with Grep, Glob and Read and 98 % with semlith; 41 of 127 grep
+  quotes were not in the document they named, 0 of 126 with semlith) beside
+  the single-repo code result where it does not help (92 % either way). A
+  recording of `semlith search` answering from a PDF and a Word file,
+  rendered by vhs from `docs/images/demo.tape`, replaces the portal
+  screenshot, which moves to The portal.
+- **Dependencies.** libc 0.2.191, tree-sitter, tree-sitter-scala 0.26.3 and
+  zip patch updates (Dependabot #259), with `THIRD-PARTY-NOTICES`
+  regenerated for the scala grammar.
+
+### Fixed
+
+- **The clean-install workflow's Windows tamper check works again.** It
+  rewrites `install.ps1`'s origin line wherever the script indents it; from
+  0.46.0 the line sits inside a script block, so the check failed in setup
+  instead of testing a tampered release.
+
 ## [0.46.0] - 2026-10-24
 
 The two security audits of 0.45.1 (2026-10-23) found nothing Critical or
@@ -5738,7 +5771,16 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.40.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.46.1...HEAD
+[0.46.1]: https://github.com/semlith/semlith/compare/v0.46.0...v0.46.1
+[0.46.0]: https://github.com/semlith/semlith/compare/v0.45.1...v0.46.0
+[0.45.1]: https://github.com/semlith/semlith/compare/v0.45.0...v0.45.1
+[0.45.0]: https://github.com/semlith/semlith/compare/v0.44.1...v0.45.0
+[0.44.1]: https://github.com/semlith/semlith/compare/v0.44.0...v0.44.1
+[0.44.0]: https://github.com/semlith/semlith/compare/v0.43.0...v0.44.0
+[0.43.0]: https://github.com/semlith/semlith/compare/v0.42.0...v0.43.0
+[0.42.0]: https://github.com/semlith/semlith/compare/v0.41.0...v0.42.0
+[0.41.0]: https://github.com/semlith/semlith/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/semlith/semlith/compare/v0.39.0...v0.40.0
 [0.39.0]: https://github.com/semlith/semlith/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/semlith/semlith/compare/v0.37.0...v0.38.0
