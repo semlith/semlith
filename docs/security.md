@@ -430,8 +430,9 @@ in a pack.
 
 `--airgap` refuses every outbound request before a connection opens, which
 covers model and pack downloads that are not cached, `semlith upgrade`, the
-price table, Semlith Cloud and `semlith add`, and names what it refused. An accelerator lane runs in its own worker process, so a
-driver crash ends that worker and its lane, not the daemon. The llama.cpp server
+price table, Semlith Cloud and `semlith add`, and names what it refused. An
+accelerator lane runs in its own worker process, so a driver crash ends that
+worker and its lane, not the daemon. The llama.cpp server
 listens on `127.0.0.1` with a key only its worker holds, and dies with the
 worker.
 
