@@ -41,12 +41,13 @@ the few spans that answer the question. Semlith finds them.
   symbols connect.
 - **Always current.** A watcher re-embeds a file when you save it. There is no
   build step and nothing to go stale against your working tree.
-- **Local by design.** No API keys, no network at query time until you connect
-  a cloud org, a portal bound to `127.0.0.1` only. Model weights and
-  acceleration packs are the only downloads, each pinned by digest.
-- **Made for agents.** An MCP server with sixteen tools, registered in your
-  agent clients by one command, and a ledger of every retrieval with the tokens
-  it saved.
+- **Local by design.** No API keys, and no network at query time unless you
+  connect a Semlith Cloud org. The portal binds to `127.0.0.1` only. Model
+  weights and acceleration packs are the only downloads, each pinned by digest,
+  and `--airgap` refuses every outbound request before a connection opens.
+- **Made for agents.** An MCP server with eight tools listed by default and
+  sixteen in all, registered in your agent clients by `semlith setup`, and a
+  ledger of every retrieval with the tokens it saved.
 - **More than code.** PDFs, Office documents, notebooks and Markdown are read
   as text; images are searchable by what they show.
 
@@ -70,10 +71,11 @@ irm https://raw.githubusercontent.com/semlith/semlith/main/install.ps1 | iex
 
 The installer picks the release for your machine, verifies the ed25519
 signature on the release's `SHA256SUMS`, checks the archive against it,
-unpacks it into `~/.semlith/bin` and runs `semlith setup`. Setup puts semlith
-on your `PATH`, downloads the embedding model, registers semlith with the agent
-clients it finds, and installs the daemon as a login service. Run `semlith setup` again at any time to repair an install;
-`--yes` takes every default.
+unpacks it into `~/.semlith/bin` and runs `semlith setup`. Setup puts Semlith
+on your `PATH`, downloads the embedding model, registers Semlith with each agent
+client that has a registration CLI, and installs the daemon as a login service.
+Run `semlith setup` again at any time to repair an install, and `--yes` takes
+every default.
 
 | Variable | Effect |
 |---|---|
@@ -166,15 +168,16 @@ same way.
 ## Use it from an agent
 
 ```sh
-semlith setup     # registers semlith in every agent client it finds
+semlith setup     # registers each agent client that has a registration CLI
 semlith doctor    # checks each client can actually reach it, and says how to fix it if not
 ```
 
-`setup` registers the MCP server at user scope in every client with a
-registration command — 12 clients are documented, and every stanza is run
-against the binary in `tests/clients.rs`;
-[docs/clients.md](docs/clients.md) has every stanza and the HTTP transport. It
-also installs the semlith Agent Skill, a steering hook that suggests the
+`semlith setup` registers the MCP server at user scope in each installed client
+that has a registration CLI, which is six of the 12 documented clients. The
+other six are a config file, which `semlith setup --register-all` writes for
+you, and `semlith doctor` reports on every one. Each stanza is run against the
+binary in `tests/clients.rs`, and [docs/clients.md](docs/clients.md) has them
+all with the HTTP transport. Setup also installs the semlith Agent Skill, a steering hook that suggests the
 semlith call when an agent is about to grep, and a read-only research agent.
 
 `semlith mcp` serves MCP over stdio; the daemon serves the same tools over HTTP
@@ -227,8 +230,10 @@ to change it. Every page and `/api/` route needs the per-run session token,
 sent in a `Semlith-Token` request header; without it the answer is 401. The
 agent key opens `/mcp` and nothing else. Responses carry a
 `Content-Security-Policy` of `'self'`, no CORS header is sent, and every byte
-the portal loads is compiled into the binary. `--airgap` refuses every download
-that is not already cached. The Privacy page checks these claims against the
+the portal loads is compiled into the binary. `--airgap` refuses every outbound
+request before a connection opens, which covers model and pack downloads that
+are not cached, `semlith upgrade`, the price table, Semlith Cloud and
+`semlith add`. The Privacy page checks these claims against the
 running daemon; [docs/security.md](docs/security.md) is the full account.
 
 ## How it works
@@ -378,7 +383,7 @@ each; [docs/performance.md](docs/performance.md) has the full tables:
 | | | |
 |---|---|---|
 | warm search at 700 / 7 000 / 70 000 chunks, peak RSS under 240 MB | **16.2 / 37.9 / 159.1 ms** | `cargo test --release --test measure -- --ignored --nocapture` |
-| edit on disk to searchable | **under 5 s** | the same |
+| edit on disk to searchable, watcher running | **1.24 s** | [docs/performance.md](docs/performance.md) |
 | indexing on an M1 Air: Neural Engine / CPU and GPU through Core ML | **229.8 / 62.7 chunks/s** p10 | [docs/performance.md](docs/performance.md) |
 | daemon memory 60 s after a run, seven stores open | **465 MB** | `footprint -p <pid>` |
 | idle watcher CPU over 60 s | **under 1.0 s** | the same |
@@ -415,8 +420,10 @@ index. Query latency does: the vector scan is linear.
   never reads contents. Multi-store search merges rankings rather than ranking
   jointly. Cross-encoder rescoring (`SEMLITH_RERANK=on`) is off by default: it
   costs about 16× the search time for two more answers in 77 at k=1.
-- No code signing, no ARM64 Windows or Intel macOS build, and `semlith upgrade`
-  only replaces a binary in `~/.semlith/bin`.
+- Binaries are not notarised by Apple or Authenticode-signed for Windows. Each
+  release carries an ed25519-signed `SHA256SUMS` and a GitHub artifact
+  attestation instead. There is no ARM64 Windows or Intel macOS build, and
+  `semlith upgrade` only replaces a binary in `~/.semlith/bin`.
 
 ## Documentation
 
