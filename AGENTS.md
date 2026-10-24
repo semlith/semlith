@@ -809,9 +809,19 @@ contract lives in `docs/compatibility.md`.
   The 100k benchmark store is a fixture kept at `~/.cache/semlith/bench/100k-store`
   — build it once (recipe in `CONTRIBUTING.md`), not per release.
 - A count stated in the README is asserted against its source by
-  `tests/readme.rs`, which also holds the under-500-line ceiling and the grep
+  `tests/readme.rs`, which also holds the under-480-line ceiling and the grep
   for release-specific prose. Change a count in the code and the README fails
   the build; add a count to the README and add its row there.
+- README first screen, held by `tests/readme.rs`: the logo, `# Semlith`, the
+  bold tagline, the eight badges directly under it, the section links, then the
+  portal screenshot (`docs/images/home-dark.webp` / `home-light.webp`), and
+  nothing else before `## Why Semlith`. No install block, commands, recording or
+  bold lead paragraph up there; those live in Install, Quick start and
+  Benchmarks. README prose is plain sentences without colons, semicolons or em
+  dashes, "Semlith" capitalised when it names the product (commands, paths,
+  crate and tool names stay lowercase), one percent style (`76.8 %`), no hype
+  words, and benchmark figures only from `bench/scorecard/README.md`. Every
+  claim is checked against the code before it is written.
 - Public surface changes must land in `docs/compatibility.md`; the client
   stanzas in `docs/clients.md` are executed by `tests/clients.rs`, so a renamed
   flag breaks there. From 0.18.0 that file also carries the registration facts,

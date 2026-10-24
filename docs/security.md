@@ -428,9 +428,11 @@ out and opened again, into a directory it has just created for itself; an
 archive entry with a colon or a Windows device name in it is refused there as
 in a pack.
 
-`--airgap` refuses every download unless it is already in the model cache, and
-names what it refused. An accelerator lane runs in its own worker process, so a
-driver crash ends that worker and its lane, not the daemon. The llama.cpp server
+`--airgap` refuses every outbound request before a connection opens, which
+covers model and pack downloads that are not cached, `semlith upgrade`, the
+price table, Semlith Cloud and `semlith add`, and names what it refused. An
+accelerator lane runs in its own worker process, so a driver crash ends that
+worker and its lane, not the daemon. The llama.cpp server
 listens on `127.0.0.1` with a key only its worker holds, and dies with the
 worker.
 

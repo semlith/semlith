@@ -5,6 +5,39 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.46.4] - 2026-10-24
+
+Docs and metadata only. The binary behaves as 0.46.3.
+
+### Changed
+
+- **The README's first screen is back in the usual order.** The logo, the
+  name, the tagline, the badges directly under it, the section links and the
+  portal screenshot, with nothing else above Why Semlith. The install block
+  and the three commands were already in Install and Quick start, the
+  recording moves into Quick start, and the documents finding (63 % against
+  98 %, 41 of 127 grep quotes not in the named document against 0 of 126,
+  92 % either way on single-repo code) opens Benchmarks. `tests/readme.rs`
+  now fails when anything is pushed between the tagline and the badges or
+  above the screenshot.
+- **README claims match the code.** Eight MCP tools are listed by default
+  and sixteen in all. `--airgap` refuses every outbound request before a
+  connection opens, which covers uncached model and pack downloads,
+  `semlith upgrade`, the price table, Semlith Cloud and `semlith add`, here
+  and in `docs/security.md`. Edit to searchable is the measured 1.24 s from
+  `docs/performance.md`. Setup registers the six clients that have a
+  registration CLI, and `semlith setup --register-all` writes the other six.
+  Known limits says the binaries are not notarised or Authenticode-signed,
+  beside the signed `SHA256SUMS` and the attestation each release carries.
+- **README prose.** Plain sentences, "Semlith" capitalised where it names
+  the product, no em dashes. AGENTS.md holds the first-screen order and these
+  rules.
+- **Crate and registry description.** Cargo.toml now reads "Local search
+  over your code and documents for AI agents. One binary that indexes your
+  repositories, PDFs and Office files and serves them over MCP." The
+  `server.json` description is its first sentence, inside the registry's
+  100-character limit.
+
 ## [0.46.3] - 2026-10-24
 
 Test harness only. The binary behaves as 0.46.2.
