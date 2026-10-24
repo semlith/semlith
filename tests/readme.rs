@@ -192,9 +192,17 @@ fn the_readme_states_the_number_of_prebuilt_targets() {
     );
 }
 
+/// The README with `\n` line endings. A Windows checkout gives it `\r\n`, and
+/// the first-screen and section checks below match on whole lines.
+fn lf() -> &'static str {
+    static TEXT: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| README.replace("\r\n", "\n"));
+    &TEXT
+}
+
 /// The text under one `## ` heading, up to the next.
 fn section(heading: &str) -> &'static str {
-    let rest = README
+    let rest = lf()
         .split_once(&format!("\n{heading}\n"))
         .unwrap_or_else(|| panic!("the README has no {heading:?} heading"))
         .1;
@@ -210,7 +218,7 @@ fn section(heading: &str) -> &'static str {
 /// the live page and asked for the usual shape back, so it is asserted here.
 #[test]
 fn the_readme_first_screen_is_the_header_and_the_screenshot() {
-    let (top, _) = README
+    let (top, _) = lf()
         .split_once("\n## Why Semlith\n")
         .expect("the README has a ## Why Semlith heading");
     let at = |needle: &str| {
