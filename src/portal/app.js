@@ -10195,12 +10195,12 @@ function seCloudOff() {
     "div",
     { class: "card" },
     el("div", { class: "card-h" }, el("span", { class: "card-t grow", text: "Semlith Cloud" }), pill("not connected", "grey", { dot: false })),
-    el("div", { class: "card-b line-row muted t13 pretty", text: "An organisation's stores, hosted: every repository and document set indexed on push, served over MCP to any agent, with a pull-request impact check and a team ledger. This binary works without it and contacts nothing until you sign in." }),
+    el("div", { class: "card-b line-row muted t13 pretty", text: "Semlith runs on your machine and is free. Semlith Cloud is the paid, hosted version. It keeps one index that every agent can reach, on any laptop, in the cloud or in CI, for you alone or your whole team. This binary works without it and contacts nothing until you sign in." }),
     el(
       "div",
       { class: "auto-fit m200 gap0" },
       [
-        ["One URL for cloud agents", "Cloud sessions and CI can't reach a laptop; they can reach an org's stores."],
+        ["One URL for cloud agents", "Cloud sessions and CI can't reach a laptop; they can reach one URL."],
         ["Its stores beside yours", "Connected, they answer with the local ones, in one ranked list, each row badged."],
         ["A pull-request check", "States what the graph proves, with no model and no guess."],
       ].map(([t, d]) => el("div", { class: "point" }, el("span", { class: "t-b t13", text: t }), el("span", { class: "muted t-xs", text: d }))),
