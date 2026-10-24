@@ -203,6 +203,11 @@ jobs:
           bash .github/changes-test.sh
           bash .github/verify-tag-test.sh
 
+      # The drive's one retry rule: only a request the browser never sent
+      # (net::ERR_NO_BUFFER_SPACE) earns a second attempt at a check.
+      - name: drive retry rule self-test
+        run: python3 tests/drive/drive_test.py
+
       # The scripts are pasted into a shell by people who have not read them, so
       # they stay short enough to read. Raised from 170 in 0.14.0, when
       # install.sh took on placing the ONNX Runtime that ships beside the

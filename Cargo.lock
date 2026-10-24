@@ -2684,7 +2684,7 @@ dependencies = [
 
 [[package]]
 name = "semlith"
-version = "0.46.2"
+version = "0.46.3"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
