@@ -42,9 +42,10 @@ the few spans that answer the question. Semlith finds them.
 - **Always current.** A watcher re-embeds a file when you save it. There is no
   build step and nothing to go stale against your working tree.
 - **Local by design.** No API keys, and no network at query time unless you
-  connect a Semlith Cloud org. The portal binds to `127.0.0.1` only. Model
-  weights and acceleration packs are the only downloads, each pinned by digest,
-  and `--airgap` refuses every outbound request before a connection opens.
+  sign in to Semlith Cloud, a separate hosted service, with `semlith cloud login`.
+  The portal binds to `127.0.0.1` only. Model weights and acceleration packs are
+  the only downloads, each pinned by digest, and `--airgap` refuses every
+  outbound request before a connection opens.
 - **Made for agents.** An MCP server with eight tools listed by default and
   sixteen in all, registered in your agent clients by `semlith setup`, and a
   ledger of every retrieval with the tokens it saved.
@@ -292,7 +293,7 @@ query ──embed──> vector ──search shards──┐
 | `semlith mcp`, `hook`, `key` | MCP over stdio, the steering hook, the HTTP agent key. |
 | `semlith setup`, `doctor`, `upgrade` | Install and repair, diagnose each client, replace the binary. |
 | `semlith accel` | Which devices embed: CPU (always on, `SEMLITH_CPU_CAP` caps it), Neural Engine, GPU, and the experimental CUDA, TensorRT, OpenVINO and llama.cpp lanes. |
-| `semlith cloud` | Semlith Cloud. Nothing here touches the network until `semlith cloud login`. |
+| `semlith cloud` | Connects to Semlith Cloud, a separate hosted service. Nothing contacts the network until `semlith cloud login`. |
 
 `semlith <command> --help` documents every flag.
 

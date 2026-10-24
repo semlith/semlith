@@ -338,6 +338,45 @@ fn the_readme_carries_no_release_specific_content() {
     );
 }
 
+/// The README is about the binary. Semlith Cloud is named only as a separate
+/// hosted service, in the commands row and the "Local by design" bullet, and in
+/// the airgap list, which is a network disclosure.
+///
+/// The positioning of 2026-10-24 retired every Cloud pitch from this repository.
+/// Before 0.47.0 the bullet read "unless you connect a Semlith Cloud org", and
+/// nothing would have failed had a pitch crept back in.
+#[test]
+fn the_readme_names_semlith_cloud_only_as_a_separate_service() {
+    // Joined, so a sentence wrapped across lines still reads as one.
+    let text = README.split_whitespace().collect::<Vec<_>>().join(" ");
+    let allowed = [
+        "no network at query time unless you sign in to Semlith Cloud, a separate hosted \
+         service, with `semlith cloud login`.",
+        "| `semlith cloud` | Connects to Semlith Cloud, a separate hosted service. Nothing \
+         contacts the network until `semlith cloud login`. |",
+        "`semlith upgrade`, the price table, Semlith Cloud and `semlith add`",
+    ];
+    for line in allowed {
+        assert!(
+            text.contains(line),
+            "the README no longer says {line:?}"
+        );
+    }
+    assert_eq!(
+        text.matches("Semlith Cloud").count(),
+        allowed.len(),
+        "the README names Semlith Cloud outside the commands row, the Local by design \
+         bullet and the airgap list"
+    );
+    let lower = text.to_lowercase();
+    for pitch in ["for teams", "organisation knows", "organization knows", "team ledger"] {
+        assert!(
+            !lower.contains(pitch),
+            "the README pitches the hosted service ({pitch:?})"
+        );
+    }
+}
+
 /// The work the index is built on, named and linked where a reader evaluating
 /// semlith will meet it.
 ///
