@@ -86,6 +86,46 @@ def load_known_failures(path, platform_token, family):
     return known
 
 
+def unsent_request(page_errors):
+    """The page error saying the browser never sent a request, or None.
+
+    The Windows runner's Chrome sometimes cannot open a loopback socket at all
+    (net::ERR_NO_BUFFER_SPACE, WSAENOBUFS). The daemon's log has no trace of
+    those requests, and the job's TCP table showed a few hundred of 16,384
+    ports in use when it happened (0.46.1 par.1, 0.46.2 rc4.11 and rc4.12), so
+    it is the runner's fault, not the portal's. A check that failed with this
+    in its page errors is run once more. Nothing else earns a retry:
+    `tests/drive/drive_test.py` holds the rule.
+    """
+    for line in page_errors:
+        if "net::ERR_NO_BUFFER_SPACE" in line:
+            return line
+    return None
+
+
+def run_check(drive, function):
+    """One attempt at a check from the pages' defaults: (failure, skipped)."""
+    # Every check starts from the pages' defaults: page state and the
+    # wizard now survive a reload (per viewer), so one check's filters
+    # would otherwise be the next one's starting point.
+    try:
+        drive.eval("(() => { try { for (const k of Object.keys(localStorage)) if (k.startsWith('semlith-ui:')) localStorage.removeItem(k);"
+                   " sessionStorage.removeItem('semlith-wz'); if (typeof KEPT !== 'undefined') KEPT.length = 0;"
+                   " if (typeof state !== 'undefined') state.wz = null; } catch (e) {} return true; })()")
+    except Exception:
+        pass
+    try:
+        function(drive)
+    except findings.Skipped as reason:
+        return None, str(reason)
+    except Exception as error:  # a check may fail any way it likes
+        failure = "%s: %s" % (type(error).__name__, error)
+        if not isinstance(error, (findings.CheckFailed, cdp.ProtocolError)):
+            failure += "\n" + traceback.format_exc()
+        return failure, None
+    return None, None
+
+
 # --------------------------------------------------------------------- token
 
 
@@ -231,7 +271,7 @@ def main():
     corpora = fixtures_module.Fixtures(keep=args.keep_fixtures)
     drive.fixtures = corpora
 
-    passes = fails = xfails = xpasses = skips = 0
+    passes = fails = xfails = xpasses = skips = retries = 0
     needs_attention = []
 
     try:
@@ -244,27 +284,20 @@ def main():
     try:
         for check_id, title, function in selected:
             issue = known.get(check_id)
-            failure = None
-            skipped = None
             began = time.time()
             errors_before = len(drive.page_errors)
-            # Every check starts from the pages' defaults: page state and the
-            # wizard now survive a reload (per viewer), so one check's filters
-            # would otherwise be the next one's starting point.
-            try:
-                drive.eval("(() => { try { for (const k of Object.keys(localStorage)) if (k.startsWith('semlith-ui:')) localStorage.removeItem(k);"
-                           " sessionStorage.removeItem('semlith-wz'); if (typeof KEPT !== 'undefined') KEPT.length = 0;"
-                           " if (typeof state !== 'undefined') state.wz = null; } catch (e) {} return true; })()")
-            except Exception:
-                pass
-            try:
-                function(drive)
-            except findings.Skipped as reason:
-                skipped = str(reason)
-            except Exception as error:  # a check may fail any way it likes
-                failure = "%s: %s" % (type(error).__name__, error)
-                if not isinstance(error, (findings.CheckFailed, cdp.ProtocolError)):
-                    failure += "\n" + traceback.format_exc()
+            failure, skipped = run_check(drive, function)
+            # Once, and only for a request the browser never sent.
+            retried = None
+            if failure is not None:
+                try:
+                    drive._drain()
+                except Exception:
+                    pass
+                retried = unsent_request(drive.page_errors[errors_before:])
+                if retried is not None:
+                    retries += 1
+                    failure, skipped = run_check(drive, function)
 
             # After the check, whatever happened: a screenshot of a failure is
             # the whole reason anyone opens the output directory.
@@ -280,6 +313,8 @@ def main():
             elif failure is None and issue is None:
                 passes += 1
                 transcript.line("ok       %-8s %s" % (check_id, title))
+                if retried is not None:
+                    transcript.line("         retried once, the first attempt's request was never sent: %s" % retried)
             elif failure is not None and issue is not None:
                 xfails += 1
                 transcript.line("xfail    %-8s %s (#%s)" % (check_id, title, issue))
@@ -294,6 +329,8 @@ def main():
                 fails += 1
                 needs_attention.append(check_id)
                 transcript.line("FAIL     %-8s %s" % (check_id, title))
+                if retried is not None:
+                    transcript.line("         failed again on its one retry (the first attempt's request was never sent)")
                 for line in failure.splitlines()[:25]:
                     transcript.line("         %s" % line)
                 transcript.line("         %s, after %.1f s" % (time.strftime("%H:%M:%S"), time.time() - began))
@@ -312,8 +349,8 @@ def main():
     transcript.line()
     transcript.line("--------------------------------------------------------------")
     transcript.line(
-        "pass %d   fail %d   xfail %d   XPASS %d   skip %d"
-        % (passes, fails, xfails, xpasses, skips)
+        "pass %d   fail %d   xfail %d   XPASS %d   skip %d   retried %d"
+        % (passes, fails, xfails, xpasses, skips, retries)
     )
     if needs_attention:
         transcript.line("needs attention: %s" % " ".join(needs_attention))

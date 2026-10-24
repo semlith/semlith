@@ -5,6 +5,21 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.46.3] - 2026-10-24
+
+Test harness only. The binary behaves as 0.46.2.
+
+### Fixed
+
+- **The browser drive no longer fails a release for a request the browser
+  never sent.** The Windows runner's Chrome sometimes cannot open a loopback
+  socket (`net::ERR_NO_BUFFER_SPACE`), which failed the Windows drive once in
+  0.46.1 and once in 0.46.2 although the daemon never saw the request and the
+  runner's TCP table was far from full. A check that fails with that error in
+  its page errors now runs once more, and the transcript says so. Any other
+  failure, or a second one, still fails the job. `tests/drive/drive_test.py`
+  holds the rule and CI's scripts lane runs it.
+
 ## [0.46.2] - 2026-10-24
 
 Metadata only. The binary behaves as 0.46.1.
@@ -5782,7 +5797,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.46.2...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.46.3...HEAD
+[0.46.3]: https://github.com/semlith/semlith/compare/v0.46.2...v0.46.3
 [0.46.2]: https://github.com/semlith/semlith/compare/v0.46.1...v0.46.2
 [0.46.1]: https://github.com/semlith/semlith/compare/v0.46.0...v0.46.1
 [0.46.0]: https://github.com/semlith/semlith/compare/v0.45.1...v0.46.0

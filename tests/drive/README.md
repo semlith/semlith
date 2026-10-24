@@ -145,6 +145,24 @@ A check whose precondition did not hold — no browser, no network, a corpus
 with no PDF in it — is reported `skip` and fails nothing. A harness that blames
 the product for its own breakage is worse than no harness.
 
+## The one retry
+
+A check that fails while the page logged `net::ERR_NO_BUFFER_SPACE` runs once
+more, from the same reset state. That error means the browser could not open a
+loopback socket at all (WSAENOBUFS on the Windows runner). The daemon never
+sees those requests, and the job's TCP table showed a few hundred of 16,384
+ports in use when it happened, so the fault is the runner's. A retried check
+that passes prints `ok` and a `retried once` line naming the request; one that
+fails again prints `FAIL` with both attempts' page errors. The summary line
+counts retries.
+
+Nothing else is retried, and nothing is retried twice. `drive_test.py` holds
+that rule, and CI's scripts lane runs it:
+
+```sh
+python3 tests/drive/drive_test.py
+```
+
 ## Adding a check when the next drive finds finding 48
 
 1. Add the finding to the drive's findings document first, with its
