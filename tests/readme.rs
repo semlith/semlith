@@ -233,7 +233,14 @@ fn the_readme_first_screen_is_the_header_and_the_screenshot() {
          section links, then the portal screenshot: {order:?}"
     );
     for badge in [
-        "ci", "crates.io", "downloads", "docs.rs", "msrv", "platform", "mcp", "license",
+        "ci",
+        "crates.io",
+        "downloads",
+        "docs.rs",
+        "msrv",
+        "platform",
+        "mcp",
+        "license",
     ] {
         let found = at(&format!("[![{badge}]"));
         assert!(
@@ -261,8 +268,14 @@ fn the_readme_first_screen_is_the_header_and_the_screenshot() {
         "only the portal screenshot may sit between the header and ## Why Semlith, found {after_header:?}"
     );
     assert!(!top.contains("```"), "a code block is on the first screen");
-    assert!(!top.contains("demo.gif"), "the recording is on the first screen");
-    assert!(!top.contains("\n## "), "a heading sits above ## Why Semlith");
+    assert!(
+        !top.contains("demo.gif"),
+        "the recording is on the first screen"
+    );
+    assert!(
+        !top.contains("\n## "),
+        "a heading sits above ## Why Semlith"
+    );
     let bold: Vec<&str> = top.lines().filter(|l| l.starts_with("**")).collect();
     assert_eq!(
         bold,
