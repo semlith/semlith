@@ -5,7 +5,7 @@
 
 # Semlith
 
-**A local vector store and code graph for AI agents, on your own machine.**
+**Local search over your code and documents for AI agents.**
 
 [Install](#install) · [Quick start](#quick-start) · [Agents](#use-it-from-an-agent) ·
 [Portal](#the-portal) · [Benchmarks](#benchmarks) · [Docs](#documentation)
@@ -26,13 +26,13 @@ semlith search "where is retry backoff handled"
 semlith doctor                       # every agent client found, registered and reachable
 ```
 
-**Benchmarks:** SWE-bench, CodeRAG-Bench, agents on Opus, and PDF, Office and
-EPUB documents, each number with the command that reproduces it, on the
-[scorecard page](bench/scorecard/README.md).
-
-Index your code and documents once, keep the index current as you save, and
-answer an agent's questions in milliseconds — without anything leaving the
-machine.
+**What it changes.** Asked 127 questions about 53 public documents, an Opus
+agent with Grep, Glob and Read found the passage 63 % of the time, and 41 of its
+127 top quotes appear nowhere in the document it named: it found the file by
+name, could not read it, and wrote something plausible. With semlith installed
+it found 98 %, and 0 of 126 quotes were made up. On single-repo code with a
+strong model it does not help: Opus scores 92 % with or without it. Every number
+and its command is on the [scorecard page](bench/scorecard/README.md).
 
 <div align="center">
 
@@ -47,10 +47,7 @@ machine.
 
 </div>
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/home-dark.webp">
-  <img src="docs/images/home-light.webp" alt="The Semlith portal's Home page, with one store indexing BurntSushi/ripgrep">
-</picture>
+<img src="docs/images/demo.gif" alt="semlith search answering one question from a PDF and one from a Word file, each with its file and line span" width="900">
 
 ## Why Semlith
 
@@ -223,7 +220,9 @@ default, because every definition costs tokens on every request;
 
 A bare `semlith mcp` opens every registered store, so one question can span
 repositories. Supported MCP versions: `2026-07-28`, `2025-11-25`, `2025-06-18`
-and `2024-11-05`, each proven by a session in `tests/mcp.rs`.
+and `2024-11-05`, each proven by a session in `tests/mcp.rs`. In the official
+[MCP registry](https://registry.modelcontextprotocol.io) it is listed as
+mcp-name: io.github.semlith/semlith
 
 ## The portal
 
@@ -231,6 +230,11 @@ and `2024-11-05`, each proven by a session in `tests/mcp.rs`.
 write lock, watches its folders, re-embeds what you save, and serves a portal at
 `http://127.0.0.1:7365`. The URL with its session token is printed once, on
 stdout. [docs/portal.md](docs/portal.md) documents every page.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/home-dark.webp">
+  <img src="docs/images/home-light.webp" alt="The Semlith portal's Home page, with one store indexing BurntSushi/ripgrep">
+</picture>
 
 <table>
 <tr>
