@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.semlith/semlith",
+  "title": "Semlith",
+  "description": "Local search over your code and documents for AI agents, with a code graph of callers.",
+  "repository": {
+    "url": "https://github.com/semlith/semlith",
+    "source": "github"
+  },
+  "websiteUrl": "https://semlith.com",
+  "version": "0.46.0",
+  "packages": [
+    {
+      "registryType": "cargo",
+      "identifier": "semlith",
+      "version": "0.46.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}

@@ -345,3 +345,40 @@ fn the_readme_savings_paragraph_matches_the_run_that_produced_it() {
         );
     }
 }
+
+/// The official MCP registry lists semlith from `server.json`, and accepts a
+/// cargo package only when the crate's README on crates.io names the server in
+/// visible text (crates.io strips HTML comments, so a hidden marker fails).
+///
+/// The version is the one a release forgets: the registry refuses to publish a
+/// version it already holds, and a stale one points clients at an old crate.
+#[test]
+fn the_registry_entry_names_this_release_and_the_readme_names_the_server() {
+    let server: serde_json::Value =
+        serde_json::from_str(include_str!("../server.json")).expect("server.json is JSON");
+    let name = server["name"].as_str().expect("server.json has a name");
+    assert_eq!(
+        server["version"],
+        env!("CARGO_PKG_VERSION"),
+        "server.json's version"
+    );
+    for package in server["packages"]
+        .as_array()
+        .expect("server.json has packages")
+    {
+        assert_eq!(
+            package["version"],
+            env!("CARGO_PKG_VERSION"),
+            "server.json's package version"
+        );
+    }
+    let marker = format!("mcp-name: {name}");
+    let line = README
+        .lines()
+        .find(|line| line.contains(&marker))
+        .unwrap_or_else(|| panic!("the README does not contain {marker:?}"));
+    assert!(
+        !line.contains("<!--"),
+        "the README names the server only inside an HTML comment, which crates.io strips"
+    );
+}
