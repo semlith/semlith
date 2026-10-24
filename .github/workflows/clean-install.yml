@@ -161,8 +161,9 @@ jobs:
           [IO.File]::WriteAllBytes($path, $bytes)
           $hash = (Get-FileHash -Path $path -Algorithm SHA256).Hash.ToLower()
           Set-Content -Path (Join-Path $dir 'SHA256SUMS') -Value "$hash  $archive" -Encoding ascii
-          $text = (Get-Content -Raw install.ps1) -replace "(?m)^\`$origin = 'https://github\.com'", "`$`$origin = 'http://127.0.0.1:8000'"
-          if ($text -notmatch "(?m)^\`$origin = 'http://127\.0\.0\.1:8000'") { throw 'the origin line was not rewritten' }
+          # Indented from 0.46.0, when install.ps1's body moved into one script block.
+          $text = (Get-Content -Raw install.ps1) -replace "(?m)^(\s*)\`$origin = 'https://github\.com'", "`${1}`$`$origin = 'http://127.0.0.1:8000'"
+          if ($text -notmatch "(?m)^\s*\`$origin = 'http://127\.0\.0\.1:8000'") { throw 'the origin line was not rewritten' }
           Set-Content -Path tampered.ps1 -Value $text -Encoding ascii
           Start-Process python -ArgumentList '-m', 'http.server', '8000', '--bind', '127.0.0.1', '--directory', 'srv' -WindowStyle Hidden
           foreach ($i in 1..50) {
