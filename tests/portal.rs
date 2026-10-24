@@ -27,6 +27,11 @@ use std::time::Duration;
 
 const APP_JS: &str = include_str!("../src/portal/app.js");
 const STYLE: &str = include_str!("../src/portal/style.css");
+/// The one sentence that describes both products, word for word wherever it
+/// appears (docs/positioning/04-decision-2026-10-24.md in the project files).
+const SHARED_SENTENCE: &str = "Semlith runs on your machine and is free. Semlith Cloud is the \
+    paid, hosted version. It keeps one index that every agent can reach, on any laptop, in the \
+    cloud or in CI, for you alone or your whole team.";
 const INDEX_HTML: &str = include_str!("../src/portal/index.html");
 const ROUTES_RS: &str = include_str!("../src/routes.rs");
 const PORTAL_MD: &str = include_str!("../docs/portal.md");
@@ -1592,15 +1597,16 @@ fn nothing_the_portal_renders_offers_to_sell_anything() {
             {
                 continue;
             }
-            // "team" inside an ordinary word is not the word — and "a team
-            // ledger" on Settings › Cloud is a description of the hosted
-            // service, not a tier of this binary. The design's own copy says
-            // it, and it is the one place allowed.
+            // "team" inside an ordinary word is not the word — and the shared
+            // sentence on Settings › Cloud describes the hosted service, not a
+            // tier of this binary. The positioning of 2026-10-24 has it word
+            // for word everywhere, so it is the one place allowed; any other
+            // "team" in the same string still fails.
             if needle == "team"
-                && (!lower
+                && !lower
+                    .replace(&SHARED_SENTENCE.to_lowercase(), "")
                     .split(|c: char| !c.is_alphanumeric())
                     .any(|w| w == "team")
-                    || lower.contains("team ledger"))
             {
                 continue;
             }
@@ -1710,6 +1716,24 @@ fn the_cloud_section_draws_both_states() {
         assert!(
             !off.contains(price),
             "the not-connected state names a price: {price}"
+        );
+    }
+    // The positioning of 2026-10-24: the shared sentence, and none of the
+    // organisation framing it retired.
+    for needle in [
+        SHARED_SENTENCE,
+        "This binary works without it and contacts nothing until you sign in.",
+        "they can reach one URL.",
+    ] {
+        assert!(
+            off.contains(needle),
+            "the not-connected state lost {needle:?}"
+        );
+    }
+    for retired in ["organisation", "team ledger", "an org's stores"] {
+        assert!(
+            !off.contains(retired),
+            "the not-connected state still says {retired:?}"
         );
     }
     assert!(
