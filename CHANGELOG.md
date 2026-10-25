@@ -5,6 +5,12 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.47.1] - 2026-10-25
+
+### Fixed
+
+- **A folder named in a path filter matched nothing.** `semlith_files` with `path: ["src/oauth"]`, and `--path src/oauth` on the CLI, answered "No file in the semlith store matches that." because a path filter is a glob and a bare folder matched only a file of that exact name. A path with no `*`, `?` or `[` now also means the folder of that name, `src/oauth/**`, for exclusions too (`!vendor`). A glob means what it did, and a path that names a file still matches only that file. Found by the Semlith Cloud directory self-test, where an agent asked for the files in a folder got none.
+
 ## [0.47.0] - 2026-10-24
 
 The README and the portal talk about Semlith. The binary does, sends and
