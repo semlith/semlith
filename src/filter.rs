@@ -163,7 +163,7 @@ impl Filter {
         let mut groups = Vec::new();
 
         if !paths.is_empty() {
-            groups.push(paths.iter().map(|p| anchor(p)).collect());
+            groups.push(paths.iter().flat_map(|p| as_folder_too(p)).collect());
         }
 
         // Extensions and languages are both extension sets, so they share one
@@ -244,6 +244,18 @@ fn negation(value: &str) -> (&'static str, &str) {
     }
 }
 
+/// A path with no glob in it, anchored, and also as the folder of that name
+/// (0.47.1): `src/oauth` is the files under `src/oauth`, the way a person and
+/// `semlith_files` ("what is in this folder") mean it. A file and a folder
+/// cannot share a path, so a pattern that names a file still matches only it.
+fn as_folder_too(pattern: &str) -> Vec<String> {
+    if pattern.contains(['*', '?', '[']) {
+        return vec![anchor(pattern)];
+    }
+    let folder = format!("{}/**", pattern.trim_end_matches(['/', '\\']));
+    vec![anchor(pattern), anchor(&folder)]
+}
+
 fn anchor(pattern: &str) -> String {
     // The marker stays in front of the anchored pattern rather than being
     // anchored into the middle of it: `!src/**` is the exclusion of `*/src/**`,
@@ -311,6 +323,23 @@ mod tests {
 
     /// The rule the README documents: a relative glob is anchored so it works
     /// from any directory; an absolute one is not, so it means exactly itself.
+    /// 0.47.1: a folder named without a glob is the files under it. Agents
+    /// write `path: ["src/oauth"]` far more often than `src/oauth/**`, and
+    /// `semlith_files` says it lists what is in a folder; as a bare GLOB it
+    /// matched only a file of that exact name, which is to say nothing.
+    #[test]
+    fn a_bare_folder_matches_the_files_under_it() {
+        let f = Filter::new(&s(&["src/oauth"]), &[], &[]).unwrap();
+        assert_eq!(f.groups(), [["*/src/oauth", "*/src/oauth/**"]]);
+        let f = Filter::new(&s(&["/home/me/proj/lib/"]), &[], &[]).unwrap();
+        assert_eq!(f.groups(), [["/home/me/proj/lib/", "/home/me/proj/lib/**"]]);
+        let f = Filter::new(&s(&["!vendor"]), &[], &[]).unwrap();
+        assert_eq!(f.groups(), [["!*/vendor", "!*/vendor/**"]]);
+        // A glob already says what it means.
+        let f = Filter::new(&s(&["src/*.rs"]), &[], &[]).unwrap();
+        assert_eq!(f.groups(), [["*/src/*.rs"]]);
+    }
+
     #[test]
     fn a_relative_pattern_is_anchored_and_an_absolute_one_is_not() {
         // `/` on every platform: the query side normalises the path column to
