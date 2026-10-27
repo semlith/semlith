@@ -178,6 +178,70 @@ fn the_readme_states_the_number_of_cli_commands() {
     );
 }
 
+/// docs.rs, crates.io and `semlith --help` say what the README says.
+///
+/// Until 0.48.0 the crate docs and the CLI about line called Semlith "a local
+/// semantic cache for AI agents", and docs.rs ranked on Google with it, under
+/// a README and a website that said something else. Nothing compared them.
+#[test]
+fn every_shipped_description_is_the_repo_tagline() {
+    const TAGLINE: &str = "Local search over your code and documents for AI agents.";
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .arg("--help")
+        .output()
+        .expect("semlith --help runs");
+    let help = String::from_utf8_lossy(&out.stdout).into_owned();
+    // The about line is Cargo.toml's description (`#[command(about)]`), which
+    // crates.io shows too, so the two cannot drift apart.
+    assert!(
+        help.starts_with(TAGLINE),
+        "`semlith --help` does not open with the repo tagline"
+    );
+
+    let lib = std::fs::read_to_string(root.join("src/lib.rs")).expect("src/lib.rs reads");
+    assert_eq!(
+        lib.lines().next(),
+        Some(format!("//! {TAGLINE}").as_str()),
+        "the crate docs (docs.rs) do not open with the repo tagline"
+    );
+
+    let cargo = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml reads");
+    for field in [
+        "homepage = \"https://semlith.com\"",
+        "documentation = \"https://docs.rs/semlith\"",
+    ] {
+        assert!(
+            cargo.lines().any(|l| l == field),
+            "Cargo.toml has no `{field}` line, so crates.io does not link it"
+        );
+    }
+
+    // Everything `cargo package` ships that a reader sees: the manifest and src/.
+    let mut stale = Vec::new();
+    let mut dirs = vec![root.join("src")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).expect("src/ reads") {
+            let path = entry.expect("a src/ entry").path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if std::fs::read_to_string(&path)
+                .is_ok_and(|text| text.to_lowercase().contains("semantic cache"))
+            {
+                stale.push(path);
+            }
+        }
+    }
+    if cargo.to_lowercase().contains("semantic cache") {
+        stale.push(root.join("Cargo.toml"));
+    }
+    assert!(
+        stale.is_empty(),
+        "the retired \"semantic cache\" description ships in {stale:?}"
+    );
+}
+
 #[test]
 fn the_readme_states_the_number_of_prebuilt_targets() {
     let built = RELEASE_YML.matches("            target: ").count();
@@ -232,13 +296,22 @@ fn the_readme_first_screen_is_the_header_and_the_screenshot() {
         at(TAGLINE),
         at("[![ci]"),
         at("[![license]"),
+        at("[Website](https://semlith.com)"),
         at("[Install](#install)"),
         at("docs/images/home-dark.webp"),
     ];
     assert!(
         order.windows(2).all(|w| w[0] < w[1]),
         "the first screen is out of order; it must be logo, # Semlith, tagline, badges, \
-         section links, then the portal screenshot: {order:?}"
+         the Website link, section links, then the portal screenshot: {order:?}"
+    );
+    assert!(
+        top[order[5]..order[6]].trim() == "[Website](https://semlith.com) ·",
+        "the links row does not start with the Website link"
+    );
+    assert!(
+        section("## Documentation").contains("(https://semlith.com/llms.txt)"),
+        "the Documentation table does not link the website's llms.txt"
     );
     for badge in [
         "ci",

@@ -16,8 +16,8 @@
 [![mcp](https://img.shields.io/badge/MCP-server-6E56CF.svg)](https://modelcontextprotocol.io)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-[Install](#install) · [Quick start](#quick-start) · [Agents](#use-it-from-an-agent) ·
-[Portal](#the-portal) · [Benchmarks](#benchmarks) · [Docs](#documentation)
+[Website](https://semlith.com) · [Install](#install) · [Quick start](#quick-start) ·
+[Agents](#use-it-from-an-agent) · [Portal](#the-portal) · [Benchmarks](#benchmarks) · [Docs](#documentation)
 
 </div>
 
@@ -442,6 +442,7 @@ index. Query latency does, because the vector scan is linear.
 | [docs/models.md](docs/models.md) | The embedding models, and how to choose one. |
 | [docs/security.md](docs/security.md) | The threat model and what is on the wire. |
 | [docs/compatibility.md](docs/compatibility.md) | What is a contract, and what a 0.x version promises. |
+| [semlith.com/llms.txt](https://semlith.com/llms.txt) | The website as one text file, for agents. |
 | [CHANGELOG.md](CHANGELOG.md) | What changed in each release. |
 
 ## Contributing
