@@ -5,6 +5,29 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.48.0] - 2026-10-27
+
+docs.rs, crates.io, `semlith --help` and the README describe Semlith in the
+same words and link semlith.com. The binary does, sends and stores exactly
+what 0.47.1 did.
+
+### Changed
+
+- **The crate docs open with the repo tagline.** docs.rs read "a local
+  semantic cache for AI agents", which no other page says. It now opens with
+  "Local search over your code and documents for AI agents." and says in two
+  plain sentences what the binary does. The stale line on the CLI struct goes
+  too. `tests/readme.rs` fails if "semantic cache" is in `src/` or
+  `Cargo.toml`, or if `semlith --help` or the crate docs open with anything
+  but the tagline.
+- **crates.io links the website.** `Cargo.toml` sets `homepage` to
+  https://semlith.com, where it named the GitHub repository (still the
+  `repository` link), and adds `documentation` for https://docs.rs/semlith.
+- **The README links the website.** The links row under the badges starts
+  with Website, and the Documentation table lists semlith.com/llms.txt, the
+  website as one text file for agents. The first-screen test holds the
+  Website link before Install.
+
 ## [0.47.1] - 2026-10-25
 
 ### Fixed
