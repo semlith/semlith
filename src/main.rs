@@ -23,7 +23,7 @@ enum Reconcile {
     Off,
 }
 
-/// A local semantic cache for AI agents.
+/// Local search over your code and documents for AI agents.
 #[derive(Parser)]
 // `--version` names the key releases are signed with on a second line; the
 // first stays `semlith <version>`, which scripts compare. A test holds the id
