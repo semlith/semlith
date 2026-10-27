@@ -1,8 +1,8 @@
-//! semlith — a local semantic cache for AI agents.
+//! Local search over your code and documents for AI agents.
 //!
-//! Point it at files, get back a store that answers "what part of my corpus is
-//! relevant to this question?" in milliseconds, without shipping anything off
-//! the machine and without an agent burning tokens reading whole files.
+//! Semlith indexes the repositories, PDFs and Office files on your
+//! machine and serves them to AI agents over MCP. Nothing leaves the
+//! machine.
 //!
 //! Two pieces of state live side by side in the store directory:
 //!

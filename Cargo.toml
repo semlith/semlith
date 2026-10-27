@@ -1,11 +1,12 @@
 [package]
 name = "semlith"
-version = "0.47.1"
+version = "0.48.0"
 edition = "2024"
 rust-version = "1.90"
 description = "Local search over your code and documents for AI agents. One binary that indexes your repositories, PDFs and Office files and serves them over MCP."
 repository = "https://github.com/semlith/semlith"
-homepage = "https://github.com/semlith/semlith"
+homepage = "https://semlith.com"
+documentation = "https://docs.rs/semlith"
 license = "Apache-2.0"
 readme = "README.md"
 keywords = ["vector-search", "embeddings", "rag", "mcp", "semantic-search"]
