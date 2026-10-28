@@ -728,6 +728,23 @@ From 0.37.0-rc.7:
 |---|---|
 | Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
+### 0.49.0
+
+`FORMAT_VERSION` does not move and no store is re-indexed. No MCP schema,
+registry or `settings.json` key changes. The first image a store indexes now
+also fetches the CLIP text encoder (files only, digest-checked), which 0.48.0
+fetched at the first pictured query, so the bytes downloaded are the same.
+
+| Surface | Change |
+|---|---|
+| CLI | `semlith setup --all-models` also fetches the CLIP vision and text encoders after the embedding and rescoring models, states the total and asks first (`--yes` answers). With `--airgap` or `SEMLITH_AIRGAP` it exits non-zero before any step. Without the flag setup downloads what 0.48.0 did. |
+| CLI | A search whose image lane fails (airgap refusal, failed fetch, load or digest check) exits 0 with its text results and prints one `image results skipped: ...` line on stderr, where 0.48.0 exited 1. The next search tries the image lane again. |
+| MCP | `semlith_search` and `semlith_brief` add the same note to the result text instead of returning an error. |
+| Routes | The search route's answer carries `images_skipped` when the image lane failed. `GET /api/privacy` lists the rescoring model, CLIP vision and CLIP text in `downloads`, each with whether it is on disk. |
+| Library | `Semlith::images_skipped` and `Fleet::image_note` return the note; `image_search` failing no longer fails the search. |
+| Library | Under `SEMLITH_AIRGAP` the rescoring model is looked up by its repository, so a cached reranker loads; 0.48.0 asked about its display name, which no cache directory carries, and refused it. |
+| Portal parity | The note shows above search results; the Privacy page gains the three rows. |
+
 ### 0.45.0
 
 `FORMAT_VERSION` does not move, and no route, MCP schema, registry or
