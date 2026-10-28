@@ -35,6 +35,14 @@ pub const LANE_DEPTH: usize = 2;
 /// handed to another target.
 const LANE_GONE: Duration = Duration::from_secs(2);
 
+/// How often the scheduler reads the lane switches. Its loop turns thousands
+/// of times a second while batches are out, and each read is `settings.json`
+/// and a probe of every lane switched on: asked on every turn, an index run on
+/// the M1 took about a tenth more CPU time than with the lanes pinned by
+/// `SEMLITH_ACCEL` (0.50.0). A switch still lands within this of being saved;
+/// lane readiness and failure are read live on every turn.
+const SWITCHES_EVERY: Duration = Duration::from_millis(100);
+
 /// Windows the embed stage works on at once. A lane that finishes the oldest
 /// window's work moves on to the next one rather than idling at the boundary;
 /// more than this is memory with nothing to gain.
@@ -1413,6 +1421,7 @@ fn schedule(
     // When each target last gave a batch back: a batch queued behind another
     // is busy from then, not from when it was sent.
     let mut last_back: HashMap<&'static str, Instant> = HashMap::new();
+    let mut switches: Option<(Instant, crate::accel::Enabled)> = None;
     loop {
         if abort.load(Ordering::Relaxed) {
             return;
@@ -1441,7 +1450,13 @@ fn schedule(
         // finishes, nothing new starts.
         if !paused.load(Ordering::Relaxed) {
             let (lanes, cpu_on) = if may_use_lanes {
-                crate::accel::for_run()
+                if switches
+                    .as_ref()
+                    .is_none_or(|(at, _)| at.elapsed() >= SWITCHES_EVERY)
+                {
+                    switches = Some((Instant::now(), crate::accel::enabled()));
+                }
+                crate::accel::for_run_with(&switches.as_ref().expect("read above").1)
             } else {
                 (Vec::new(), true)
             };

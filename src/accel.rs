@@ -1111,10 +1111,15 @@ fn missing_hardware(id: &str) -> Option<String> {
 /// when none is on its way: a lane starting, downloading or compiling is
 /// waited for.
 pub fn for_run() -> (Vec<Arc<Lane>>, bool) {
+    for_run_with(&enabled())
+}
+
+/// [`for_run`] with the switches already read: the scheduler reads them now
+/// and then rather than on every turn of its loop.
+pub fn for_run_with(on: &Enabled) -> (Vec<Arc<Lane>>, bool) {
     if !MANAGED.load(Ordering::Relaxed) {
         return (Vec::new(), true);
     }
-    let on = enabled();
     let chosen: Vec<Arc<Lane>> = lanes()
         .into_iter()
         .filter(|lane| on.lane(lane.id) && unavailable_here(lane.id).is_none())

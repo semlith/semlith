@@ -43,6 +43,12 @@ or `settings.json` change and no re-index.
   `accel::CPU_LOCKED` and keeps `accel::CPU_ALWAYS_ON`. `SEMLITH_ACCEL` still
   overrides every switch. Rolled back to 0.49.0, a saved `cpu: false` reads as
   on there again.
+- **An index run reads the lane switches every 100 ms, not on every turn.**
+  The scheduler's loop turns thousands of times a second while batches are
+  out, and each turn read `settings.json` and probed every lane switched on.
+  On the M1 that cost a run about a tenth more CPU time than lanes pinned by
+  `SEMLITH_ACCEL`. Lane readiness and failure are still read on every turn,
+  and a switch lands within 100 ms.
 - **`tests/airgap.sh` checks the note, not the file name.** The pictured query
   must print no "image results skipped" note, instead of the results being
   grepped for `logo.png`.
