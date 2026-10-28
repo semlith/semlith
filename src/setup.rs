@@ -219,6 +219,7 @@ pub fn run(
     mode: crate::hook::Mode,
     agents: bool,
     file_managers: Option<bool>,
+    all_models: bool,
 ) -> Result<()> {
     let _ = cliclack::intro(format!(" semlith {} setup ", env!("CARGO_PKG_VERSION")));
 
@@ -228,6 +229,7 @@ pub fn run(
         announce(step_binary(yes)?),
         announce(step_path(yes)?),
         announce(step_model(yes, airgap)?),
+        announce(step_all_models(all_models, yes)?),
         announce(step_neural_engine(yes, airgap)?),
         announce(step_agents(register_all, yes)?),
         announce(step_leftovers()),
@@ -702,6 +704,91 @@ fn step_model(yes: bool, airgap: bool) -> Result<Step> {
             detail: format!("{e} — `semlith setup` again when the network is back"),
         }),
     }
+}
+
+/// Step 3a, only with `--all-models`: every other weight semlith can load —
+/// the rescoring model and both halves of CLIP — so the cache can be copied to
+/// a machine with no network and answer everything there. Accelerator packs
+/// are not in it; each is seeded on its own lane.
+///
+/// What is already cached is skipped, so a second run downloads nothing. The
+/// total is stated before anything is fetched. `--airgap` with this flag is
+/// refused before setup starts, in `main`.
+fn step_all_models(all_models: bool, yes: bool) -> Result<Step> {
+    let name = "all models";
+    if !all_models {
+        return Ok(Step {
+            name,
+            state: State::Skipped,
+            detail: "`semlith setup --all-models` seeds the rescoring model and CLIP".into(),
+        });
+    }
+    let cache = model_cache_dir()?;
+    let rerank = !crate::rerank::cached(&cache);
+    let clip = [crate::image::VISION_REPO, crate::image::TEXT_REPO]
+        .iter()
+        .any(|repo| !embed::model_is_cached(&cache, repo));
+    if !rerank && !clip {
+        return Ok(Step {
+            name,
+            state: State::AlreadyDone,
+            detail: cache.display().to_string(),
+        });
+    }
+    // In the portal's megabytes (2^20), so setup and the Privacy page agree.
+    let bytes = if rerank {
+        crate::rerank::RERANK_BYTES
+    } else {
+        0
+    } + if clip {
+        crate::image::VISION_BYTES + crate::image::TEXT_BYTES
+    } else {
+        0
+    };
+    let fetch = yes
+        || cliclack::confirm(format!(
+            "Download the rescoring model and CLIP (~{} MB) into {}?",
+            bytes / 1_048_576,
+            cache.display()
+        ))
+        .initial_value(true)
+        .interact()
+        .unwrap_or(false);
+    if !fetch {
+        return Ok(Step {
+            name,
+            state: State::Skipped,
+            detail: "nothing downloaded".into(),
+        });
+    }
+
+    let _ = cliclack::log::step(format!(
+        "all models: downloading ~{} MB into {}",
+        bytes / 1_048_576,
+        cache.display()
+    ));
+    home::secure_dir(&cache).with_context(|| format!("creating {}", cache.display()))?;
+    let result = (|| -> Result<()> {
+        if rerank {
+            crate::rerank::load(&cache, false)?;
+        }
+        if clip {
+            crate::image::seed(&cache, false)?;
+        }
+        Ok(())
+    })();
+    Ok(match result {
+        Ok(()) => Step {
+            name,
+            state: State::Done,
+            detail: cache.display().to_string(),
+        },
+        Err(e) => Step {
+            name,
+            state: State::Failed,
+            detail: format!("{e:#} — `semlith setup --all-models` again when the network is back"),
+        },
+    })
 }
 
 /// Step 3b. On Apple silicon, the Neural Engine's models: granite as Core ML,

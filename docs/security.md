@@ -385,13 +385,14 @@ Every download is pinned by URL and SHA-256 ([models.md](models.md) has each
 digest) and checked while it streams; a file whose digest does not match is
 deleted and refused. Nothing is fetched on a timer or at startup without a
 reason below. The Privacy page lists every download the binary can make, with
-its source, size, when it happens and whether it is cached.
+its source, size, when it happens and whether it is cached, including the
+embedding model, the rescoring model and both CLIP encoders.
 
 | What | From | When |
 |---|---|---|
 | The embedding model (~52 MB) | `huggingface.co` | the first index; `semlith setup` pre-fetches it |
-| The rescoring model | `huggingface.co` | `semlith setup`, beside the embedding model |
-| CLIP, vision and text (335 MB and 244 MB) | `huggingface.co` | the first image a store indexes; never at start. Checked against its pinned digests before ONNX Runtime loads it |
+| The rescoring model (~38 MB) | `huggingface.co` | `semlith setup` and `semlith setup --all-models`, beside the embedding model |
+| CLIP, vision and text (335 MB and 246 MB) | `huggingface.co` | the first image a store indexes, both encoders together, or `semlith setup --all-models`; never at start. Each is checked against its pinned digests when it is fetched and again before ONNX Runtime loads it. The text encoder is loaded only at the first query that describes a picture |
 | The WebGPU plugin and the fp16 model | `files.pythonhosted.org`, `huggingface.co` | the first run with the GPU lane on and a hardware GPU found; never for a software renderer |
 | The CUDA pack (1.89 GB) | `github.com`, `files.pythonhosted.org` | Linux only, after `semlith accel on cuda` or the page's switch, which states the size first |
 | The Core ML pack (148 MB) | this repository's GitHub release | `semlith setup` on Apple silicon, or `semlith accel on ane` |

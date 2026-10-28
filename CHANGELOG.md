@@ -5,6 +5,49 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.49.0] - 2026-10-28
+
+A machine with no network indexes and searches a folder that holds images,
+once its model cache is copied from a connected machine. No store format
+change and no re-index.
+
+### Added
+
+- **`semlith setup --all-models`.** Beside the embedding model it fetches the
+  rescoring model and both CLIP encoders, pinned and digest-checked, into the
+  model cache (`SEMLITH_MODEL_CACHE` when set). It states the total and asks
+  first; `--yes` answers. A model already cached is skipped, so a second run
+  downloads nothing. With `--airgap` or `SEMLITH_AIRGAP` it exits non-zero
+  before any step runs. Without the flag setup downloads what 0.48.0 did.
+- **The Privacy page lists every model weight.** Rows for the rescoring model,
+  CLIP's vision encoder and CLIP's text encoder, each with its source, size,
+  when it is fetched and whether it is on disk.
+- **`tests/airgap.sh`.** A local gate, never run in CI: given a Linux release
+  archive it seeds a cache with `setup --all-models` in a connected container,
+  then indexes and searches by CLI and stdio MCP in a `--network none`
+  container with `SEMLITH_AIRGAP=1` and the cache mounted read-only.
+
+### Fixed
+
+- **A pictured query no longer fails when CLIP's text encoder is missing.**
+  Under airgap, or offline, a query that describes something seen ("logo",
+  "a red circle") failed the whole search with the airgap refusal or a DNS
+  error, and the text results went with it. The image lane's error now costs
+  the pictures only: the search answers from its other lists with one note
+  naming why, on stderr for the CLI, in the result text for `semlith_search`
+  and `semlith_brief`, and above the portal's results. Nothing is remembered,
+  so the next search after the cache is seeded finds images again.
+- **Indexing an image fetches both CLIP encoders.** The text encoder waited
+  for the first pictured query, so a cache seeded by indexing on a connected
+  machine had only half of CLIP, although docs/security.md said both came
+  with the first image. It is now fetched and digest-checked with the vision
+  encoder, and still loaded only at the first pictured query. Under airgap a
+  missing text encoder is not an indexing error.
+- **A cached rescoring model loads under airgap.** The airgap check asked
+  about the reranker by its display name, which no cache directory carries,
+  so `SEMLITH_AIRGAP` refused a reranker that was on disk. It now asks by
+  repository.
+
 ## [0.48.0] - 2026-10-27
 
 docs.rs, crates.io, `semlith --help` and the README describe Semlith in the
@@ -5888,7 +5931,12 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.46.3...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.49.0...HEAD
+[0.49.0]: https://github.com/semlith/semlith/compare/v0.48.0...v0.49.0
+[0.48.0]: https://github.com/semlith/semlith/compare/v0.47.1...v0.48.0
+[0.47.1]: https://github.com/semlith/semlith/compare/v0.47.0...v0.47.1
+[0.47.0]: https://github.com/semlith/semlith/compare/v0.46.4...v0.47.0
+[0.46.4]: https://github.com/semlith/semlith/compare/v0.46.3...v0.46.4
 [0.46.3]: https://github.com/semlith/semlith/compare/v0.46.2...v0.46.3
 [0.46.2]: https://github.com/semlith/semlith/compare/v0.46.1...v0.46.2
 [0.46.1]: https://github.com/semlith/semlith/compare/v0.46.0...v0.46.1

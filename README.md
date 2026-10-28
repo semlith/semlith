@@ -237,7 +237,9 @@ the portal loads is compiled into the binary. `--airgap` refuses every outbound
 request before a connection opens, which covers model and pack downloads that
 are not cached, `semlith upgrade`, the price table, Semlith Cloud and
 `semlith add`. The Privacy page checks these claims against the running daemon,
-and [docs/security.md](docs/security.md) is the full account.
+and [docs/security.md](docs/security.md) is the full account. To run on a
+machine with no network, seed a model cache on a connected one as
+[docs/models.md](docs/models.md#air-gapped-machines) describes.
 
 ## How it works
 

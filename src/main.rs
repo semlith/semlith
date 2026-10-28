@@ -549,6 +549,13 @@ enum Command {
         #[arg(long)]
         airgap: bool,
 
+        /// Also download every other model weight semlith can load — the
+        /// rescoring model and CLIP's vision and text encoders — so the model
+        /// cache can be copied to a machine with no network. States the total
+        /// and asks first; `--yes` answers. Refused with `--airgap`.
+        #[arg(long)]
+        all_models: bool,
+
         /// Also write the configuration file of every client that has no
         /// registration command of its own, and the rules file of every client
         /// that documents one. Every path is listed before anything is written,
@@ -1409,8 +1416,18 @@ fn run() -> Result<()> {
             no_agents,
             file_managers,
             no_file_managers,
+            all_models,
         } => {
             arm_airgap(airgap);
+            // Before any step runs: one flag asks for every download and the
+            // other refuses them all, and a half-run setup answers neither.
+            if all_models && semlith::embed::airgap() {
+                anyhow::bail!(
+                    "--all-models downloads every model weight and --airgap \
+                     (or {}) refuses every download; drop one of them",
+                    semlith::embed::AIRGAP_ENV
+                );
+            }
             // The flag or the variable. The installers translate their own
             // `SEMLITH_NO_SERVICE` into the flag, but `semlith setup` is also
             // run directly — by a provisioning script, by CI, by the native
@@ -1436,6 +1453,7 @@ fn run() -> Result<()> {
                     (_, true) => Some(false),
                     _ => None,
                 },
+                all_models,
             )?;
         }
 
@@ -2130,6 +2148,9 @@ fn run() -> Result<()> {
                 semlith::ledger::search(fleet, &CLI_LEDGER, &query, &hits, started.elapsed());
                 // Said on stderr, so `--json` and a pipe read the hits alone.
                 if let Some(note) = fleet.pending_note() {
+                    eprintln!("{note}");
+                }
+                if let Some(note) = fleet.image_note() {
                     eprintln!("{note}");
                 }
             }
@@ -5147,6 +5168,10 @@ fn brief(
     // that counted the text would overstate what was saved.
     let rendered = serde_json::to_string(&brief)?;
     semlith::ledger::brief(&fleet, &CLI_LEDGER, &question, &brief, &rendered, elapsed);
+    // On stderr, as search says it, so `--json` reads the brief alone.
+    if let Some(note) = fleet.image_note() {
+        eprintln!("{note}");
+    }
 
     if json {
         println!(

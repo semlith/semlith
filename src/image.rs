@@ -102,6 +102,26 @@ pub const TEXT_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// What [`VISION_FILES`] and [`TEXT_FILES`] add up to, for the Privacy page
+/// and `semlith setup --all-models`.
+pub const VISION_BYTES: u64 = 351_687_456;
+pub const TEXT_BYTES: u64 = 257_715_442;
+
+/// Fetch both encoders' files into `cache` and check them against their pins,
+/// loading neither: what `semlith setup --all-models` seeds a cache with for a
+/// machine that will have no network.
+pub fn seed(cache: &Path, quiet: bool) -> Result<()> {
+    for (repo, revision, files) in [
+        (VISION_REPO, VISION_REVISION, VISION_FILES),
+        (TEXT_REPO, TEXT_REVISION, TEXT_FILES),
+    ] {
+        crate::embed::refuse_if_airgapped(repo)?;
+        prefetch(cache, repo, files, quiet)?;
+        crate::embed::verify_cached(cache, repo, revision, files)?;
+    }
+    Ok(())
+}
+
 /// The directory the image vectors live in, beside the text index.
 pub const INDEX_DIR: &str = "images";
 
@@ -174,7 +194,8 @@ fn prefetch(cache: &Path, repo: &str, files: &[(&str, &str)], quiet: bool) -> Re
 /// The two halves of CLIP, loaded on first use.
 ///
 /// Both are fetched into the same model cache the text model uses, on the first
-/// image a store indexes rather than at start — a store that never holds an
+/// image a store indexes rather than at start (the text encoder is loaded at the
+/// first pictured query) — a store that never holds an
 /// image never downloads them, which is the point. `--airgap` refuses the fetch
 /// before a socket is opened, exactly as it does for the text model.
 #[derive(Default)]
@@ -217,6 +238,17 @@ impl Clip {
                 // Again, in case fastembed's own client fetched anything the
                 // prefetch did not: nothing it loads goes unchecked.
                 crate::embed::verify_cached(&cache, VISION_REPO, VISION_REVISION, VISION_FILES)?;
+                // The text encoder's files too, so a cache seeded by indexing
+                // answers a pictured query on a machine with no network
+                // (0.49.0). Files only: it is loaded at the first pictured
+                // query, as before. Best effort, because the vision encoder
+                // decides whether images index; a search that cannot reach the
+                // text encoder says so in its note.
+                let _ = crate::embed::refuse_if_airgapped(TEXT_REPO)
+                    .and_then(|()| prefetch(&cache, TEXT_REPO, TEXT_FILES, quiet))
+                    .and_then(|()| {
+                        crate::embed::verify_cached(&cache, TEXT_REPO, TEXT_REVISION, TEXT_FILES)
+                    });
                 self.vision.insert(model)
             }
         };
