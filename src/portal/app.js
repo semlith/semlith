@@ -9905,10 +9905,11 @@ function sePerf() {
         const check = seUi.gpu && (seUi.gpu.checks || []).find((x) => x.lane === l.lane);
         // The switch draws what was chosen (saved), not only what runs use;
         // the environment's list is drawn as it is and cannot be switched.
+        // A locked CPU runs whatever was saved, so it is drawn on.
         const env = l.source === "environment";
-        const on = env ? !!l.enabled : !!(l.saved ?? l.enabled);
+        const on = env || l.locked ? !!l.enabled : !!(l.saved ?? l.enabled);
         // An unavailable or failed lane can be turned off, never on; the CPU
-        // is always on.
+        // is locked on while no other lane is on.
         const failed = l.status?.state === "failed";
         const locked = l.locked || env || ((na || failed) && !on);
         const tip = l.locked ? cap(l.locked_reason || "") : env ? "Set by SEMLITH_ACCEL, so the switch cannot change it" : (na || failed) && !on ? cap(l.status?.reason || "") : null;
