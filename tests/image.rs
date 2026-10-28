@@ -429,3 +429,133 @@ fn what_an_image_query_scores() {
         }
     }
 }
+
+/// The model cache this machine already holds, which the two tests below copy
+/// from rather than download into: what they assert is what one run adds to a
+/// cache, so each needs a cache of its own.
+fn real_cache() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("SEMLITH_MODEL_CACHE") {
+        return std::path::PathBuf::from(dir);
+    }
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".cache")
+        .join("semlith")
+        .join("models")
+}
+
+/// A cache holding only `repos`, copied whole (refs and snapshots) from the
+/// real one. The snapshots are symlinks into `blobs/`; `fs::copy` follows them,
+/// so the copy stands on its own.
+fn cache_with(repos: &[&str]) -> tempfile::TempDir {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap().flatten() {
+            let target = to.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+    let cache = tempfile::tempdir().unwrap();
+    for repo in repos {
+        let dir = format!("models--{}", repo.replace('/', "--"));
+        let from = real_cache().join(&dir);
+        assert!(
+            from.join("snapshots").is_dir(),
+            "no {repo} in {}; run the image tests once first",
+            real_cache().display()
+        );
+        copy(&from, &cache.path().join(&dir));
+    }
+    cache
+}
+
+const GRANITE: &str = "onnx-community/granite-embedding-small-english-r2-ONNX";
+
+fn semlith(cache: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(args)
+        .env("SEMLITH_MODEL_CACHE", cache)
+        .output()
+        .expect("running semlith")
+}
+
+/// The first image a store indexes brings both halves of CLIP, so a cache
+/// copied from this machine to one with no network can answer a pictured
+/// query too. Until 0.49.0 the text encoder waited for the first such query,
+/// and an air-gapped machine seeded by indexing never had it.
+#[test]
+#[ignore = "downloads CLIP's text encoder"]
+fn indexing_an_image_caches_both_clip_encoders() {
+    let cache = cache_with(&[GRANITE, semlith::image::VISION_REPO]);
+    let corpus = corpus();
+    let store = tempfile::tempdir().unwrap();
+    let out = semlith(
+        cache.path(),
+        &[
+            "index",
+            corpus.path().to_str().unwrap(),
+            "--quiet",
+            "--store",
+            store.path().to_str().unwrap(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "index failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        semlith::embed::model_is_cached(cache.path(), semlith::image::TEXT_REPO),
+        "indexing an image left no CLIP text encoder in the cache"
+    );
+}
+
+/// A pictured query on a machine that cannot reach CLIP's text encoder still
+/// answers from the text lists, and says why it has no pictures. Until 0.49.0
+/// the whole search failed with the airgap refusal.
+#[test]
+#[ignore = "copies the real model cache, so it needs one"]
+fn a_pictured_query_without_the_clip_text_encoder_still_answers() {
+    let cache = cache_with(&[GRANITE, semlith::image::VISION_REPO]);
+    let corpus = corpus();
+    let store = tempfile::tempdir().unwrap();
+    let store = store.path().to_str().unwrap();
+    let airgapped = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .args(args)
+            .env("SEMLITH_MODEL_CACHE", cache.path())
+            .env("SEMLITH_AIRGAP", "1")
+            .output()
+            .expect("running semlith")
+    };
+    let index = airgapped(&[
+        "index",
+        corpus.path().to_str().unwrap(),
+        "--quiet",
+        "--store",
+        store,
+    ]);
+    assert!(
+        index.status.success(),
+        "a missing text encoder failed the index:\n{}",
+        String::from_utf8_lossy(&index.stderr)
+    );
+
+    let out = airgapped(&["search", "a red circle", "--store", store]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "the search failed:\n{stderr}");
+    assert!(
+        stdout.contains("notes.md") || stdout.contains("parse.rs"),
+        "no text hits:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("image results skipped")
+            && stderr.contains(semlith::image::TEXT_REPO)
+            && stderr.contains("semlith setup --all-models"),
+        "no note naming the missing encoder:\n{stderr}"
+    );
+}

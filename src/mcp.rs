@@ -2535,10 +2535,11 @@ pub fn search_reply(
 ) -> SearchReply {
     let paths = fleet.shortener();
     let (rows, kept) = locate_cut(hits, query, max_tokens, &|p| paths.short(p));
-    let note = fleet
-        .pending_note()
+    let note: String = [fleet.pending_note(), fleet.image_note()]
+        .into_iter()
+        .flatten()
         .map(|n| format!("\n{n}"))
-        .unwrap_or_default();
+        .collect();
     let text = paths.with_header(format!("{}\n{rows}{note}", reading(query, prefer)));
     let terms = query_terms(query);
     let lines = hits
@@ -2562,7 +2563,14 @@ pub fn brief_reply(fleet: &Fleet, brief: &crate::brief::Brief, filter: &crate::F
         return fleet.no_match_reason(filter);
     }
     let paths = fleet.shortener();
-    paths.with_header(render_brief(brief, &|p| paths.short(p)))
+    let note = fleet
+        .image_note()
+        .map(|n| format!("\n{n}"))
+        .unwrap_or_default();
+    paths.with_header(format!(
+        "{}{note}",
+        render_brief(brief, &|p| paths.short(p))
+    ))
 }
 
 /// One hit's best line for `query`, as a locate row shows it.

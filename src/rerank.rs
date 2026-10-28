@@ -42,6 +42,9 @@ pub const RERANK_NAME: &str = "jina-reranker-v1-turbo-en-int8";
 /// The quantized graph, so the stage costs 38 MB on disk rather than 150.
 pub const RERANK_ONNX: &str = "onnx/model_quantized.onnx";
 
+/// What [`RERANK_FILES`] add up to, for the Privacy page and `setup --all-models`.
+pub const RERANK_BYTES: u64 = 40_328_577;
+
 /// Every file semlith fetches from [`RERANK_REPO`], with its SHA-256.
 pub const RERANK_FILES: &[(&str, &str)] = &[
     (
@@ -148,7 +151,10 @@ pub fn with<T>(cache: &Path, quiet: bool, f: impl FnOnce(Option<&mut TextRerank>
 pub fn load(cache_dir: &Path, quiet: bool) -> Result<TextRerank> {
     crate::embed::link_runtime()?;
     crate::embed::check_cache_dir(cache_dir)?;
-    crate::embed::refuse_if_airgapped(RERANK_NAME)?;
+    // By repository, which is what the cache directory is named after: the
+    // display name never matched one, so an airgapped run refused a reranker
+    // it already held (fixed 0.49.0).
+    crate::embed::refuse_if_airgapped(RERANK_REPO)?;
 
     let repo = crate::embed::Pinned::new(cache_dir, RERANK_REPO, RERANK_REVISION, quiet)?;
 

@@ -1506,6 +1506,10 @@ fn search_on(fleet: &mut crate::fleet::Fleet, request: &Request) -> Response {
                 .collect::<Vec<_>>()
         );
     }
+    // Why a pictured query has no pictures (0.49.0). Absent otherwise.
+    if let Some(note) = fleet.image_note() {
+        answer["images_skipped"] = json!(note);
+    }
     failures_beside(fleet, &mut answer);
     Response::json(&answer)
 }
@@ -2017,8 +2021,9 @@ fn models() -> Response {
             "code": embed::GRANITE_REPO,
         }),
         // Not a choice, so it is listed apart from the models a store can be
-        // built with: both halves of it are loaded together, on the first
-        // image a store indexes, and nothing selects them.
+        // built with: both halves are fetched on the first image a store
+        // indexes, the vision encoder is loaded then and the text encoder at
+        // the first query that describes a picture, and nothing selects them.
         json!({
             "name": crate::image::MODEL_NAME,
             "dim": crate::image::DIM,
@@ -2372,6 +2377,27 @@ fn downloads(cache: &Path, stores: &[(String, PathBuf)]) -> Value {
             "bytes": 51_885_568 + 598_902,
             "when": "the first time anything is indexed or searched",
             "cached": crate::embed::is_cached(cache),
+        },
+        {
+            "what": format!("the rescoring model ({})", crate::rerank::RERANK_NAME),
+            "source": "huggingface.co",
+            "bytes": crate::rerank::RERANK_BYTES,
+            "when": "by `semlith setup` beside the embedding model, or `semlith setup --all-models`; read only when rescoring is on",
+            "cached": crate::rerank::cached(cache),
+        },
+        {
+            "what": "CLIP's vision encoder (clip-ViT-B-32-vision)",
+            "source": "huggingface.co",
+            "bytes": crate::image::VISION_BYTES,
+            "when": "the first image a store indexes, or `semlith setup --all-models`",
+            "cached": crate::embed::model_is_cached(cache, crate::image::VISION_REPO),
+        },
+        {
+            "what": "CLIP's text encoder (clip-ViT-B-32-text)",
+            "source": "huggingface.co",
+            "bytes": crate::image::TEXT_BYTES,
+            "when": "with the vision encoder, or `semlith setup --all-models`; loaded at the first query that describes a picture",
+            "cached": crate::embed::model_is_cached(cache, crate::image::TEXT_REPO),
         },
         {
             "what": format!("the WebGPU plugin {} and the fp16 model", crate::gpu::WEBGPU_VERSION),
@@ -6160,6 +6186,39 @@ fn drop_resolve(state: &Arc<State>, request: &Request) -> Response {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every model weight semlith can load has a Privacy row saying whether it
+    /// is on disk (0.49.0): the rescoring model and both CLIP encoders were
+    /// missing, so a person seeding an air-gapped cache could not check it.
+    #[test]
+    fn the_privacy_downloads_list_every_model_weight() {
+        let cache = tempfile::tempdir().unwrap();
+        let text_snapshot = cache
+            .path()
+            .join("models--Qdrant--clip-ViT-B-32-text")
+            .join("snapshots");
+        std::fs::create_dir_all(&text_snapshot).unwrap();
+        let list = downloads(cache.path(), &[]);
+        let row = |needle: &str| {
+            list.as_array()
+                .unwrap()
+                .iter()
+                .find(|d| d["what"].as_str().unwrap().contains(needle))
+                .unwrap_or_else(|| panic!("no Privacy row for {needle}: {list}"))
+                .clone()
+        };
+        assert_eq!(row("rescoring")["cached"], false);
+        assert_eq!(row("vision encoder")["cached"], false);
+        assert_eq!(row("text encoder")["cached"], true);
+        assert_eq!(row("text encoder")["bytes"], crate::image::TEXT_BYTES);
+        assert!(
+            list[0]["what"]
+                .as_str()
+                .unwrap()
+                .contains("embedding model"),
+            "the portal reads the embedding model as the first row"
+        );
+    }
     /// The Reports page's frame loads a kept report under the report-only
     /// policy (no script), by an id nobody can guess; an unknown id is a 404.
     #[test]

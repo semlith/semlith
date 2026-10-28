@@ -272,6 +272,45 @@ fn airgap_with_an_empty_cache_skips_the_model_and_exits_zero() {
     );
 }
 
+/// `--all-models` asks for every download and `--airgap` refuses them all, so
+/// the pair is refused before any step runs: nothing written, nothing fetched.
+#[test]
+fn all_models_with_airgap_is_refused_before_any_step() {
+    let machine = Machine::new();
+    let before = snapshot(&machine.home);
+    for args in [
+        &["--yes", "--all-models", "--airgap"][..],
+        &["--yes", "--all-models"][..],
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_semlith"));
+        command
+            .arg("setup")
+            .arg("--no-service")
+            .args(args)
+            .env("HOME", &machine.home)
+            .env("SHELL", "/bin/zsh")
+            .env("SEMLITH_HOME", &machine.store_home)
+            .env("SEMLITH_MODEL_CACHE", &machine.cache)
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::null());
+        if !args.contains(&"--airgap") {
+            command.env("SEMLITH_AIRGAP", "1");
+        }
+        let run = command.output().expect("running semlith setup");
+        let said = Machine::said(&run);
+        assert!(!run.status.success(), "{args:?} exited zero:\n{said}");
+        assert!(
+            said.contains("--all-models") && said.contains("--airgap"),
+            "the refusal should name both flags:\n{said}"
+        );
+        assert_eq!(
+            snapshot(&machine.home),
+            before,
+            "{args:?} ran a step before refusing"
+        );
+    }
+}
+
 /// Found on a clean `ubuntu:24.04` container installing the real 0.10.0
 /// archive: `SHELL` is unset there, `rc_file` gave up, and the install
 /// finished with a binary nobody's shell could find. A HOME with no SHELL is

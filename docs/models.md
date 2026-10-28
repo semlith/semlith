@@ -255,6 +255,50 @@ semlith refuses to load weights from a model cache owned by another account or
 writable by other users, and names the `chown` or `chmod` that fixes it. A
 directory somebody else can write to is a model somebody else chooses.
 
+## Air-gapped machines
+
+A machine with no network runs everything on this page once its model cache is
+copied from a machine that has one. On a connected machine, fill a cache
+directory with every model semlith can load:
+
+```sh
+SEMLITH_MODEL_CACHE=/path/to/models semlith setup --all-models
+```
+
+Beside the embedding model it fetches the rescoring model and both CLIP
+encoders, each pinned and checked as above. It states the total, about 670 MB, and asks before it downloads; `--yes`
+answers. A model already in the cache is skipped, so a second run downloads
+nothing. It refuses to run with `--airgap` or `SEMLITH_AIRGAP` set, since
+downloading is all it adds.
+
+Copy that directory to the target machine and set both variables there:
+
+```sh
+export SEMLITH_MODEL_CACHE=/path/to/models
+export SEMLITH_AIRGAP=1
+```
+
+`SEMLITH_AIRGAP` refuses every download, so a model missing from the copy is
+named with its cache path instead of fetched. The copy must belong to the
+account that runs semlith and not be writable by other users, as
+[The cache directory](#the-cache-directory) says.
+
+Accelerator packs are not part of `--all-models`. Each lane keeps its pack under
+`accel/` in the model cache, as [Accelerator components](#accelerator-components)
+describes, so turn on each lane you want once on a connected machine of the
+same platform, with the same `SEMLITH_MODEL_CACHE`, before copying the
+directory.
+
+If the CLIP text encoder is missing on the target, a search for something seen
+in a picture still answers from its text results, with one note naming why
+image results were skipped and the command that seeds them. The CLI prints the
+note on stderr, `semlith_search` and `semlith_brief` add it to their result,
+and the portal shows it above the results. Nothing is remembered, so the next
+search after the cache is seeded finds images again without a restart.
+
+`tests/airgap.sh` checks all of this against a Linux release archive in Docker
+containers with no network.
+
 ## Checking a digest yourself
 
 Hugging Face publishes the SHA-256 of every LFS file in its tree API, and the

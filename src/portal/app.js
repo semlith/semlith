@@ -7197,6 +7197,7 @@ function rankedView(r) {
         unreadable(r.failed),
         r.remote_skipped ? el("div", { class: "notice amber" }, el("span", { class: "sub", text: `${r.remote_skipped}. The local stores answered in full.` })) : null,
         (r.pending || []).length ? el("div", { class: "notice amber" }, el("span", { class: "sub", text: `Still embedding: ${r.pending.map((p) => `${p.store} ${Math.round(p.share * 100)}% not yet ranked by meaning`).join(", ")}. Keyword and graph already cover it.` })) : null,
+        r.images_skipped ? el("div", { class: "notice amber" }, el("span", { class: "sub", text: r.images_skipped })) : null,
         groups.map((g) =>
           el(
             "div",

@@ -51,6 +51,9 @@ pub struct Fleet {
     /// Print model-download progress to stderr. Off for the MCP server, where
     /// stdout and stderr are a protocol channel.
     pub quiet: bool,
+    /// Why the last search's stores answered without pictures. See
+    /// [`Fleet::image_note`].
+    images_skipped: Vec<String>,
 }
 
 struct Member {
@@ -148,6 +151,7 @@ impl Fleet {
             pinned: RefCell::new(Default::default()),
             tokenizer: None,
             embeds: 0,
+            images_skipped: Vec::new(),
             quiet: true,
         }
     }
@@ -301,6 +305,7 @@ impl Fleet {
             pinned: RefCell::new(Default::default()),
             tokenizer: None,
             embeds: 0,
+            images_skipped: Vec::new(),
             quiet: false,
         })
     }
@@ -390,6 +395,18 @@ impl Fleet {
              best keyword matches without a vector were embedded for this query",
             parts.join(", ")
         ))
+    }
+
+    /// Why the last search has no pictures, as one line a search prints beside
+    /// its answer. `None` when every store it asked had its image list.
+    pub fn image_note(&self) -> Option<String> {
+        (!self.images_skipped.is_empty()).then(|| {
+            format!(
+                "image results skipped: {}. Text results below. Seed it with \
+                 `semlith setup --all-models` on a connected machine.",
+                self.images_skipped.join("; ")
+            )
+        })
     }
 
     /// The stores `only` names, unreadable ones left out.
@@ -580,6 +597,7 @@ impl Fleet {
         filter: &Filter,
         prefer: Option<crate::Prefer>,
     ) -> Result<Vec<Hit>> {
+        self.images_skipped.clear();
         let chosen = self.chosen(only)?;
         // Labels are worth their tokens only when there is something to tell
         // apart. One store means the output is what it was before stores could
@@ -605,6 +623,11 @@ impl Fleet {
             let hits = self.members[i]
                 .store
                 .search_preferring(query, &vector, k, filter, prefer)?;
+            if let Some(why) = self.members[i].store.images_skipped()
+                && !self.images_skipped.iter().any(|seen| seen == why)
+            {
+                self.images_skipped.push(why.to_string());
+            }
             let label = self.members[i].label.clone();
             queues.push(
                 hits.into_iter()

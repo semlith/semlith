@@ -2004,6 +2004,9 @@ pub struct Semlith {
     tokenizer: Option<tokenizers::Tokenizer>,
     /// CLIP's two encoders, loaded on the first image indexed or searched for.
     clip: image::Clip,
+    /// Why the last search answered without its image list, from the full
+    /// error chain. `None` when it had one or did not ask for one.
+    images_skipped: Option<String>,
     /// The index generation this process has loaded. Compared against the
     /// store's on every search to notice another process's writes.
     generation: u64,
@@ -2155,6 +2158,7 @@ impl Semlith {
             lane_chunks: std::collections::BTreeMap::new(),
             tokenizer: None,
             clip: image::Clip::default(),
+            images_skipped: None,
             generation,
             shares_vectors: false,
             filter_memo: std::collections::VecDeque::new(),
@@ -5894,6 +5898,7 @@ impl Semlith {
         filter: &Filter,
         prefer: Prefer,
     ) -> Result<Vec<(Hit, f32)>> {
+        self.images_skipped = None;
         // A store being watched changes under a long-lived reader. Answering
         // from the index this process happened to load at startup is how an
         // agent ends up quoting a function that no longer exists.
@@ -6033,8 +6038,20 @@ impl Semlith {
         // And only for a query that describes something seen: see
         // [`pictured`]. Anything else is not asked, which also spares it the
         // CLIP embed.
+        //
+        // A failed image lane — the text encoder refused by airgap, a fetch
+        // with no network, a digest that does not match — costs the pictures,
+        // not the answer (0.49.0): the other lists still answer, and
+        // [`Semlith::images_skipped`] says why. Not remembered, so the next
+        // query after the cache is seeded finds the pictures again.
         let (images, truncated) = if pictured(query) {
-            self.image_search(query, depth, filter)?
+            match self.image_search(query, depth, filter) {
+                Ok(found) => found,
+                Err(e) => {
+                    self.images_skipped = Some(format!("{e:#}"));
+                    (Vec::new(), false)
+                }
+            }
         } else {
             (Vec::new(), false)
         };
@@ -6726,6 +6743,11 @@ impl Semlith {
                 .collect(),
             truncated,
         ))
+    }
+
+    /// Why the last search answered without its image list, or `None`.
+    pub fn images_skipped(&self) -> Option<&str> {
+        self.images_skipped.as_deref()
     }
 
     /// How many images this store holds.
