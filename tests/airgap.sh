@@ -168,9 +168,21 @@ check_query() {
     return 1
 }
 
+# A pictured query searched its images only if it printed no skip note:
+# logo.png alone also matches the README text hit that names the file.
+# check_pictured <step> <docker args...> -- <query>
+check_pictured() {
+    local step=$1
+    check_query "$@" || return 1
+    if grep -q 'image results skipped' "$out/$step.stderr"; then
+        fail "$step" "image results skipped: $(grep -m1 'image results skipped' "$out/$step.stderr" | cut -c1-200)"
+        return 1
+    fi
+}
+
 check_query airgap-text-query config.rs "$cache" "${airgap[@]}" -- \
     --store /store/s search "$text_query" --local && pass airgap-text-query
-check_query airgap-pictured-query logo.png "$cache" "${airgap[@]}" -- \
+check_pictured airgap-pictured-query logo.png "$cache" "${airgap[@]}" -- \
     --store /store/s search "$pictured_query" --local && pass airgap-pictured-query
 
 # A 2026-07-28 client: no initialize, the version and client on the request.
@@ -190,7 +202,7 @@ check_query offline-text-query config.rs "$cache" "${offline[@]}" -- \
 # over 2 s brings remembering the failure into scope. Every query also pays
 # for loading the embedding model, so the cost of the fetch attempt is the
 # time over the offline text query.
-if check_query offline-pictured-query logo.png "$cache" "${offline[@]}" -- \
+if check_pictured offline-pictured-query logo.png "$cache" "${offline[@]}" -- \
     --store /store/s search "$pictured_query" --local; then
     secs=$(cat "$out/offline-pictured-query.secs")
     extra=$(awk -v p="$secs" -v t="$(cat "$out/offline-text-query.secs")" 'BEGIN { printf "%.2f", p - t }')

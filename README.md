@@ -294,7 +294,7 @@ query ──embed──> vector ──search shards──┐
 | `semlith ledger`, `report`, `schedule`, `prices` | Retrieval history, five reports in five formats, scheduled reports, the price table. |
 | `semlith mcp`, `hook`, `key` | MCP over stdio, the steering hook, the HTTP agent key. |
 | `semlith setup`, `doctor`, `upgrade` | Install and repair, diagnose each client, replace the binary. |
-| `semlith accel` | Which devices embed: CPU (always on, `SEMLITH_CPU_CAP` caps it), Neural Engine, GPU, and the experimental CUDA, TensorRT, OpenVINO and llama.cpp lanes. |
+| `semlith accel` | Which devices embed: CPU (off only beside another lane, `SEMLITH_CPU_CAP` caps it), Neural Engine, GPU, and the experimental CUDA, TensorRT, OpenVINO and llama.cpp lanes. |
 | `semlith cloud` | Connects to Semlith Cloud, a separate hosted service. Nothing contacts the network until `semlith cloud login`. |
 
 `semlith <command> --help` documents every flag.

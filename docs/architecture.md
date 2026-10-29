@@ -524,19 +524,23 @@ vectors; the store counts chunks per variant in the `variants` meta row.
 
 | Lane | Runs | Notes |
 |---|---|---|
-| CPU | int8 in the daemon | always on; capped by `SEMLITH_CPU_CAP` or the saved cap |
+| CPU | int8 in the daemon | off by default beside the Neural Engine, on otherwise; can be off only while another lane is on; capped by `SEMLITH_CPU_CAP` or the saved cap |
 | GPU | fp16 through Microsoft's WebGPU plugin, or Core ML on Apple silicon | |
 | Neural Engine (`ane`) | granite as native Core ML models | Apple silicon |
 | CUDA, TensorRT for RTX, OpenVINO, llama.cpp | vendor plugins or llama.cpp's server | experimental |
 
-**The lane policy.** On Apple silicon the Neural Engine goes first and nothing
-else embeds beside it: two int8 CPU threads cut it from 236 to 79 chunks/s by
+**The lane policy.** On Apple silicon the Neural Engine goes first and, by
+default, nothing else embeds beside it, from the first batch and also while it
+starts or compiles: two int8 CPU threads cut it from 236 to 79 chunks/s by
 taking the cores that tokenise and feed it, and the GPU beside it adds 30 % in
 bursts but 4 % sustained on a fanless Air. `gpu-beside-ane` turns the GPU back
-on for a machine that can cool both. Elsewhere every accelerator that is on runs
-with the CPU beside it. A lane starts in the background and takes batches once
-its worker passes the known-answer check; until then, and after any failure, the
-run continues with what it has.
+on for a machine that can cool both, and a saved CPU switch set on runs the CPU
+beside it. Elsewhere every accelerator that is on runs with the CPU beside it
+unless the CPU is switched off. A lane starts in the background and takes
+batches once its worker passes the known-answer check; until then the run uses
+the lanes that are ready, and waits for one on its way when no lane it may use
+is ready. With no lane ready and none on its way the CPU carries the run
+whatever its switch says, so a failed lane hands its work to the CPU.
 
 **The Neural Engine through Core ML.** ONNX Runtime's Core ML provider places
 almost nothing of granite on the Neural Engine; a native Core ML model does.

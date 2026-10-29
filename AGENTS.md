@@ -34,6 +34,12 @@ cargo test --release --test shards -- --ignored --nocapture
 cargo test --release --test retrieval -- --ignored --nocapture # retrieval quality
 ```
 
+The whole `--ignored` suite builds about 16 GB of debug test binaries. On a
+small disk run it one target at a time with `CARGO_PROFILE_DEV_DEBUG=0
+CARGO_INCREMENTAL=0`, deleting each `target/debug/deps/<name>-*` after it
+runs. `tests/cache.rs` and `tests/daemon.rs` need `--test-threads=1`; in
+parallel they fail with `WouldBlock` and watcher timeouts.
+
 `tests/retrieval.rs` is the harness behind every retrieval claim this repository
 makes. It runs a fixed set of 107 questions with ground-truth spans from
 `tests/fixtures/retrieval/questions.yaml` — identifier-shaped, concept-shaped and

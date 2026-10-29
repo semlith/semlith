@@ -5,6 +5,54 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.50.0] - 2026-10-29
+
+The CPU lane can be switched off again, beside another lane, and a Mac with
+defaults runs the Neural Engine alone from the first batch. No store format
+or `settings.json` change and no re-index.
+
+### Changed
+
+- **The CPU switch turns off beside another lane.** From 0.37.0-rc.6 the CPU
+  lane was always on and `semlith accel off cpu` always refused. It is now
+  accepted while another lane (GPU, Neural Engine, CUDA, TensorRT for RTX,
+  OpenVINO, llama.cpp or a registered remote lane) is on and can run on this
+  machine, from the CLI or the Settings › Performance switch. With no such
+  lane the CPU is on and locked, and `accel off cpu` exits non-zero with "the
+  CPU lane stays on while no other lane is on; switch one on first". Turning
+  off the last other lane is allowed; the CPU is then held on, and its saved
+  off applies again when a lane comes back. `accel on cpu` now saves `true`
+  instead of clearing the saved value.
+- **The CPU is off by default beside the Neural Engine.** With nothing saved
+  it is off while the Neural Engine is on and available (a Mac with Apple
+  silicon) and on otherwise, so a Linux or Windows machine with a GPU lane
+  keeps the CPU beside it. A saved choice wins, so a saved `cpu: true` now
+  runs the CPU beside the Neural Engine, where 0.49.0 dropped it once the
+  Neural Engine was ready. With no lane ready and none on its way the CPU
+  still carries the run whatever its switch says, and it still re-embeds any
+  vector a lane returned unsound.
+- **The GPU waits beside a starting Neural Engine.** It embedded while the
+  Neural Engine started or compiled. With the Neural Engine ready or on its
+  way the GPU now runs beside it only when `gpu-beside-ane` is on. A failed
+  Neural Engine is not used, and the GPU and CPU take over as before.
+- **`GET /api/accel`'s CPU row tells the truth.** `saved` is the saved choice
+  or the default, `source` is `default`, `saved` or `environment`, `locked` is
+  true only while no other lane is on, and `locked_reason` carries the new
+  message only then, `null` otherwise. The portal's CPU row is a normal switch
+  while unlocked and says "always on" only while locked. The library exports
+  `accel::CPU_LOCKED` and keeps `accel::CPU_ALWAYS_ON`. `SEMLITH_ACCEL` still
+  overrides every switch. Rolled back to 0.49.0, a saved `cpu: false` reads as
+  on there again.
+- **An index run reads the lane switches every 100 ms, not on every turn.**
+  The scheduler's loop turns thousands of times a second while batches are
+  out, and each turn read `settings.json` and probed every lane switched on.
+  On the M1 that cost a run about a tenth more CPU time than lanes pinned by
+  `SEMLITH_ACCEL`. Lane readiness and failure are still read on every turn,
+  and a switch lands within 100 ms.
+- **`tests/airgap.sh` checks the note, not the file name.** The pictured query
+  must print no "image results skipped" note, instead of the results being
+  grepped for `logo.png`.
+
 ## [0.49.0] - 2026-10-28
 
 A machine with no network indexes and searches a folder that holds images,

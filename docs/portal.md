@@ -1041,13 +1041,20 @@ experimental: built and checked without their hardware. A lane whose pack is
 missing asks before downloading, naming the size. It is the same control as
 `semlith accel`.
 
-The CPU lane is always on (its switch is locked; the CPU cap holds it back). A lane
-set by `SEMLITH_ACCEL` says so and is locked. Which lanes can run is read from the
-hardware: no usable GPU (Metal, or a vendor Vulkan driver) disables the GPU and
-llama.cpp lanes; no NVIDIA card and driver disables CUDA and TensorRT; a non-Intel
-CPU disables OpenVINO. An unavailable or failed lane can be switched off, never on,
-and the refusal says why. On a Mac the GPU does not embed beside the Neural Engine
-unless `gpu-beside-ane` is on.
+The CPU switch can be turned off only while another lane is on and can run on this
+machine. With no other lane on it is locked on, and the row says the CPU cap limits
+it. Turning off the last other lane is allowed: the CPU is then held on, and a saved
+off applies again once a lane comes back. With nothing saved the CPU is off while
+the Neural Engine is on and available (a Mac with Apple silicon), so the Neural
+Engine runs alone from the first batch; elsewhere it is on beside the GPU. A saved
+choice wins over that default. Whatever the switch says, the CPU carries a run when
+no lane is ready and none is on its way, and it re-embeds any vector a lane returned
+unsound. A lane set by `SEMLITH_ACCEL` says so and is locked. Which lanes can run is
+read from the hardware: no usable GPU (Metal, or a vendor Vulkan driver) disables
+the GPU and llama.cpp lanes; no NVIDIA card and driver disables CUDA and TensorRT; a
+non-Intel CPU disables OpenVINO. An unavailable or failed lane can be switched off,
+never on, and the refusal says why. On a Mac the GPU does not embed beside the
+Neural Engine, also while it starts or compiles, unless `gpu-beside-ane` is on.
 
 **Check each lane against the CPU** is `semlith doctor --gpu`: each lane embeds 32
 fixed chunks, compared with CPU vectors committed to the repository, showing the
