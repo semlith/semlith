@@ -100,31 +100,131 @@ fn not_for_this_platform() -> &'static str {
     }
 }
 
+/// Every lane beside the CPU switched off, as a settings file says it.
+const ONLY_CPU: &str = r#"{"accelerators":{"gpu":false,"ane":false}}"#;
+
 #[test]
-fn the_cpu_lane_cannot_be_turned_off_and_an_old_saved_off_reads_as_on() {
+fn the_cpu_lane_cannot_be_turned_off_while_no_other_lane_is_on() {
     let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("settings.json"), ONLY_CPU).unwrap();
     let out = semlith(home.path(), &["accel", "off", "cpu"], &[]);
     assert!(!out.status.success());
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("the CPU lane is always on"),
+        String::from_utf8_lossy(&out.stderr)
+            .contains("the CPU lane stays on while no other lane is on"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // What an rc.5 or older settings file could hold.
+    // What an rc.5 or older settings file could hold, with no lane beside it.
     std::fs::write(
         home.path().join("settings.json"),
-        r#"{"accelerators":{"cpu":false}}"#,
+        r#"{"accelerators":{"cpu":false,"gpu":false,"ane":false}}"#,
     )
     .unwrap();
     let cpu = lane(&status(home.path()), "cpu").clone();
     assert_eq!(cpu["enabled"], true);
-    assert_eq!(cpu["saved"], true);
     assert_eq!(cpu["locked"], true);
+    assert!(
+        cpu["locked_reason"]
+            .as_str()
+            .unwrap()
+            .contains("no other lane is on"),
+        "{cpu}"
+    );
     assert_ne!(
         cpu["status"]["state"], "active",
         "idle while nothing embeds"
     );
+}
+
+/// llama.cpp's CPU backend, asked for by name, needs no GPU, so every
+/// runner has a lane to put beside the CPU: the Neural Engine on a Mac with
+/// Apple silicon, llama.cpp elsewhere. Switched on in `settings.json`, as
+/// `accel on` saves it, so no pack is fetched.
+const DEVICE: (&str, &str) = ("SEMLITH_LLAMA_DEVICE", "cpu");
+
+fn status_in(home: &std::path::Path) -> serde_json::Value {
+    let out = semlith(home, &["accel", "status", "--json"], &[DEVICE]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+fn a_lane_beside_the_cpu(home: &std::path::Path) -> Option<&'static str> {
+    let rows = status_in(home);
+    ["ane", "llama"]
+        .into_iter()
+        .find(|id| lane(&rows, id)["status"]["state"] != "unavailable")
+}
+
+#[test]
+fn the_cpu_lane_can_be_turned_off_beside_another_lane_and_comes_back_locked_without_one() {
+    let home = tempfile::tempdir().unwrap();
+    let Some(other) = a_lane_beside_the_cpu(home.path()) else {
+        eprintln!("no lane besides the CPU runs here; nothing to check");
+        return;
+    };
+    let settings = home.path().join("settings.json");
+    // The other lane on and every lane besides it off.
+    let beside = |cpu: &str| {
+        let off = ["gpu", "ane"].into_iter().filter(|id| *id != other);
+        let off: String = off.map(|id| format!(r#""{id}":false,"#)).collect();
+        format!(r#"{{"accelerators":{{{cpu}{off}"{other}":true}}}}"#)
+    };
+    std::fs::write(&settings, beside("")).unwrap();
+    let off = semlith(home.path(), &["accel", "off", "cpu"], &[DEVICE]);
+    assert!(
+        off.status.success(),
+        "{}",
+        String::from_utf8_lossy(&off.stderr)
+    );
+    let cpu = lane(&status_in(home.path()), "cpu").clone();
+    assert_eq!(cpu["enabled"], false, "{cpu}");
+    assert_eq!(cpu["saved"], false);
+    assert_eq!(cpu["source"], "saved");
+    assert_eq!(cpu["locked"], false);
+
+    // The last other lane off: the CPU is on and locked, and its saved off
+    // is kept for when a lane comes back.
+    let last = semlith(home.path(), &["accel", "off", other], &[DEVICE]);
+    assert!(
+        last.status.success(),
+        "{}",
+        String::from_utf8_lossy(&last.stderr)
+    );
+    let cpu = lane(&status_in(home.path()), "cpu").clone();
+    assert_eq!(cpu["enabled"], true, "{cpu}");
+    assert_eq!(cpu["locked"], true);
+    assert_eq!(cpu["saved"], false);
+
+    // The lane back on, as `accel on` saves it beside the kept choice.
+    std::fs::write(&settings, beside(r#""cpu":false,"#)).unwrap();
+    let cpu = lane(&status_in(home.path()), "cpu").clone();
+    assert_eq!(cpu["enabled"], false, "the saved off applies again: {cpu}");
+    assert_eq!(cpu["locked"], false);
+
+    let on = semlith(home.path(), &["accel", "on", "cpu"], &[DEVICE]);
+    assert!(
+        on.status.success(),
+        "{}",
+        String::from_utf8_lossy(&on.stderr)
+    );
+    assert_eq!(lane(&status_in(home.path()), "cpu")["enabled"], true);
+}
+
+#[test]
+fn with_nothing_saved_the_cpu_is_off_beside_the_neural_engine_and_on_elsewhere() {
+    let home = tempfile::tempdir().unwrap();
+    let rows = status(home.path());
+    let cpu = lane(&rows, "cpu");
+    let ane_here = lane(&rows, "ane")["status"]["state"] != "unavailable";
+    assert_eq!(cpu["source"], "default");
+    assert_eq!(cpu["enabled"], !ane_here, "{cpu}");
+    assert_eq!(cpu["saved"], !ane_here);
 }
 
 #[test]

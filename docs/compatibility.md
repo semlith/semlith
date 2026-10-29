@@ -728,6 +728,23 @@ From 0.37.0-rc.7:
 |---|---|
 | Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
+### 0.50.0
+
+The CPU lane can be switched off again, beside another lane. `FORMAT_VERSION`
+does not move and no store is re-indexed. No MCP schema, registry or
+`settings.json` key changes. Rolled back to 0.49.0, a saved `accelerators.cpu:
+false` reads as on there again.
+
+| Surface | Change |
+|---|---|
+| CLI | `accel off cpu` is accepted while another lane (GPU, Neural Engine, CUDA, TensorRT, OpenVINO, llama.cpp or a registered remote lane) is on and can run here. With none it exits non-zero with `the CPU lane stays on while no other lane is on; switch one on first`, where 0.49.0 always refused. Turning off the last other lane is allowed; the CPU is then held on, and its saved off applies again when a lane comes back. `accel on cpu` saves `true`; 0.49.0 cleared the saved value. |
+| Defaults | With nothing saved the CPU is off while the Neural Engine is on and available here, on otherwise. A saved choice wins, so a saved `cpu: true` runs the CPU beside the Neural Engine, which 0.49.0 dropped once the Neural Engine was ready. With the Neural Engine ready or on its way the GPU embeds beside it only when `gpu-beside-ane` is on, also while it starts or compiles; a failed Neural Engine is not used. With no lane ready and none on its way the CPU still carries the run whatever its switch says. |
+| `GET /api/accel` | The CPU row's `saved` is the saved choice or the default, `source` is `default`, `saved` or `environment`, `locked` is true only while no other lane is on, and `locked_reason` is the message above while locked and `null` otherwise. `cpu_fallback` is unchanged. |
+| `settings.json` | No schema change. `accelerators.cpu: false` is now kept and honoured beside another lane. |
+| Environment | `SEMLITH_ACCEL` still overrides every switch. |
+| Library | `accel::CPU_LOCKED` is new. `accel::CPU_ALWAYS_ON` is kept for programs that hold their own CPU on with it. |
+| Portal parity | The CPU row on Settings › Performance is a normal switch while unlocked; the "always on" line shows only while it is locked. |
+
 ### 0.49.0
 
 `FORMAT_VERSION` does not move and no store is re-indexed. No MCP schema,

@@ -227,9 +227,39 @@ impl Enabled {
     }
 }
 
-/// What the CPU lane's switch says, wherever it is drawn or refused. The CPU
-/// cap is the control instead.
+/// What the CPU lane's switch said from 0.37.0-rc.6 to 0.49.0, when it could
+/// not be turned off. Kept for programs that hold their own CPU on with it.
 pub const CPU_ALWAYS_ON: &str = "the CPU lane is always on; use the CPU cap to limit it";
+
+/// Why the CPU lane's switch is locked, wherever it is drawn or refused.
+pub const CPU_LOCKED: &str = "the CPU lane stays on while no other lane is on; switch one on first";
+
+/// The lanes besides the CPU that can carry a run, by id.
+const BESIDE_CPU: [&str; 6] = ["gpu", "cuda", "ane", "trt", "openvino", "llama"];
+
+/// Whether a lane besides the CPU is switched on and can run on this machine:
+/// what lets the CPU be switched off. A registered remote lane counts.
+fn another_lane_on(on: &Enabled) -> bool {
+    BESIDE_CPU
+        .into_iter()
+        .chain(remote_ids())
+        .any(|id| on.lane(id) && unavailable_here(id).is_none())
+}
+
+/// The CPU lane's switch in force and whether it is locked. It may be off
+/// only while another lane is on (`others`); then what was saved holds, and
+/// with nothing saved it is off beside a Neural Engine that is on and runs
+/// here (`ane`), which goes faster alone. With no other lane it is on and
+/// locked, and what was saved waits for a lane to come back.
+fn cpu_switch(saved: Option<bool>, others: bool, ane: bool) -> (bool, bool) {
+    (!others || saved.unwrap_or(!ane), !others)
+}
+
+/// The CPU's switch for `on`, whose other lanes are already decided.
+fn cpu_in_force(saved: Option<bool>, on: &Enabled) -> (bool, bool) {
+    let ane = on.ane && unavailable_here("ane").is_none();
+    cpu_switch(saved, another_lane_on(on), ane)
+}
 
 /// Whether a lane is on when nothing has been saved for it.
 fn on_by_default(id: &str) -> bool {
@@ -267,9 +297,8 @@ impl Switches {
 /// The switches in force: the environment, then the saved setting, then the
 /// defaults. CPU, GPU and the Neural Engine are on; CUDA, TensorRT for RTX,
 /// OpenVINO and llama.cpp are experimental and off, and each is fetched only
-/// when somebody turns it on. The CPU is on whatever was saved: a
-/// `settings.json` from before 0.37.0-rc.6 that turned it off reads as on.
-/// Only `SEMLITH_ACCEL`, an override for measurements, can leave it out.
+/// when somebody turns it on. The CPU follows [`cpu_switch`]: off only while
+/// another lane is on, and by default off beside the Neural Engine.
 pub fn enabled() -> Enabled {
     if let Ok(list) = std::env::var(ACCEL_ENV) {
         let has = |name: &str| list.split(',').any(|item| item.trim() == name);
@@ -293,7 +322,7 @@ pub fn enabled() -> Enabled {
         };
     }
     let saved = crate::home::Settings::load().accelerators;
-    Enabled {
+    let mut on = Enabled {
         cpu: true,
         gpu: saved.gpu.unwrap_or(true),
         cuda: saved.cuda.unwrap_or(false),
@@ -309,7 +338,9 @@ pub fn enabled() -> Enabled {
         } else {
             "saved"
         },
-    }
+    };
+    on.cpu = cpu_in_force(saved.cpu, &on).0;
+    on
 }
 
 // --------------------------------------------------------------- remote lane
@@ -1071,31 +1102,42 @@ fn missing_hardware(id: &str) -> Option<String> {
 /// batches as well. A lane in the list may still be starting: the run wakes
 /// it and uses it once it is ready.
 ///
-/// The lane policy lives here. On Apple silicon the Neural Engine goes first
-/// and, once it is running, nothing else runs beside it: no CPU embedding
-/// lane (it takes the cores that feed the Neural Engine), and no GPU lane
-/// unless `gpu-beside-ane` is on. Elsewhere every accelerator that is on runs,
-/// with the CPU beside them — measured on the M1 before the Neural Engine
-/// existed, CPU beside WebGPU was 1.52x WebGPU alone. With no accelerator
-/// ready the CPU carries the run whatever its switch says only when none is on
-/// its way: a lane starting, downloading or compiling is waited for.
+/// The lane policy lives here and in [`pick`]. The CPU runs when its switch
+/// says so ([`cpu_switch`]): by default not beside the Neural Engine, whose
+/// cores it would take. Elsewhere every accelerator that is on runs, with the
+/// CPU beside them unless it is switched off — measured on the M1 before the
+/// Neural Engine existed, CPU beside WebGPU was 1.52x WebGPU alone. With no
+/// accelerator ready the CPU carries the run whatever its switch says only
+/// when none is on its way: a lane starting, downloading or compiling is
+/// waited for.
 pub fn for_run() -> (Vec<Arc<Lane>>, bool) {
+    for_run_with(&enabled())
+}
+
+/// [`for_run`] with the switches already read: the scheduler reads them now
+/// and then rather than on every turn of its loop.
+pub fn for_run_with(on: &Enabled) -> (Vec<Arc<Lane>>, bool) {
     if !MANAGED.load(Ordering::Relaxed) {
         return (Vec::new(), true);
     }
-    let on = enabled();
-    let mut chosen: Vec<Arc<Lane>> = lanes()
+    let chosen: Vec<Arc<Lane>> = lanes()
         .into_iter()
         .filter(|lane| on.lane(lane.id) && unavailable_here(lane.id).is_none())
         .filter(|lane| lane.usable())
         .collect();
-    let mut cpu = on.cpu;
-    let ane_running = chosen.iter().any(|lane| lane.id == "ane" && lane.ready());
-    if ane_running {
-        cpu = false;
-        if !on.gpu_beside_ane {
-            chosen.retain(|lane| lane.id != "gpu");
-        }
+    pick(chosen, on.cpu, on.gpu_beside_ane)
+}
+
+/// [`for_run`]'s choice among the usable lanes switched on. The Neural
+/// Engine, ready or on its way, has no GPU beside it unless `gpu-beside-ane`
+/// is on, so it runs alone from the first batch rather than once it is up; a
+/// Neural Engine that failed is not among them, and the GPU carries on.
+fn pick(mut chosen: Vec<Arc<Lane>>, cpu: bool, gpu_beside_ane: bool) -> (Vec<Arc<Lane>>, bool) {
+    let ane = chosen
+        .iter()
+        .any(|lane| lane.id == "ane" && (lane.ready() || lane.coming()));
+    if ane && !gpu_beside_ane {
+        chosen.retain(|lane| lane.id != "gpu");
     }
     // With no lane ready the CPU carries the run only when no lane is on its
     // way either: a lane still downloading, starting or compiling is waited
@@ -1220,6 +1262,12 @@ pub fn snapshot() -> serde_json::Value {
         Some(value) => (value, "saved"),
         None => (on_by_default(id), "default"),
     };
+    let (cpu_saved, cpu_source) = match saved.cpu {
+        _ if from_env => (on.cpu, "environment"),
+        Some(value) => (value, "saved"),
+        None => (cpu_in_force(None, &on).0, "default"),
+    };
+    let cpu_locked = !from_env && cpu_in_force(saved.cpu, &on).1;
     let cpu = cpu_lane();
     let cache = crate::model_cache_dir().ok();
     let cpu_rate = cpu.rate();
@@ -1227,10 +1275,10 @@ pub fn snapshot() -> serde_json::Value {
         "lane": "cpu",
         "label": "CPU",
         "enabled": on.cpu,
-        "saved": true,
-        "source": if from_env { "environment" } else { "default" },
-        "locked": true,
-        "locked_reason": CPU_ALWAYS_ON,
+        "saved": cpu_saved,
+        "source": cpu_source,
+        "locked": cpu_locked,
+        "locked_reason": cpu_locked.then_some(CPU_LOCKED),
         "experimental": false,
         // Active while it embeds, idle otherwise: no longer said Active
         // whatever it was doing.
@@ -1463,14 +1511,14 @@ fn run_lanes() -> Vec<&'static str> {
     let on = enabled();
     let known = rates();
     let usable = |lane: &&str| on.lane(lane) && unavailable_here(lane).is_none();
-    // The lanes a run would use, as `for_run` chooses them: with the Neural
-    // Engine on, the CPU steps aside and the GPU joins only when asked to.
+    // The lanes a run would use, as `for_run` chooses them: the CPU when its
+    // switch is on, and with the Neural Engine on the GPU only when asked to.
     let ane = usable(&"ane") && known.contains_key("ane");
     let lanes: Vec<&str> = ["cpu", "ane", "gpu", "cuda", "trt", "openvino", "llama"]
         .into_iter()
         .chain(remote_ids())
         .filter(|lane| usable(lane))
-        .filter(|lane| !ane || (*lane != "cpu" && (*lane != "gpu" || on.gpu_beside_ane)))
+        .filter(|lane| !ane || *lane != "gpu" || on.gpu_beside_ane)
         .collect();
     lanes
 }
@@ -1483,7 +1531,8 @@ pub const SWITCH_NAMES: &str = "cpu, gpu, ane, cuda, trt, openvino, llama, gpu-b
 /// Saved to `settings.json` and read by every run before every batch, which
 /// is the "next batch" the switch promises. Each lane is decided on its own,
 /// so one change of several lanes lands the same in any order. The CPU is
-/// never turned off ([`CPU_ALWAYS_ON`]). A lane that is unavailable here, or
+/// turned off only while another lane is on ([`CPU_LOCKED`]); turning off the
+/// last other lane is allowed and leaves it on. A lane that is unavailable here, or
 /// failed, can be turned off but not on, and the refusal says why; turning a
 /// failed lane off clears the failure, so it may be turned on again later.
 /// Turning on a lane whose pack is not here fetches it first, with
@@ -1504,9 +1553,8 @@ pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) 
     }
     let mut settings = crate::home::Settings::load();
     match (lane_id, on) {
-        ("cpu", false) => bail!("{CPU_ALWAYS_ON}"),
-        // Always on: a saved `false` from an older release is cleared.
-        ("cpu", true) => settings.accelerators.cpu = None,
+        ("cpu", false) if cpu_in_force(Some(false), &enabled()).1 => bail!("{CPU_LOCKED}"),
+        ("cpu", _) => settings.accelerators.cpu = Some(on),
         ("gpu", _) => settings.accelerators.gpu = Some(on),
         ("gpu-beside-ane", _) => settings.accelerators.gpu_beside_ane = Some(on),
         (id, _) if is_remote(id) => {
@@ -3022,6 +3070,62 @@ mod tests {
         assert!(!lane.coming());
         lane.set(Status::Active);
         assert!(lane.ready() && !lane.coming());
+    }
+
+    /// The CPU is off only beside another lane: by default beside the Neural
+    /// Engine, and wherever somebody saved it off. Alone it is on and locked,
+    /// whatever was saved.
+    #[test]
+    fn the_cpu_switch_follows_the_lanes_beside_it() {
+        // (saved, another lane on, the Neural Engine on here) -> (on, locked)
+        assert_eq!(cpu_switch(None, true, true), (false, false));
+        assert_eq!(cpu_switch(None, true, false), (true, false));
+        assert_eq!(cpu_switch(Some(true), true, true), (true, false));
+        assert_eq!(cpu_switch(Some(false), true, false), (false, false));
+        for saved in [None, Some(false), Some(true)] {
+            for ane in [false, true] {
+                assert_eq!(
+                    cpu_switch(saved, false, ane),
+                    (true, true),
+                    "{saved:?} {ane}"
+                );
+            }
+        }
+    }
+
+    /// With the CPU off, a Neural Engine still compiling is waited for with
+    /// no GPU beside it; once it fails, the GPU carries the run, and with no
+    /// lane left the CPU does.
+    #[test]
+    fn the_neural_engine_runs_alone_from_the_first_batch() {
+        let ane = Arc::new(Lane::new(spec("ane").unwrap()));
+        let gpu = Arc::new(Lane::new(spec("gpu").unwrap()));
+        ane.set(Status::Compiling {
+            percent: 10,
+            eta_ms: None,
+        });
+        gpu.set(Status::Active);
+        let ids = |(lanes, cpu): (Vec<Arc<Lane>>, bool)| {
+            (lanes.iter().map(|l| l.id).collect::<Vec<_>>(), cpu)
+        };
+        let both = || vec![Arc::clone(&ane), Arc::clone(&gpu)];
+        assert_eq!(ids(pick(both(), false, false)), (vec!["ane"], false));
+        assert_eq!(ids(pick(both(), false, true)), (vec!["ane", "gpu"], false));
+        ane.set(Status::Active);
+        assert_eq!(ids(pick(both(), false, false)), (vec!["ane"], false));
+        assert_eq!(ids(pick(both(), true, false)), (vec!["ane"], true));
+        // A failed lane is not usable, so for_run leaves it out.
+        assert_eq!(
+            ids(pick(vec![Arc::clone(&gpu)], false, false)),
+            (vec!["gpu"], false)
+        );
+        assert_eq!(ids(pick(Vec::new(), false, false)), (vec![], true));
+        // Every lane failed or gone: the CPU takes over whatever its switch.
+        ane.set(Status::Failed { reason: "x".into() });
+        assert_eq!(
+            ids(pick(vec![Arc::clone(&ane)], false, false)),
+            (vec!["ane"], true)
+        );
     }
 
     /// A failed lane stays failed for a while and is then tried again, rather
