@@ -2356,9 +2356,12 @@ mod tests {
                 .position(|s| s.provider == provider && s.label == "token")
                 .unwrap();
             for _ in 0..10 {
-                let mut value = forge(i);
-                let last = value.pop().unwrap();
-                value.push(if last == 'Z' { 'Y' } else { 'Z' });
+                // One character of the random part, not of the checksum: a
+                // changed checksum character is valid in the other base62
+                // alphabet about twice in ten thousand (0.50.0, Windows CI).
+                let mut chars: Vec<char> = forge(i).chars().collect();
+                chars[4] = if chars[4] == 'Z' { 'Y' } else { 'Z' };
+                let value: String = chars.into_iter().collect();
                 not.push((format!("{provider} invalid checksum"), value));
             }
         }
@@ -2407,9 +2410,9 @@ mod tests {
             .iter()
             .position(|s| s.kind == "a GitHub token")
             .unwrap();
-        let mut live = forge(github);
-        let last = live.pop().unwrap();
-        live.push(if last == 'a' { 'b' } else { 'a' });
+        let mut chars: Vec<char> = forge(github).chars().collect();
+        chars[4] = if chars[4] == 'a' { 'b' } else { 'a' };
+        let live: String = chars.into_iter().collect();
         let found = scan("src/config.rs", &live);
         assert!(found[0].confidence <= 10, "{:?}", found[0]);
     }

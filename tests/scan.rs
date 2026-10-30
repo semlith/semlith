@@ -1026,12 +1026,7 @@ fn no_forged_value_of_any_shape_is_read_as_a_dummy_at_scale() {
 /// would be token-shaped.
 #[test]
 fn the_audit_false_positives_stay_indexed() {
-    let ghp = live("GitHub token");
-    let bad_checksum = format!(
-        "{}{}",
-        &ghp[..ghp.len() - 1],
-        if ghp.ends_with('a') { 'b' } else { 'a' }
-    );
+    let bad = bad_checksum();
     let random = random20();
     for (what, path, text) in [
         (
@@ -1088,7 +1083,7 @@ fn the_audit_false_positives_stay_indexed() {
         (
             "a token that fails its checksum",
             "tests/fixtures.rs",
-            format!("let t = \"{bad_checksum}\";\n"),
+            format!("let t = \"{bad}\";\n"),
         ),
         (
             "a key body of words",
@@ -1161,12 +1156,7 @@ fn the_audit_false_positives_stay_indexed() {
 /// only line it reaches.
 #[test]
 fn each_new_dummy_rule_names_itself_and_a_tag_reaches_only_its_line() {
-    let ghp = live("GitHub token");
-    let bad = format!(
-        "{}{}",
-        &ghp[..ghp.len() - 1],
-        if ghp.ends_with('a') { 'b' } else { 'a' }
-    );
+    let bad = bad_checksum();
     let found = semlith::keyscan::scan("src/a.rs", &bad);
     assert!(found[0].dummy.unwrap().starts_with("(d)"), "{found:?}");
 
@@ -1227,12 +1217,7 @@ fn an_acceptance_never_loosens_under_new_rules() {
     // A lookup key: the 0.50.0 rule matched it, 0.51.0's does not.
     let gone = format!("cache_key = \"{random}{random}\"\n");
     // A token that fails its checksum: live-looking until 0.51.0, a dummy now.
-    let ghp = live("GitHub token");
-    let bad = format!(
-        "{}{}",
-        &ghp[..ghp.len() - 1],
-        if ghp.ends_with('a') { 'b' } else { 'a' }
-    );
+    let bad = bad_checksum();
     let dummy = format!("t = \"{bad}\"\n");
     for (path, text, value) in [
         ("/work/gone.py", gone.clone(), format!("{random}{random}")),
@@ -1278,4 +1263,14 @@ fn an_acceptance_never_loosens_under_new_rules() {
             other => panic!("{path}: {other:?}"),
         }
     }
+}
+
+/// A GitHub token whose checksum fails: one character of its random part
+/// changed, so the six checksum characters no longer match in either base62
+/// alphabet. Changing a checksum character instead (as 0.50.0's test did)
+/// leaves it valid in the other alphabet about twice in ten thousand.
+fn bad_checksum() -> String {
+    let mut chars: Vec<char> = live("GitHub token").chars().collect();
+    chars[4] = if chars[4] == 'a' { 'b' } else { 'a' };
+    chars.into_iter().collect()
 }
