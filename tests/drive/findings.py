@@ -61,6 +61,7 @@ import os
 import re
 import time
 import urllib.parse
+import zlib
 import urllib.request
 
 import cdp
@@ -4857,14 +4858,25 @@ def _(d):
 # ---------------------------------------------------------------- 0.30.0 (10.x)
 
 def live_aws():
-    """An AWS access key id built now: live-looking, and in no source file."""
-    alphabet = string.ascii_uppercase + string.digits
+    """An AWS access key id built now: live-looking, and in no source file.
+    Base32 after the prefix, as AWS issues them: from 0.51.0 an id holding
+    0, 1, 8 or 9 is not one."""
+    alphabet = string.ascii_uppercase + "234567"
     return "AKIA" + "".join(random.choice(alphabet) for _ in range(16))
 
 
 def live_github():
-    alphabet = string.ascii_letters + string.digits
-    return "ghp_" + "".join(random.choice(alphabet) for _ in range(36))
+    """A classic GitHub token with a valid checksum, as keyscan::forge builds
+    one: from 0.51.0 a token whose checksum fails was never issued and is a
+    dummy."""
+    alphabet = string.digits + string.ascii_uppercase + string.ascii_lowercase
+    body = "".join(random.choice(alphabet) for _ in range(30))
+    crc = zlib.crc32(body.encode())
+    check = ""
+    for _ in range(6):
+        check = alphabet[crc % 62] + check
+        crc //= 62
+    return "ghp_" + body + check
 
 
 def review_tree(d, name):
