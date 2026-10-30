@@ -5354,7 +5354,12 @@ fn decisions(state: &Arc<State>, request: &Request) -> Response {
             }
             let mut rows = Vec::new();
             for row in crate::store::refusals(store.db())? {
+                // An accepted file a later match refused again is out of the
+                // store whatever its acceptance said (0.51.0: a rule change
+                // can find a second value in a file accepted for the first).
+                let again = row.rule.starts_with("new match since accepted");
                 let (outcome, by) = match (row.accepted.as_deref(), row.class.as_str()) {
+                    (Some(_), _) if again => ("never indexed", "you"),
                     (Some("refused"), _) => ("kept out", "you"),
                     (Some("redacted"), _) => ("redacted · indexed", "you"),
                     (Some(_), _) => ("accepted", "you"),

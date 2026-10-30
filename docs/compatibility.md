@@ -728,6 +728,25 @@ From 0.37.0-rc.7:
 |---|---|
 | Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
+### 0.51.0
+
+The credential scan's rules move to version 3, so every store rescans once on
+its next run. That is a read and a scan of each file, and nothing already
+indexed is embedded again. `FORMAT_VERSION` does not move. No CLI command or
+flag, MCP tool or schema, route, registry or `settings.json` key changes.
+Rolled back to 0.50.0, a store keeps rules version 3, which 0.50.0 reads as
+current, so the files 0.51.0 let in stay indexed. `semlith scan` on 0.50.0
+lists every file its rules would refuse and `semlith scan --forget` (or
+`semlith forget <path>`) evicts them. Acceptances are unchanged either way.
+
+| Surface | Change |
+|---|---|
+| Secret scan | The generic rule reads a name as words and a value by its shape, and its unquoted form no longer runs on code. A checksum that fails, a sequential, repeating or word body, a test word as a whole part of a generic value, an unsigned or short-signed JSON web token and an allow tag on the match's own line (`semlith:allow`, `gitleaks:allow`, `pragma: allowlist secret`, `trufflehog:ignore`) make a match a test dummy. Files the rescan finds holding only dummies, or nothing, are indexed and their refusal rows cleared. See `docs/security.md`. |
+| Secret scan | Newly refused: a private key inside a JSON or code string (read through its escapes), a base64-encoded, PGP or PuTTY private key, a connection string with a password, an Authorization header value, Slack and Discord webhook URLs, a Discord bot token, a password of 12 to 19 characters under a password name, and seventeen named formats (Hugging Face, GitLab, Vault, Groq, OpenRouter, Perplexity, Replicate, xAI, LangSmith, Pinecone, DigitalOcean, Databricks, PyPI, Shopify, Linear, Doppler, Azure AD client secret). A file holding one leaves the store on the rescan. An AWS access key id holding 0, 1, 8 or 9 after its prefix is no longer a match. |
+| Acceptances | Kept, and never loosened. A file accepted with redaction keeps redacting every value its acceptance holds a fingerprint of, including one the new rules call a dummy or no longer find, and what 0.50.0's generic rule matched. A match the new rules find that the acceptance does not hold refuses the file again, as any new match did. |
+| `GET /api/refused`, `semlith refused` | Same fields. `why` names the strongest signal that lowered the confidence and the strongest that raised it (`Looks like … at line N: <lowered>; <raised>: 35 % likely real.`), where 0.50.0 listed only what raised it. `confidence`, `likely` and `suggest` follow the generic rule's new scoring, so a fixture and a live key are scored apart. |
+| Library | `keyscan::scan` reads the path to decide whether the unquoted generic rule applies; an empty path applies every rule. `filter::SHAPES` gains 24 rows. |
+
 ### 0.50.0
 
 The CPU lane can be switched off again, beside another lane. `FORMAT_VERSION`

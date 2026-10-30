@@ -172,16 +172,19 @@ scanned. A file refused this way never reaches the store.
 
 ### What the scan looks for
 
-One table, `filter::SHAPES`; the verdict on each match (dummy or live, its
-confidence, its mask) is `keyscan.rs`. Every row but one is anchored on the
+One table, `filter::SHAPES`, and the verdict on each match (dummy or live, its
+confidence, its mask) is `keyscan.rs`. Most rows are anchored on the
 credential's own prefix, because a prefix is the issuer declaring what the
-string is:
+string is. Each row's length and alphabet are the ones gitleaks 8.30.1's rule
+of the same name uses, or trufflehog's detector where gitleaks has none, and
+the source is cited beside the row.
 
 | Credential | Prefix |
 |---|---|
 | Anthropic API key | `sk-ant-` |
+| OpenRouter API key | `sk-or-v1-` |
 | OpenAI API key | `sk-` |
-| AWS access key id | `AKIA`, `ASIA` |
+| AWS access key id | `AKIA`, `ASIA`, then 16 base32 characters |
 | GitHub token | `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` |
 | GitHub fine-grained token | `github_pat_` |
 | Slack token | `xoxa-`, `xoxb-`, `xoxp-`, `xoxr-`, `xoxs-` |
@@ -191,35 +194,135 @@ string is:
 | SendGrid API key | `SG.` |
 | npm token | `npm_` |
 | semlith agent key | `sml_` |
-| Private key | a `-----BEGIN … PRIVATE KEY-----` block |
+| Hugging Face token | `hf_` |
+| GitLab token | `glpat-`, `gloas-`, `glptt-` |
+| HashiCorp Vault token | `hvs.`, `hvb.`, `hvr.` |
+| Groq API key | `gsk_` |
+| Perplexity API key | `pplx-` |
+| Replicate API token | `r8_` |
+| xAI API key | `xai-` |
+| LangSmith API key | `lsv2_pt_`, `lsv2_sk_` |
+| Pinecone API key | `pcsk_` |
+| DigitalOcean token | `dop_v1_`, `doo_v1_`, `dor_v1_` |
+| Databricks token | `dapi` |
+| PyPI upload token | `pypi-AgEIcHlwaS5vcmc` |
+| Shopify token | `shpat_`, `shpca_`, `shppa_`, `shpss_` |
+| Linear API key | `lin_api_` |
+| Doppler token | `dp.pt.` |
+| Azure AD client secret | none; three characters, a digit, `Q~`, then 31 to 34 |
+| Slack webhook URL | `https://hooks.slack.com/services/`, `/workflows/`, `/triggers/` |
+| Discord webhook URL | `https://discord.com/api/webhooks/`, `discordapp.com` too |
+| Discord bot token | none; three dot-separated parts, the first decoding to a user id of 17 to 20 digits |
+| Private key | a `-----BEGIN … PRIVATE KEY-----` block, PGP's `-----BEGIN PGP PRIVATE KEY BLOCK-----` among them |
+| Base64-encoded private key | `LS0tLS1CRUdJTi`, which is `-----BEGIN` encoded, when it decodes to a private key |
+| PuTTY private key | `PuTTY-User-Key-File-2:` or `-3:`, through its private lines |
 | JSON web token | `eyJ`, in three dot-separated parts |
+| Connection string with a password | `postgres`, `postgresql`, `mysql`, `mariadb`, `mongodb`, `mongodb+srv`, `redis`, `rediss`, `amqp`, `amqps`, `mssql` or `sqlserver`, as `scheme://user:password@host` |
+| Token in an Authorization header | `Authorization`, then `Bearer`, `Token` or `Basic` |
 
-Stripe test keys are refused too: a table with an exception is wrong the day
-someone pastes a live key into `test.md`. Each row carries an example it must
-match (a declared test dummy, so the table's own file is not refused) and a near
-miss it must not. `tests/scan.rs` walks the table, builds a live-shaped value
-for each row at run time, and fails the build if the example is not a dummy, the
-built value is not refused, or the near miss matches. No live-looking literal is
-in the source.
+Stripe test keys are refused too. A table with an exception is wrong the day
+someone pastes a live key into `test.md`. An AWS access key id is read as AWS
+issues it and as gitleaks reads it, 16 base32 characters (`[A-Z2-7]{16}`) after
+the prefix, so from 0.51.0 a hand-made id holding a 0, 1, 8 or 9 is not a match.
 
-**The one rule without a prefix needs two things at once:** an assignment whose
-left side is a key-like name — `api_key`, `secret`, `token`, `password`,
-`passwd`, `auth`, or one ending `_KEY`, `_SECRET` or `_TOKEN`, inside any
-identifier — and whose right side is at least twenty characters of high entropy.
-The value may be quoted, or unquoted on a line of its own as a `.env`, a shell
-`export` or YAML writes it (`AWS_SECRET_ACCESS_KEY=…`). This catches an AWS
-secret access key, which has no prefix. The name alone would refuse
-`password = "hunter2"` and `PASSWORD=changeme`; the entropy alone would refuse
-every base64 fixture and lockfile hash. Together they are narrow enough to be on
-by default.
+Each row carries an example it must match (a declared test dummy, so the
+table's own file is not refused) and a near miss it must not. `tests/scan.rs`
+walks the table, builds a live-shaped value for each row at run time, and fails
+the build if the example is not a dummy, the built value is not refused, or the
+near miss matches. `tests/scan_recall.rs` writes a live-shaped value of every
+row, and of every kind of value the generic rule below finds, into twelve kinds
+of file (`.env`, YAML, JSON, a Python keyword argument, a Go constant, a
+TypeScript object, a shell `export`, a Markdown fence, docker-compose, a
+Kubernetes Secret, Terraform and a curl command), and fails if one is let in or
+suggested for indexing. No live-looking literal is in the source.
 
-Two shapes are never a match for that rule:
+**A private key is read through what a string does to it.** A key in a JSON
+file, or in a TypeScript, Go, Python or Rust string, has its line breaks escaped
+(`\n`, `\r\n`, or the `\\n` of a JSON string inside a JSON string) and may be
+cut into strings joined with quotes. The body is read through both. Until
+0.51.0 it was read only after a real line break, so such a key had no body, was
+taken for a bare header under dummy rule (c) below, and was indexed. Every
+Google service-account `.json` was. That leak is fixed. A private key that is
+itself base64-encoded, as a Kubernetes Secret or an environment variable holds
+one, is decoded and refused. An encoded certificate is not a private key and is
+not a match.
 
+**A connection string and an Authorization header are judged on their secret
+part.** The password in `scheme://user:password@host` and the value after
+`Bearer`, `Token` or `Basic` (decoded, for `Basic`, to its password) are all
+that a match covers, a mask shows and a redaction replaces. That part has to
+pass the generic rule's value test below as a password does, so
+`postgres://app:app@localhost` is not a match. A placeholder password (`${…}`,
+`<…>`, one starting with `$`, `password`, `pass`, `secret`, `changeme`, all `*`
+or all `x`) is a test dummy.
+
+**The one rule without a prefix needs a credential's name and a credential's
+value at once.** It reads an assignment on one line, the value quoted
+(`api_key = "…"`, `"api_key": "…"`, `token := "…"`, `secret => "…"`) or
+unquoted on a line of its own as a `.env`, a shell `export` or YAML writes it
+(`AWS_SECRET_ACCESS_KEY=…`). This catches an AWS secret access key, which has
+no prefix. From 0.51.0 the name is read as words and the value by its shape.
+Until then the name was a substring test and the value an entropy test, which
+together refused test fixtures, code and prose that hold no secret.
+
+The name is split on `_`, `-`, `.` and camelCase, with digits trimmed from each
+word's ends. Only its last dotted part counts, and a last word that says how the
+value is written (`value`, `str`, `string`, `b64`, `base64`, `hex`, `raw`,
+`plain`) is dropped. It names a credential when one of its words is a secret
+word (`token`, `secret`, `password`, `passwd`, `pwd`, `passphrase`, `apikey`,
+`key`, `auth`, `authorization`, `credential`, `credentials`, `creds`, `pat`,
+`bearer`), or ends in one glued to another word (`accesstoken`,
+`clientsecret`). It does not when its last word is metadata about a secret
+(`token_url`, `auth_type`, `secret_manager_client`, about 120 such words), or
+when its last word is `key` after a lookup word (`cache_key`, `object_key`,
+`sort_key`, about 60). So `tokens`, `tokenizer` and `author` are not credential
+names. `id` is not metadata, so Vault's `secret_id` is one, and `storage` is not
+a lookup word, so `AZURE_STORAGE_KEY` is one. Both lists say what is not a
+credential and never what is. The audit behind 0.51.0 tried a list of words
+allowed in front of `key` instead, and it dropped a live SMTP key.
+
+The value needs 20 or more characters and 3.2 bits of entropy a character, as
+before, and one of these:
+
+- a stretch a generator wrote, 12 or more letters and digits that mix upper and
+  lower case, or letters and digits, and switch between them all along. A
+  camelCase identifier (`hideDecisionModelsBanner`) and a word with a number on
+  it (`dbpassword9090`) are not one. A value spelled only in base64 is read
+  with its `+` and `/` taken out, because they are base64's own letters and
+  cut a 44-character key into stretches under 12 about once in a hundred;
+- 32 or more hex characters;
+- for a name whose last word ends in `password`, `passwd`, `pwd` or
+  `passphrase`, a short password. That is 12 or more characters with at least
+  three of lower case, upper case, digits and symbols, and no run of four
+  letters written as a word is (all lower case, all upper case or
+  capitalised). This is the one place the floor is under 20 characters, because
+  a 16-character random password in YAML went unfound before 0.51.0. A random
+  16-character password spells such a word by chance a few times in a hundred,
+  and this test then does not find it.
+
+These are never a credential value, whatever their entropy:
+
+- a member path (`cfg.auth.token`), where every dotted part is an identifier
+  and none is generator-shaped, so a Vault `hvs.` token still counts, and a
+  value that passes the short-password test is never one;
+- a URL with no `user:password@` in it;
+- prose, with a space anywhere past a leading `Bearer`, `Basic` or `Token`;
+- code, a value that takes an address and opens a block or a call
+  (`&schemas.Key{`). Both, because a random password opens on `&` about once
+  in seventy;
+- an elided value, one holding `...` or `…`;
+- a value with a sequential run of eight (`abcdefgh`, `12345678`);
 - a template reference (`${SEMLITH_AGENT_KEY}`, `{{token}}`, `<your-key-here>`)
-  or a bare `SCREAMING_SNAKE` variable name;
-- a value crossing a line. An unquoted value is read only when it is the whole
-  rest of its line and made of characters a key is made of, so
-  `let token = compute_token(input);` is not a match.
+  or a bare `SCREAMING_SNAKE` variable name.
+
+**The unquoted form does not run on code.** In a Python, Go or TypeScript file
+`a.b.token = c.d.e` is a line of code, and that was a quarter of the generic
+rule's matches in the audit behind 0.51.0. Shell scripts, Dockerfiles,
+Makefiles and Terraform count as configuration here, YAML, TOML, JSON and
+Markdown are not code, and a file in no language (`.env`, `.ini`, a `.txt`
+note) gets every rule. The quoted form runs on every file. An unquoted value
+is read only when the name opens its line and the value is the whole rest of
+it, so `let token = compute_token(input);` is not a match anywhere.
 
 **A refusal never quotes the credential.** It names the kind of thing matched and
 its line. No character of the match is written to the event, the CLI's output,
@@ -229,17 +332,58 @@ decide, it is masked to the issuer's prefix and the last four characters
 
 ### Test dummies
 
-A match is a test dummy, and does not refuse its file, when one of three
+A match is a test dummy, and does not refuse its file, when one of five
 declared rules says so:
 
-- (a) it is on a short list of published documentation examples, such as AWS's
-  `AKIAIOSFODNN7EXAMPLE` and `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`;
-- (b) the token's body — after the issuer's prefix — contains `EXAMPLE`,
-  `FAKE`, `DUMMY`, `PLACEHOLDER`, `REDACTED` or a run of eight or more `X`, or is
-  one character repeated. Only the body counts: a comment saying "test" beside a
-  live key changes nothing;
+- (a) it is a published example. AWS's documentation keys
+  (`AKIAIOSFODNN7EXAMPLE` and `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`), the
+  example token of RFC 7515 and jwt.io's sample token (by their signatures), an
+  unsigned JSON web token (no signature, or `alg` none, which no server should
+  accept) and Supabase's local development keys (issuer `supabase-demo`) are;
+- (b) the value says it stands in for a key. On every shape that is a marker in
+  the body after the issuer's prefix (`EXAMPLE`, `TEST`, `TESTING`, `FAKE`,
+  `DUMMY`, `SAMPLE`, `PLACEHOLDER`, `REDACTED`, `MASKED`, `INVALID` or
+  `NOTREAL`, written in one case), a run of eight or more `X`, or one character
+  repeated. A marker of six letters or more counts anywhere in the body. A
+  shorter one counts only as a whole `-`, `_` or `.` part, or at the start or
+  end of one beside eight or more characters of one case or of digits
+  (`FAKEtokenvalue`, `FAKE000000000000`): a generator leaves a shorter rest,
+  and a Discord bot token's six-character middle part opened on `TEST` by
+  chance in the 0.51.0 calibration. For a webhook or a bot token the body is
+  the token, not the numeric id in front of it. On a prefixed shape it is
+  also a sequential run of eight inside one part (ten in a part of digits
+  alone, as Slack's numeric parts are), a repeating pattern (`aaaaBBBBcccc`,
+  `TESTTESTTEST`), or a body of words with no stretch a generator wrote
+  (`sk-YOUR_OPENAI_API_KEY_HERE`, `xoxb-my-bot-token`) on a shape whose
+  generator mixes case. AWS, Twilio and semlith bodies are one case by format,
+  so a word in one of them is chance. On the generic rule it is also a whole
+  part of the value that is a test word (`test`, `fake`, `mock`, `dummy`,
+  `sample`, `example`, `placeholder`, `changeme`, `your`, `invalid`, `notreal`,
+  `redacted`, `xxx`). Parts split on `-`, `_`, `.` and spaces, never on `/` or
+  `+`, so a key whose base64 holds `/test/` by chance is still a key. On a
+  connection string it is a placeholder password, as above;
 - (c) it is a private-key `BEGIN` line with no key under it: fewer than 40
-  base64 characters before the `END` line or the end of the text.
+  base64 characters, read through string escapes, before the `END` line or the
+  end of the text;
+- (d) it proves it was never issued. A GitHub classic or npm token whose CRC32
+  checksum fails does, and so does a JSON web token whose signature is shorter
+  than any signing algorithm makes (HS256's, the shortest, is 43 characters).
+  Until 0.51.0 a failed checksum lowered the confidence and still refused the
+  file;
+- (e) its own line carries an allow tag, `semlith:allow`, `gitleaks:allow`,
+  `pragma: allowlist secret` or `trufflehog:ignore`.
+
+Only the value and its own line count. A comment saying "test" on the line
+above a live key, or the file sitting under `tests/`, moves the confidence and
+never the verdict.
+
+**Allow tags are honoured** because a repository already tagged for gitleaks,
+detect-secrets or trufflehog holds a person's decision on each tagged line, and
+it should need no edit to be indexed. A tag counts on the match's own line
+only, never the line above or below, so it cannot reach a key it was not
+written beside. For a private key that line is the `BEGIN` line. A cloned
+repository could tag a real key and semlith would index it. That key is already
+published in that repository, and the index is yours alone.
 
 The rules are declared, not guessed from entropy, because a rule that let
 through anything random enough would index the one real key that was not.
@@ -269,14 +413,26 @@ tree). A row is one of five classes:
 likely the match is a real, working secret. It is built from declared signals,
 each shown beside the number: whether the value has its provider's documented
 length and characters; a valid CRC32 checksum on a GitHub or npm token (at least
-90 %) or an invalid one (at most 10 %); how random the body is against the
+90 %), an invalid one being dummy rule (d); how random the body is against the
 provider's generator, lower for a repeated, sequential or dictionary body; a
 companion, such as a 40-character secret access key within five lines of an AWS
 key id or a private-key body that decodes to a DER sequence; the location, lower
 under `tests/`, `fixtures/`, `examples/` or `docs/`, in Markdown or in a test
 function, higher in a configuration, CI or deploy file; and a JSON web token
-whose `exp` has passed. **It is an estimate and decides nothing**; only the
+whose `exp` has passed. A generic match is scored from its own evidence too, so
+a fixture and a live key no longer land on the same number. A word that only
+ever names a secret (`secret`, `password`, `apikey`, `credential`) raises it
+more than `key`, `token` or `auth` do, and a generated value raises it more than
+a short password. **It is an estimate and decides nothing**; only the
 dummy rules decide.
+
+The review's reason names the strongest signal each way, what lowered the
+estimate and then what raised it, as in "Looks like a secret assigned to a
+key-like name at line 12: under tests, fixtures, examples or docs, or in
+Markdown; a secret-sounding name holding a generated value: 35 % likely real."
+Until 0.51.0 it listed only what raised it. The suggestion follows the
+estimate, keep it out from 70 %, redact from 30 % and index it below, in the
+same fields as before.
 
 ### Accepting a refused file
 
@@ -309,6 +465,13 @@ returns to the list marked `new match since accepted, line N`. A read of an
 accepted-redacted file from disk (`semlith_read` on a file edited since
 indexing) applies the same redaction.
 
+**A change to the rules never loosens an acceptance.** A file accepted with
+redaction keeps every value its acceptance holds a fingerprint of redacted, even
+one later rules call a dummy or no longer find at all, what 0.50.0's generic
+rule matched among them. The person chose redaction for what they saw, and a
+rule change is not their choice. A match the new rules find that the acceptance
+holds no fingerprint of refuses the file again, as any new match does.
+
 ### When the scan runs
 
 **Before anything is embedded.** Every index run opens with a scan phase that
@@ -327,18 +490,26 @@ index's terms (FTS5 secure delete), its full-precision vectors in `exact.f32`
 (zeroed), its entries in the vector cache, and the freed pages of the store's
 database (vacuumed before the run ends).
 
+**New rules rescan every store once.** A store records the version of the scan
+rules it was last swept under, and when a release changes them its next run
+reads and scans every file again. That is a read and a scan, and nothing the
+store already holds is embedded again. 0.51.0's rules are version 3. A file
+they let in is indexed and its refusal row cleared, a file they refuse leaves
+the store as above, and every acceptance is kept.
+
 **`semlith scan` checks a store indexed earlier.** It runs both halves over every
 file a store holds — the deny-list against the name, the content table against
 the stored text — and prints each file semlith would refuse today, with the
-rule or the kind and line. It exits non-zero while anything is found, so it
+rule or the kind and line. It passes each file's path as an index run does, so
+the unquoted generic rule skips code there too. It exits non-zero while anything is found, so it
 works as a check in a script; `--forget` evicts what it found. The Privacy page
 has the same check, from the same function, with a button per row. There is no
 MCP tool for it: an agent does not decide what a store may hold.
 
 **The scan is a net, not a guarantee.** It refuses the shapes in the table and
-nothing else. A credential with no issuer prefix, a format only your service
-uses, one split across two lines, or one base64-encoded inside something else
-does not match. Do not index a directory you otherwise would not because the
+nothing else. A credential with no issuer prefix under a name that does not
+say secret, a format only your service uses, one split across two lines, or
+one base64-encoded inside something else (a private key aside) does not match. Do not index a directory you otherwise would not because the
 scan exists, and run `semlith scan` afterwards.
 
 ## What is yours alone on disk

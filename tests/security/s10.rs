@@ -28,8 +28,15 @@ fn s10_a_file_refused_for_a_secret_leaves_no_trace_in_the_store() {
     std::fs::create_dir_all(&corpus).unwrap();
     let file = corpus.join("deploy.md");
     // A credential already in the store: indexed with the scan off, as a
-    // store indexed before a rule widened holds one.
-    let token = "ghp_R8x2Kq9LmP4vTz7Wn3Yb6Hc1Jd5Fg0Se2Uaq";
+    // store indexed before a rule widened holds one. Built now with a valid
+    // checksum: from 0.51.0 a token whose checksum fails is a dummy.
+    let token = semlith::keyscan::forge(
+        semlith::filter::SHAPES
+            .iter()
+            .position(|s| s.kind == "a GitHub token")
+            .unwrap(),
+    );
+    let token = token.as_str();
     std::fs::write(
         &file,
         format!("# Deploy\n\nzqmarker7 uses {token} to push.\n"),
