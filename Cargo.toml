@@ -1,6 +1,6 @@
 [package]
 name = "semlith"
-version = "0.50.0"
+version = "0.51.0"
 edition = "2024"
 rust-version = "1.90"
 description = "Local search over your code and documents for AI agents. One binary that indexes your repositories, PDFs and Office files and serves them over MCP."

@@ -495,11 +495,11 @@ fn review_items_are_scored_and_decided_in_bulk_before_indexing() {
     let (_dir, home) = home();
     let corpus = home.join("work");
     std::fs::create_dir_all(&corpus).unwrap();
-    let key = semlith::keyscan::forge(3);
+    let key = github_token();
     std::fs::write(corpus.join("a.rs"), format!("let token = \"{key}\";\n")).unwrap();
     std::fs::write(
         corpus.join("b.rs"),
-        format!("let other = \"{}\";\n", semlith::keyscan::forge(3)),
+        format!("let other = \"{}\";\n", github_token()),
     )
     .unwrap();
     std::fs::write(corpus.join("ok.md"), "# fine\n\nnothing here\n").unwrap();
@@ -858,7 +858,7 @@ fn not_indexed_rows_carry_their_risk() {
         daemon.post("/api/store/create", json!({ "name": "rows" }));
     }
     let dir = home.join("stores").join("rows");
-    let text = format!("token = {}\n", semlith::keyscan::forge(3));
+    let text = format!("token = {}\n", github_token());
     {
         let store = semlith::Semlith::open(&dir, None).unwrap();
         semlith::store::read_only(store.db(), false).unwrap();
@@ -880,4 +880,15 @@ fn not_indexed_rows_carry_their_risk() {
     assert_eq!(row["tone"], "red");
     assert_eq!(row["kind"], "Access token");
     assert!(row["evidence"].as_str().unwrap().contains("line 1"));
+}
+
+/// A live-shaped GitHub token, found by its row rather than its place in the
+/// table, which grows.
+fn github_token() -> String {
+    semlith::keyscan::forge(
+        semlith::filter::SHAPES
+            .iter()
+            .position(|s| s.kind == "a GitHub token")
+            .unwrap(),
+    )
 }
