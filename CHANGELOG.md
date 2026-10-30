@@ -5,6 +5,109 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.51.0] - 2026-10-30
+
+The credential scan refuses far fewer files that only look like they hold a
+secret, and finds keys it used to miss, a private key inside a JSON string
+among them. Every store rescans once on its next run. No store format change,
+no re-embedding and no CLI or MCP change.
+
+### Changed
+
+- **Far fewer false refusals.** On BerriAI/litellm at 43c07a0, 0.50.0 refused
+  882 of its 13,656 files and 0.51.0 refuses 104. On a private
+  repository where 166 refusals had been cleared by hand, 167 refused files
+  are now 6. Nearly all of the difference is the generic rule, the one with no
+  issuer prefix. It reads a name as words, so `tokens`, `tokenizer`, `author`,
+  `token_url`, `auth_type` and `cache_key` are no longer credential names,
+  while `secret_id`, `smtp_key` and `AZURE_STORAGE_KEY` still are. It reads a
+  value by its shape, so it needs a stretch a generator wrote or 32 or more
+  hex, and a member path, a URL with no credentials, prose, a line of code
+  (`&schemas.Key{`), an elided value or a sequential run of eight never
+  counts. Its unquoted form (`NAME=value` on a
+  line of its own) no longer runs on code, where it matched lines such as
+  `a.b.token = c.d.e`. Shell, Dockerfiles, Makefiles and Terraform still count
+  as configuration, and a file in no language, such as `.env` or a `.txt`
+  note, still gets every rule. Both word lists say what is not a credential
+  and never what is, because a list of what may come before `key` dropped a
+  live SMTP key in draft.
+- **The review says why in both directions.** A refusal's reason names the
+  strongest signal that lowered its confidence and the strongest that raised
+  it, as in "Looks like … at line 12: under tests, fixtures, examples or docs,
+  or in Markdown; a secret-sounding name holding a generated value: 35 % likely
+  real.", where 0.50.0 listed only what raised it. A generic match is scored
+  from its own evidence (a word that only names a secret, a generated value, a
+  configuration file up, a test file down), so a fixture and a live key are no
+  longer both suggested **redact**. Same fields in `/api/refused`,
+  `semlith refused` and Files › Decisions.
+- **An AWS access key id is read as AWS issues it.** 16 base32 characters
+  after `AKIA` or `ASIA`, as gitleaks' rule reads them, so a hand-made id
+  holding 0, 1, 8 or 9 is not a match.
+
+### Fixed
+
+- **A private key inside a string was indexed.** Its body was read only after
+  a real line break, so a key whose line breaks are escaped (`\n`, `\r\n`,
+  `\\n`), as in every Google service-account `.json` and every key in a
+  TypeScript, Go, Python or Rust string, was taken for a bare header with no
+  key under it and let through as a test dummy. The body is now read through
+  the escapes and through quotes that join one string to the next, and such a
+  file is refused as a private key block.
+- **Credentials that were not found at all are refused.** A connection string
+  with a password (`postgres://user:password@host`, and MySQL, MariaDB,
+  MongoDB, Redis, AMQP and SQL Server URLs), an Authorization header value
+  (`Bearer`, `Token`, or `Basic` decoded to its password), Slack and Discord
+  webhook URLs, a Discord bot token, a base64-encoded private key as a
+  Kubernetes Secret holds one, PGP and PuTTY private keys, and a password of
+  12 to 19 characters assigned to a password name when it mixes three kinds
+  of character and holds no word. Each is judged on its secret part only,
+  which is all a mask shows and a redaction replaces.
+
+### Added
+
+- **Seventeen named formats.** Hugging Face, GitLab, HashiCorp Vault, Groq,
+  OpenRouter, Perplexity, Replicate, xAI, LangSmith, Pinecone, DigitalOcean,
+  Databricks, PyPI, Shopify, Linear, Doppler and Azure AD client secrets each
+  get a row in `filter::SHAPES`, with the length and alphabet of gitleaks
+  8.30.1's rule of the same name, or trufflehog's detector where gitleaks has
+  none, cited beside it. Several were found before only when the generic rule
+  happened to see them.
+- **Proof that a value is not live makes it a test dummy.** A GitHub or npm
+  token whose checksum fails, or a JSON web token whose signature is shorter
+  than any signing algorithm makes, was never issued (rule (d)); a failed
+  checksum used to lower the confidence and still refuse the file. Rule (b)
+  gains the markers `TEST`, `TESTING`, `MASKED`, `SAMPLE`, `INVALID` and
+  `NOTREAL`, a sequential run inside one part of the body, a repeating pattern
+  (`aaaaBBBBcccc`), a body of words (`sk-YOUR_OPENAI_API_KEY_HERE`), a test word
+  as a whole part of a generic value, and a placeholder password in a
+  connection string. Rule (a) gains unsigned JSON web tokens (no signature, or
+  `alg` none), the example tokens of RFC 7515 and jwt.io, and Supabase's local
+  development keys.
+- **Allow tags.** A match whose own line carries `semlith:allow`,
+  `gitleaks:allow`, `pragma: allowlist secret` or `trufflehog:ignore` is a test
+  dummy under rule (e), so a repository already tagged for those tools needs no
+  edit. The line of the match only, never a neighbour.
+- **`tests/scan_recall.rs`.** A live-shaped value of every row and of every
+  kind the generic rule finds, written into twelve kinds of file, must be
+  refused and never suggested for indexing. It names the cases the drafts of
+  these rules broke (an SMTP key, Vault's `secret_id`, Vault and Discord
+  tokens, a key path holding `/test/`), so they stay refused.
+
+### Upgrading
+
+- Scan rules move to version 3. Every store reads and scans each file once on
+  its next run, embedding nothing it already holds. A file the new rules let in
+  is indexed and its refusal row cleared, and a file holding a newly found
+  credential leaves the store. Acceptances are kept and never loosen. A file
+  accepted with redaction keeps redacting every value its acceptance holds a
+  fingerprint of, even one the new rules call a dummy or no longer find, and
+  what 0.50.0's generic rule matched. A new match in an accepted file refuses
+  it again, as before.
+- Rolling back to 0.50.0 keeps what 0.51.0 let in, because 0.50.0 reads rules
+  version 3 as current and does not rescan. `semlith scan` on 0.50.0 lists every
+  file its rules would refuse, and `semlith scan --forget` or `semlith forget`
+  evicts them. See docs/compatibility.md and docs/security.md.
+
 ## [0.50.0] - 2026-10-29
 
 The CPU lane can be switched off again, beside another lane, and a Mac with

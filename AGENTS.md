@@ -143,7 +143,7 @@ Module responsibilities:
 | `src/trt.rs`, `src/openvino.rs`, `src/llama.rs` | The experimental lanes: NVIDIA's TensorRT for RTX and Intel's OpenVINO plugin providers, and llama.cpp's server on loopback |
 | `src/priority.rs` | The daemon's priority following its work: background while idle, normal while anything embeds or a request is served |
 | `src/filter.rs` | `--path`/`--ext`/`--lang` → GLOB patterns → one chunk id set; the deny-list and the credential shapes |
-| `src/keyscan.rs` | The verdict on each secret-shaped match: live or declared test dummy, a 0-100 % confidence with its signals, the mask, the salted fingerprint, redaction, and the one accept/refuse decision every pass applies |
+| `src/keyscan.rs` | The verdict on each secret-shaped match: live or declared test dummy (rules (a) to (e)), the generic rule's name-as-words and value-shape tests, a 0-100 % confidence with its signals, the mask, the salted fingerprint, redaction, and the one accept/refuse decision every pass applies |
 | `src/tree.rs` | `semlith files --tree` / `semlith_files {tree: true}`: directories with counts, files with symbols, and what is on disk but not indexed |
 | `src/fleet.rs` | Several stores, one query, merged ranking |
 | `src/graph.rs` | tree-sitter extraction, the bounded traversals over the edges, and the ranked walk search expands through |
@@ -376,6 +376,19 @@ Module responsibilities:
   `refused`, for any reviewable class. An acceptance holds salted blake3 fingerprints,
   never values, and `keyscan::decide` is the one function every pass (index,
   watcher, catch-up, read from disk) asks. A credential file is never accepted.
+  An acceptance never loosens (0.51.0): a file accepted redacted keeps
+  redacting every value its acceptance holds a fingerprint of, even one a later
+  rule calls a dummy or no longer finds (`keyscan::held`, which also reads the
+  0.50.0 generic rule), and a new match still refuses it. A rule change that
+  alters what is refused bumps `SCAN_RULES` in `src/lib.rs`, so every store
+  rescans once.
+- **The generic secret rule denies, it never allows.** Its name and lookup word
+  lists say what is not a credential name; an allow list of what may come
+  before `key` dropped a live SMTP key in the 0.51.0 audit. Its unquoted form
+  does not run on code (`keyscan::unquoted_applies`): shell, Dockerfile,
+  Makefile and Terraform count as configuration, and a path in no language
+  gets every rule. A change that lets a value in keeps
+  `tests/scan_recall.rs` green.
 - **`read` answers from chunks, never from disk — except for a file it indexed
   that has changed since.** Then (0.30.0) it reads the current lines, through
   the same secret scan and the same acceptance a pass applies, and marks the
