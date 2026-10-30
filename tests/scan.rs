@@ -74,6 +74,8 @@ fn live(kind: &str) -> String {
 /// and at least 14 distinct characters. Fourteen of twenty bounds the entropy
 /// from below at 3.34 bits — the most skewed spread, one character seven times
 /// and thirteen once each, scores that — so no kept draw can fall under 3.2.
+/// From 0.51.0 it must also hold a digit: a draw of letters alone reads as a
+/// camelCase identifier about once in 35 000 (`keyscan::has_generated`).
 fn random20() -> String {
     loop {
         let value = live("GitHub token")[4..24].to_string();
@@ -81,7 +83,10 @@ fn random20() -> String {
             .chars()
             .collect::<std::collections::HashSet<_>>()
             .len();
-        if value.chars().any(|c| c.is_ascii_lowercase()) && distinct >= 14 {
+        if value.chars().any(|c| c.is_ascii_lowercase())
+            && value.chars().any(|c| c.is_ascii_digit())
+            && distinct >= 14
+        {
             return value;
         }
     }
@@ -188,9 +193,13 @@ fn the_finding_names_the_line() {
 #[test]
 fn no_reason_ever_quotes_the_credential() {
     for (i, shape) in semlith::filter::SHAPES.iter().enumerate() {
-        let value = semlith::keyscan::forge(i);
-        let found = semlith::filter::scan_text(&value).expect("a live-shaped value");
+        let forged = semlith::keyscan::forge(i);
+        let found = semlith::filter::scan_text(&forged).expect("a live-shaped value");
         let reason = found.reason();
+        // The credential is what the match covers: a header row's match is
+        // its token, not the word `Authorization` in front of it.
+        let matched = semlith::keyscan::scan("", &forged);
+        let value = &forged[matched[0].range.clone()];
         for window in value
             .as_bytes()
             .windows(8)
@@ -446,10 +455,19 @@ fn write_docx(path: &Path, body: &str) {
 /// Ignored because it needs a corpus, not because it is slow. 0.19.0 ran it
 /// over two trees before the release proceeded, and the first run is what found
 /// the `${SEMLITH_AGENT_KEY}` placeholder rule.
+///
+/// `SEMLITH_SCAN_AUDIT` may name several trees, separated as `PATH` is. Each
+/// is walked as an index run walks it (`.gitignore` respected) and each file's
+/// own path goes to the scan, so the location signal and the configuration-file
+/// rule see what they see in a real run. Per tree it prints the refused share,
+/// the provider of each refused file's first live match, and what those
+/// matches were, by kind. With `SEMLITH_SCAN_AUDIT_LIST=1` it also lists each
+/// refused file, and each file indexed only because every match is a dummy
+/// with the rule that made it one; a value never prints.
 #[test]
 #[ignore = "needs SEMLITH_SCAN_AUDIT pointing at a corpus"]
 fn audit_a_corpus_for_false_positives() {
-    let Ok(root) = std::env::var("SEMLITH_SCAN_AUDIT") else {
+    let Some(roots) = std::env::var_os("SEMLITH_SCAN_AUDIT") else {
         // Nothing to audit is not a failure. This is a tool with a test's
         // shape: it takes a corpus somebody chose, and with none named there
         // is no assertion it could make. Panicking here made the whole
@@ -458,61 +476,81 @@ fn audit_a_corpus_for_false_positives() {
         eprintln!("skipped: set SEMLITH_SCAN_AUDIT to a tree to audit it for false positives");
         return;
     };
-    let root = PathBuf::from(root);
-    let mut walked = 0usize;
-    let mut refused = 0usize;
-    let mut texts: Vec<String> = Vec::new();
-    let mut stack = vec![root.clone()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+    let list = std::env::var_os("SEMLITH_SCAN_AUDIT_LIST").is_some();
+    let mut texts: Vec<(String, String)> = Vec::new();
+    for root in std::env::split_paths(&roots) {
+        let (mut walked, mut refused) = (0usize, 0usize);
+        let mut providers: std::collections::BTreeMap<&str, usize> = Default::default();
+        let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+        for entry in ignore::WalkBuilder::new(&root)
+            .hidden(false)
+            .build()
+            .flatten()
+        {
             let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if path.is_dir() {
-                // The directories a walk would never yield anyway.
-                if !matches!(
-                    name.as_str(),
-                    ".git" | "target" | "node_modules" | ".semlith" | "dist" | "build"
-                ) {
-                    stack.push(path);
-                }
+            if !path.is_file() || path.components().any(|c| c.as_os_str() == ".git") {
                 continue;
             }
-            let Ok(bytes) = fs::read(&path) else { continue };
+            let Ok(bytes) = fs::read(path) else { continue };
             if bytes.len() as u64 > 8 * 1024 * 1024 {
                 continue;
             }
-            let Ok(text) = semlith::chunk::extract(&path, &bytes) else {
+            let Ok(text) = semlith::chunk::extract(path, &bytes) else {
                 continue;
             };
             walked += 1;
-            if let Some(found) = semlith::filter::scan_text(&text) {
+            let key = path.to_string_lossy().into_owned();
+            let found = semlith::keyscan::scan(&key, &text);
+            if let Some(first) = found.iter().find(|m| m.dummy.is_none()) {
                 refused += 1;
-                println!("{}: {}", path.display(), found.reason());
+                *providers.entry(first.provider).or_default() += 1;
+                for m in found.iter().filter(|m| m.dummy.is_none()) {
+                    *kinds.entry(m.kind.clone()).or_default() += 1;
+                }
+                if list {
+                    println!(
+                        "  {key}: line {} · {} · {} %",
+                        first.line, first.kind, first.confidence
+                    );
+                }
+            } else if list && let Some(first) = found.first() {
+                println!(
+                    "  {key}: indexed · line {} · {} · {}",
+                    first.line,
+                    first.kind,
+                    first.dummy.unwrap_or_default()
+                );
             }
-            texts.push(text);
+            texts.push((key, text));
         }
+        println!(
+            "{}: {refused} of {walked} files refused ({:.1} %)",
+            root.display(),
+            100.0 * refused as f64 / walked.max(1) as f64
+        );
+        println!("  first live match by provider: {providers:?}");
+        println!("  live matches by kind: {kinds:?}");
     }
-    println!("audited {walked} readable files under {}", root.display());
-    println!("{refused} would be refused");
 
     // What the scan itself costs, which is the number the throughput claim
     // rests on. An end-to-end index run is almost entirely the embedder, so a
     // wall-clock comparison of two runs measures the model rather than this.
-    let mut total = 0usize;
-    let start = std::time::Instant::now();
-    for text in &texts {
-        total += text.len();
-        std::hint::black_box(semlith::filter::scan_text(text));
-    }
-    let spent = start.elapsed();
+    // Three passes, and the median, because one pass on a laptop is noise.
+    let total: usize = texts.iter().map(|(_, t)| t.len()).sum();
+    let mut rates: Vec<f64> = (0..3)
+        .map(|_| {
+            let start = std::time::Instant::now();
+            for (key, text) in &texts {
+                std::hint::black_box(semlith::keyscan::scan(key, text));
+            }
+            (total as f64 / (1024.0 * 1024.0)) / start.elapsed().as_secs_f64()
+        })
+        .collect();
+    rates.sort_by(f64::total_cmp);
     println!(
-        "the scan itself: {:.1} ms over {:.1} MiB of text ({:.0} MiB/s)",
-        spent.as_secs_f64() * 1000.0,
+        "the scan itself over {:.1} MiB of text: {:.1} MiB/s median of {rates:.1?}",
         total as f64 / (1024.0 * 1024.0),
-        (total as f64 / (1024.0 * 1024.0)) / spent.as_secs_f64()
+        rates[1]
     );
 }
 
@@ -948,4 +986,294 @@ fn no_output_ever_holds_a_full_secret() {
         "a read from disk returned the key: {read}"
     );
     assert!(read.contains("REDACTED"), "{read}");
+}
+
+/// Calibration (0.51.0): ten thousand forged values per shape, none read as a
+/// dummy. A dummy rule that a generator's output meets by chance is a live
+/// key indexed; this is the number that says how rarely. The ignored suite
+/// runs a hundred thousand per shape.
+fn no_forged_value_is_a_dummy(per_shape: usize) {
+    std::thread::scope(|scope| {
+        for (i, shape) in semlith::filter::SHAPES.iter().enumerate() {
+            scope.spawn(move || {
+                for _ in 0..per_shape {
+                    let value = semlith::keyscan::forge(i);
+                    let found = semlith::keyscan::scan("src/config.rs", &value);
+                    assert!(
+                        found.first().is_some_and(|m| m.dummy.is_none()),
+                        "{}: a forged value was read as a dummy or missed: {found:?}",
+                        shape.kind
+                    );
+                }
+            });
+        }
+    });
+}
+
+#[test]
+fn no_forged_value_of_any_shape_is_read_as_a_dummy() {
+    no_forged_value_is_a_dummy(10_000);
+}
+
+#[test]
+#[ignore = "a hundred thousand per shape takes minutes in a debug build"]
+fn no_forged_value_of_any_shape_is_read_as_a_dummy_at_scale() {
+    no_forged_value_is_a_dummy(100_000);
+}
+
+/// What the 0.51.0 audit found refused in real trees, each a file nobody's
+/// agent could search, now indexed. Built from parts where a whole literal
+/// would be token-shaped.
+#[test]
+fn the_audit_false_positives_stay_indexed() {
+    let ghp = live("GitHub token");
+    let bad_checksum = format!(
+        "{}{}",
+        &ghp[..ghp.len() - 1],
+        if ghp.ends_with('a') { 'b' } else { 'a' }
+    );
+    let random = random20();
+    for (what, path, text) in [
+        (
+            "a constant of lowercase words",
+            "proxy/auth.py",
+            r#"RETURN_URL_KEY = "litellm_mcp_oauth_return_url""#.to_string(),
+        ),
+        (
+            "a member path in Go",
+            "core/schemas.go",
+            "cohereReq.MaxTokensPerDoc = bifrostReq.Params.MaxTokensPerDoc\n".to_string(),
+        ),
+        (
+            "a token count",
+            "usage.py",
+            r#"reasoning_tokens = "completion_tokens_details.reasoning""#.to_string(),
+        ),
+        (
+            "a tokenizer setting",
+            "model.yaml",
+            "tokenizer_type: huggingface_tokenizer_v2\n".to_string(),
+        ),
+        (
+            "an author",
+            "pyproject.toml",
+            "author = \"Ada Lovelace <ada@example.org>\"\n".to_string(),
+        ),
+        (
+            "a token URL",
+            "oauth.py",
+            r#"token_url = "https://auth.example.org/oauth2/v1/token""#.to_string(),
+        ),
+        (
+            "a cache key",
+            "cache.py",
+            format!("cache_key = \"{random}\"\n"),
+        ),
+        (
+            "a storage key prefix",
+            "app.ts",
+            r#"const STORAGE_KEY_PREFIX = "app-settings-v2-";"#.to_string(),
+        ),
+        (
+            "prose in a doc comment",
+            "crypto.d.ts",
+            r#"password: "The password used to derive the key","#.to_string(),
+        ),
+        (
+            "jszip's alphabet",
+            "jszip.js",
+            r#"var _keyStr = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";"#
+                .to_string(),
+        ),
+        (
+            "a token that fails its checksum",
+            "tests/fixtures.rs",
+            format!("let t = \"{bad_checksum}\";\n"),
+        ),
+        (
+            "a key body of words",
+            "README.md",
+            "export OPENAI_API_KEY=sk-proj-your-openai-api-key-goes-right-here\n".to_string(),
+        ),
+        (
+            "a Slack token of words",
+            "docs/slack.md",
+            "SLACK_BOT_TOKEN=xoxb-my-bot-token\n".to_string(),
+        ),
+        (
+            "a sequential body",
+            "billing.py",
+            "STRIPE = \"sk_live_abcdefgh12345678\"\n".to_string(),
+        ),
+        (
+            "repeated blocks",
+            "notes.txt",
+            "npm_aaaaBBBBccccDDDDeeeeFFFFggggHHHH9753\n".to_string(),
+        ),
+        (
+            "a tagged line",
+            "client.py",
+            format!("api_key = \"{random}\"  # gitleaks:allow\n"),
+        ),
+        (
+            "a semlith-tagged line",
+            "client.ts",
+            format!("const apiKey = \"{random}\"; // semlith:allow\n"),
+        ),
+        (
+            "a test word in the value",
+            "config.yaml",
+            "api_key: fake-api-key-for-local-tests-0000\n".to_string(),
+        ),
+        (
+            "a placeholder connection string",
+            "docker-compose.yml",
+            "DATABASE_URL: postgres://app:${DB_PASSWORD}@db:5432/app\n".to_string(),
+        ),
+        (
+            "a connection string with a word password",
+            "docker-compose.yml",
+            "DATABASE_URL: postgres://postgres:postgres@localhost:5432/app\n".to_string(),
+        ),
+        (
+            "an unsigned JWT",
+            "auth.py",
+            "t = \"eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyMTIzNDUifQ.c2lnbmF0dXJlLWlnbm9yZWQ\"\n"
+                .to_string(),
+        ),
+        (
+            "a bearer placeholder",
+            "api.http",
+            "Authorization: Bearer YOUR_API_TOKEN_HERE\n".to_string(),
+        ),
+    ] {
+        let found = semlith::keyscan::scan(path, &text);
+        assert!(
+            !semlith::keyscan::refuses(&found),
+            "{what} ({path}) is refused: {found:?}"
+        );
+    }
+}
+
+/// Each new dummy rule says which it is, and the line a tag sits on is the
+/// only line it reaches.
+#[test]
+fn each_new_dummy_rule_names_itself_and_a_tag_reaches_only_its_line() {
+    let ghp = live("GitHub token");
+    let bad = format!(
+        "{}{}",
+        &ghp[..ghp.len() - 1],
+        if ghp.ends_with('a') { 'b' } else { 'a' }
+    );
+    let found = semlith::keyscan::scan("src/a.rs", &bad);
+    assert!(found[0].dummy.unwrap().starts_with("(d)"), "{found:?}");
+
+    let key = live("AWS");
+    let tagged = format!("id = \"{key}\" # pragma: allowlist secret\n");
+    let found = semlith::keyscan::scan("src/a.py", &tagged);
+    assert!(found[0].dummy.unwrap().starts_with("(e)"), "{found:?}");
+    for tag in ["trufflehog:ignore", "gitleaks:allow", "semlith:allow"] {
+        assert!(!semlith::keyscan::refuses(&semlith::keyscan::scan(
+            "a.py",
+            &format!("{key} # {tag}\n")
+        )));
+    }
+    // The tag on the line above is a neighbour's, not the key's.
+    let above = format!("# gitleaks:allow\nid = \"{key}\"\n");
+    assert!(semlith::keyscan::refuses(&semlith::keyscan::scan(
+        "src/a.py", &above
+    )));
+}
+
+/// The private key a Google service-account file holds, escaped in a JSON
+/// string, is refused; until 0.51.0 it was read as a bare header (c) and
+/// indexed. Also in a TypeScript string cut into joined pieces.
+#[test]
+fn a_private_key_inside_a_string_is_refused() {
+    let pem = live("private key");
+    let json = format!(
+        "{{\n  \"type\": \"service_account\",\n  \"private_key\": \"{}\"\n}}\n",
+        pem.replace('\n', "\\n")
+    );
+    let found = semlith::keyscan::scan("/work/svc-1234.json", &json);
+    assert!(semlith::keyscan::refuses(&found), "{found:?}");
+    assert_eq!(found[0].kind, "a private key block");
+    assert!(found[0].confidence >= 70, "{found:?}");
+
+    let ts = format!(
+        "const key =\n  \"{}\";\n",
+        pem.lines()
+            .map(|l| format!("{l}\\n"))
+            .collect::<Vec<_>>()
+            .join("\" +\n  \"")
+    );
+    let found = semlith::keyscan::scan("/work/app.ts", &ts);
+    assert!(semlith::keyscan::refuses(&found), "{found:?}");
+    assert!(found[0].confidence >= 70, "{found:?}");
+}
+
+/// An acceptance never loosens (0.51.0): a file accepted redacted keeps
+/// redacting the value its acceptance holds, when a later rule calls it a
+/// dummy and when a later rule no longer finds it at all.
+#[test]
+fn an_acceptance_never_loosens_under_new_rules() {
+    let store = tempfile::tempdir().unwrap();
+    let s = store_at(store.path());
+    semlith::store::read_only(s.db(), false).unwrap();
+    let salt = semlith::store::salt(s.db()).unwrap();
+    let random = random20();
+    // A lookup key: the 0.50.0 rule matched it, 0.51.0's does not.
+    let gone = format!("cache_key = \"{random}{random}\"\n");
+    // A token that fails its checksum: live-looking until 0.51.0, a dummy now.
+    let ghp = live("GitHub token");
+    let bad = format!(
+        "{}{}",
+        &ghp[..ghp.len() - 1],
+        if ghp.ends_with('a') { 'b' } else { 'a' }
+    );
+    let dummy = format!("t = \"{bad}\"\n");
+    for (path, text, value) in [
+        ("/work/gone.py", gone.clone(), format!("{random}{random}")),
+        ("/work/dummy.py", dummy.clone(), bad.clone()),
+    ] {
+        assert!(!semlith::keyscan::refuses(&semlith::keyscan::scan(
+            path, &text
+        )));
+        let at = text.find(&value).unwrap();
+        let held = semlith::keyscan::Match {
+            kind: String::new(),
+            provider: "generic",
+            label: "secret",
+            line: 1,
+            masked: String::new(),
+            dummy: None,
+            confidence: 0,
+            signals: Vec::new(),
+            range: at..at + value.len(),
+        };
+        semlith::store::accept(
+            s.db(),
+            &semlith::store::Acceptance {
+                path: path.to_string(),
+                class: semlith::store::class::CONTENT.to_string(),
+                mode: "redacted".to_string(),
+                fingerprints: vec![semlith::keyscan::fingerprint(&salt, &text, &held)],
+                confidence: None,
+                at: 0,
+                source: "test".to_string(),
+            },
+        )
+        .unwrap();
+        let found = semlith::keyscan::scan(path, &text);
+        match semlith::keyscan::decide(s.db(), path, &text, &found).unwrap() {
+            semlith::keyscan::Decision::Index { text: kept, .. } => {
+                assert!(
+                    !kept.contains(&value),
+                    "{path}: the accepted value came back: {kept}"
+                );
+                assert!(kept.contains("[REDACTED:"), "{kept}");
+            }
+            other => panic!("{path}: {other:?}"),
+        }
+    }
 }

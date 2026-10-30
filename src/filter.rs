@@ -1132,25 +1132,41 @@ pub const SHAPES: &[Shape] = &[
         provider: "anthropic",
         label: "api key",
         prefix_len: 7,
-        pattern: r"\bsk-ant-[A-Za-z0-9_-]{24,}",
+        pattern: r"(?-u:\b)sk-ant-[A-Za-z0-9_-]{24,}",
         example: "sk-ant-api03-EXAMPLEEXAMPLEEXAMPLEEXAMPLE",
         near_miss: "sk-ant-short",
+    },
+    // OpenRouter before OpenAI too: `sk-or-v1-` is an `sk-`. 64 hex after the
+    // prefix (trufflehog's openrouter detector).
+    Shape {
+        kind: "an OpenRouter API key",
+        provider: "openrouter",
+        label: "api key",
+        prefix_len: 9,
+        pattern: r"(?-u:\b)sk-or-v1-[0-9a-f]{64}(?-u:\b)",
+        example: concat!(
+            "sk-",
+            "or-v1-0000000000000000000000000000000000000000000000000000000000000000"
+        ),
+        near_miss: "sk-or-v1-0123abcd",
     },
     Shape {
         kind: "an OpenAI API key",
         provider: "openai",
         label: "api key",
         prefix_len: 3,
-        pattern: r"\bsk-[A-Za-z0-9_-]{32,}",
+        pattern: r"(?-u:\b)sk-[A-Za-z0-9_-]{32,}",
         example: "sk-proj-EXAMPLEEXAMPLEEXAMPLEEXAMPLE1234",
         near_miss: "sk-tooshort",
     },
+    // Base32 after the prefix, as AWS issues them and gitleaks' aws-access-token
+    // rule reads them: a 0, 1, 8 or 9 is a hand-made fixture (0.51.0).
     Shape {
         kind: "an AWS access key id",
         provider: "aws",
         label: "access key id",
         prefix_len: 4,
-        pattern: r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
+        pattern: r"(?-u:\b)(?:AKIA|ASIA)[A-Z2-7]{16}(?-u:\b)",
         example: concat!("AKIAIOSFODNN7", "EXAMPLE"),
         near_miss: "AKIAIOSFODNN7EXAMPL",
     },
@@ -1159,7 +1175,7 @@ pub const SHAPES: &[Shape] = &[
         provider: "github",
         label: "token",
         prefix_len: 4,
-        pattern: r"\bgh[pousr]_[A-Za-z0-9]{36}\b",
+        pattern: r"(?-u:\b)gh[pousr]_[A-Za-z0-9]{36}(?-u:\b)",
         example: "ghp_EXAMPLEaaaaBBBBccccDDDDeeeeFFFF12345",
         near_miss: "ghp_tooshortforatoken",
     },
@@ -1168,7 +1184,7 @@ pub const SHAPES: &[Shape] = &[
         provider: "github",
         label: "fine-grained token",
         prefix_len: 11,
-        pattern: r"\bgithub_pat_[A-Za-z0-9_]{40,}",
+        pattern: r"(?-u:\b)github_pat_[A-Za-z0-9_]{40,}",
         example: "github_pat_11EXAMPLE0aaaaaaaaaaaa_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         near_miss: "github_pat_11AAAAAAA0",
     },
@@ -1177,7 +1193,7 @@ pub const SHAPES: &[Shape] = &[
         provider: "slack",
         label: "token",
         prefix_len: 5,
-        pattern: r"\bxox[abprs]-[0-9A-Za-z-]{12,}",
+        pattern: r"(?-u:\b)xox[abprs]-[0-9A-Za-z-]{12,}",
         example: concat!(
             "xox",
             "b-123456789012-1234567890123-EXAMPLEaaaaaaaaaaaaaaaaa"
@@ -1195,7 +1211,7 @@ pub const SHAPES: &[Shape] = &[
         provider: "stripe",
         label: "key",
         prefix_len: 8,
-        pattern: r"\b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}",
+        pattern: r"(?-u:\b)[sr]k_(?:live|test)_[0-9A-Za-z]{16,}",
         example: "sk_live_EXAMPLEaaaaBBBB1234",
         near_miss: "sk_live_tooshort",
     },
@@ -1204,7 +1220,7 @@ pub const SHAPES: &[Shape] = &[
         provider: "google",
         label: "api key",
         prefix_len: 4,
-        pattern: r"\bAIza[0-9A-Za-z_-]{35}\b",
+        pattern: r"(?-u:\b)AIza[0-9A-Za-z_-]{35}(?-u:\b)",
         example: concat!("AIza", "SyEXAMPLEaaaaaaaaaaaaaaaaaaaaaaaaaa"),
         near_miss: "AIzaSyA0aaaaaaaaaaaa",
     },
@@ -1213,7 +1229,7 @@ pub const SHAPES: &[Shape] = &[
         provider: "twilio",
         label: "api key",
         prefix_len: 2,
-        pattern: r"\bSK[0-9a-fA-F]{32}\b",
+        pattern: r"(?-u:\b)SK[0-9a-fA-F]{32}(?-u:\b)",
         example: concat!("SK", "00000000000000000000000000000000"),
         near_miss: "SK0123456789abcdef",
     },
@@ -1222,7 +1238,7 @@ pub const SHAPES: &[Shape] = &[
         provider: "sendgrid",
         label: "api key",
         prefix_len: 3,
-        pattern: r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}",
+        pattern: r"(?-u:\b)SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}",
         example: "SG.EXAMPLEaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         near_miss: "SG.aaaa.bbbb",
     },
@@ -1231,7 +1247,7 @@ pub const SHAPES: &[Shape] = &[
         provider: "npm",
         label: "token",
         prefix_len: 4,
-        pattern: r"\bnpm_[A-Za-z0-9]{36}\b",
+        pattern: r"(?-u:\b)npm_[A-Za-z0-9]{36}(?-u:\b)",
         example: "npm_EXAMPLEaaaaBBBBccccDDDDeeeeFFFF12345",
         near_miss: "npm_install",
     },
@@ -1240,27 +1256,306 @@ pub const SHAPES: &[Shape] = &[
         provider: "semlith",
         label: "agent key",
         prefix_len: 4,
-        pattern: r"\bsml_[0-9a-f]{64}\b",
+        pattern: r"(?-u:\b)sml_[0-9a-f]{64}(?-u:\b)",
         example: "sml_0000000000000000000000000000000000000000000000000000000000000000",
         near_miss: "sml_0123456789abcdef",
     },
+    // 0.51.0's named formats. Each length and alphabet is the one gitleaks
+    // 8.30.1's rule of the same name uses (config/gitleaks.toml at 5f6ec56),
+    // or trufflehog's detector at 421026a where gitleaks has none.
+    // gitleaks huggingface-access-token: 34 letters.
+    Shape {
+        kind: "a Hugging Face token",
+        provider: "huggingface",
+        label: "token",
+        prefix_len: 3,
+        pattern: r"(?-u:\b)hf_[A-Za-z]{34}(?-u:\b)",
+        example: concat!("hf_", "EXAMPLEaaaaBBBBccccDDDDeeeeFFFFggg"),
+        near_miss: "hf_hub_download",
+    },
+    // gitleaks gitlab-pat, gitlab-pat-routable, gitlab-oauth-app-secret,
+    // gitlab-ptt.
+    Shape {
+        kind: "a GitLab token",
+        provider: "gitlab",
+        label: "token",
+        prefix_len: 6,
+        pattern: r"(?-u:\b)(?:glpat-[A-Za-z0-9_-]{20,}(?:\.[0-9a-z]{9})?|gloas-[A-Za-z0-9_-]{64}|glptt-[0-9a-f]{40}(?-u:\b))",
+        example: concat!("glp", "at-EXAMPLEaaaaBBBBccccDDDDe"),
+        near_miss: "glpat-short",
+    },
+    // gitleaks vault-service-token (hvs., 90 or more) and vault-batch-token
+    // (hvb., 138 or more); recovery tokens (hvr.) share the alphabet.
+    Shape {
+        kind: "a HashiCorp Vault token",
+        provider: "vault",
+        label: "token",
+        prefix_len: 4,
+        pattern: r"(?-u:\b)hv[sbr]\.[A-Za-z0-9_-]{24,}",
+        example: concat!("hvs", ".EXAMPLEaaaaBBBBccccDDDDeeee"),
+        near_miss: "hvs.short",
+    },
+    // trufflehog groq: 52 alphanumerics.
+    Shape {
+        kind: "a Groq API key",
+        provider: "groq",
+        label: "api key",
+        prefix_len: 4,
+        pattern: r"(?-u:\b)gsk_[A-Za-z0-9]{52}(?-u:\b)",
+        example: concat!(
+            "gsk",
+            "_EXAMPLEaaaaBBBBccccDDDDeeeeFFFFggggHHHHiiiiJJJJkkkkL"
+        ),
+        near_miss: "gsk_short",
+    },
+    // gitleaks perplexity-api-key: 48 alphanumerics.
+    Shape {
+        kind: "a Perplexity API key",
+        provider: "perplexity",
+        label: "api key",
+        prefix_len: 5,
+        pattern: r"(?-u:\b)pplx-[A-Za-z0-9]{48}(?-u:\b)",
+        example: concat!("ppl", "x-EXAMPLEaaaaBBBBccccDDDDeeeeFFFFggggHHHHiiiiJJJJk"),
+        near_miss: "pplx-short",
+    },
+    // trufflehog replicate: 37 of [A-Za-z0-9_-]. No closing `(?-u:\b)`: a body
+    // that ends on `-` would fail it and the key would go unseen.
+    Shape {
+        kind: "a Replicate API token",
+        provider: "replicate",
+        label: "api token",
+        prefix_len: 3,
+        pattern: r"(?-u:\b)r8_[A-Za-z0-9_-]{37}",
+        example: concat!("r8_", "EXAMPLEaaaaBBBBccccDDDDeeeeFFFFggggHH"),
+        near_miss: "r8_short",
+    },
+    // trufflehog xai: 80 of [A-Za-z0-9_].
+    Shape {
+        kind: "an xAI API key",
+        provider: "xai",
+        label: "api key",
+        prefix_len: 4,
+        pattern: r"(?-u:\b)xai-[A-Za-z0-9_]{80}(?-u:\b)",
+        example: concat!(
+            "xai",
+            "-EXAMPLEaaaaBBBBccccDDDDeeeeFFFFggggHHHHiiiiJJJJkkkkLLLLmmmmNNNNooooPPPPqqqqRRRRs"
+        ),
+        near_miss: "xai-short",
+    },
+    // trufflehog langsmith: 32 hex, underscore, 10 hex.
+    Shape {
+        kind: "a LangSmith API key",
+        provider: "langsmith",
+        label: "api key",
+        prefix_len: 8,
+        pattern: r"(?-u:\b)lsv2_(?:pt|sk)_[0-9a-f]{32}_[0-9a-f]{10}(?-u:\b)",
+        example: concat!("lsv", "2_pt_00000000000000000000000000000000_0000000000"),
+        near_miss: "lsv2_pt_0123",
+    },
+    // trufflehog pinecone: a 5 or 6 character key id, then 63.
+    Shape {
+        kind: "a Pinecone API key",
+        provider: "pinecone",
+        label: "api key",
+        prefix_len: 5,
+        pattern: r"(?-u:\b)pcsk_[A-Za-z0-9]{5,6}_[A-Za-z0-9]{63}(?-u:\b)",
+        example: concat!(
+            "pcs",
+            "k_EXAMP_EXAMPLEaaaaBBBBccccDDDDeeeeFFFFggggHHHHiiiiJJJJkkkkLLLLmmmmNNNN"
+        ),
+        near_miss: "pcsk_short",
+    },
+    // gitleaks digitalocean-pat, -access-token, -refresh-token: 64 hex.
+    Shape {
+        kind: "a DigitalOcean token",
+        provider: "digitalocean",
+        label: "token",
+        prefix_len: 7,
+        pattern: r"(?-u:\b)do[por]_v1_[0-9a-f]{64}(?-u:\b)",
+        example: concat!(
+            "dop",
+            "_v1_0000000000000000000000000000000000000000000000000000000000000000"
+        ),
+        near_miss: "dop_v1_0123",
+    },
+    // gitleaks databricks-api-token: 32 hex, an optional `-<digit>`.
+    Shape {
+        kind: "a Databricks token",
+        provider: "databricks",
+        label: "token",
+        prefix_len: 4,
+        pattern: r"(?-u:\b)dapi[0-9a-f]{32}(?:-\d)?(?-u:\b)",
+        example: concat!("dap", "i00000000000000000000000000000000"),
+        near_miss: "dapi0123",
+    },
+    // gitleaks pypi-upload-token: the fixed macaroon header, then 50 or more.
+    Shape {
+        kind: "a PyPI upload token",
+        provider: "pypi",
+        label: "upload token",
+        prefix_len: 20,
+        pattern: r"(?-u:\b)pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}",
+        example: concat!(
+            "pyp",
+            "i-AgEIcHlwaS5vcmcEXAMPLEaaaaBBBBccccDDDDeeeeFFFFggggHHHHiiiiJJJJkkkkLLLLm"
+        ),
+        near_miss: "pypi-AgEIcHlwaS5vcmcshort",
+    },
+    // gitleaks shopify-*-access-token and shopify-shared-secret: 32 hex.
+    Shape {
+        kind: "a Shopify token",
+        provider: "shopify",
+        label: "token",
+        prefix_len: 6,
+        pattern: r"(?-u:\b)shp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}(?-u:\b)",
+        example: concat!("shp", "at_00000000000000000000000000000000"),
+        near_miss: "shpat_0123",
+    },
+    // gitleaks linear-api-key: 40 alphanumerics.
+    Shape {
+        kind: "a Linear API key",
+        provider: "linear",
+        label: "api key",
+        prefix_len: 8,
+        pattern: r"(?-u:\b)lin_api_[A-Za-z0-9]{40}(?-u:\b)",
+        example: concat!("lin", "_api_EXAMPLEaaaaBBBBccccDDDDeeeeFFFFggggHHHHi"),
+        near_miss: "lin_api_short",
+    },
+    // gitleaks doppler-api-token: 43 alphanumerics.
+    Shape {
+        kind: "a Doppler token",
+        provider: "doppler",
+        label: "token",
+        prefix_len: 6,
+        pattern: r"(?-u:\b)dp\.pt\.[A-Za-z0-9]{43}(?-u:\b)",
+        example: concat!("dp.", "pt.EXAMPLEaaaaBBBBccccDDDDeeeeFFFFggggHHHHiiii"),
+        near_miss: "dp.pt.short",
+    },
+    // gitleaks azure-ad-client-secret: three, a digit, `Q~`, 31 to 34. The
+    // secret is the group; the characters around it only bound it.
+    Shape {
+        kind: "an Azure AD client secret",
+        provider: "azure",
+        label: "client secret",
+        prefix_len: 0,
+        pattern: r#"(?m)(?:^|[\\'"`\s>=:(,)])([a-zA-Z0-9_~.]{3}\dQ~[a-zA-Z0-9_~.-]{31,34})(?:$|[\\'"`\s<),])"#,
+        example: concat!("sec", "ret: abc8Q~EXAMPLEaaaaBBBBccccDDDDeeeeFFFFg\n"),
+        near_miss: "abc8Q~short",
+    },
+    // trufflehog slackwebhook and gitleaks slack-webhook-url.
+    Shape {
+        kind: "a Slack webhook URL",
+        provider: "slack",
+        label: "webhook",
+        prefix_len: 0,
+        pattern: r"https://hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}",
+        example: concat!(
+            "https://hooks.slack.com/",
+            "services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+        ),
+        near_miss: "https://hooks.slack.com/services/",
+    },
+    // trufflehog discordwebhook: an 17-20 digit id and a 68 character token.
+    Shape {
+        kind: "a Discord webhook URL",
+        provider: "discord",
+        label: "webhook",
+        prefix_len: 0,
+        pattern: r"https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/webhooks/[0-9]{17,20}/[A-Za-z0-9_-]{60,}",
+        example: concat!(
+            "https://discord.com/api/webhooks/",
+            "100000000000000000/EXAMPLEaaaaBBBBccccDDDDeeeeFFFFggggHHHHiiiiJJJJkkkkLLLLmmmmNNNNoooo"
+        ),
+        near_miss: "https://discord.com/api/webhooks/123/abc",
+    },
+    // trufflehog discordbottoken: 24.6.27-38 of base64url. No prefix, so the
+    // scan also checks the first part decodes to a user id (17 to 20 digits),
+    // which is what a bot token starts with; anything else is not one. Base64
+    // of a number opens on one of nine pairs, which the pattern spells so the
+    // regex engine can skip to them.
+    Shape {
+        kind: "a Discord bot token",
+        provider: "discord",
+        label: "bot token",
+        prefix_len: 0,
+        pattern: r"(?-u:\b)(?:M[TDjz]|N[DTjz]|O[DT])[A-Za-z0-9_-]{22,24}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,38}",
+        example: concat!(
+            "MTA",
+            "wMDAwMDAwMDAwMDAwMDAw.EXAMPL.EXAMPLEaaaaBBBBccccDDDDeeeeF"
+        ),
+        near_miss: "MTAwMDAwMDAwMDAwMDAwMDAw.short",
+    },
+    // `BLOCK` for PGP's armour, `-----BEGIN PGP PRIVATE KEY BLOCK-----`.
     Shape {
         kind: "a private key block",
         provider: "pem",
         label: "private key",
         prefix_len: 0,
-        pattern: r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----",
+        pattern: r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY(?: BLOCK)?-----",
         example: "-----BEGIN RSA PRIVATE KEY-----",
         near_miss: "-----BEGIN CERTIFICATE-----",
+    },
+    // A PEM block base64-encoded, as a Kubernetes Secret or an environment
+    // variable holds one: `LS0tLS1CRUdJTi` is `-----BEGIN`. The scan decodes
+    // it and keeps only a private key; an encoded certificate is not one.
+    Shape {
+        kind: "a base64-encoded private key",
+        provider: "pem",
+        label: "encoded private key",
+        prefix_len: 0,
+        pattern: r"(?-u:\b)LS0tLS1CRUdJTi[A-Za-z0-9+/]{20,}={0,2}",
+        example: concat!(
+            "LS0",
+            "tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLQo="
+        ),
+        near_miss: "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUJzekNDQVZtZ0F3SUJBZ0lVCi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K",
+    },
+    // PuTTY's own format, through its base64 private lines, its line breaks
+    // real or escaped as a string escapes them.
+    Shape {
+        kind: "a PuTTY private key",
+        provider: "pem",
+        label: "putty key",
+        prefix_len: 0,
+        pattern: r"PuTTY-User-Key-File-[23]: [^\r\n\\]*(?:(?:\r?\n|\\r\\n|\\n)[^\r\n\\]*){0,8}?(?:\r?\n|\\r\\n|\\n)Private-Lines: \d+(?:(?:\r?\n|\\r\\n|\\n)[A-Za-z0-9+/=]+)+",
+        example: concat!(
+            "PuT",
+            "TY-User-Key-File-3: ssh-rsa\nEncryption: none\nPrivate-Lines: 1\nAAAA"
+        ),
+        near_miss: "PuTTY-User-Key-File-3: ssh-rsa",
     },
     Shape {
         kind: "a JSON web token",
         provider: "jwt",
         label: "token",
         prefix_len: 3,
-        pattern: r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+        pattern: r"(?-u:\b)eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.(?:[A-Za-z0-9_-]{10,})?",
         example: "eyJFAKEaaaaaaaaaa.eyJFAKEbbbbbbbbbb.FAKEcccccccccccc",
         near_miss: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0",
+    },
+    // The two below are judged on their secret part only, which is the
+    // capture group and all a match or a redaction covers. Last, so a token
+    // with a prefix of its own inside them is named by its own row.
+    // gitleaks has no rule for these; the scheme list is the one the contract
+    // names. The password is judged as the generic rule judges a value.
+    Shape {
+        kind: "a connection string with a password",
+        provider: "connection",
+        label: "password",
+        prefix_len: 0,
+        pattern: r#"(?-u:\b)(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?|mssql|sqlserver)://[^\s:/@'"`]*:([^\s@'"`/]+)@"#,
+        example: concat!("pos", "tgres://app:EXAMPLE0password0EXAMPLE@localhost/app"),
+        near_miss: "postgres://app@localhost/app",
+    },
+    // gitleaks curl-auth-header covers curl only; this is any header line.
+    Shape {
+        kind: "a token in an Authorization header",
+        provider: "header",
+        label: "authorization",
+        prefix_len: 0,
+        pattern: r#"(?i-u:\bauthorization)["']?[ \t]*[:=][ \t]*["']?(?i-u:bearer|token|basic)[ \t]+([A-Za-z0-9._~+/=-]{12,})"#,
+        example: concat!("Aut", "horization: Bearer EXAMPLE0token0EXAMPLE"),
+        near_miss: "Authorization: Bearer ${TOKEN}",
     },
 ];
 
@@ -1276,15 +1571,22 @@ pub const SHAPES: &[Shape] = &[
 /// name alone catches `password = "hunter2"`, which is not a credential worth
 /// refusing a file for; the entropy alone catches every base64 fixture and
 /// every lockfile hash in the corpus. Both together is the rule.
-pub(crate) const ASSIGNMENT: &str = r#"(?i)[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|auth|[_-]key)[a-z0-9_-]*[ \t]*[:=][ \t]*["']([^"'\r\n]{20,})["']"#;
+///
+/// From 0.51.0 the pattern only finds candidates: group 1 is the name and
+/// group 2 the value, and `keyscan` reads the name as words and the value by
+/// its shape. The substring list here is wider than the words that count, so
+/// `tokens` and `author` reach the word test and fail it there. A name may be
+/// quoted (`"api_key": "…"`) and the operator may be `:=` or `=>`.
+pub(crate) const ASSIGNMENT: &str = r#"(?i-u:([a-z0-9_.-]*(?:key|secret|token|passw|passphrase|pwd|auth|cred|pat\b|bearer)[a-z0-9_.-]*))["']?[ \t]*(?::=|=>|[:=])[ \t]*["']([^"'\r\n]{12,})["']"#;
 
 /// The same rule for a value written without quotes, as a `.env`, a shell
-/// `export` or a YAML file writes one (0.30.0, 2.2).
+/// `export`, a YAML file or a compose list writes one (0.30.0, 2.2).
 ///
-/// Anchored to a whole line and to a value made only of the characters a key
-/// is made of, so `let token = compute_token(input);` — a key-like name
-/// assigned code — is not a match: the parentheses end the value.
-pub(crate) const ENV_ASSIGNMENT: &str = r#"(?im)^[ \t]*(?:export[ \t]+)?[a-z0-9_.-]*(?:api[_-]?key|secret|token|password|passwd|auth|[_-]key)[a-z0-9_.-]*[ \t]*[:=][ \t]*([A-Za-z0-9+/=_.-]{20,})[ \t]*\r?$"#;
+/// Anchored to a whole line, a trailing `# comment` aside, so
+/// `let token = compute_token(input);` is not a match. From 0.51.0 it does
+/// not run on code at all (`keyscan::unquoted_applies`), and the value may
+/// hold any character but whitespace and quotes, as a password does.
+pub(crate) const ENV_ASSIGNMENT: &str = r#"(?m)^[ \t]*(?i-u:(?:export[ \t]+|-[ \t]+)?([a-z0-9_.-]*(?:key|secret|token|passw|passphrase|pwd|auth|cred|pat\b|bearer)[a-z0-9_.-]*))[ \t]*[:=][ \t]*([^\s"'`]{12,})(?:[ \t]+#[^\r\n]*)?[ \t]*\r?$"#;
 
 /// How much entropy a generic literal needs before it reads as a credential.
 ///

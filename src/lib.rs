@@ -1594,8 +1594,9 @@ struct CacheWrites {
 /// The version of the scan rules a store was last swept under. A store below
 /// it has every unchanged file scanned again on its next full pass: 0.30.0's
 /// dummy rules (2.1) let some files in, and its no-prefix rule (2.2) keeps
-/// some out, and neither shows up in a content hash.
-const SCAN_RULES: u32 = 2;
+/// some out, and neither shows up in a content hash. 3 is 0.51.0's: the
+/// generic rule read as words and value shape, new formats, new dummy rules.
+const SCAN_RULES: u32 = 3;
 
 /// The version of the graph extraction a store was last swept under. A store
 /// below it has every unchanged file's symbols and edges extracted again on its
@@ -5679,11 +5680,19 @@ impl Semlith {
                 });
                 continue;
             }
-            if let Some(found) = filter::scan_text(&store::text_of(&self.db, &key)?) {
-                out.push(Finding {
-                    path: key,
-                    why: found.reason(),
-                });
+            // The file's own path, as an index run passes it: the unquoted
+            // generic rule does not run on code.
+            let text = store::text_of(&self.db, &key)?;
+            if let Some(m) = keyscan::scan(&key, &text)
+                .into_iter()
+                .find(|m| m.dummy.is_none())
+            {
+                let why = filter::Found {
+                    kind: m.kind,
+                    line: m.line,
+                }
+                .reason();
+                out.push(Finding { path: key, why });
             }
         }
         Ok(out)

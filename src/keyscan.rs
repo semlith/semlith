@@ -68,17 +68,64 @@ impl Match {
 
 /// Values published as documentation examples, which are dummies wherever
 /// they are written. Split so this file does not hold a contiguous match.
-const DOC_EXAMPLES: [&str; 2] = [
+const DOC_EXAMPLES: [&str; 4] = [
     concat!("AKIAIOSFODNN7", "EXAMPLE"),
     concat!("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY"),
+    // The signature of RFC 7515's example JWS (A.1) and of jwt.io's sample
+    // token, copied into a great many tests and docs.
+    concat!("dBjftJeZ4CVP-mB92K27uhb", "UJU1p1r_wW1gFWFOEjXk"),
+    concat!("SflKxwRJSMeKKF2QT4fwpM", "eJf36POk6yJV_adQssw5c"),
 ];
 
 /// Words that mark a value as standing in for a key rather than being one.
-const MARKERS: [&str; 5] = ["EXAMPLE", "FAKE", "DUMMY", "PLACEHOLDER", "REDACTED"];
+const MARKERS: [&str; 11] = [
+    "EXAMPLE",
+    "TEST",
+    "FAKE",
+    "DUMMY",
+    "PLACEHOLDER",
+    "REDACTED",
+    "MASKED",
+    "SAMPLE",
+    "INVALID",
+    "NOTREAL",
+    "TESTING",
+];
+
+/// Whole segments of a generic value that say it stands in for one (0.51.0).
+/// A segment is what lies between `-`, `_`, `.` and whitespace, never `/` or
+/// `+`: those are base64, and a key path or body holding `/test/` by chance
+/// is still a key (one of the audit's drafts lost exactly that).
+const TEST_WORDS: [&str; 13] = [
+    "test",
+    "fake",
+    "mock",
+    "dummy",
+    "sample",
+    "example",
+    "placeholder",
+    "changeme",
+    "your",
+    "invalid",
+    "notreal",
+    "redacted",
+    "xxx",
+];
+
+/// What a line says to mark its match as allowed, for every tool a repository
+/// may already be tagged for (0.51.0, rule (e)).
+const ALLOW_TAGS: [&str; 4] = [
+    "semlith:allow",
+    "gitleaks:allow",
+    "pragma: allowlist secret",
+    "trufflehog:ignore",
+];
 
 /// Every secret-shaped match in `text`, in the order they appear.
 ///
-/// `path` is used only for the location signal, and may be empty.
+/// `path` is used for the location signal and to decide whether the unquoted
+/// form of the generic rule applies (it does not in code); it may be empty,
+/// which reads as a file of unknown kind and applies every rule.
 pub fn scan(path: &str, text: &str) -> Vec<Match> {
     let (each, assignment, env) = filter::shapes();
     let mut found: Vec<Match> = Vec::new();
@@ -95,34 +142,68 @@ pub fn scan(path: &str, text: &str) -> Vec<Match> {
             .is_some_and(|(_, end)| *end > at.start)
     };
     for (index, regex) in each.iter().enumerate() {
-        for m in regex.find_iter(text) {
-            let mut range = m.range();
+        let shape = &SHAPES[index];
+        // The one row with no literal for the regex engine to skip to; its
+        // `Q~` is required, and a text without one is most texts.
+        if shape.provider == "azure" && !text.contains("Q~") {
+            continue;
+        }
+        // A row with a group names only its secret part: the password of a
+        // connection string, the token of a header.
+        let ranges: Vec<std::ops::Range<usize>> = if regex.captures_len() > 1 {
+            regex
+                .captures_iter(text)
+                .filter_map(|c| c.get(1))
+                .map(|m| m.range())
+                .collect()
+        } else {
+            regex.find_iter(text).map(|m| m.range()).collect()
+        };
+        for mut range in ranges {
             // Table order decides a match two rows both claim: `sk-ant-` is an
             // `sk-` too, and the Anthropic row comes first.
             if overlaps(&taken, &range) {
                 continue;
             }
-            let shape = &SHAPES[index];
-            if shape.provider == "pem" {
+            if shape.provider == "pem" && shape.label == "private key" {
                 range = pem_block(text, range);
             }
-            taken.insert(range.start, range.end);
-            found.push(judge(path, text, index, range));
+            let Some(m) = judge(path, text, index, range) else {
+                continue;
+            };
+            taken.insert(m.range.start, m.range.end);
+            found.push(m);
         }
     }
-    for rule in [assignment, env] {
+    let unquoted = unquoted_applies(path);
+    for (rule, quoted) in [(assignment, true), (env, false)] {
+        if !quoted && !unquoted {
+            continue;
+        }
         for caps in rule.captures_iter(text) {
-            let Some(value) = caps.get(1) else { continue };
+            let (Some(name), Some(value)) = (caps.get(1), caps.get(2)) else {
+                continue;
+            };
+            let Some(named) = credential_name(name.as_str()) else {
+                continue;
+            };
             let raw = value.as_str();
-            if filter::is_placeholder(raw) || filter::entropy(raw) < filter::MIN_ENTROPY {
+            // Twenty characters, as before 0.51.0; twelve for a password.
+            if (!named.password && raw.chars().count() < 20)
+                || filter::is_placeholder(raw)
+                || filter::entropy(raw) < filter::MIN_ENTROPY
+            {
                 continue;
             }
+            let Some(shape) = value_shape(raw, named.password) else {
+                continue;
+            };
             let range = value.range();
             if overlaps(&taken, &range) {
                 continue;
             }
             taken.insert(range.start, range.end);
-            found.push(judge_assignment(path, text, range));
+            found.push(judge_assignment(path, text, range, &named, shape));
         }
     }
     found.sort_by_key(|m| m.range.start);
@@ -186,7 +267,10 @@ pub fn redact(text: &str, matches: &[Match]) -> String {
 /// instead of the value. Keyed blake3, so the store never holds anything a
 /// value could be recovered or confirmed from without the salt beside it.
 pub fn fingerprint(salt: &[u8; 32], text: &str, m: &Match) -> String {
-    let value = &text[m.range.clone()];
+    print(salt, &text[m.range.clone()])
+}
+
+fn print(salt: &[u8; 32], value: &str) -> String {
     blake3::keyed_hash(salt, value.as_bytes()).to_hex()[..32].to_string()
 }
 
@@ -218,11 +302,15 @@ pub fn assess(
     let first = live.first().copied().or_else(|| matches.first());
     let kind_of = |m: &serde_json::Value| match text(m, "provider").as_str() {
         "pem" => "Private key",
-        "aws" | "google" => "Cloud key",
-        "anthropic" | "openai" | "twilio" | "sendgrid" | "stripe" => "API key",
-        "github" | "slack" | "npm" | "semlith" => "Access token",
-        "jwt" => "Token",
-        _ if text(m, "kind").contains("connection") => "Connection string",
+        _ if text(m, "label") == "webhook" => "Webhook URL",
+        "aws" | "google" | "azure" => "Cloud key",
+        "anthropic" | "openai" | "twilio" | "sendgrid" | "stripe" | "openrouter"
+        | "huggingface" | "groq" | "perplexity" | "replicate" | "xai" | "langsmith"
+        | "pinecone" | "linear" => "API key",
+        "github" | "slack" | "npm" | "semlith" | "gitlab" | "vault" | "digitalocean"
+        | "databricks" | "pypi" | "shopify" | "doppler" | "discord" => "Access token",
+        "jwt" | "header" => "Token",
+        "connection" => "Connection string",
         _ if text(m, "kind").contains("password") => "Password",
         _ => "Secret",
     };
@@ -311,29 +399,53 @@ pub fn assess(
             } else {
                 "likely a test value".to_string()
             };
-            let up: Vec<String> = m
+            // The strongest signal each way, in its own words, so a person
+            // sees why it is 35 and not 80: what lowered it, then what raised
+            // it. Strength is the order the scan weighs them in.
+            let signals = m
                 .get("signals")
                 .and_then(serde_json::Value::as_array)
-                .map(|s| {
-                    s.iter()
-                        .filter(|s| {
-                            s.get("effect").and_then(serde_json::Value::as_str) == Some("up")
-                        })
-                        .filter_map(|s| s.get("name").and_then(serde_json::Value::as_str))
-                        .map(str::to_string)
-                        .collect()
-                })
+                .cloned()
                 .unwrap_or_default();
+            let strongest = |effect: &str, order: &[&str]| {
+                order.iter().find_map(|name| {
+                    signals.iter().find_map(|s| {
+                        (s.get("effect").and_then(serde_json::Value::as_str) == Some(effect)
+                            && s.get("name").and_then(serde_json::Value::as_str) == Some(name))
+                        .then(|| text(s, "detail"))
+                    })
+                })
+            };
+            let reasons: Vec<String> = [
+                strongest(
+                    "down",
+                    &[
+                        "dummy",
+                        "checksum",
+                        "expiry",
+                        "location",
+                        "format",
+                        "randomness",
+                    ],
+                ),
+                strongest(
+                    "up",
+                    &["checksum", "companion", "format", "randomness", "location"],
+                ),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
             let why = format!(
-                "Looks like {} at line {} ({top} % likely real{}).",
+                "Looks like {} at line {}{}: {top} % likely real.",
                 text(m, "kind"),
                 m.get("line")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0),
-                if up.is_empty() {
+                if reasons.is_empty() {
                     String::new()
                 } else {
-                    format!(": {}", up.join(", "))
+                    format!(": {}", reasons.join("; "))
                 }
             );
             let suggest = if top >= 70 {
@@ -389,6 +501,11 @@ pub enum Decision {
 /// mode they chose, with redaction applied again to the text as it is now. A
 /// new match since the acceptance refuses it again, whatever the acceptance
 /// said: an edit never lets a new secret through.
+///
+/// An acceptance never loosens (0.51.0). A file accepted redacted keeps every
+/// value its acceptance holds a fingerprint of redacted, even one later rules
+/// call a dummy or no longer find at all: the person chose redaction for what
+/// they saw, and a rule change is not their choice.
 pub fn decide(
     db: &rusqlite::Connection,
     path: &str,
@@ -402,13 +519,15 @@ pub fn decide(
         ));
     }
     let live: Vec<&Match> = found.iter().filter(|m| m.dummy.is_none()).collect();
-    let Some(first) = live.first() else {
+    let acceptance = accepted.filter(|a| a.class == crate::store::class::CONTENT);
+    if live.is_empty() && acceptance.as_ref().is_none_or(|a| a.mode != "redacted") {
         return Ok(Decision::Index {
             text: text.to_string(),
             accepted: false,
         });
-    };
-    let Some(acceptance) = accepted.filter(|a| a.class == crate::store::class::CONTENT) else {
+    }
+    let Some(acceptance) = acceptance else {
+        let first = live[0];
         return Ok(Decision::Refuse(format!(
             "holds what looks like {} at line {} — semlith does not index it",
             first.kind, first.line
@@ -432,15 +551,70 @@ pub fn decide(
             new.line, new.kind
         )));
     }
-    let owned: Vec<Match> = live.into_iter().cloned().collect();
     Ok(Decision::Index {
         text: if acceptance.mode == "redacted" {
-            redact(text, &owned)
+            redact(text, &held(&salt, text, found, &acceptance.fingerprints))
         } else {
             text.to_string()
         },
         accepted: true,
     })
+}
+
+/// Every value in `text` an acceptance holds a fingerprint of: today's
+/// matches, dummies among them, and what the 0.50.0 generic rule matched,
+/// which a later rule may no longer name.
+fn held(salt: &[u8; 32], text: &str, found: &[Match], prints: &[String]) -> Vec<Match> {
+    let mut out: Vec<Match> = found
+        .iter()
+        .filter(|m| prints.contains(&fingerprint(salt, text, m)))
+        .cloned()
+        .collect();
+    for range in legacy_generic(text) {
+        if out
+            .iter()
+            .any(|m| m.range.start < range.end && range.start < m.range.end)
+        {
+            continue;
+        }
+        let value = &text[range.clone()];
+        if prints.contains(&print(salt, value)) {
+            out.push(Match {
+                kind: "a secret assigned to a key-like name".to_string(),
+                provider: "generic",
+                label: "secret",
+                line: filter::line_of(text, range.start),
+                masked: mask(value, 0),
+                dummy: None,
+                confidence: 0,
+                signals: Vec::new(),
+                range,
+            });
+        }
+    }
+    out
+}
+
+/// The 0.50.0 generic rule, kept only so an acceptance made under it keeps
+/// redacting what it matched (see [`decide`]). It decides nothing else.
+fn legacy_generic(text: &str) -> Vec<std::ops::Range<usize>> {
+    static RULES: std::sync::OnceLock<[regex::Regex; 2]> = std::sync::OnceLock::new();
+    let rules = RULES.get_or_init(|| {
+        [
+            r#"(?i)[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|auth|[_-]key)[a-z0-9_-]*[ \t]*[:=][ \t]*["']([^"'\r\n]{20,})["']"#,
+            r#"(?im)^[ \t]*(?:export[ \t]+)?[a-z0-9_.-]*(?:api[_-]?key|secret|token|password|passwd|auth|[_-]key)[a-z0-9_.-]*[ \t]*[:=][ \t]*([A-Za-z0-9+/=_.-]{20,})[ \t]*\r?$"#,
+        ]
+        .map(|r| regex::Regex::new(r).expect("the 0.50.0 rules compile"))
+    });
+    rules
+        .iter()
+        .flat_map(|rule| rule.captures_iter(text).filter_map(|c| c.get(1)))
+        .filter(|v| {
+            !filter::is_placeholder(v.as_str())
+                && filter::entropy(v.as_str()) >= filter::MIN_ENTROPY
+        })
+        .map(|v| v.range())
+        .collect()
 }
 
 /// `text` as it may be served from disk: redacted if the file was accepted
@@ -457,20 +631,75 @@ pub fn readable(
     })
 }
 
-/// The verdict on a prefixed match.
-fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) -> Match {
+/// The verdict on a match of a row of [`SHAPES`], or `None` when a check the
+/// pattern cannot make says it is not one after all: an encoded block that is
+/// a certificate, a Discord-shaped string whose first part is no user id, a
+/// connection string or header whose secret part is a word.
+fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) -> Option<Match> {
     let shape = &SHAPES[index];
     let value = &text[range.clone()];
     let body = value.get(shape.prefix_len.min(value.len())..).unwrap_or("");
     let mut signals = Vec::new();
     let mut score: i32 = 60;
 
+    // What the key is when the value holds it encoded or in pieces.
+    let decoded = match shape.label {
+        "encoded private key" => {
+            let bytes = base64_decode(value, false)?;
+            let pem = String::from_utf8_lossy(&bytes).into_owned();
+            if !pem
+                .lines()
+                .next()
+                .is_some_and(|l| l.contains("PRIVATE KEY"))
+            {
+                return None;
+            }
+            pem
+        }
+        _ => String::new(),
+    };
+    if shape.provider == "discord" && shape.label == "bot token" {
+        let id = base64_decode(value.split('.').next().unwrap_or(""), true)?;
+        if !(17..=20).contains(&id.len()) || !id.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+    }
+    // The secret part of a header or a connection string, judged as the
+    // generic rule judges a value. Basic carries `user:password` encoded.
+    let mut placeholder = false;
+    if matches!(shape.provider, "connection" | "header") {
+        let secret = if shape.provider == "header" && scheme_before(text, range.start) == "basic" {
+            let pair = String::from_utf8(base64_decode(value, false)?).ok()?;
+            pair.split_once(':').map(|(_, p)| p.to_string())?
+        } else {
+            value.to_string()
+        };
+        placeholder = shape.provider == "connection" && placeholder_password(&secret);
+        if !placeholder && value_shape(&secret, true).is_none() {
+            return None;
+        }
+    }
+    let pem = match shape.label {
+        "private key" => pem_body(value),
+        "encoded private key" => pem_body(&decoded),
+        "putty key" => putty_body(value),
+        _ => String::new(),
+    };
+
     let dummy = if shape.provider == "pem" {
-        let key_body = pem_body(value);
-        (key_body.len() < 40).then_some("(c) a private-key header with no key body")
+        (pem.len() < 40).then_some("(c) a private-key header with no key body")
+    } else if placeholder {
+        Some("(b) a placeholder password, such as ${…}, <…> or password")
     } else {
         dummy_rule(value, body)
-    };
+            .or_else(|| prefixed_dummy(shape, body))
+            .or_else(|| {
+                (shape.provider == "jwt")
+                    .then(|| jwt_dummy(value))
+                    .flatten()
+            })
+    }
+    .or_else(|| allowed(text, range.start));
 
     // Format: the issuer's documented length and alphabet.
     match format_fits(shape.provider, value, body) {
@@ -497,13 +726,18 @@ fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) ->
         )),
     }
 
-    // Randomness, against what the generator produces.
-    let pem = if shape.provider == "pem" {
-        pem_body(value)
+    // Randomness, against what the generator produces: the key body, the
+    // token at the end of a webhook, the parts of a bot token after its id.
+    let random_part = if shape.provider == "pem" {
+        pem.as_str()
+    } else if shape.label == "webhook" {
+        value.rsplit('/').next().unwrap_or(body)
+    } else if shape.label == "bot token" {
+        value.split_once('.').map_or(body, |(_, rest)| rest)
     } else {
-        String::new()
+        body
     };
-    let (random, why) = randomness(if shape.provider == "pem" { &pem } else { body });
+    let (random, why) = randomness(random_part);
     score += random;
     if random != 0 {
         signals.push(signal("randomness", random > 0, &why));
@@ -518,7 +752,7 @@ fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) ->
             "a 40-character secret access key within five lines",
         ));
     }
-    if shape.provider == "pem" && dummy.is_none() && pem_is_der(&pem_body(value)) {
+    if shape.provider == "pem" && dummy.is_none() && pem_is_der(&pem) {
         score += 15;
         signals.push(signal(
             "companion",
@@ -539,17 +773,18 @@ fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) ->
     score += location(path, text, range.start, &mut signals);
 
     // Checksum, last: a valid one is close to proof and an invalid one is
-    // proof, so it bounds whatever the softer signals added up to.
+    // proof, so it bounds whatever the softer signals added up to. Proof that
+    // a token was never issued is a dummy rule of its own (d), not only a low
+    // score: a file of such tokens is indexed.
+    let mut dummy = dummy;
     if let Some(valid) = checksum(shape.provider, value, body) {
         if valid {
             score = score.max(90);
-            signals.push(signal("checksum", true, "its CRC32 checksum is valid"));
+            signals.push(signal("checksum", true, "its checksum is valid"));
         } else {
             score = score.min(10);
-            signals.push(signal(
-                "checksum",
-                false,
-                "its CRC32 checksum is invalid, so it cannot be a real token",
+            dummy = dummy.or(Some(
+                "(d) fails the issuer's checksum, so it was never issued",
             ));
         }
     }
@@ -559,7 +794,7 @@ fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) ->
         signals.push(signal("dummy", false, rule));
     }
 
-    Match {
+    Some(Match {
         kind: shape.kind.to_string(),
         provider: shape.provider,
         label: shape.label,
@@ -570,25 +805,533 @@ fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) ->
         confidence: score.clamp(0, 100) as u8,
         signals,
         range,
-    }
+    })
 }
 
-/// The verdict on a value assigned to a secret-sounding name (2.2).
-fn judge_assignment(path: &str, text: &str, range: std::ops::Range<usize>) -> Match {
+/// What a generic value is, when it is one that counts (0.51.0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// A stretch a generator wrote, or 32 or more hex.
+    Generated,
+    /// A short password: 12 or more, three kinds of character, no word.
+    Password,
+}
+
+/// A secret-sounding name, read as words (0.51.0).
+struct Named {
+    /// Its secret word is one that only ever names a secret.
+    strong: bool,
+    /// Its last word says password, so the shorter floor applies.
+    password: bool,
+}
+
+/// Whether a value is shaped like a credential, and how; `None` when it is
+/// one of the things a credential is never written as.
+///
+/// It counts when it has a stretch a generator wrote, 32 or more hex, or —
+/// for a password — passes the short-password test. It never counts as a
+/// member path, a URL with no credentials in it, prose, or with a sequential
+/// run of eight.
+fn value_shape(value: &str, password: bool) -> Option<Shape> {
+    let bare = ["Bearer ", "Basic ", "Token "]
+        .iter()
+        .find_map(|p| value.strip_prefix(p))
+        .unwrap_or(value);
+    // Prose, and a value elided as documentation elides one (`eyJ…X9oN`).
+    if bare.chars().any(char::is_whitespace) || bare.contains("...") || bare.contains('…') {
+        return None;
+    }
+    // Code: an address taken, or a block or call opened (`&schemas.Key{`).
+    if bare.starts_with('&') || bare.ends_with(['{', '(', '[']) {
+        return None;
+    }
+    if let Some((_, rest)) = bare.split_once("://") {
+        let authority = rest.split('/').next().unwrap_or("");
+        if !authority.contains('@') {
+            return None;
+        }
+    }
+    let identifier = |s: &str| {
+        s.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    };
+    let parts: Vec<&str> = bare.split('.').collect();
+    if parts.len() >= 2 && parts.iter().all(|p| identifier(p) && !generated(p)) {
+        return None;
+    }
+    if bare
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|s| sequential(&s.chars().collect::<Vec<_>>()))
+    {
+        return None;
+    }
+    let hex = bare
+        .split(|c: char| !c.is_ascii_hexdigit())
+        .any(|s| s.len() >= 32);
+    if has_generated(bare) || hex {
+        return Some(Shape::Generated);
+    }
+    (password && short_password(bare)).then_some(Shape::Password)
+}
+
+/// A password too short for the generic rule's 20, still worth refusing: 12
+/// or more characters, at least three of lower case, upper case, digits and
+/// symbols, and no segment that is a word.
+fn short_password(value: &str) -> bool {
+    let kinds = [
+        value.chars().any(|c| c.is_ascii_lowercase()),
+        value.chars().any(|c| c.is_ascii_uppercase()),
+        value.chars().any(|c| c.is_ascii_digit()),
+        value
+            .chars()
+            .any(|c| c.is_ascii_punctuation() || !c.is_ascii()),
+    ];
+    value.chars().count() >= 12 && kinds.iter().filter(|k| **k).count() >= 3 && !has_word(value)
+}
+
+/// Whether a value holds a run of four or more letters written as a word is:
+/// all lower case, all upper case, or capitalised. A random password holds one
+/// of those now and then (a few in a hundred at 16 characters); a person's
+/// holds one nearly always.
+fn has_word(value: &str) -> bool {
+    value.split(|c: char| !c.is_ascii_alphabetic()).any(|w| {
+        let rest = w.get(1..).unwrap_or("");
+        w.len() >= 4
+            && (w.chars().all(|c| c.is_ascii_lowercase())
+                || w.chars().all(|c| c.is_ascii_uppercase())
+                || (w.starts_with(|c: char| c.is_ascii_uppercase())
+                    && rest.chars().all(|c| c.is_ascii_lowercase())))
+    })
+}
+
+/// Whether a stretch of `s` between non-alphanumerics reads as a
+/// generator's output: [`generated`], and also not a camelCase identifier
+/// (`hideDecisionModelsBanner`) and not a word with a number on it
+/// (`dbpassword9090`), which mix case or digits only at word edges. A
+/// generator switches between lower case, upper case and digits all along.
+///
+/// ponytail: both are heuristics with a measured ceiling. A uniform random
+/// 20-character alphanumeric reads as camelCase about once in 35 000 draws
+/// (it needs no digit at all) and switches fewer than twice about once in
+/// three million; both fall off fast with length. Raise the bar if a real
+/// key format ever turns out to be letters only.
+fn has_generated(s: &str) -> bool {
+    s.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|part| generated(part) && switches(part) >= 2 && !camel(part))
+}
+
+/// How many times a stretch changes between lower case, upper case and
+/// digits.
+fn switches(s: &str) -> usize {
+    let kind = |c: char| (c.is_ascii_lowercase(), c.is_ascii_uppercase());
+    s.chars()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .filter(|w| kind(w[0]) != kind(w[1]))
+        .count()
+}
+
+/// Whether a stretch is a camelCase identifier: letters only, in pieces of
+/// one optional capital and two or more lower-case letters, four letters a
+/// piece on average. A generator's letters break into pieces of about two.
+fn camel(s: &str) -> bool {
+    if !s.chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    let mut pieces: Vec<String> = vec![String::new()];
+    let mut prev_lower = false;
+    for c in s.chars() {
+        if c.is_ascii_uppercase() && prev_lower {
+            pieces.push(String::new());
+        }
+        pieces.last_mut().expect("a piece is open").push(c);
+        prev_lower = c.is_ascii_lowercase();
+    }
+    pieces.len() * 4 <= s.len()
+        && pieces.iter().all(|p| {
+            let rest = p
+                .strip_prefix(|c: char| c.is_ascii_uppercase())
+                .unwrap_or(p);
+            rest.len() >= 2 && rest.chars().all(|c| c.is_ascii_lowercase())
+        })
+}
+
+/// Words that only ever name a secret. `key`, `token` and `auth` also name a
+/// great many things that are not, and score lower.
+const STRONG_WORDS: [&str; 8] = [
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "apikey",
+    "credential",
+    "credentials",
+];
+
+/// A name holding one of these as a whole word names a credential.
+const SECRET_WORDS: [&str; 15] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "apikey",
+    "key",
+    "auth",
+    "authorization",
+    "credential",
+    "credentials",
+    "creds",
+    "pat",
+    "bearer",
+];
+
+/// One word that ends in one of these is a secret word glued to another, as
+/// `accesstoken` or `clientsecret` are. Only ever widens what counts.
+const GLUED: [&str; 13] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "apikey",
+    "secretkey",
+    "accesskey",
+    "privatekey",
+    "masterkey",
+    "signingkey",
+    "encryptionkey",
+];
+
+/// Last words that say a name holds something about a secret, not the secret:
+/// `token_url`, `secret_manager_client`, `auth_type`. `id` is not one, so
+/// Vault's `secret_id` stays a credential.
+const METADATA: &[&str] = &[
+    "url",
+    "uri",
+    "urls",
+    "type",
+    "types",
+    "name",
+    "names",
+    "count",
+    "limit",
+    "endpoint",
+    "endpoints",
+    "header",
+    "headers",
+    "prefix",
+    "suffix",
+    "ttl",
+    "expiry",
+    "expires",
+    "expiration",
+    "manager",
+    "policy",
+    "length",
+    "len",
+    "field",
+    "fields",
+    "path",
+    "paths",
+    "file",
+    "files",
+    "filename",
+    "filepath",
+    "dir",
+    "ref",
+    "refs",
+    "arn",
+    "label",
+    "format",
+    "mode",
+    "method",
+    "kind",
+    "scope",
+    "scopes",
+    "version",
+    "usage",
+    "provider",
+    "providers",
+    "flow",
+    "base",
+    "host",
+    "hostname",
+    "port",
+    "client",
+    "size",
+    "max",
+    "min",
+    "timeout",
+    "lifetime",
+    "duration",
+    "enabled",
+    "disabled",
+    "required",
+    "regex",
+    "pattern",
+    "template",
+    "description",
+    "desc",
+    "hint",
+    "location",
+    "algorithm",
+    "alg",
+    "class",
+    "handler",
+    "service",
+    "status",
+    "state",
+    "error",
+    "errors",
+    "message",
+    "msg",
+    "title",
+    "link",
+    "domain",
+    "region",
+    "env",
+    "var",
+    "variable",
+    "user",
+    "username",
+    "email",
+    "issuer",
+    "audience",
+    "at",
+    "time",
+    "timestamp",
+    "date",
+    "fingerprint",
+    "kid",
+    "param",
+    "params",
+    "schema",
+    "spec",
+    "list",
+    "map",
+    "store",
+    "table",
+    "column",
+    "rotation",
+    "interval",
+    "period",
+    "retries",
+    "delay",
+    "placeholder",
+    "validator",
+    "callback",
+    "route",
+    "source",
+    "option",
+    "options",
+    "display",
+    "hash",
+    "hashed",
+    "digest",
+];
+
+/// Words that, in front of a last word `key`, make it a lookup key and not a
+/// credential: `cache_key`, `object_key`, `sort_key`. `storage` is not one:
+/// `AZURE_STORAGE_KEY` is an Azure account key.
+const LOOKUP: &[&str] = &[
+    "cache",
+    "object",
+    "sort",
+    "primary",
+    "foreign",
+    "partition",
+    "map",
+    "lookup",
+    "row",
+    "idempotency",
+    "routing",
+    "hash",
+    "bucket",
+    "state",
+    "cursor",
+    "result",
+    "reference",
+    "index",
+    "query",
+    "event",
+    "i18n",
+    "translation",
+    "dict",
+    "item",
+    "entry",
+    "group",
+    "composite",
+    "unique",
+    "dedup",
+    "dedupe",
+    "lock",
+    "redis",
+    "metric",
+    "tag",
+    "column",
+    "field",
+    "attribute",
+    "attr",
+    "property",
+    "prop",
+    "public",
+    "pub",
+    "file",
+    "asset",
+    "order",
+    "shard",
+    "range",
+    "natural",
+    "surrogate",
+    "react",
+    "list",
+    "record",
+    "node",
+    "label",
+    "message",
+    "feature",
+    "flag",
+    "memo",
+    "parent",
+    "child",
+    "tree",
+    "span",
+    "trace",
+];
+
+/// Value words a name may end on that say how the value is written, not what
+/// it is: `password_b64` is a password.
+const ENCODINGS: [&str; 8] = [
+    "value", "str", "string", "b64", "base64", "hex", "raw", "plain",
+];
+
+/// Whether a name is a credential's name, read as words (0.51.0).
+///
+/// Split on `_`, `-`, `.` and camelCase, digits trimmed from word ends, the
+/// last dotted component only, encoding words dropped from the end. It is a
+/// credential name when a secret word is one of its words and its last word
+/// is not metadata, and not when its last word is `key` after a lookup word.
+/// Deny lists only: an allow list of what may come before `key` dropped a
+/// live SMTP key in the audit that led here.
+fn credential_name(name: &str) -> Option<Named> {
+    let last = name.rsplit('.').next().unwrap_or(name);
+    let mut words = words(last);
+    while words.len() > 1
+        && words
+            .last()
+            .is_some_and(|w| ENCODINGS.contains(&w.as_str()))
+    {
+        words.pop();
+    }
+    let final_word = words.last()?.as_str();
+    if METADATA.contains(&final_word) {
+        return None;
+    }
+    if final_word == "key" && words.len() >= 2 && LOOKUP.contains(&words[words.len() - 2].as_str())
+    {
+        return None;
+    }
+    let secret = |w: &str| {
+        SECRET_WORDS.contains(&w) || GLUED.iter().any(|g| w.len() > g.len() && w.ends_with(g))
+    };
+    if !words.iter().any(|w| secret(w)) {
+        return None;
+    }
+    let strong = words.iter().any(|w| {
+        STRONG_WORDS.contains(&w.as_str())
+            || GLUED.iter().any(|g| w.len() > g.len() && w.ends_with(g))
+    });
+    let password = ["password", "passwd", "pwd", "passphrase"]
+        .iter()
+        .any(|p| final_word.ends_with(p));
+    Some(Named { strong, password })
+}
+
+/// A name's words, lower case: split on `_`, `-` and camelCase, digits
+/// trimmed from each word's ends.
+fn words(name: &str) -> Vec<String> {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = Vec::new();
+    let mut word = String::new();
+    for (i, c) in chars.iter().enumerate() {
+        if !c.is_ascii_alphanumeric() {
+            out.push(std::mem::take(&mut word));
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|p| chars[p]);
+        let next = chars.get(i + 1);
+        let boundary = c.is_ascii_uppercase()
+            && prev.is_some_and(|p| {
+                p.is_ascii_lowercase()
+                    || p.is_ascii_digit()
+                    || (p.is_ascii_uppercase() && next.is_some_and(char::is_ascii_lowercase))
+            });
+        if boundary {
+            out.push(std::mem::take(&mut word));
+        }
+        word.push(c.to_ascii_lowercase());
+    }
+    out.push(word);
+    out.into_iter()
+        .map(|w| w.trim_matches(|c: char| c.is_ascii_digit()).to_string())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Whether the unquoted form of the generic rule applies to a file: not in
+/// code, where `a.b.token = c.d.e` is an assignment of code. Shell,
+/// Dockerfiles, Makefiles and Terraform are configuration for this purpose,
+/// and a path in no language (`.env`, a `.txt` note) gets every rule.
+fn unquoted_applies(path: &str) -> bool {
+    !filter::is_code(path)
+        || filter::language_of_path(path)
+            .is_some_and(|l| matches!(l.name, "shell" | "dockerfile" | "makefile" | "terraform"))
+}
+
+/// The verdict on a value assigned to a secret-sounding name (2.2, 0.51.0).
+///
+/// Scored from its evidence, so a fixture and a live key land apart: a
+/// strong secret word and a generated value raise it, a configuration file
+/// raises it, a test file lowers it.
+fn judge_assignment(
+    path: &str,
+    text: &str,
+    range: std::ops::Range<usize>,
+    named: &Named,
+    shape: Shape,
+) -> Match {
     let value = &text[range.clone()];
+    let mut score: i32 = 40 + if named.strong { 10 } else { 5 };
     let mut signals = vec![signal(
         "format",
         true,
-        "a literal of 20 or more characters assigned to a secret-sounding name",
+        match shape {
+            Shape::Generated => {
+                score += 10;
+                "a secret-sounding name holding a generated value"
+            }
+            Shape::Password => {
+                score += 5;
+                "a password name holding 12 or more mixed characters"
+            }
+        },
     )];
-    let mut score: i32 = 50;
     let (random, why) = randomness(value);
     score += random;
     if random != 0 {
         signals.push(signal("randomness", random > 0, &why));
     }
     score += location(path, text, range.start, &mut signals);
-    let dummy = dummy_rule(value, value);
+    let dummy = dummy_rule(value, value)
+        .or_else(|| test_word(value))
+        .or_else(|| allowed(text, range.start));
     if let Some(rule) = dummy {
         score = score.min(10);
         signals.push(signal("dummy", false, rule));
@@ -604,6 +1347,183 @@ fn judge_assignment(path: &str, text: &str, range: std::ops::Range<usize>) -> Ma
         signals,
         range,
     }
+}
+
+/// Rule (b) for a generic value: a whole segment that is a test word.
+/// Inside a generated stretch it is not a segment, so it does not count.
+fn test_word(value: &str) -> Option<&'static str> {
+    value
+        .split(|c: char| matches!(c, '-' | '_' | '.') || c.is_whitespace())
+        .any(|s| TEST_WORDS.iter().any(|w| s.eq_ignore_ascii_case(w)))
+        .then_some("(b) a test word such as fake or example as a whole part of the value")
+}
+
+/// Rule (e): the match's own line carries an allow tag. That line only,
+/// never a neighbour, so a tag cannot reach a key it was not written beside.
+fn allowed(text: &str, at: usize) -> Option<&'static str> {
+    let from = window_start(text, at, CONTEXT_BYTES);
+    let start = text[from..at].rfind('\n').map_or(from, |i| from + i + 1);
+    let mut to = (at + CONTEXT_BYTES).min(text.len());
+    while !text.is_char_boundary(to) {
+        to -= 1;
+    }
+    let end = text[at..to].find('\n').map_or(to, |i| at + i);
+    let line = &text[start..end];
+    ALLOW_TAGS
+        .iter()
+        .any(|t| line.contains(t))
+        .then_some("(e) marked allowed on its own line")
+}
+
+/// The scheme word in front of a header value: `bearer`, `basic` or `token`.
+fn scheme_before(text: &str, at: usize) -> String {
+    let from = window_start(text, at, 64);
+    text[from..at]
+        .split_whitespace()
+        .last()
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_ascii_alphabetic())
+        .to_ascii_lowercase()
+}
+
+/// A connection string's password that stands in for one.
+fn placeholder_password(password: &str) -> bool {
+    let lower = password.to_ascii_lowercase();
+    filter::is_placeholder(password)
+        || password.starts_with('$')
+        || matches!(
+            lower.as_str(),
+            "password" | "pass" | "passwd" | "pwd" | "secret" | "changeme"
+        )
+        || password.chars().all(|c| c == '*')
+        || lower.chars().all(|c| c == 'x')
+}
+
+/// Rule (b) widened for prefixed shapes (0.51.0): the body is plainly not a
+/// generator's.
+fn prefixed_dummy(shape: &filter::Shape, body: &str) -> Option<&'static str> {
+    let runs = body.split(|c: char| !c.is_ascii_alphanumeric()).any(|s| {
+        let chars: Vec<char> = s.chars().collect();
+        let longest = longest_run(&chars);
+        if chars.iter().all(char::is_ascii_digit) {
+            longest >= 10
+        } else {
+            longest >= 8
+        }
+    });
+    if runs {
+        return Some("(b) a sequential run such as abcdefgh in the body");
+    }
+    if repeated_blocks(body) || repeated_unit(body) {
+        return Some("(b) a repeating pattern, such as aaaaBBBBcccc or TESTTESTTEST");
+    }
+    // A body of words after the issuer's prefix, on a shape whose generator
+    // mixes case: no stretch a generator wrote, at least one word, and every
+    // part a word, a number, a word with a number on it (`oat01`) or three
+    // characters or fewer. AWS, Twilio and semlith bodies are one case by
+    // format, and a random one spells only letters now and then; a shape with
+    // no prefix has no body to read this way.
+    let mixed = shape.pattern.contains("A-Z") && shape.pattern.contains("a-z");
+    let parts: Vec<&str> = body
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let plain = |p: &&str| {
+        let letters: String = p.chars().filter(char::is_ascii_alphabetic).collect();
+        let rest = letters.get(1..).unwrap_or("");
+        p.len() <= 3
+            || (switches_between_letters_and_digits(p) <= 1
+                && (letters == letters.to_ascii_lowercase()
+                    || letters == letters.to_ascii_uppercase()
+                    || rest == rest.to_ascii_lowercase()))
+    };
+    if mixed
+        && shape.prefix_len > 0
+        && !has_generated(body)
+        && parts.iter().any(|p| has_word(p))
+        && parts.iter().all(plain)
+    {
+        return Some("(b) a body of words, not a generated value");
+    }
+    None
+}
+
+/// How many times a part changes between letters and digits.
+fn switches_between_letters_and_digits(s: &str) -> usize {
+    s.chars()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .filter(|w| w[0].is_ascii_digit() != w[1].is_ascii_digit())
+        .count()
+}
+
+/// A unit of one to eight characters written three times or more, twelve or
+/// more characters in all: `hunter2hunter2hunter2`, `TESTTESTTEST`. A
+/// generator writes one by chance about never: at least eight characters
+/// must each repeat the one a unit before, under one in four billion even
+/// for a hex body.
+fn repeated_unit(body: &str) -> bool {
+    let b = body.as_bytes();
+    (1..=8).any(|unit| {
+        let need = (12 - unit).max(2 * unit);
+        let mut run = 0;
+        (unit..b.len()).any(|i| {
+            if b[i] == b[i - unit] {
+                run += 1;
+            } else {
+                run = 0;
+            }
+            run >= need
+        })
+    })
+}
+
+/// Three blocks in a row of four or more of one character each.
+fn repeated_blocks(body: &str) -> bool {
+    let mut blocks: Vec<usize> = Vec::new();
+    let mut last: Option<char> = None;
+    for c in body.chars() {
+        if Some(c) == last {
+            *blocks.last_mut().expect("a block is open") += 1;
+        } else {
+            blocks.push(1);
+            last = Some(c);
+        }
+    }
+    blocks.windows(3).any(|w| w.iter().all(|n| *n >= 4))
+}
+
+/// Rule (a) for a JWT: unsigned (`alg` none), which no server should accept,
+/// or one of Supabase's published local-development keys.
+fn jwt_dummy(value: &str) -> Option<&'static str> {
+    // No signature at all is an unsigned token. HS256, the shortest
+    // signature in use, is 43 characters; one shorter was never made by a
+    // signer (`some_signature`, base64 of a word).
+    match value.rsplit('.').next().map(str::len) {
+        Some(0) => return Some("(a) an unsigned token, which no server should accept"),
+        Some(n) if n < 40 => {
+            return Some("(d) a signature too short for any signing algorithm, so never issued");
+        }
+        _ => {}
+    }
+    let mut parts = value.split('.');
+    let header = parts
+        .next()
+        .and_then(|h| base64_decode(h, true))
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())?;
+    if header
+        .get("alg")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|a| a.eq_ignore_ascii_case("none"))
+    {
+        return Some("(a) an unsigned token (alg none), which no server should accept");
+    }
+    let claims = parts
+        .next()
+        .and_then(|p| base64_decode(p, true))
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())?;
+    (claims.get("iss").and_then(serde_json::Value::as_str) == Some("supabase-demo"))
+        .then_some("(a) a published example: Supabase's local development key")
 }
 
 /// Which declared dummy rule a value meets, if any (2.1).
@@ -638,8 +1558,8 @@ pub fn dummy_rule(value: &str, body: &str) -> Option<&'static str> {
 /// `FAKe` about once in 20 000 Slack tokens, and a live key read as a dummy is
 /// indexed. A short marker also has to start or end the body or one of its
 /// `-`, `_` or `.` segments, because four letters in one case still turn up by
-/// chance; seven or more (`EXAMPLE`, `REDACTED`) do not, and sit anywhere, as
-/// in `github_pat_11EXAMPLE0…`.
+/// chance; six or more (`SAMPLE`, `EXAMPLE`, `REDACTED`) do not, and sit
+/// anywhere, as in `github_pat_11EXAMPLE0…`.
 ///
 /// Even at a segment's edge a short marker counts only when the rest of the
 /// segment is not generator-shaped: a live Slack secret opens on `FAKE` about
@@ -649,7 +1569,7 @@ fn has_marker(body: &str, marker: &str) -> bool {
     let lower = marker.to_ascii_lowercase();
     let segments = || body.split(['-', '_', '.']);
     [marker, lower.as_str()].iter().any(|m| {
-        if marker.len() >= 7 {
+        if marker.len() >= 6 {
             body.contains(m)
         } else {
             segments().any(|seg| {
@@ -686,10 +1606,23 @@ fn format_fits(provider: &str, value: &str, body: &str) -> Option<bool> {
             let parts: Vec<&str> = value.split('.').collect();
             parts.len() == 3 && parts[1].len() == 22 && parts[2].len() == 43
         }
+        "slack" if value.starts_with("https://") => true,
         "slack" => value.split('-').count() >= 4,
         "stripe" => body.len() >= 24 && alnum(body),
         "semlith" => body.len() == 64,
         "jwt" => jwt_header_parses(value),
+        // 0.51.0's rows: each pattern fixes the length its source documents,
+        // so a match fits by construction, except where the length is open.
+        "gitlab" if value.starts_with("gloas-") => body.len() == 64,
+        "gitlab" if value.starts_with("glptt-") => body.len() == 40,
+        "gitlab" => body.len() >= 20,
+        "vault" if value.starts_with("hvs.") => body.len() >= 90,
+        "vault" if value.starts_with("hvb.") => body.len() >= 138,
+        "pypi" => body.len() >= 50,
+        "azure" => (37..=40).contains(&value.len()),
+        "openrouter" | "huggingface" | "vault" | "groq" | "perplexity" | "replicate" | "xai"
+        | "langsmith" | "pinecone" | "digitalocean" | "databricks" | "shopify" | "linear"
+        | "doppler" | "discord" | "connection" | "header" => true,
         _ => return None,
     })
 }
@@ -749,29 +1682,33 @@ fn randomness(body: &str) -> (i32, String) {
 }
 
 /// Eight or more characters rising by one, or falling by one.
+fn sequential(chars: &[char]) -> bool {
+    longest_run(chars) >= 8
+}
+
+/// The longest run of characters rising by one, or falling by one.
 ///
 /// One direction per run: `2123212` steps by one each time but is not
 /// sequential, and counting it as a run marked random Slack tokens, whose
 /// numeric segments zigzag like that by chance, as typed by hand.
-fn sequential(chars: &[char]) -> bool {
+fn longest_run(chars: &[char]) -> usize {
     let mut run = 1;
+    let mut longest = chars.len().min(1);
     let mut direction = 0;
     for pair in chars.windows(2) {
         let step = pair[1] as i32 - pair[0] as i32;
         if (step == 1 || step == -1) && (run == 1 || step == direction) {
             direction = step;
             run += 1;
-            if run >= 8 {
-                return true;
-            }
         } else if step == 1 || step == -1 {
             direction = step;
             run = 2;
         } else {
             run = 1;
         }
+        longest = longest.max(run);
     }
-    false
+    longest
 }
 
 /// The location signal: where a secret sits says something about whether it
@@ -888,10 +1825,16 @@ fn pem_block(text: &str, header: std::ops::Range<usize>) -> std::ops::Range<usiz
             .unwrap_or(tail.len());
         return header.start..header.end + end + close;
     }
+    // A body written inside a string runs on through its escapes and the
+    // quotes that join one string to the next.
     let body: usize = rest
         .char_indices()
         .take_while(|(_, c)| {
-            c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '\n' | '\r' | ' ' | '\t')
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '+' | '/' | '=' | '\n' | '\r' | ' ' | '\t' | '\\' | '"' | '\''
+                )
         })
         .map(|(i, c)| i + c.len_utf8())
         .last()
@@ -899,20 +1842,50 @@ fn pem_block(text: &str, header: std::ops::Range<usize>) -> std::ops::Range<usiz
     header.start..header.end + body
 }
 
-/// The base64 characters of a PEM block's body.
+/// The base64 characters of a PEM block's body: after the header's closing
+/// dashes, up to the END line, read through what a string does to it (0.51.0).
+///
+/// A key in a JSON file, or in a TypeScript, Go, Python or Rust string, has
+/// its line breaks escaped (`\n`, `\r\n`, a JSON string inside a JSON string's
+/// `\\n`) and may be cut into joined strings. Until 0.51.0 the body was read
+/// only after a real line break, so such a key had none, was taken for a bare
+/// header under rule (c), and was indexed: every Google service-account file.
 fn pem_body(block: &str) -> String {
-    let after = block
-        .find("-----\n")
-        .or_else(|| block.find("-----\r\n"))
-        .map(|i| i + 5);
-    let Some(start) = after.or_else(|| block.rfind("-----").map(|i| i + 5)) else {
+    let start = block
+        .strip_prefix("-----BEGIN")
+        .and_then(|rest| rest.find("-----"))
+        .map_or(0, |i| "-----BEGIN".len() + i + 5);
+    let body = &block[start.min(block.len())..];
+    base64_chars(body.split("-----END").next().unwrap_or(""))
+}
+
+/// The base64 characters of a key body, read through string escapes.
+fn base64_chars(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // An escape: the backslashes and the letter they escape.
+            while chars.peek() == Some(&'\\') {
+                chars.next();
+            }
+            if matches!(chars.peek(), Some('n' | 'r' | 't')) {
+                chars.next();
+            }
+        } else if c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=') {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The base64 of a PuTTY key's private lines.
+fn putty_body(block: &str) -> String {
+    let Some((_, rest)) = block.split_once("Private-Lines:") else {
         return String::new();
     };
-    let body = &block[start.min(block.len())..];
-    let body = body.split("-----END").next().unwrap_or("");
-    body.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
-        .collect()
+    let rest = rest.trim_start_matches(|c: char| c == ' ' || c.is_ascii_digit());
+    base64_chars(rest.split("Private-MAC").next().unwrap_or(""))
 }
 
 /// Whether a PEM body decodes to a DER `SEQUENCE` whose length matches.
@@ -1089,10 +2062,86 @@ fn forge_once(index: usize) -> String {
             .map(|b| alphabet[*b as usize % alphabet.len()] as char)
             .collect()
     };
+    let letters = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let digits = b"0123456789";
+    match (shape.provider, shape.label) {
+        ("openrouter", _) => return format!("sk-or-v1-{}", pick(hex, 64)),
+        ("huggingface", _) => return format!("hf_{}", pick(letters, 34)),
+        ("gitlab", _) => return format!("glpat-{}", pick(alnum, 20)),
+        ("vault", _) => return format!("hvs.{}", pick(alnum, 95)),
+        ("groq", _) => return format!("gsk_{}", pick(alnum, 52)),
+        ("perplexity", _) => return format!("pplx-{}", pick(alnum, 48)),
+        ("replicate", _) => return format!("r8_{}", pick(alnum, 37)),
+        ("xai", _) => return format!("xai-{}", pick(alnum, 80)),
+        ("langsmith", _) => return format!("lsv2_pt_{}_{}", pick(hex, 32), pick(hex, 10)),
+        ("pinecone", _) => return format!("pcsk_{}_{}", pick(alnum, 5), pick(alnum, 63)),
+        ("digitalocean", _) => return format!("dop_v1_{}", pick(hex, 64)),
+        ("databricks", _) => return format!("dapi{}", pick(hex, 32)),
+        ("pypi", _) => return format!("pypi-AgEIcHlwaS5vcmc{}", pick(alnum, 70)),
+        ("shopify", _) => return format!("shpat_{}", pick(hex, 32)),
+        ("linear", _) => return format!("lin_api_{}", pick(alnum, 40)),
+        ("doppler", _) => return format!("dp.pt.{}", pick(alnum, 43)),
+        ("azure", _) => {
+            return format!("{}{}Q~{}", pick(alnum, 3), pick(digits, 1), pick(alnum, 34));
+        }
+        ("slack", "webhook") => {
+            return format!(
+                "https://hooks.slack.com/services/T{}/B{}/{}",
+                pick(upper, 10),
+                pick(upper, 10),
+                pick(alnum, 24)
+            );
+        }
+        ("discord", "webhook") => {
+            return format!(
+                "https://discord.com/api/webhooks/1{}/{}",
+                pick(digits, 17),
+                pick(alnum, 68)
+            );
+        }
+        ("discord", "bot token") => {
+            let id = format!("1{}", pick(digits, 17));
+            return format!(
+                "{}.{}.{}",
+                base64_url(id.as_bytes()),
+                pick(alnum, 6),
+                pick(alnum, 38)
+            );
+        }
+        ("pem", "encoded private key") => {
+            let pem = SHAPES
+                .iter()
+                .position(|s| s.provider == "pem" && s.label == "private key")
+                .expect("the private key row");
+            return base64_encode(forge_once(pem).as_bytes());
+        }
+        ("pem", "putty key") => {
+            let mut random = vec![0u8; 288];
+            let _ = getrandom::fill(&mut random);
+            let lines: Vec<String> = base64_encode(&random)
+                .as_bytes()
+                .chunks(64)
+                .map(|c| String::from_utf8_lossy(c).into_owned())
+                .collect();
+            return format!(
+                "PuTTY-User-Key-File-3: ssh-rsa\nEncryption: none\nComment: rsa-key\n\
+                 Public-Lines: 1\nAAAAB3NzaC1yc2EAAAADAQABAAAAgQ\nPrivate-Lines: {}\n{}\n\
+                 Private-MAC: {}",
+                lines.len(),
+                lines.join("\n"),
+                pick(hex, 64)
+            );
+        }
+        ("connection", _) => {
+            return format!("postgres://app:{}@db.internal:5432/app", pick(alnum, 24));
+        }
+        ("header", _) => return format!("Authorization: Bearer {}", pick(alnum, 40)),
+        _ => {}
+    }
     match shape.provider {
         "anthropic" => format!("sk-ant-api03-{}", pick(alnum, 93)),
         "openai" => format!("sk-proj-{}", pick(alnum, 48)),
-        "aws" => format!("AKIA{}", pick(upper, 16)),
+        "aws" => format!("AKIA{}", pick(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", 16)),
         "github" if shape.label == "fine-grained token" => {
             format!("github_pat_11{}_{}", pick(alnum, 22), pick(alnum, 59))
         }
@@ -1193,7 +2242,12 @@ mod tests {
     /// in the answer is the value.
     #[test]
     fn a_review_row_is_scored_from_the_scan_and_never_shows_the_value() {
-        let live = forge(3);
+        let live = forge(
+            SHAPES
+                .iter()
+                .position(|s| s.kind == "a GitHub token")
+                .unwrap(),
+        );
         let text = format!("token = {live}\n");
         let found = stored(&text);
         let a = assess(crate::store::class::CONTENT, "/x/a.rs", &found, None);
