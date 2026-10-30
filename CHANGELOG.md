@@ -15,14 +15,15 @@ no re-embedding and no CLI or MCP change.
 ### Changed
 
 - **Far fewer false refusals.** On BerriAI/litellm at 43c07a0, 0.50.0 refused
-  882 of its 13,656 files and 0.51.0 refuses 104. On a private
+  882 of its 13,656 files and 0.51.0 refuses 103. On a private
   repository where 166 refusals had been cleared by hand, 167 refused files
-  are now 6. Nearly all of the difference is the generic rule, the one with no
+  are now 4. Nearly all of the difference is the generic rule, the one with no
   issuer prefix. It reads a name as words, so `tokens`, `tokenizer`, `author`,
   `token_url`, `auth_type` and `cache_key` are no longer credential names,
   while `secret_id`, `smtp_key` and `AZURE_STORAGE_KEY` still are. It reads a
   value by its shape, so it needs a stretch a generator wrote or 32 or more
-  hex, and a member path, a URL with no credentials, prose, a line of code
+  hex (a value spelled only in base64 read with its `+` and `/` taken out),
+  and a member path, a URL with no credentials, prose, a line of code
   (`&schemas.Key{`), an elided value or a sequential run of eight never
   counts. Its unquoted form (`NAME=value` on a
   line of its own) no longer runs on code, where it matched lines such as

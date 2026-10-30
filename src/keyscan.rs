@@ -189,13 +189,13 @@ pub fn scan(path: &str, text: &str) -> Vec<Match> {
             };
             let raw = value.as_str();
             // Twenty characters, as before 0.51.0; twelve for a password.
-            if (!named.password && raw.chars().count() < 20)
+            if (!named.short_floor && raw.chars().count() < 20)
                 || filter::is_placeholder(raw)
                 || filter::entropy(raw) < filter::MIN_ENTROPY
             {
                 continue;
             }
-            let Some(shape) = value_shape(raw, named.password) else {
+            let Some(shape) = value_shape(raw, named.short_floor) else {
                 continue;
             };
             let range = value.range();
@@ -638,7 +638,14 @@ pub fn readable(
 fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) -> Option<Match> {
     let shape = &SHAPES[index];
     let value = &text[range.clone()];
-    let body = value.get(shape.prefix_len.min(value.len())..).unwrap_or("");
+    // The part a generator wrote: after the issuer's prefix, and for a
+    // webhook or a bot token after the numeric id it carries, which is not
+    // secret and may repeat (`MDAw` is base64 of `000`).
+    let body = match shape.label {
+        "webhook" => value.rsplit('/').next().unwrap_or(value),
+        "bot token" => value.split_once('.').map_or(value, |(_, rest)| rest),
+        _ => value.get(shape.prefix_len.min(value.len())..).unwrap_or(""),
+    };
     let mut signals = Vec::new();
     let mut score: i32 = 60;
 
@@ -674,7 +681,7 @@ fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) ->
         } else {
             value.to_string()
         };
-        placeholder = shape.provider == "connection" && placeholder_password(&secret);
+        placeholder = shape.provider == "connection" && placeholder_secret(&secret);
         if !placeholder && value_shape(&secret, true).is_none() {
             return None;
         }
@@ -730,10 +737,6 @@ fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) ->
     // token at the end of a webhook, the parts of a bot token after its id.
     let random_part = if shape.provider == "pem" {
         pem.as_str()
-    } else if shape.label == "webhook" {
-        value.rsplit('/').next().unwrap_or(body)
-    } else if shape.label == "bot token" {
-        value.split_once('.').map_or(body, |(_, rest)| rest)
     } else {
         body
     };
@@ -821,8 +824,10 @@ enum Shape {
 struct Named {
     /// Its secret word is one that only ever names a secret.
     strong: bool,
-    /// Its last word says password, so the shorter floor applies.
-    password: bool,
+    /// Its last word says password, so the shorter floor applies. Not
+    /// called `password`: CodeQL reads any value reaching a binding of that
+    /// name as a hard-coded credential, and every test string reaches this.
+    short_floor: bool,
 }
 
 /// Whether a value is shaped like a credential, and how; `None` when it is
@@ -832,7 +837,7 @@ struct Named {
 /// for a password — passes the short-password test. It never counts as a
 /// member path, a URL with no credentials in it, prose, or with a sequential
 /// run of eight.
-fn value_shape(value: &str, password: bool) -> Option<Shape> {
+fn value_shape(value: &str, short_floor: bool) -> Option<Shape> {
     let bare = ["Bearer ", "Basic ", "Token "]
         .iter()
         .find_map(|p| value.strip_prefix(p))
@@ -841,10 +846,14 @@ fn value_shape(value: &str, password: bool) -> Option<Shape> {
     if bare.chars().any(char::is_whitespace) || bare.contains("...") || bare.contains('…') {
         return None;
     }
-    // Code: an address taken, or a block or call opened (`&schemas.Key{`).
-    if bare.starts_with('&') || bare.ends_with(['{', '(', '[']) {
+    // Code: an address taken and a block or call opened (`&schemas.Key{`).
+    // Both, because a random password opens on `&` about once in seventy.
+    if bare.starts_with('&') && bare.ends_with(['{', '(', '[']) {
         return None;
     }
+    // A password that passes the short-password test is never read as a
+    // member path: `Ab3.x_Q9.Kp7z` is all identifiers and is a password.
+    let short = short_floor && short_password(bare);
     if let Some((_, rest)) = bare.split_once("://") {
         let authority = rest.split('/').next().unwrap_or("");
         if !authority.contains('@') {
@@ -859,7 +868,7 @@ fn value_shape(value: &str, password: bool) -> Option<Shape> {
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
     };
     let parts: Vec<&str> = bare.split('.').collect();
-    if parts.len() >= 2 && parts.iter().all(|p| identifier(p) && !generated(p)) {
+    if !short && parts.len() >= 2 && parts.iter().all(|p| identifier(p) && !generated(p)) {
         return None;
     }
     if bare
@@ -874,7 +883,7 @@ fn value_shape(value: &str, password: bool) -> Option<Shape> {
     if has_generated(bare) || hex {
         return Some(Shape::Generated);
     }
-    (password && short_password(bare)).then_some(Shape::Password)
+    short.then_some(Shape::Password)
 }
 
 /// A password too short for the generic rule's 20, still worth refusing: 12
@@ -919,8 +928,23 @@ fn has_word(value: &str) -> bool {
 /// three million; both fall off fast with length. Raise the bar if a real
 /// key format ever turns out to be letters only.
 fn has_generated(s: &str) -> bool {
-    s.split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|part| generated(part) && switches(part) >= 2 && !camel(part))
+    let made = |part: &str| generated(part) && switches(part) >= 2 && !camel(part);
+    if s.split(|c: char| !c.is_ascii_alphanumeric()).any(made) {
+        return true;
+    }
+    // `+` and `/` are base64's own letters, and in a 44-character key they
+    // cut every alphanumeric stretch under twelve about once in a hundred:
+    // a value spelled only in base64 is read with them taken out.
+    let base64 = s.len() >= 20
+        && s.trim_end_matches('=')
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/');
+    base64
+        && made(
+            &s.chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>(),
+        )
 }
 
 /// How many times a stretch changes between lower case, upper case and
@@ -1248,10 +1272,13 @@ fn credential_name(name: &str) -> Option<Named> {
         STRONG_WORDS.contains(&w.as_str())
             || GLUED.iter().any(|g| w.len() > g.len() && w.ends_with(g))
     });
-    let password = ["password", "passwd", "pwd", "passphrase"]
+    let short_floor = ["password", "passwd", "pwd", "passphrase"]
         .iter()
         .any(|p| final_word.ends_with(p));
-    Some(Named { strong, password })
+    Some(Named {
+        strong,
+        short_floor,
+    })
 }
 
 /// A name's words, lower case: split on `_`, `-` and camelCase, digits
@@ -1386,16 +1413,16 @@ fn scheme_before(text: &str, at: usize) -> String {
         .to_ascii_lowercase()
 }
 
-/// A connection string's password that stands in for one.
-fn placeholder_password(password: &str) -> bool {
-    let lower = password.to_ascii_lowercase();
-    filter::is_placeholder(password)
-        || password.starts_with('$')
+/// A connection string's secret part that stands in for one.
+fn placeholder_secret(part: &str) -> bool {
+    let lower = part.to_ascii_lowercase();
+    filter::is_placeholder(part)
+        || part.starts_with('$')
         || matches!(
             lower.as_str(),
             "password" | "pass" | "passwd" | "pwd" | "secret" | "changeme"
         )
-        || password.chars().all(|c| c == '*')
+        || part.chars().all(|c| c == '*')
         || lower.chars().all(|c| c == 'x')
 }
 
@@ -1561,13 +1588,23 @@ pub fn dummy_rule(value: &str, body: &str) -> Option<&'static str> {
 /// chance; six or more (`SAMPLE`, `EXAMPLE`, `REDACTED`) do not, and sit
 /// anywhere, as in `github_pat_11EXAMPLE0…`.
 ///
-/// Even at a segment's edge a short marker counts only when the rest of the
-/// segment is not generator-shaped: a live Slack secret opens on `FAKE` about
-/// once in 3.7 million, and read as a dummy it was indexed. `FAKEtokenvalue`,
-/// `FAKE000000000000` and `fake` alone still are markers.
+/// At a segment's edge a short marker counts only when the segment is the
+/// marker alone, or the rest is eight or more characters of one case or of
+/// digits, as a person pads one (`FAKEtokenvalue`, `FAKE000000000000`). A
+/// shorter rest is what a generator leaves: a Discord bot token's six-character
+/// middle part opened on `FAKE` or `TEST` by chance in the 0.51.0 calibration,
+/// and read as a dummy it would be indexed. A random rest of eight in one case
+/// beside a chance marker is about one in a billion.
 fn has_marker(body: &str, marker: &str) -> bool {
     let lower = marker.to_ascii_lowercase();
     let segments = || body.split(['-', '_', '.']);
+    let padding = |rest: &str| {
+        rest.is_empty()
+            || (rest.len() >= 8
+                && (rest.chars().all(|c| c.is_ascii_lowercase())
+                    || rest.chars().all(|c| c.is_ascii_uppercase())
+                    || rest.chars().all(|c| c.is_ascii_digit())))
+    };
     [marker, lower.as_str()].iter().any(|m| {
         if marker.len() >= 6 {
             body.contains(m)
@@ -1575,7 +1612,7 @@ fn has_marker(body: &str, marker: &str) -> bool {
             segments().any(|seg| {
                 seg.strip_prefix(m)
                     .or_else(|| seg.strip_suffix(m))
-                    .is_some_and(|rest| !generated(rest))
+                    .is_some_and(padding)
             })
         }
     })

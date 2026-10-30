@@ -287,7 +287,9 @@ before, and one of these:
 - a stretch a generator wrote, 12 or more letters and digits that mix upper and
   lower case, or letters and digits, and switch between them all along. A
   camelCase identifier (`hideDecisionModelsBanner`) and a word with a number on
-  it (`dbpassword9090`) are not one;
+  it (`dbpassword9090`) are not one. A value spelled only in base64 is read
+  with its `+` and `/` taken out, because they are base64's own letters and
+  cut a 44-character key into stretches under 12 about once in a hundred;
 - 32 or more hex characters;
 - for a name whose last word ends in `password`, `passwd`, `pwd` or
   `passphrase`, a short password. That is 12 or more characters with at least
@@ -301,11 +303,13 @@ before, and one of these:
 These are never a credential value, whatever their entropy:
 
 - a member path (`cfg.auth.token`), where every dotted part is an identifier
-  and none is generator-shaped, so a Vault `hvs.` token still counts;
+  and none is generator-shaped, so a Vault `hvs.` token still counts, and a
+  value that passes the short-password test is never one;
 - a URL with no `user:password@` in it;
 - prose, with a space anywhere past a leading `Bearer`, `Basic` or `Token`;
-- code, a value that takes an address or opens a block or a call
-  (`&schemas.Key{`);
+- code, a value that takes an address and opens a block or a call
+  (`&schemas.Key{`). Both, because a random password opens on `&` about once
+  in seventy;
 - an elided value, one holding `...` or `…`;
 - a value with a sequential run of eight (`abcdefgh`, `12345678`);
 - a template reference (`${SEMLITH_AGENT_KEY}`, `{{token}}`, `<your-key-here>`)
@@ -340,9 +344,13 @@ declared rules says so:
   the body after the issuer's prefix (`EXAMPLE`, `TEST`, `TESTING`, `FAKE`,
   `DUMMY`, `SAMPLE`, `PLACEHOLDER`, `REDACTED`, `MASKED`, `INVALID` or
   `NOTREAL`, written in one case), a run of eight or more `X`, or one character
-  repeated. A marker of six letters or more counts anywhere in the body, and a
-  shorter one only at the start or end of the body or of one of its `-`, `_` or
-  `.` parts, with nothing generator-shaped beside it. On a prefixed shape it is
+  repeated. A marker of six letters or more counts anywhere in the body. A
+  shorter one counts only as a whole `-`, `_` or `.` part, or at the start or
+  end of one beside eight or more characters of one case or of digits
+  (`FAKEtokenvalue`, `FAKE000000000000`): a generator leaves a shorter rest,
+  and a Discord bot token's six-character middle part opened on `TEST` by
+  chance in the 0.51.0 calibration. For a webhook or a bot token the body is
+  the token, not the numeric id in front of it. On a prefixed shape it is
   also a sequential run of eight inside one part (ten in a part of digits
   alone, as Slack's numeric parts are), a repeating pattern (`aaaaBBBBcccc`,
   `TESTTESTTEST`), or a body of words with no stretch a generator wrote
