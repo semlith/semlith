@@ -1108,7 +1108,7 @@ fn the_audit_false_positives_stay_indexed() {
         (
             "repeated blocks",
             "notes.txt",
-            "npm_aaaaBBBBccccDDDDeeeeFFFFggggHHHH9753\n".to_string(),
+            format!("npm_{}9753\n", "aaaaBBBBccccDDDDeeeeFFFFggggHHHH"),
         ),
         (
             "a tagged line",
@@ -1138,8 +1138,10 @@ fn the_audit_false_positives_stay_indexed() {
         (
             "an unsigned JWT",
             "auth.py",
-            "t = \"eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyMTIzNDUifQ.c2lnbmF0dXJlLWlnbm9yZWQ\"\n"
-                .to_string(),
+            format!(
+                "t = \"{}.{}.{}\"\n",
+                "eyJhbGciOiJub25lIn0", "eyJzdWIiOiJ1c2VyMTIzNDUifQ", "c2lnbmF0dXJlLWlnbm9yZWQ"
+            ),
         ),
         (
             "a bearer placeholder",

@@ -6443,7 +6443,7 @@ sdReview.asked = {};
 
 /** A refusal row as a Decisions-table row, for a daemon that sends no table. */
 function decisionFromRow(r) {
-  const outcome = r.accepted ? (r.accepted === "redacted" ? "redacted · indexed" : r.accepted === "refused" || r.accepted === "kept" ? "kept out" : "accepted") : r.class === "credential" ? "never indexed" : r.class === "crashed" ? "parser crashed" : r.class === "dummy" ? "accepted" : r.class === "unindexable" && /image/.test(r.rule) ? "read as image" : "skipped";
+  const outcome = r.accepted && /^new match since accepted/.test(r.rule || "") ? "never indexed" : r.accepted ? (r.accepted === "redacted" ? "redacted · indexed" : r.accepted === "refused" || r.accepted === "kept" ? "kept out" : "accepted") : r.class === "credential" ? "never indexed" : r.class === "crashed" ? "parser crashed" : r.class === "dummy" ? "accepted" : r.class === "unindexable" && /image/.test(r.rule) ? "read as image" : "skipped";
   const mine = !!r.accepted;
   return { path: r.path, outcome, why: r.rule, by: mine ? "you" : "rules", at: r.last_seen, can_undo: mine, can_retry: r.class === "crashed" && !mine };
 }

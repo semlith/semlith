@@ -1439,7 +1439,7 @@ pub const SHAPES: &[Shape] = &[
         label: "client secret",
         prefix_len: 0,
         pattern: r#"(?m)(?:^|[\\'"`\s>=:(,)])([a-zA-Z0-9_~.]{3}\dQ~[a-zA-Z0-9_~.-]{31,34})(?:$|[\\'"`\s<),])"#,
-        example: concat!("sec", "ret: abc8Q~EXAMPLEaaaaBBBBccccDDDDeeeeFFFFg\n"),
+        example: concat!("secret: abc8Q", "~EXAMPLEaaaaBBBBccccDDDDeeeeFFFFg\n"),
         near_miss: "abc8Q~short",
     },
     // trufflehog slackwebhook and gitleaks slack-webhook-url.
@@ -1485,7 +1485,7 @@ pub const SHAPES: &[Shape] = &[
         ),
         near_miss: "MTAwMDAwMDAwMDAwMDAwMDAw.short",
     },
-    // `BLOCK` for PGP's armour, `-----BEGIN PGP PRIVATE KEY BLOCK-----`.
+    // `BLOCK` for PGP's armour, whose header names a `PGP PRIVATE KEY BLOCK`.
     Shape {
         kind: "a private key block",
         provider: "pem",

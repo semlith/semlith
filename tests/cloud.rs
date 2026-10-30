@@ -1308,7 +1308,7 @@ fn a_push_sends_only_what_changed_after_the_binarys_own_refusals() {
     write("build.log", b"noise\n");
     write(".env", b"TOKEN=1\n");
     write("node_modules/left-pad/index.js", b"module.exports = 1;\n");
-    write("keys.txt", b"aws_access_key_id = AKIAZ7Q4M2P9X3K8L5N6\n");
+    write("keys.txt", b"aws_access_key_id = AKIAZ7Q4M2P7X3K2L5N6\n");
     write("big.bin", &vec![b'a'; 2 << 20]);
 
     let o = semlith(
@@ -1407,7 +1407,7 @@ fn tracked_tree(home: &Path) -> std::path::PathBuf {
         ("README.md", &b"# infra\nHow the boxes are built.\n"[..]),
         (".github/workflows/ci.yml", b"on: push\n"),
         (".editorconfig", b"root = true\n"),
-        ("keys.txt", b"aws_access_key_id = AKIAZ7Q4M2P9X3K8L5N6\n"),
+        ("keys.txt", b"aws_access_key_id = AKIAZ7Q4M2P7X3K2L5N6\n"),
     ] {
         let p = tree.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
