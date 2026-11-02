@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.51.1] - 2026-11-02
 
-The documents agent round on the scorecard is counted in full. No binary
-change, no store format change and no CLI or MCP change.
+The documents agent round on the scorecard is counted in full, and the
+credential scan refuses a password spelled in upper case and digits that it
+used to read as a variable name. Every store rescans once on its next run. No
+store format change and no CLI or MCP change.
 
 ### Fixed
 
@@ -23,6 +25,19 @@ change, no store format change and no CLI or MCP change.
   scored on the same 127 answers. The scorecard page, the README and the
   crates.io page carry the corrected figures. The code agent round reads its
   answers the same way now. None of its saved sessions were affected.
+- **An upper-case password read as a variable name.** The scan let a value
+  spelled only in upper case, digits and underscores through as a placeholder
+  such as `DB_PASSWORD`, so a connection string or a password a generator wrote
+  in upper case and digits was indexed. A value that switches between letters
+  and digits the way a generator does is now refused. On the audit corpora
+  this adds 7 refused files, all trufflehog detector fixtures holding
+  real-shaped keys, and none on litellm, openai-python, supabase/auth or
+  stripe-go. Found by the scan's 100,000-per-shape calibration.
+
+### Changed
+
+- Dependencies: ureq 3.5, rusqlite 0.41, zip 9.1, tree-sitter-dart 0.3,
+  tree-sitter-md 0.5.4 and the patch group, and five GitHub Actions.
 
 ## [0.51.0] - 2026-10-30
 
