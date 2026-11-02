@@ -927,7 +927,7 @@ fn has_word(value: &str) -> bool {
 /// (it needs no digit at all) and switches fewer than twice about once in
 /// three million; both fall off fast with length. Raise the bar if a real
 /// key format ever turns out to be letters only.
-fn has_generated(s: &str) -> bool {
+pub(crate) fn has_generated(s: &str) -> bool {
     let made = |part: &str| generated(part) && switches(part) >= 2 && !camel(part);
     if s.split(|c: char| !c.is_ascii_alphanumeric()).any(made) {
         return true;
@@ -1450,6 +1450,11 @@ fn prefixed_dummy(shape: &filter::Shape, body: &str) -> Option<&'static str> {
     // characters or fewer. AWS, Twilio and semlith bodies are one case by
     // format, and a random one spells only letters now and then; a shape with
     // no prefix has no body to read this way.
+    //
+    // ponytail: a chance spelling still meets it, measured 0.51.1 at about
+    // once in eight million forged GitLab tokens (a capitalised body of
+    // nineteen lower-case letters). Add a letter-frequency test if a real
+    // format turns out to have a short single-case body.
     let mixed = shape.pattern.contains("A-Z") && shape.pattern.contains("a-z");
     let parts: Vec<&str> = body
         .split(|c: char| !c.is_ascii_alphanumeric())

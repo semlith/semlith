@@ -335,7 +335,7 @@ Asked 127 questions about 53 public documents, an Opus agent with Grep, Glob and
 Read found the passage 63 % of the time, and 41 of its 127 top quotes appear
 nowhere in the document it named. It found the file by name, could not read it,
 and wrote something plausible. With Semlith installed it found 98 %, and 0 of
-126 quotes were made up. On single-repo code with a strong model it does not
+127 quotes were made up. On single-repo code with a strong model it does not
 help, and Opus scores 92 % with or without it.
 
 Public code-retrieval benchmarks, run by [`bench/scorecard/`](bench/scorecard/README.md)
@@ -351,7 +351,7 @@ number are on the [scorecard page](bench/scorecard/README.md).**
 | CodeRAG-Bench DS-1000, NDCG@10 | **0.260** | 0.158 BM25 | 513 |
 | Agents (Opus), cost per correct answer | **$0.065** | $0.072 grep only | 50 × 3 runs |
 | Documents (PDF, Office, EPUB, …), passage found within 4k tokens | **116/127** | 34/127 rga | 127 |
-| Agents (Opus) on those documents, passage found | **124/127** | 80/127 grep only | 127 |
+| Agents (Opus) on those documents, passage found | **125/127** | 80/127 grep only | 127 |
 | Real sessions, tokens sent against whole files read | **75.2× fewer** | | 1,575 retrievals |
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/bench/swe-hit-dark.svg"><img src="docs/images/bench/swe-hit-light.svg" alt="SWE-bench: Semlith puts the right file in the top 10 for 72-77 % of instances, against 47 % for grep then read" width="760"></picture>

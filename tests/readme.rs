@@ -378,7 +378,7 @@ fn the_documents_finding_and_the_recording_live_further_down() {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    for figure in ["41 of", "0 of 126", "63 %", "98 %", "92 %"] {
+    for figure in ["41 of", "0 of 127", "63 %", "98 %", "92 %"] {
         assert!(
             bench.contains(figure),
             "the Benchmarks section no longer states the documents finding ({figure:?})"

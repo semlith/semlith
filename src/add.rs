@@ -849,6 +849,7 @@ mod tests {
         let timeout = ureq::unversioned::transport::NextTimeout {
             after: ureq::unversioned::transport::time::Duration::NotHappening,
             reason: ureq::Timeout::Resolve,
+            ..Default::default()
         };
         let connected = |listener: &std::net::TcpListener| {
             std::thread::sleep(std::time::Duration::from_millis(200));

@@ -3,8 +3,9 @@
 #[allow(unused_imports)]
 use super::*;
 
-/// The three shapes that abort tree-sitter's block grammars at depth 300, and
-/// one ordinary file.
+/// The three shapes that aborted tree-sitter's block grammars at depth 300,
+/// and one ordinary file. From tree-sitter-md 0.5.4 only the YAML one still
+/// aborts on its own.
 fn nesting_corpus(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     let d = 300;
@@ -23,6 +24,10 @@ fn nesting_corpus(dir: &Path) {
 
 const HOSTILE: [&str; 3] = ["quotes.md", "list.md", "seq.yaml"];
 
+/// The files that abort a parser when the nesting cap is off: seq.yaml for
+/// real, and quotes.md through the debug-build abort hook, since
+/// tree-sitter-md 0.5.4 no longer aborts on deep quotes or lists.
+const CRASHING: [&str; 2] = ["quotes.md", "seq.yaml"];
 fn crashed_rows(refused: &Value) -> Vec<(String, String)> {
     refused["stores"]
         .as_array()
@@ -53,7 +58,7 @@ fn begins(home: &Path, name: &str) -> usize {
     n
 }
 
-/// S01: the three files that aborted 0.39.0 leave the CLI and the daemon
+/// S01: files that abort a parser leave the CLI and the daemon
 /// running, each refused with a parser-crash reason, and neither a catch-up
 /// nor a restart parses them again. The nesting cap is switched off (debug
 /// builds honour the switch) so the real C abort reaches the parse worker.
@@ -65,7 +70,10 @@ fn s01_a_file_that_aborts_a_parser_is_refused_once_and_never_loops() {
     let corpus = dir.path().join("corpus");
     std::fs::create_dir_all(&home).unwrap();
     nesting_corpus(&corpus);
-    let cap_off = [("SEMLITH_NO_NESTING_CAP", "1")];
+    let cap_off = [
+        ("SEMLITH_NO_NESTING_CAP", "1"),
+        ("SEMLITH_FAULT_ABORT", "quotes.md"),
+    ];
 
     let out = run(&home, &["index", corpus.to_str().unwrap()], &cap_off);
     assert!(
@@ -77,20 +85,20 @@ fn s01_a_file_that_aborts_a_parser_is_refused_once_and_never_loops() {
     let out = run(&home, &["refused", "--json"], &cap_off);
     let refused: Value = serde_json::from_slice(&out.stdout).expect("refused --json");
     let rows = crashed_rows(&refused);
-    for name in HOSTILE {
+    for name in CRASHING {
         let row = rows.iter().find(|(p, _)| p.ends_with(name));
         let (_, reason) =
             row.unwrap_or_else(|| panic!("{name} is not refused as crashed: {rows:?}"));
         assert!(reason.starts_with("parser crashed"), "{name}: {reason}");
     }
-    let before: Vec<usize> = HOSTILE.iter().map(|n| begins(&home, n)).collect();
+    let before: Vec<usize> = CRASHING.iter().map(|n| begins(&home, n)).collect();
 
     // Catch-up on start, then a restart: the daemon stays up, the refusals
     // stand, and the journal shows no second parse of any of them.
     for round in 0..2 {
         let mut daemon = Daemon::start(&home, &cap_off);
         let listed = until(Duration::from_secs(120), || {
-            crashed_rows(&daemon.api("/api/refused")).len() >= HOSTILE.len()
+            crashed_rows(&daemon.api("/api/refused")).len() >= CRASHING.len()
         });
         assert!(daemon.alive(), "round {round}: the daemon died on catch-up");
         assert!(
@@ -106,7 +114,7 @@ fn s01_a_file_that_aborts_a_parser_is_refused_once_and_never_loops() {
         assert_eq!(status, 200, "round {round}: the daemon does not answer");
         drop(daemon);
     }
-    let after: Vec<usize> = HOSTILE.iter().map(|n| begins(&home, n)).collect();
+    let after: Vec<usize> = CRASHING.iter().map(|n| begins(&home, n)).collect();
     assert_eq!(before, after, "a refused file was handed to a parser again");
 
     // doctor names them.
