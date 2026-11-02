@@ -575,6 +575,34 @@ fn a_placeholder_is_not_a_credential() {
     }
 }
 
+/// A secret spelled in upper case and digits only is not a variable name: a
+/// generator switches between letters and digits all along, a name does not.
+/// Found by the 100,000-per-shape calibration (0.51.1): a forged connection
+/// string password spelled in upper case and digits was read as a placeholder.
+#[test]
+fn an_upper_case_generated_secret_is_not_a_placeholder() {
+    // Spelled in two halves so this file is not itself refused.
+    let secret = ["SH849ZNRRO", "VEI7S21YM7EXO6"].concat();
+    for value in [
+        format!("DATABASE_URL=postgres://app:{secret}@db.internal:5432/app"),
+        format!(r#"db_password = "{secret}""#),
+    ] {
+        assert!(
+            semlith::filter::scan_text(&value).is_some(),
+            "an upper-case generated secret was read as a placeholder: {value}"
+        );
+    }
+    for value in [
+        "DATABASE_URL=postgres://app:DB_PASSWORD@db.internal:5432/app",
+        r#"db_password = "PROD_DB_PASSWORD_2""#,
+    ] {
+        assert!(
+            semlith::filter::scan_text(value).is_none(),
+            "a variable name was refused as a credential: {value}"
+        );
+    }
+}
+
 /// The value may not cross a line. `split_once("/?token=")` and a quote two
 /// lines later are not an assignment; they are code with a colon in it.
 #[test]

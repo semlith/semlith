@@ -1668,12 +1668,15 @@ pub(crate) fn is_placeholder(value: &str) -> bool {
         return true;
     }
     // A variable name rather than a value: upper case, digits, underscores and
-    // nothing else, optionally with a word in front of it.
+    // nothing else, optionally with a word in front of it. Not a generator's
+    // output spelled in upper case and digits (`SH849…EXO6`, 24 characters),
+    // which switches between letters and digits all along where a name does not.
     value.split_whitespace().last().is_some_and(|last| {
         !last.is_empty()
             && last
                 .chars()
                 .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            && !crate::keyscan::has_generated(last)
     })
 }
 
