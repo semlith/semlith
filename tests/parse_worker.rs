@@ -15,6 +15,7 @@ fn a_parser_that_dies_costs_one_worker_and_names_the_reason() {
     // any other thread reads the environment.
     unsafe {
         std::env::set_var("SEMLITH_NO_NESTING_CAP", "1");
+        std::env::set_var("SEMLITH_FAULT_ABORT", "abort.md");
         std::env::set_var("SEMLITH_FAULT_HANG", "hang.txt");
         std::env::set_var("SEMLITH_FAULT_GRAPH_HANG", "graph-hang.rs");
         std::env::set_var("SEMLITH_FAULT_ALLOC", "alloc.txt");
@@ -32,10 +33,11 @@ fn a_parser_that_dies_costs_one_worker_and_names_the_reason() {
         "a Rust file has a graph"
     );
 
-    // The real trigger: tree-sitter-md's external scanner overflows its
-    // 1024-byte buffer and the C assert aborts the process.
-    let quotes = "> ".repeat(300) + "x\n";
-    match worker::read(Path::new("deep.md"), quotes.as_bytes(), true) {
+    // A parser that aborts the process. This used to be the real trigger,
+    // tree-sitter-md's external scanner overflowing on 300 nested quotes, but
+    // tree-sitter-md 0.5.4 no longer aborts there, so the debug-build hook
+    // aborts instead.
+    match worker::read(Path::new("abort.md"), b"x\n", true) {
         Err(Stop::Crashed(reason)) => {
             assert!(reason.starts_with("parser crashed"), "{reason}");
             #[cfg(unix)]
