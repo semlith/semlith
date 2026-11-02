@@ -1596,7 +1596,9 @@ struct CacheWrites {
 /// dummy rules (2.1) let some files in, and its no-prefix rule (2.2) keeps
 /// some out, and neither shows up in a content hash. 3 is 0.51.0's: the
 /// generic rule read as words and value shape, new formats, new dummy rules.
-const SCAN_RULES: u32 = 3;
+/// 4 is 0.51.1's: a value in upper case and digits that a generator wrote is
+/// no longer read as a variable-name placeholder.
+const SCAN_RULES: u32 = 4;
 
 /// The version of the graph extraction a store was last swept under. A store
 /// below it has every unchanged file's symbols and edges extracted again on its

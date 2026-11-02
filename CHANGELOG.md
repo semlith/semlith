@@ -5,6 +5,40 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.51.1] - 2026-11-02
+
+The documents agent round on the scorecard is counted in full, and the
+credential scan refuses a password spelled in upper case and digits that it
+used to read as a variable name. Every store rescans once on its next run. No
+store format change and no CLI or MCP change.
+
+### Fixed
+
+- **The documents scorer dropped 5 Semlith answers.** It read an agent's
+  ANSWER line with strict JSON, and a quote copied from a spreadsheet row
+  holds raw tab characters, which strict JSON refuses, so the answer counted
+  as no answer. On the 2026-10-19 run that was 1 answer with Semlith
+  installed and 4 with Semlith and Read only. Re-scoring the same sessions,
+  with no new run, gives Semlith installed 125/127 passages found and 0 of
+  127 top quotes not in the named document, Semlith and Read only 126/127 and
+  0 of 127, and grep unchanged at 80/127 and 41 of 127. Every arm is now
+  scored on the same 127 answers. The scorecard page, the README and the
+  crates.io page carry the corrected figures. The code agent round reads its
+  answers the same way now. None of its saved sessions were affected.
+- **An upper-case password read as a variable name.** The scan let a value
+  spelled only in upper case, digits and underscores through as a placeholder
+  such as `DB_PASSWORD`, so a connection string or a password a generator wrote
+  in upper case and digits was indexed. A value that switches between letters
+  and digits the way a generator does is now refused. On the audit corpora
+  this adds 7 refused files, all trufflehog detector fixtures holding
+  real-shaped keys, and none on litellm, openai-python, supabase/auth or
+  stripe-go. Found by the scan's 100,000-per-shape calibration.
+
+### Changed
+
+- Dependencies: ureq 3.5, rusqlite 0.41, zip 9.1, tree-sitter-dart 0.3,
+  tree-sitter-md 0.5.4 and the patch group, and five GitHub Actions.
+
 ## [0.51.0] - 2026-10-30
 
 The credential scan refuses far fewer files that only look like they hold a

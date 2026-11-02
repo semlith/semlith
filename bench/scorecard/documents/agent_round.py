@@ -92,12 +92,13 @@ def run(a):
 
 
 def parse_answer(text):
-    """The last ANSWER: line's JSON list of {path, quote}, or []."""
+    """The last ANSWER: line's JSON list of {path, quote}, or []. strict=False: a quote copied from a spreadsheet row
+    carries raw tabs, which strict JSON refuses."""
     m = None
     for m in re.finditer(r"ANSWER:\s*(\[.*?\])\s*$", text, re.S | re.M):
         pass
     try:
-        items = json.loads(m.group(1)) if m else []
+        items = json.loads(m.group(1), strict=False) if m else []
     except ValueError:
         return []
     return [i for i in items if isinstance(i, dict) and i.get("path")]

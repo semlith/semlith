@@ -239,7 +239,7 @@ def parse_answer(text):
     if not m:
         return None
     try:
-        items = json.loads(m.group(1))
+        items = json.loads(m.group(1), strict=False)  # raw control characters inside a string still parse
     except ValueError:
         return None
     return [i if isinstance(i, str) else i.get("path", "") for i in items if isinstance(i, (str, dict))]

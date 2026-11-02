@@ -145,8 +145,10 @@ Headless Claude Code on the same questions; the answer is up to five documents, 
 | model | arm | runs | questions | found | cost / session | sessions calling semlith | top quotes not in the named document |
 |---|---|---|---|---|---|---|---|
 | opus | grep (Grep, Glob, Read) | 1 | 127 | 80/127 | $0.067 | — | 41 of 127 |
-| opus | semlith installed, Grep built in | 1 | 127 | 124/127 | $0.043 | 127 | 0 of 126 |
-| opus | semlith and Read only | 1 | 127 | 122/127 | $0.042 | 127 | 0 of 123 |
+| opus | semlith installed, Grep built in | 1 | 127 | 125/127 | $0.043 | 127 | 0 of 127 |
+| opus | semlith and Read only | 1 | 127 | 126/127 | $0.042 | 127 | 0 of 127 |
+
+These are the 2026-10-19 sessions re-scored on 0.51.1. The scorer had read a quote holding a raw tab from a spreadsheet row as no answer, which dropped 1 semlith installed answer and 4 semlith and Read only answers.
 
 `python3 bench/scorecard/documents/agent_round.py run g,s,sx && python3 bench/scorecard/documents/agent_round.py score`
 

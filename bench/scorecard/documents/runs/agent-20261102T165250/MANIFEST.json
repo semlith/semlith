@@ -1,0 +1,20 @@
+{
+ "bench": "documents-agent",
+ "command": "uv run --with pyarrow python bench/scorecard/documents/agent_round.py score",
+ "fetch_mismatches": {},
+ "files": {
+  "agent-scores.jsonl": "75b7bfcfc9c86239a2228d614ab31f4f0e81e75bbd62dbc53caaf9807dcfbb4b",
+  "agent.json": "244cfcb119e62cfca1c64cae724afc486132eef1bcf547cad5ec6e5ebd992588"
+ },
+ "machine": "macOS-27.0.1-arm64-arm-64bit",
+ "python": "3.11.2",
+ "root": "/Users/aakashpawar/semlith-bench/scorecard/documents/files",
+ "semlith": "semlith 0.51.0\nreleases signed by SHA256:a5oJmrakIwDHEWTDWqWe51Ttt6m2tQ0dsGzIqyxDuxs",
+ "semlith_binary": {
+  "path": "/Users/aakashpawar/.semlith/bin/semlith",
+  "sha256": "06d76c5530777598a6d752fc9f5ddab817abc7e5716bd9b511e95f37eb6f1c52"
+ },
+ "skill": "/Users/aakashpawar/Documents/Aakash/AI/Apps/live/semlith/semlith/docs/skill/SKILL.md",
+ "store": "/Users/aakashpawar/semlith-bench/scorecard/documents/home/stores/documents",
+ "written": "2026-11-02T16:52:50+0530"
+}
