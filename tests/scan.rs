@@ -582,14 +582,15 @@ fn a_placeholder_is_not_a_credential() {
 #[test]
 fn an_upper_case_generated_secret_is_not_a_placeholder() {
     // Spelled in two halves so this file is not itself refused.
-    let secret = ["SH849ZNRRO", "VEI7S21YM7EXO6"].concat();
-    for value in [
-        format!("DATABASE_URL=postgres://app:{secret}@db.internal:5432/app"),
-        format!(r#"db_password = "{secret}""#),
-    ] {
+    let forged = ["SH849ZNRRO", "VEI7S21YM7EXO6"].concat();
+    let contexts = [
+        format!("DATABASE_URL=postgres://app:{forged}@db.internal:5432/app"),
+        format!(r#"db_password = "{forged}""#),
+    ];
+    for (i, line) in contexts.iter().enumerate() {
         assert!(
-            semlith::filter::scan_text(&value).is_some(),
-            "an upper-case generated secret was read as a placeholder: {value}"
+            semlith::filter::scan_text(line).is_some(),
+            "context {i}: an upper-case generated value was read as a placeholder"
         );
     }
     for value in [
