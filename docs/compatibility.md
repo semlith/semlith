@@ -194,6 +194,13 @@ Each entry lists what a script, an agent or a stored file could notice. A
 **break** is a change to a covered surface. Route changes are listed even
 though routes are not covered.
 
+### Unreleased
+
+- **Display:** Report byte counts match the portal, with no grouping below
+  1024 bytes (`1000 B`) and positive rounding ties rounded up (`1280` bytes
+  prints `1.3 KB`). The portal now clamps negative byte counts to `0 B`, as
+  reports already did.
+
 ### 0.13.0
 
 - **Added:** `key show`, `key rotate`, `start --no-mcp-http`; the `/mcp`
