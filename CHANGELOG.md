@@ -38,6 +38,19 @@ once on its next run. No store format change and no CLI or MCP change.
 - CI approves the maintainer's own pull requests once every job has passed,
   and a scheduled workflow labels outside contributors' pull requests (type,
   language, first-time contributor, waiting on review).
+- Every release credits its contributors: the notes end with a Contributors
+  section, and each outside contributor's pull request and reported issue gets
+  a comment naming the release it shipped in.
+
+### Contributors
+
+Thank you to everyone outside the core team whose work is in this release.
+
+- @codekongdev: fix(report): align byte formatting with the portal (#301)
+
+New contributors:
+
+- @codekongdev made their first contribution in #301
 
 ## [0.51.1] - 2026-11-02
 

@@ -103,6 +103,24 @@ Open pull requests against `develop`; `main` receives releases.
 - A change to a public surface (command, flag, environment variable, MCP tool,
   store format) also lands in [docs/compatibility.md](docs/compatibility.md).
 
+### How contributions are credited
+
+Every contribution that ships is credited in three places, without you asking:
+
+- **On the change itself.** The changelog line for your fix or feature ends
+  with `Thanks @you (#N).`
+- **In the release notes.** Each release's section in
+  [CHANGELOG.md](CHANGELOG.md), which is also the body of its
+  [GitHub release](https://github.com/semlith/semlith/releases), ends with a
+  **Contributors** section: everyone outside the core team whose pull request
+  is in the release, everyone whose reported issue it fixes, and a **New
+  contributors** list for first pull requests.
+- **On your pull request or issue.** When the release is published, a comment
+  says which version it shipped in.
+
+Reporting a bug that gets fixed counts as a contribution. Pull requests are
+merged with a merge commit, so your commits keep your name in the history.
+
 ## Performance work
 
 Measure first and put the numbers in the PR:
