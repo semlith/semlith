@@ -20,6 +20,16 @@ set -euo pipefail
 
 repo=${GITHUB_REPOSITORY:-semlith/semlith}
 
+# The core team: every @handle in CODEOWNERS, besides whoever GitHub calls
+# OWNER, MEMBER or COLLABORATOR. A private org member reads as CONTRIBUTOR to
+# the workflow token, so the association alone would credit the owner.
+team() {
+  grep -v '^#' "$(dirname "$0")/CODEOWNERS" | grep -o '@[A-Za-z0-9-]*' | tr -d @ | sort -u | jq -R . | jq -sc .
+}
+# shellcheck disable=SC2016 # jq text, expanded by jq
+outside='def outside: (.bot | not) and (.association as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a) | not)
+  and (.login as $l | $team | index($l) | not);'
+
 # The collected JSON: {prs: [...], issues: [...]}, one entry per pull request in
 # the range and per issue those pull requests close.
 # The pull requests merged in <from>..<to>: "Merge pull request #N" commits, and
@@ -45,7 +55,7 @@ collect() {
     # First contribution: their oldest merged pull request here is this one.
     # Asked only for outside authors: search is rate limited hard.
     first=0
-    if jq -e '(.bot | not) and (.association as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a) | not)' <<< "$pr" > /dev/null; then
+    if jq -e --argjson team "$(team)" "$outside outside" <<< "$pr" > /dev/null; then
       first=$(gh api -X GET search/issues -f q="repo:$repo is:pr is:merged author:$login" -f sort=created -f order=asc -f per_page=1 \
         --jq '.items[0].number // 0')
     fi
@@ -62,8 +72,7 @@ collect() {
 }
 
 render() {
-  jq -r '
-    def outside: (.bot | not) and (.association as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a) | not);
+  jq -r --argjson team "$(team)" "$outside"'
     ([.prs[] | select(outside)]) as $prs
     | ([.issues[] | select(outside)]) as $issues
     | ([.prs[] | select(.bot)]) as $bots
@@ -104,8 +113,7 @@ thank() {
   marker="<!-- semlith-released:$tag -->"
   release="https://github.com/$repo/releases/tag/$tag"
   # One comment per pull request and per issue, never twice for one release.
-  jq -c '
-    def outside: (.bot | not) and (.association as $a | ["OWNER", "MEMBER", "COLLABORATOR"] | index($a) | not);
+  jq -c --argjson team "$(team)" "$outside"'
     (.prs[] | select(outside) | {number, login, kind: "pr"}),
     (.issues[] | select(outside) | {number, login, kind: "issue"})
   ' <<< "$data" | while IFS= read -r item; do

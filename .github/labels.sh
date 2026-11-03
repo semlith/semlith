@@ -19,12 +19,20 @@
 # add is checked against the ones already there, so a second run prints nothing.
 set -euo pipefail
 
+# The core team: every @handle in CODEOWNERS. GitHub reports a private org
+# member's author_association as CONTRIBUTOR to the workflow token, so the
+# association alone took the owner's own pull requests for a contributor's.
+team() {
+  grep -v '^#' "$(dirname "$0")/CODEOWNERS" | grep -o '@[A-Za-z0-9-]*' | tr -d @ | sort -u | jq -R . | jq -sc .
+}
+
 decide() {
-  jq -r '
+  jq -r --argjson team "$(team)" '
     def maintainer: . == "OWNER" or . == "MEMBER" or . == "COLLABORATOR";
+    def core: (.author_association | maintainer) or (.login as $l | $team | index($l));
     [.labels[].name] as $have
     | [.files[].path] as $paths
-    | if (.author_association | maintainer)
+    | if (.author_association | maintainer) or (.author.login as $l | $team | index($l))
         or .author.type == "Bot" or (.author.login | endswith("[bot]"))
       then empty
       else
@@ -41,7 +49,7 @@ decide() {
             (if .author_association == "FIRST_TIME_CONTRIBUTOR" or .author_association == "FIRST_TIMER"
              then "first-time contributor" else empty end)
           ]
-          + ( ([.reviews[] | select(.submitted_at != null and (.author_association | maintainer)) | .submitted_at]
+          + ( ([.reviews[] | select(.submitted_at != null and core) | .submitted_at]
                | max) as $reviewed
               | if ($have | index("waiting on author")) and $reviewed != null
                    and .last_commit_at != null and .last_commit_at > $reviewed
@@ -65,7 +73,7 @@ fetch() {
   done
   files=$(gh api --paginate "repos/$repo/pulls/$n/files?per_page=100" --jq '.[] | {path: .filename}' | jq -sc .)
   commit=$(gh api --paginate "repos/$repo/pulls/$n/commits?per_page=100" --jq '.[].commit.committer.date' | jq -Rsc 'split("\n") | map(select(. != "")) | max')
-  reviews=$(gh api --paginate "repos/$repo/pulls/$n/reviews?per_page=100" --jq '.[] | {author_association, submitted_at}' | jq -sc .)
+  reviews=$(gh api --paginate "repos/$repo/pulls/$n/reviews?per_page=100" --jq '.[] | {login: .user.login, author_association, submitted_at}' | jq -sc .)
   jq -c --argjson files "$files" --argjson commit "$commit" --argjson reviews "$reviews" --argjson issues "$issue_labels" \
     '{number, author: {login: .user.login, type: .user.type}, author_association, body,
       labels: [.labels[] | {name}], files: $files, last_commit_at: $commit,
