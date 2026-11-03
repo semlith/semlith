@@ -5,12 +5,52 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.51.2] - 2026-11-04
+
+A lane whose pack was removed in Settings can be switched on again, the
+credential scan refuses a connection-string password spelled in letters
+only, and reports format byte counts as the portal does. Every store rescans
+once on its next run. No store format change and no CLI or MCP change.
 
 ### Fixed
 
+- **A lane whose pack was removed could not be switched on again.** Removing
+  the Neural Engine pack in Settings › Performance left the lane "failed —
+  reading …/manifest.json" with its switch disabled, so the only way back was
+  `semlith accel on ane` in a terminal, although the Remove dialog promises
+  that turning it on downloads it again. A lane that is switched off is no
+  longer kept as failed, Remove lets the lane's worker go and leaves it idle,
+  and the row reads "off — needs a 148 MB download" with a switch that asks
+  to download and turn on.
+- **A connection-string password spelled in letters only was indexed.**
+  `postgres://app:<24 mixed-case letters>@…` read as a camelCase name, so the
+  scan let it in: 8 of 3,000,000 forged connection strings on 0.51.1, and the
+  cause of an intermittent failure of the scan calibration test. In a
+  connection string's password slot such a value is the password, and it is
+  refused; placeholders stay dummies. The scan rules move to version 5, so
+  every store rescans once and embeds nothing again.
 - Reports and the portal format byte counts alike, including 1000-1023 bytes,
-  negative counts and exact rounding ties in binary units.
+  negative counts and exact rounding ties in binary units. Thanks @codekongdev
+  (#301).
+
+### Added
+
+- CI approves the maintainer's own pull requests once every job has passed,
+  and a scheduled workflow labels outside contributors' pull requests (type,
+  language, first-time contributor, waiting on review).
+- Every release credits its contributors: the notes end with a Contributors
+  section, and each outside contributor's pull request and reported issue gets
+  a comment naming the release it shipped in.
+
+### Contributors
+
+Thank you to everyone outside the core team whose work is in this release.
+
+- @codekongdev: fix(report): align byte formatting with the portal (#301)
+
+New contributors:
+
+- @codekongdev made their first contribution in #301
 
 ## [0.51.1] - 2026-11-02
 

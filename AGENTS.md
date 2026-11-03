@@ -980,6 +980,17 @@ and SEC-007 of the 2026-10-23 audit). Tag builds use `--locked` and no cache.
 GitHub Actions must stay SHA-pinned with a
 trailing `# vN` comment for Dependabot.
 
+**Every release credits its contributors.** Before tagging, end the
+version's CHANGELOG section with the output of
+`.github/contributors.sh section v<previous>` (on the release branch, so the
+range holds every merged pull request): outside contributors by @username with
+their pull requests and the issues of theirs the release closes, new
+contributors, and Dependabot on one line. Keep the inline `Thanks @user (#N).`
+on each entry too. The section is the GitHub release body, because `release`
+copies the CHANGELOG section; the `thank` job then comments the release on each
+contributor's pull request and issue. `.github/contributors-test.sh` holds the
+rules.
+
 **A release with a security fix raises the installers' floor.** `floor=` in
 `install.sh` and `$floor` in `install.ps1` are the oldest release a resolved
 `latest` may install; set both to the new version in any release whose

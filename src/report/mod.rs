@@ -95,7 +95,9 @@ pub mod num {
             format!("{} B", size as i64)
         } else {
             // Rust rounds exact ties to even; JavaScript's toFixed(1) rounds up.
-            // Only a .25 fraction is exact in binary and rounds down here.
+            // Of the fractions that sit on a tie at one place, only .25 and .75
+            // are exact in binary. .75 already rounds up in both languages;
+            // .25 rounds down to even here, so it is nudged.
             let size = if size.fract() == 0.25 {
                 size + 0.05
             } else {

@@ -9910,7 +9910,10 @@ function sePerf() {
         const on = env || l.locked ? !!l.enabled : !!(l.saved ?? l.enabled);
         // An unavailable or failed lane can be turned off, never on; the CPU
         // is locked on while no other lane is on.
-        const failed = l.status?.state === "failed";
+        // A failed lane whose pack has gone is not locked: turning it on
+        // fetches the pack again, as the Remove dialog promised.
+        const refetch = l.download_bytes && !l.installed;
+        const failed = l.status?.state === "failed" && !refetch;
         const locked = l.locked || env || ((na || failed) && !on);
         const tip = l.locked ? cap(l.locked_reason || "") : env ? "Set by SEMLITH_ACCEL, so the switch cannot change it" : (na || failed) && !on ? cap(l.status?.reason || "") : null;
         const row = el(
@@ -9925,7 +9928,7 @@ function sePerf() {
               ? el("span", { class: "muted t-xs", text: `${l.device || "named when it starts"} · ${laneState(l.status)} · always on — the CPU cap limits it` })
               : na
               ? el("span", { class: "muted t-xs", text: `Not available on this ${osWord()}: ${String(l.status?.reason || "").replace(/^the .*? lane (is )?/i, "").replace(/^unavailable — /, "")}` })
-              : el("span", { class: "muted t-xs", text: `${l.device || "named when it starts"} · ${laneState(l.status)}${(data.accel.bytes || {})[l.lane] ? ` · ${bytes(data.accel.bytes[l.lane])} on disk` : ""}` }),
+              : el("span", { class: "muted t-xs", text: `${l.device || "named when it starts"} · ${refetch && !on && l.status?.state !== "downloading" ? `off — needs a ${bytes(l.download_bytes)} download` : laneState(l.status)}${(data.accel.bytes || {})[l.lane] ? ` · ${bytes(data.accel.bytes[l.lane])} on disk` : ""}` }),
           ),
           na ? el("span", { class: "t-mono-sm muted right nowrap", text: "off" }) : check ? laneCheck(check) : el("span", { class: "t-mono-sm ink2 right nowrap", text: `${Math.round(l.share || 0)}% of the work` }),
           // Its own column at the far right, kept on every row, so the share

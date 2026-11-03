@@ -195,7 +195,7 @@ pub fn scan(path: &str, text: &str) -> Vec<Match> {
             {
                 continue;
             }
-            let Some(shape) = value_shape(raw, named.short_floor) else {
+            let Some(shape) = value_shape(raw, named.short_floor, false) else {
                 continue;
             };
             let range = value.range();
@@ -682,7 +682,10 @@ fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) ->
             value.to_string()
         };
         placeholder = shape.provider == "connection" && placeholder_secret(&secret);
-        if !placeholder && value_shape(&secret, true).is_none() {
+        // A connection string's password slot holds the password: a camelCase
+        // stretch there is not an identifier, as it is in an assignment.
+        let slot = shape.provider == "connection";
+        if !placeholder && value_shape(&secret, true, slot).is_none() {
             return None;
         }
     }
@@ -836,8 +839,9 @@ struct Named {
 /// It counts when it has a stretch a generator wrote, 32 or more hex, or —
 /// for a password — passes the short-password test. It never counts as a
 /// member path, a URL with no credentials in it, prose, or with a sequential
-/// run of eight.
-fn value_shape(value: &str, short_floor: bool) -> Option<Shape> {
+/// run of eight. In a connection string's password slot (`slot`) a camelCase
+/// stretch counts as generated, because there it is the password (0.51.2).
+fn value_shape(value: &str, short_floor: bool, slot: bool) -> Option<Shape> {
     let bare = ["Bearer ", "Basic ", "Token "]
         .iter()
         .find_map(|p| value.strip_prefix(p))
@@ -880,7 +884,7 @@ fn value_shape(value: &str, short_floor: bool) -> Option<Shape> {
     let hex = bare
         .split(|c: char| !c.is_ascii_hexdigit())
         .any(|s| s.len() >= 32);
-    if has_generated(bare) || hex {
+    if generated_stretch(bare, !slot) || hex {
         return Some(Shape::Generated);
     }
     short.then_some(Shape::Password)
@@ -926,9 +930,18 @@ fn has_word(value: &str) -> bool {
 /// 20-character alphanumeric reads as camelCase about once in 35 000 draws
 /// (it needs no digit at all) and switches fewer than twice about once in
 /// three million; both fall off fast with length. Raise the bar if a real
-/// key format ever turns out to be letters only.
+/// key format ever turns out to be letters only. The camelCase exclusion does
+/// not apply in a connection string's password slot ([`value_shape`] with
+/// `slot`), where 8 of 3,000,000 forged passwords were letters only and read
+/// as names on 0.51.1.
 pub(crate) fn has_generated(s: &str) -> bool {
-    let made = |part: &str| generated(part) && switches(part) >= 2 && !camel(part);
+    generated_stretch(s, true)
+}
+
+/// [`has_generated`], with the camelCase-identifier exclusion only when
+/// `names` says a name may stand here.
+fn generated_stretch(s: &str, names: bool) -> bool {
+    let made = |part: &str| generated(part) && switches(part) >= 2 && !(names && camel(part));
     if s.split(|c: char| !c.is_ascii_alphanumeric()).any(made) {
         return true;
     }

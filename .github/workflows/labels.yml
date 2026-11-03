@@ -1,0 +1,41 @@
+name: labels
+
+# Labels outside contributors' pull requests every fifteen minutes, off the
+# hour: the type of the issue it closes (or `documentation` for a docs-only
+# change), the languages it touches, `first-time contributor`, and
+# `waiting on author` -> `waiting on review` once they push after a review.
+# A schedule, not `pull_request_target`: it reads pull requests through the API
+# and checks out only the default branch, so no contributor's code ever runs
+# here with a token that can write. The rules live in .github/labels.sh and
+# are tested by .github/labels-test.sh in ci.yml's scripts lane.
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+# Runs never overlap; a late one waits rather than racing the last one's writes.
+concurrency:
+  group: labels
+  cancel-in-progress: false
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      # The default branch's labels.sh, whatever ref a manual run starts from.
+      # The repository is public, so the token needs no `contents` to read it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: label pull requests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/labels.sh
