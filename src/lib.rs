@@ -1604,8 +1604,9 @@ const SCAN_RULES: u32 = 4;
 /// below it has every unchanged file's symbols and edges extracted again on its
 /// next full pass, without re-embedding: 0.30.0 records a Rust method's owner
 /// and a receiver's type, and an unchanged file would otherwise keep the edges
-/// an older release wrote until somebody edited it.
-const GRAPH_RULES: u32 = 3;
+/// an older release wrote until somebody edited it. Rule 4 corrects files
+/// whose names only shared the Dockerfile prefix (#292).
+const GRAPH_RULES: u32 = 4;
 
 /// How many paths of each not-indexed class a plan lists.
 const PLAN_PATHS: usize = 50;

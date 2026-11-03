@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Filenames such as `dockerfiles.md`, `dockerfile_test.go` and
   `dockerfile-lint.yml` resolve to Markdown, Go and YAML instead of Dockerfile.
   Dockerfile variants still match when a dot precedes the suffix (#292).
+  Existing stores refresh their graphs on the next full indexing pass without
+  re-embedding unchanged files, removing old Dockerfile symbols from files
+  that no longer have a graph language.
 
 ## [0.51.1] - 2026-11-02
 
