@@ -414,6 +414,31 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ steps.latest.outputs.make }}
 
+  # Every outside contributor thanked where they will see it: one comment on
+  # each of their pull requests in the release, and on each issue of theirs
+  # that it closed, naming the release (.github/contributors.sh thank, which
+  # skips anything already thanked for this tag). Its own job, so the one token
+  # that can comment holds nothing else. Not for a release candidate.
+  thank:
+    needs: release
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Thank contributors
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/contributors.sh thank "$GITHUB_REF_NAME"
+
   # crates.io by Trusted Publishing: no long-lived API token anywhere, only a
   # short-lived one crates.io issues against this workflow's OIDC identity, in
   # the `crates-io` environment. Never on a tag push. The release owner runs it

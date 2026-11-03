@@ -780,6 +780,20 @@ impl Lane {
     }
 
     fn set(&self, status: Status) {
+        // An off lane is never Failed: a failure kept on a lane nobody runs
+        // locked its switch, and after its pack was removed the switch could
+        // not be turned on again to fetch it (0.51.2). The switch is read only
+        // for a failure, because compile progress sets a status many times.
+        let status = match status {
+            Status::Failed { reason } if switched_off(self.id) => {
+                eprintln!(
+                    "semlith: the {} lane failed: {reason}; it is switched off, so it waits to be switched on",
+                    self.id
+                );
+                Status::Idle
+            }
+            other => other,
+        };
         let mut current = self.status.lock().unwrap_or_else(|e| e.into_inner());
         let phase = |s: &Status| match s {
             Status::Compiling { .. } => 1,
@@ -865,6 +879,14 @@ impl Lane {
             *status = Status::Starting;
         }
         self.send(Job::Warm);
+    }
+
+    /// Let the lane's worker go and leave the lane idle: its files are gone,
+    /// so whatever the worker was doing with them is over. Dropping the
+    /// dispatcher's channel ends the dispatcher, and the worker with it.
+    fn stop(&self) {
+        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.set(Status::Idle);
     }
 
     /// Clear a failure, so the lane is tried afresh. A switch turned off and
@@ -1039,6 +1061,32 @@ fn lanes() -> Vec<Arc<Lane>> {
 
 pub fn lane(id: &str) -> Option<Arc<Lane>> {
     lanes().into_iter().find(|lane| lane.id == id)
+}
+
+/// Whether a lane is switched off by what was saved (or its default). A lane
+/// the environment names is on for this, so its failures are kept as before.
+fn switched_off(id: &str) -> bool {
+    std::env::var(ACCEL_ENV).is_err() && !enabled().lane(id)
+}
+
+/// Why a pack lane cannot start: its pack is not here. Worded as
+/// [`worker_args`] has always said it for the Neural Engine.
+fn not_installed(id: &str) -> Option<String> {
+    let pack = pack_for(id)?;
+    let cache = crate::model_cache_dir().ok()?;
+    // `setup` fetches only the Neural Engine's pack; the others come with
+    // their switch.
+    let setup = if id == "ane" {
+        " or `semlith setup`"
+    } else {
+        ""
+    };
+    crate::packs::installed(&cache, &pack).is_none().then(|| {
+        format!(
+            "unavailable — the {} pack is not installed; `semlith accel on {id}`{setup} fetches it",
+            label_of(id)
+        )
+    })
 }
 
 /// Why a lane cannot run on this machine at all, before anything is fetched.
@@ -1534,7 +1582,8 @@ pub const SWITCH_NAMES: &str = "cpu, gpu, ane, cuda, trt, openvino, llama, gpu-b
 /// turned off only while another lane is on ([`CPU_LOCKED`]); turning off the
 /// last other lane is allowed and leaves it on. A lane that is unavailable here, or
 /// failed, can be turned off but not on, and the refusal says why; turning a
-/// failed lane off clears the failure, so it may be turned on again later.
+/// lane off clears a failure, or its worker's word that it is unavailable, so
+/// it may be turned on again later.
 /// Turning on a lane whose pack is not here fetches it first, with
 /// `progress` told how far the download has got.
 pub fn set(lane_id: &str, on: bool) -> Result<String> {
@@ -1590,11 +1639,10 @@ pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) 
         (other, _) => bail!("there is no lane called {other}; the switches are {SWITCH_NAMES}"),
     }
     settings.save()?;
-    if !on
-        && let Some(found) = lane(lane_id)
-        && matches!(found.status(), Status::Failed { .. })
-    {
-        found.set(Status::Idle);
+    // Off clears a failure, and a worker's word that the lane's pack is not
+    // here: either kept would lock the switch it is turned on with again.
+    if !on && let Some(found) = lane(lane_id) {
+        found.reset();
     }
     let note = spec(lane_id)
         .filter(|s| s.experimental && on)
@@ -1695,6 +1743,16 @@ pub fn pack_for(id: &str) -> Option<crate::packs::Pack> {
 /// Delete a lane's downloaded components, and say how many bytes that freed.
 /// Turning a lane off never does this; only asking does.
 pub fn remove(lane_id: &str) -> Result<u64> {
+    let freed = remove_files(lane_id)?;
+    // A worker started before the removal would otherwise go on to fail over
+    // files that are gone, and keep that failure on a lane that is off.
+    if let Some(found) = lane(lane_id) {
+        found.stop();
+    }
+    Ok(freed)
+}
+
+fn remove_files(lane_id: &str) -> Result<u64> {
     let cache = crate::model_cache_dir()?;
     if let Some(pack) = pack_for(lane_id) {
         let worker = if lane_id == "ane" {
@@ -1876,10 +1934,19 @@ fn dispatch(lane: Arc<Lane>, jobs: mpsc::Receiver<Job>) {
                         lane.set(Status::Active);
                     }
                     Err(e) => {
-                        let reason = format!("{e:#}");
+                        // A pack removed under a starting worker reads as a
+                        // pack that is not here, not as the manifest it could
+                        // no longer read.
+                        let gone = not_installed(lane.id);
+                        let pack_gone = gone.is_some();
+                        let reason = gone.unwrap_or_else(|| format!("{e:#}"));
                         // Nothing on this machine for the lane to use is not a
-                        // failure; everything else is.
-                        if let Some(why) = reason.strip_prefix("unavailable — ") {
+                        // failure; everything else is. A lane switched off
+                        // whose pack has gone is simply off: its switch is
+                        // how the pack comes back.
+                        if pack_gone && switched_off(lane.id) {
+                            lane.set(Status::Idle);
+                        } else if let Some(why) = reason.strip_prefix("unavailable — ") {
                             lane.set(Status::Unavailable {
                                 reason: why.to_string(),
                             });
@@ -3023,53 +3090,55 @@ mod tests {
     /// counts down between steps rather than climbing.
     #[test]
     fn a_compiling_lane_is_waited_for_and_its_time_left_counts_down() {
-        let lane = Lane::new(spec("ane").unwrap());
-        // The clock the lane reads, measured here rather than assumed from the
-        // nominal sleep: a slow macOS runner overshot 1 100 ms by 150 and failed
-        // a bound written around it (#166). Started before the lane's own, so
-        // the lane can never have been compiling for longer than `taken` says:
-        // taken after it, a preempted Linux runner put 84 ms between the two
-        // and the lane's estimate overshot the bound.
-        let began = std::time::Instant::now();
-        lane.set(Status::Compiling {
-            percent: 0,
-            eta_ms: None,
+        in_home(None, &[], || {
+            let lane = Lane::new(spec("ane").unwrap());
+            // The clock the lane reads, measured here rather than assumed from the
+            // nominal sleep: a slow macOS runner overshot 1 100 ms by 150 and failed
+            // a bound written around it (#166). Started before the lane's own, so
+            // the lane can never have been compiling for longer than `taken` says:
+            // taken after it, a preempted Linux runner put 84 ms between the two
+            // and the lane's estimate overshot the bound.
+            let began = std::time::Instant::now();
+            lane.set(Status::Compiling {
+                percent: 0,
+                eta_ms: None,
+            });
+            // And how far behind it the lane's clock started. A runner preempted
+            // between the two put the lane's clock 82 ms behind and its estimate
+            // under a lower bound that assumed none (#177, the second time): the
+            // lane's elapsed time is `taken` less this, give or take a read.
+            let lag = began.elapsed().as_millis() as u64;
+            assert!(lane.coming() && !lane.ready());
+            // Before it has moved, the time the last compile took counts down.
+            *lane.expected.lock().unwrap() = Some(Duration::from_secs(40));
+            let eta = |lane: &Lane| match lane.status() {
+                Status::Compiling { eta_ms, .. } => eta_ms.unwrap(),
+                other => panic!("{other:?}"),
+            };
+            assert!((39_000..=40_000).contains(&eta(&lane)));
+            std::thread::sleep(Duration::from_millis(1100));
+            assert!(eta(&lane) <= 39_000);
+            // Half done after `taken`, so as much again is left, less the moment
+            // between the step and the read.
+            let taken = began.elapsed().as_millis() as u64;
+            lane.set(Status::Compiling {
+                percent: 50,
+                eta_ms: None,
+            });
+            let first = eta(&lane);
+            let slack = began.elapsed().as_millis() as u64 - taken + 50;
+            assert!(
+                (taken.saturating_sub(slack + lag).max(1_000)..=taken + slack).contains(&first),
+                "{first} after {taken} ms, the lane's clock {lag} ms behind"
+            );
+            std::thread::sleep(Duration::from_millis(300));
+            // Floored at a second, and never above what it said before.
+            assert!(eta(&lane) <= first);
+            lane.set(Status::Failed { reason: "x".into() });
+            assert!(!lane.coming());
+            lane.set(Status::Active);
+            assert!(lane.ready() && !lane.coming());
         });
-        // And how far behind it the lane's clock started. A runner preempted
-        // between the two put the lane's clock 82 ms behind and its estimate
-        // under a lower bound that assumed none (#177, the second time): the
-        // lane's elapsed time is `taken` less this, give or take a read.
-        let lag = began.elapsed().as_millis() as u64;
-        assert!(lane.coming() && !lane.ready());
-        // Before it has moved, the time the last compile took counts down.
-        *lane.expected.lock().unwrap() = Some(Duration::from_secs(40));
-        let eta = |lane: &Lane| match lane.status() {
-            Status::Compiling { eta_ms, .. } => eta_ms.unwrap(),
-            other => panic!("{other:?}"),
-        };
-        assert!((39_000..=40_000).contains(&eta(&lane)));
-        std::thread::sleep(Duration::from_millis(1100));
-        assert!(eta(&lane) <= 39_000);
-        // Half done after `taken`, so as much again is left, less the moment
-        // between the step and the read.
-        let taken = began.elapsed().as_millis() as u64;
-        lane.set(Status::Compiling {
-            percent: 50,
-            eta_ms: None,
-        });
-        let first = eta(&lane);
-        let slack = began.elapsed().as_millis() as u64 - taken + 50;
-        assert!(
-            (taken.saturating_sub(slack + lag).max(1_000)..=taken + slack).contains(&first),
-            "{first} after {taken} ms, the lane's clock {lag} ms behind"
-        );
-        std::thread::sleep(Duration::from_millis(300));
-        // Floored at a second, and never above what it said before.
-        assert!(eta(&lane) <= first);
-        lane.set(Status::Failed { reason: "x".into() });
-        assert!(!lane.coming());
-        lane.set(Status::Active);
-        assert!(lane.ready() && !lane.coming());
     }
 
     /// The CPU is off only beside another lane: by default beside the Neural
@@ -3098,51 +3167,150 @@ mod tests {
     /// lane left the CPU does.
     #[test]
     fn the_neural_engine_runs_alone_from_the_first_batch() {
-        let ane = Arc::new(Lane::new(spec("ane").unwrap()));
-        let gpu = Arc::new(Lane::new(spec("gpu").unwrap()));
-        ane.set(Status::Compiling {
-            percent: 10,
-            eta_ms: None,
+        in_home(None, &[], || {
+            let ane = Arc::new(Lane::new(spec("ane").unwrap()));
+            let gpu = Arc::new(Lane::new(spec("gpu").unwrap()));
+            ane.set(Status::Compiling {
+                percent: 10,
+                eta_ms: None,
+            });
+            gpu.set(Status::Active);
+            let ids = |(lanes, cpu): (Vec<Arc<Lane>>, bool)| {
+                (lanes.iter().map(|l| l.id).collect::<Vec<_>>(), cpu)
+            };
+            let both = || vec![Arc::clone(&ane), Arc::clone(&gpu)];
+            assert_eq!(ids(pick(both(), false, false)), (vec!["ane"], false));
+            assert_eq!(ids(pick(both(), false, true)), (vec!["ane", "gpu"], false));
+            ane.set(Status::Active);
+            assert_eq!(ids(pick(both(), false, false)), (vec!["ane"], false));
+            assert_eq!(ids(pick(both(), true, false)), (vec!["ane"], true));
+            // A failed lane is not usable, so for_run leaves it out.
+            assert_eq!(
+                ids(pick(vec![Arc::clone(&gpu)], false, false)),
+                (vec!["gpu"], false)
+            );
+            assert_eq!(ids(pick(Vec::new(), false, false)), (vec![], true));
+            // Every lane failed or gone: the CPU takes over whatever its switch.
+            ane.set(Status::Failed { reason: "x".into() });
+            assert_eq!(
+                ids(pick(vec![Arc::clone(&ane)], false, false)),
+                (vec!["ane"], true)
+            );
         });
-        gpu.set(Status::Active);
-        let ids = |(lanes, cpu): (Vec<Arc<Lane>>, bool)| {
-            (lanes.iter().map(|l| l.id).collect::<Vec<_>>(), cpu)
-        };
-        let both = || vec![Arc::clone(&ane), Arc::clone(&gpu)];
-        assert_eq!(ids(pick(both(), false, false)), (vec!["ane"], false));
-        assert_eq!(ids(pick(both(), false, true)), (vec!["ane", "gpu"], false));
-        ane.set(Status::Active);
-        assert_eq!(ids(pick(both(), false, false)), (vec!["ane"], false));
-        assert_eq!(ids(pick(both(), true, false)), (vec!["ane"], true));
-        // A failed lane is not usable, so for_run leaves it out.
-        assert_eq!(
-            ids(pick(vec![Arc::clone(&gpu)], false, false)),
-            (vec!["gpu"], false)
-        );
-        assert_eq!(ids(pick(Vec::new(), false, false)), (vec![], true));
-        // Every lane failed or gone: the CPU takes over whatever its switch.
-        ane.set(Status::Failed { reason: "x".into() });
-        assert_eq!(
-            ids(pick(vec![Arc::clone(&ane)], false, false)),
-            (vec!["ane"], true)
-        );
     }
 
     /// A failed lane stays failed for a while and is then tried again, rather
     /// than for the life of the process.
     #[test]
     fn a_failed_lane_is_tried_again_after_its_cool_down() {
-        let lane = Lane::new(spec("ane").unwrap());
-        lane.set(Status::Failed { reason: "x".into() });
-        assert!(!lane.usable());
-        // Failing again does not restart the wait.
-        let first = *lane.failed_at.lock().unwrap();
-        lane.set(Status::Failed { reason: "y".into() });
-        assert_eq!(*lane.failed_at.lock().unwrap(), first);
-        *lane.failed_at.lock().unwrap() = Instant::now().checked_sub(LANE_RETRY);
-        assert!(lane.usable());
-        assert_eq!(lane.status(), Status::Idle);
-        assert!(lane.failed_at.lock().unwrap().is_none());
+        in_home(None, &[], || {
+            let lane = Lane::new(spec("ane").unwrap());
+            lane.set(Status::Failed { reason: "x".into() });
+            assert!(!lane.usable());
+            // Failing again does not restart the wait.
+            let first = *lane.failed_at.lock().unwrap();
+            lane.set(Status::Failed { reason: "y".into() });
+            assert_eq!(*lane.failed_at.lock().unwrap(), first);
+            *lane.failed_at.lock().unwrap() = Instant::now().checked_sub(LANE_RETRY);
+            assert!(lane.usable());
+            assert_eq!(lane.status(), Status::Idle);
+            assert!(lane.failed_at.lock().unwrap().is_none());
+        });
+    }
+
+    /// A home and a model cache of the test's own, with the Neural Engine's
+    /// switch saved as `ane` and `vars` set, so a test never reads this
+    /// machine's settings.json or packs. Holds the environment lock.
+    fn in_home<T>(ane: Option<bool>, vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
+        let home = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let mut all = vec![
+            (crate::home::HOME_ENV, home.path().as_os_str()),
+            (crate::MODEL_CACHE_ENV, cache.path().as_os_str()),
+        ];
+        all.extend(vars.iter().map(|(k, v)| (*k, std::ffi::OsStr::new(*v))));
+        crate::home::with_env_vars(&all, || {
+            if ane.is_some() {
+                let mut settings = crate::home::Settings::load();
+                settings.accelerators.ane = ane;
+                settings.save().unwrap();
+            }
+            body()
+        })
+    }
+
+    /// A failure on a lane that is switched off is not kept: it would lock
+    /// the switch that brings the lane back (0.51.2). On a lane that is on,
+    /// or one the environment names, it is kept as before.
+    #[test]
+    fn a_failure_on_an_off_lane_is_not_kept() {
+        in_home(Some(false), &[], || {
+            let lane = Lane::new(spec("ane").unwrap());
+            lane.set(Status::Failed {
+                reason: "reading manifest.json".into(),
+            });
+            if std::env::var(ACCEL_ENV).is_ok() {
+                // Named by the environment: on for this rule.
+                assert!(matches!(lane.status(), Status::Failed { .. }));
+                return;
+            }
+            assert_eq!(lane.status(), Status::Idle);
+            assert!(lane.failed_at.lock().unwrap().is_none());
+            assert!(lane.usable() && lane.coming());
+        });
+        in_home(Some(true), &[], || {
+            let lane = Lane::new(spec("ane").unwrap());
+            lane.set(Status::Failed { reason: "x".into() });
+            assert!(matches!(lane.status(), Status::Failed { .. }));
+            assert!(lane.failed_at.lock().unwrap().is_some());
+        });
+    }
+
+    /// Removing a lane's files lets its worker go and leaves the lane idle,
+    /// whatever the worker had said about them.
+    #[test]
+    fn remove_resets_a_failed_lane() {
+        in_home(None, &[], || {
+            let ane = lane("ane").unwrap();
+            ane.set(Status::Failed {
+                reason: "reading manifest.json".into(),
+            });
+            assert!(matches!(ane.status(), Status::Failed { .. }));
+            remove("ane").unwrap();
+            assert_eq!(ane.status(), Status::Idle);
+            assert!(ane.jobs.lock().unwrap().is_none());
+        });
+    }
+
+    /// Off, Remove, then on: the switch fetches the pack rather than refusing
+    /// with the failure a worker left about the removed files. The fetch is
+    /// stopped by the air-gap switch, so nothing is downloaded.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn on_after_remove_fetches_the_pack() {
+        in_home(Some(true), &[(crate::embed::AIRGAP_ENV, "1")], || {
+            if std::env::var(ACCEL_ENV).is_ok() {
+                return;
+            }
+            let ane = lane("ane").unwrap();
+            // What the page's Remove does first.
+            set("ane", false).unwrap();
+            // A worker started before the removal fails over its files.
+            ane.set(Status::Failed {
+                reason: "reading .../manifest.json".into(),
+            });
+            remove("ane").unwrap();
+            assert_eq!(ane.status(), Status::Idle);
+            let said = format!("{:#}", set("ane", true).unwrap_err());
+            let pack = crate::packs::coreml().name;
+            assert!(
+                said.contains(&format!("fetching the {pack} pack"))
+                    && said.contains(crate::embed::AIRGAP_ENV),
+                "{said}"
+            );
+            // Nothing fetched, so the switch stays off.
+            assert_eq!(crate::home::Settings::load().accelerators.ane, Some(false));
+        });
     }
 
     /// A compile left by a killed worker is deleted; one still being written
