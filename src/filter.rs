@@ -176,10 +176,21 @@ impl Filter {
         let mut patterns: Vec<String> = Vec::new();
         for e in exts {
             let (bang, value) = negation(e);
-            patterns.push(format!(
-                "{bang}*.{}",
-                value.trim_start_matches('.').to_ascii_lowercase()
-            ));
+            // Only a leading dot is stripped. A glob like `*.rs` used to become
+            // `*/*.*.rs` and silently match nothing; empty / "." / bare "!" did
+            // the same. Refuse those the way an unknown --lang is refused.
+            let ext = value.trim_start_matches('.').to_ascii_lowercase();
+            if ext.is_empty() {
+                bail!(
+                    "empty --ext {e:?}; pass an extension like rs or .rs (use --path for globs)"
+                );
+            }
+            if ext.contains(['*', '?', '[', ']']) {
+                bail!(
+                    "--ext {e:?} looks like a glob; use --path for globs, or pass rs / .rs"
+                );
+            }
+            patterns.push(format!("{bang}*.{ext}"));
         }
         for name in langs {
             let (bang, value) = negation(name);
@@ -376,6 +387,28 @@ mod tests {
         let plain = Filter::new(&[], &s(&["rs"]), &[]).unwrap();
         let dotted = Filter::new(&[], &s(&[".rs"]), &[]).unwrap();
         assert_eq!(plain, dotted);
+    }
+
+    #[test]
+    fn an_extension_glob_is_refused_with_a_pointer_to_path() {
+        let err = Filter::new(&[], &s(&["*.rs"]), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--path"), "unhelpful error: {err}");
+        assert!(err.contains("*.rs"), "unhelpful error: {err}");
+    }
+
+    #[test]
+    fn an_empty_extension_is_refused_by_name() {
+        for bad in ["", ".", "!"] {
+            let err = Filter::new(&[], &s(&[bad]), &[])
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("empty --ext") || err.contains(bad),
+                "unhelpful error for {bad:?}: {err}"
+            );
+        }
     }
 
     #[test]
