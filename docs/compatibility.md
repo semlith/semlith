@@ -728,6 +728,12 @@ From 0.37.0-rc.7:
 |---|---|
 | Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
+### Unreleased
+
+| Surface | Change |
+|---|---|
+| `--ext` / `ext` | An empty value, `.`, a bare `!`, or a value with glob characters (`*`, `?`, `[`, `]`) is refused with an error. Pass `rs` or `.rs`; use `--path` for globs. Earlier releases turned `*.rs` into `*/*.*.rs` and matched nothing silently. |
+
 ### 0.51.0
 
 The credential scan's rules move to version 3, so every store rescans once on
