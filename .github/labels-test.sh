@@ -53,6 +53,13 @@ check "the owner's pull request" \
   "$(pr '{author_association: "OWNER", body: "Closes #3", closed_issue_labels: ["bug"]}')" \
   ""
 
+# The workflow token reads a private org member as CONTRIBUTOR (#334 was
+# labelled so on 2026-11-04); a CODEOWNERS handle is core team whatever it says.
+check "the owner's pull request, seen as a contributor" \
+  "$(pr '{author: {login: "aakashpawar1999", type: "User"}, author_association: "CONTRIBUTOR",
+          files: [{path: ".github/workflows/ci.yml"}, {path: "src/a.py"}]}')" \
+  ""
+
 check "a Dependabot pull request" \
   "$(pr '{author: {login: "dependabot[bot]", type: "Bot"}, author_association: "NONE",
           files: [{path: "Cargo.lock"}]}')" \
@@ -77,8 +84,13 @@ check "a review newer than the last commit" \
           reviews: [{author_association: "MEMBER", submitted_at: "2026-11-01T12:00:00Z"}]}')" \
   ""
 
+check "the owner's review, seen as a contributor's, newer than the last commit" \
+  "$(pr '{labels: [{name: "rust"}, {name: "waiting on author"}], last_commit_at: "2026-11-01T10:00:00Z",
+          reviews: [{login: "aakashpawar1999", author_association: "CONTRIBUTOR", submitted_at: "2026-11-01T12:00:00Z"}]}')" \
+  ""
+
 check "a hand-set label stays" \
   "$(pr '{labels: [{name: "rust"}, {name: "enhancement"}]}')" \
   ""
 
-echo "labels.sh: 11 checks passed"
+echo "labels.sh: 13 checks passed"

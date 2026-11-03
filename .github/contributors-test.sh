@@ -44,6 +44,13 @@ $out"
 out=$(render "$(jq -cn --argjson a "[$owner]" --argjson i "[$by_owner]" '{prs: $a, issues: $i}')")
 [ -z "$out" ] || fail "a release with only the owner's work printed: $out"
 
+# A CODEOWNERS handle is core team even when the workflow token reads the
+# private org member as CONTRIBUTOR.
+me=$(pr '{number: 16, title: "Release 0.9.0", login: "aakashpawar1999", association: "CONTRIBUTOR", first: true, closes: [8]}')
+mine=$(issue '{number: 8, title: "x", login: "aakashpawar1999", association: "CONTRIBUTOR"}')
+out=$(render "$(jq -cn --argjson a "[$me]" --argjson i "[$mine]" '{prs: $a, issues: $i}')")
+[ -z "$out" ] || fail "the owner, read as a contributor, was credited: $out"
+
 # A collaborator is core team, not an outside contributor.
 collab=$(pr '{number: 15, title: "feat: x", login: "sam", association: "COLLABORATOR", first: true}')
 out=$(render "$(jq -cn --argjson a "[$collab]" '{prs: $a, issues: []}')")
@@ -56,4 +63,4 @@ want='### Contributors
 @dependabot kept dependencies current in #13.'
 [ "$out" = "$want" ] || fail "a Dependabot-only release: got [$out]"
 
-echo "contributors.sh: 4 checks passed"
+echo "contributors.sh: 5 checks passed"
