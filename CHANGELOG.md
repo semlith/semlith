@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Reports and the portal format byte counts alike, including 1000-1023 bytes,
+  negative counts and exact rounding ties in binary units.
+
 ## [0.51.1] - 2026-11-02
 
 The documents agent round on the scorecard is counted in full, and the

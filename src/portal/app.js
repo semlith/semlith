@@ -310,7 +310,7 @@ function pct(part, whole, digits) {
 
 function bytes(value) {
   const units = ["B", "KB", "MB", "GB", "TB"];
-  let size = Number(value) || 0;
+  let size = Math.max(0, Number(value) || 0);
   let unit = 0;
   while (size >= 1024 && unit < units.length - 1) {
     size /= 1024;
