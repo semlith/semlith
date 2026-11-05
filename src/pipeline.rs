@@ -623,11 +623,6 @@ pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) 
                 }
             }
         }
-        // A classifier fix can leave a file in no graph language at all.
-        // An empty extraction tells the writer to remove its old graph.
-        if ctx.regraph && !is_image && graph::language_of(path).is_none() {
-            regraph = Some(graph::Extraction::default());
-        }
         // A file that will not give a count still gets one, zero, so it is not
         // read again on every pass.
         let units = counting.then(|| extracted.as_ref().and_then(|(_, n)| *n).unwrap_or(0));
