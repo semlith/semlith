@@ -604,6 +604,92 @@ fn an_upper_case_generated_secret_is_not_a_placeholder() {
     }
 }
 
+/// A connection string's password spelled in letters only is a password, not
+/// a camelCase name: the eight a 3,000,000-draw calibration of 0.51.1 missed
+/// (2026-11-03), each indexed there. Spelled in pieces so this file is not
+/// itself refused.
+#[test]
+fn a_letters_only_connection_password_is_refused() {
+    let missed = [
+        ["DiaNnmAiwlvp", "vZkfekAboGoe"],
+        ["oaEdvVyhotlp", "ujCsaiKyrAiu"],
+        ["OernPyvntdsg", "PzqQobxgrWzj"],
+        ["caQbpRsiSulD", "ulhxcjeArtyj"],
+        ["UdksDzreqaiv", "ldKvjSlzAobg"],
+        ["NsrpldOqxBfi", "yIftfKxgrvpx"],
+        ["zcAvjnAlgIwo", "zYfiheSffkwt"],
+        ["IcoCfqYtnGnp", "PeluygoxkEpg"],
+    ];
+    for parts in missed {
+        let line = format!("postgres://app:{}@db.internal:5432/app", parts.concat());
+        let found = semlith::keyscan::scan("src/config.rs", &line);
+        assert!(
+            found.first().is_some_and(|m| m.dummy.is_none()),
+            "a letters-only connection password was not refused: {line} => {found:?}"
+        );
+    }
+    // What stands in for a password in the same slot still reads as one.
+    for line in [
+        "postgres://app:${DB_PASS}@db.internal:5432/app",
+        "postgres://app:<password>@db.internal:5432/app",
+        "postgres://app:password@db.internal:5432/app",
+        "postgres://app:changeme@db.internal:5432/app",
+        "postgres://app:EXAMPLEpasswordValue@db.internal:5432/app",
+    ] {
+        let found = semlith::keyscan::scan("src/config.rs", line);
+        assert!(
+            found.iter().all(|m| m.dummy.is_some()),
+            "a stand-in connection password was refused: {line} => {found:?}"
+        );
+    }
+    // The generic rule keeps the camelCase test: a name assigned is a name.
+    assert!(
+        semlith::filter::scan_text(r#"banner_key = "hideDecisionModelsBanner""#).is_none(),
+        "a camelCase name in an assignment was refused"
+    );
+}
+
+/// The connection shape's calibration at the size that found the eight above:
+/// 3,000,000 forged values, none missed. Release build:
+/// `cargo test --release --test scan -- --ignored connection_shape_at_three_million`.
+#[test]
+#[ignore = "three million draws; minutes even in a release build"]
+fn connection_shape_at_three_million() {
+    let index = semlith::filter::SHAPES
+        .iter()
+        .position(|s| s.provider == "connection")
+        .expect("the connection row");
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let per = 3_000_000 / threads + 1;
+    let missed: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(move || {
+                    (0..per)
+                        .map(|_| semlith::keyscan::forge(index))
+                        .filter(|value| {
+                            !semlith::keyscan::scan("src/config.rs", value)
+                                .first()
+                                .is_some_and(|m| m.dummy.is_none())
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    });
+    assert!(
+        missed.is_empty(),
+        "{} of {} forged connection strings missed: {:?}",
+        missed.len(),
+        per * threads,
+        &missed[..missed.len().min(8)]
+    );
+}
+
 /// The value may not cross a line. `split_once("/?token=")` and a quote two
 /// lines later are not an assignment; they are code with a colon in it.
 #[test]

@@ -451,7 +451,8 @@ index. Query latency does, because the vector scan is linear.
 
 Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers building,
 the checks CI runs and what is out of scope, and [AGENTS.md](AGENTS.md) is the
-same for a coding agent. Everyone follows the [Code of Conduct](CODE_OF_CONDUCT.md).
+same for a coding agent. Everyone follows the [Code of Conduct](CODE_OF_CONDUCT.md),
+and every release [credits its contributors](CONTRIBUTING.md#how-contributions-are-credited).
 To report a security problem, see [SECURITY.md](SECURITY.md) rather than opening
 an issue.
 

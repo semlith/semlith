@@ -1,3 +1,10 @@
+<!--
+Thank you for contributing. When this ships, the changelog line credits you
+by @username, the release notes list you under Contributors, and this pull
+request gets a comment naming the release. See CONTRIBUTING.md, "How
+contributions are credited".
+-->
+
 # What this changes
 
 <!-- What is different after this PR, and why. If it fixes an issue, "Fixes #123". -->

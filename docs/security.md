@@ -254,7 +254,9 @@ that a match covers, a mask shows and a redaction replaces. That part has to
 pass the generic rule's value test below as a password does, so
 `postgres://app:app@localhost` is not a match. A placeholder password (`${…}`,
 `<…>`, one starting with `$`, `password`, `pass`, `secret`, `changeme`, all `*`
-or all `x`) is a test dummy.
+or all `x`) is a test dummy. In a connection string's password slot a
+camelCase-shaped stretch counts as one a generator wrote (from 0.51.2): there it
+is the password, not a name.
 
 **The one rule without a prefix needs a credential's name and a credential's
 value at once.** It reads an assignment on one line, the value quoted
