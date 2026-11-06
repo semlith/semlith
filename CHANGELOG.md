@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Filenames such as `dockerfiles.md`, `dockerfile_test.go` and
+  `dockerfile-lint.yml` resolve to Markdown, Go and YAML instead of Dockerfile.
+  Dockerfile variants still match when a dot precedes the suffix (#292).
+
 ## [0.51.2] - 2026-11-04
 
 A lane whose pack was removed in Settings can be switched on again, the

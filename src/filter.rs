@@ -122,8 +122,8 @@ pub fn language_of_path(path: &str) -> Option<&'static Language> {
     let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
     LANGUAGES.iter().find(|entry| {
         entry.extensions.contains(&ext)
-            || entry.filenames.iter().any(|f| match f.strip_suffix(".*") {
-                Some(stem) => name.starts_with(stem),
+            || entry.filenames.iter().any(|f| match f.strip_suffix('*') {
+                Some(prefix) => name.starts_with(prefix),
                 None => *f == name,
             })
     })
@@ -289,6 +289,30 @@ fn is_absolute(pattern: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dockerfile_variants_require_the_dot_before_the_suffix() {
+        for (path, expected) in [
+            ("dockerfiles.md", Some("markdown")),
+            ("dockerfile_test.go", Some("go")),
+            ("dockerfile-lint.yml", Some("yaml")),
+            ("dockerfiles", None),
+            ("dockerfile_backup", None),
+            ("Dockerfile", Some("dockerfile")),
+            ("Dockerfile.prod", Some("dockerfile")),
+            ("deploy/dockerfile.dev", Some("dockerfile")),
+            (r"deploy\Dockerfile.prod", Some("dockerfile")),
+            ("Dockerfile.", Some("dockerfile")),
+            ("app.dockerfile", Some("dockerfile")),
+            ("MAKEFILE", Some("makefile")),
+        ] {
+            assert_eq!(
+                super::language_of_path(path).map(|entry| entry.name),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
     /// `prefer` needs to tell a README from the function it describes, and a
     /// file in no language at all is prose.
     #[test]
