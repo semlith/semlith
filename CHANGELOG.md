@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Filenames such as `dockerfiles.md`, `dockerfile_test.go` and
   `dockerfile-lint.yml` resolve to Markdown, Go and YAML instead of Dockerfile.
   Dockerfile variants still match when a dot precedes the suffix (#292).
+- Two threads asking for the same model file while it downloads no longer fail
+  with "Lock acquisition failed": the second waits for the first and reads the
+  cached file (#341).
 
 ## [0.51.2] - 2026-11-04
 
