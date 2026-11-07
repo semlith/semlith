@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.2.9, tree-sitter-powershell 0.26.6, tree-sitter-scala 0.26.4,
   ts-parser-perl 2.0.4 and ureq 3.5.1 (Dependabot #337), with
   `THIRD-PARTY-NOTICES` regenerated for the four grammars.
+- **Dependencies.** zip 9.3.0 (Dependabot #338).
 
 ### Fixed
 
