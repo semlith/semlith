@@ -194,6 +194,14 @@ Each entry lists what a script, an agent or a stored file could notice. A
 **break** is a change to a covered surface. Route changes are listed even
 though routes are not covered.
 
+### Unreleased
+
+- **CLI:** `semlith search`, `semlith brief` and `semlith symbol` refuse an
+  empty or blank query, question or name with exit code 2, where they used to
+  search it.
+- **MCP:** a `query` or `question` argument that is empty after trimming is
+  answered with `isError: true` and is not counted in the ledger.
+
 ### 0.13.0
 
 - **Added:** `key show`, `key rotate`, `start --no-mcp-http`; the `/mcp`

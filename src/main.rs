@@ -247,6 +247,7 @@ enum Command {
 
     /// Search the store.
     Search {
+        #[arg(value_parser = text)]
         query: String,
 
         /// Number of results.
@@ -301,6 +302,7 @@ enum Command {
     ///
     /// `semlith brief "how does a store decide it is stale"`
     Brief {
+        #[arg(value_parser = text)]
         question: String,
 
         /// The token ceiling for the whole answer, counted with the store's
@@ -737,7 +739,7 @@ enum Command {
     Symbol {
         /// The symbol's name, matched exactly. `Type::method` narrows to one
         /// owner. Several names print one row per definition and no rings.
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required = true, num_args = 1.., value_parser = text)]
         names: Vec<String>,
 
         /// Most definitions to print.
@@ -1170,6 +1172,15 @@ enum KeyCommand {
 /// The system allocator, counted against a limit inside a parse worker only.
 #[global_allocator]
 static ALLOCATOR: semlith::worker::Counting = semlith::worker::Counting;
+
+/// A query, question or name with no text in it: searched anyway, it returns
+/// ranked hits for nothing and counts as a call.
+fn text(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        return Err("is empty; give it some text".into());
+    }
+    Ok(s.to_string())
+}
 
 fn main() -> Result<()> {
     // Everything semlith creates is its user's alone: a store, its logs and
