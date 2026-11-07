@@ -236,6 +236,11 @@ fn civil_from_unix(at: i64) -> (i64, u32, u32, u32, u32, u32) {
 mod tests {
     use super::*;
 
+    /// Held by every test that reads or sets the local offset. The daylight
+    /// saving test sets TZ, and a test reading the offset twice while it did
+    /// saw two different zones.
+    static TZ: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn the_epoch_and_a_known_instant_convert() {
         assert_eq!(civil_from_unix(0), (1970, 1, 1, 0, 0, 0));
@@ -247,6 +252,7 @@ mod tests {
 
     #[test]
     fn a_stamp_carries_its_offset() {
+        let _tz = TZ.lock().unwrap_or_else(|e| e.into_inner());
         let stamp = local_stamp(1_789_653_120);
         let offset = &stamp[stamp.len() - 6..];
         assert!(
@@ -264,8 +270,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_row_carries_the_offset_of_its_own_day() {
-        // SAFETY: the only test in this crate that touches TZ, and it restores
-        // nothing other tests read; the libc call re-reads the variable.
+        let _tz = TZ.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the only test in this crate that touches TZ, and the tests
+        // that read the offset hold `TZ` while it changes; the libc call
+        // re-reads the variable.
         unsafe {
             std::env::set_var("TZ", "America/New_York");
             unsafe extern "C" {
