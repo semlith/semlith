@@ -580,5 +580,15 @@ jobs:
             echo "github-actions already approved $HEAD_SHA"
             exit 0
           fi
-          gh pr review "$PR" --repo "$REPO" --approve \
-            --body "Every ci job passed or was skipped on $HEAD_SHA: $RUN_URL"
+          # A repository that does not let Actions approve pull requests
+          # (Settings > Actions > General) refuses the review. That is a
+          # setting, not a failed build, so it is said and the check stays green.
+          if ! out=$(gh pr review "$PR" --repo "$REPO" --approve \
+            --body "Every ci job passed or was skipped on $HEAD_SHA: $RUN_URL" 2>&1); then
+            if grep -q 'not permitted to approve' <<<"$out"; then
+              echo "::warning::not approved: this repository does not allow GitHub Actions to approve pull requests"
+              exit 0
+            fi
+            echo "$out" >&2
+            exit 1
+          fi

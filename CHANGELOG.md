@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dependencies.** cliclack 0.5.7, rusqlite 0.41.1, tree-sitter-clojure-orchard
+  0.2.9, tree-sitter-powershell 0.26.6, tree-sitter-scala 0.26.4,
+  ts-parser-perl 2.0.4 and ureq 3.5.1 (Dependabot #337), with
+  `THIRD-PARTY-NOTICES` regenerated for the four grammars.
+- **Dependencies.** zip 9.3.0 (Dependabot #338).
+
 ### Fixed
 
 - Filenames such as `dockerfiles.md`, `dockerfile_test.go` and
@@ -16,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `semlith brief` and `semlith symbol` exit with an error, and MCP
   `semlith_search` and `semlith_brief` answer with `isError`; neither writes a
   ledger row (#308).
+- Two threads asking for the same model file while it downloads no longer fail
+  with "Lock acquisition failed": the second waits for the first and reads the
+  cached file (#341).
 
 ## [0.51.2] - 2026-11-04
 
