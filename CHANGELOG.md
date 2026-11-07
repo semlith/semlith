@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Filenames such as `dockerfiles.md`, `dockerfile_test.go` and
   `dockerfile-lint.yml` resolve to Markdown, Go and YAML instead of Dockerfile.
   Dockerfile variants still match when a dot precedes the suffix (#292).
+- `semlith search -k` is held to 1 through 50, as MCP and remote stores
+  already were: `-k 0` returns one hit instead of "no matches", and `-k 500`
+  returns at most 50 (#309).
 
 ## [0.51.2] - 2026-11-04
 

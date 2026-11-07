@@ -194,6 +194,12 @@ Each entry lists what a script, an agent or a stored file could notice. A
 **break** is a change to a covered surface. Route changes are listed even
 though routes are not covered.
 
+### Unreleased
+
+- **CLI:** `semlith search -k` is held to 1 through 50, the range MCP and
+  remote stores already took. `-k 0` returns one hit and `-k 500` at most 50; a
+  script that asked for more than 50 gets 50.
+
 ### 0.13.0
 
 - **Added:** `key show`, `key rotate`, `start --no-mcp-http`; the `/mcp`
