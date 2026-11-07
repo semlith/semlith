@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `semlith brief` and `semlith symbol` exit with an error, and MCP
   `semlith_search` and `semlith_brief` answer with `isError`; neither writes a
   ledger row (#308).
+- `semlith search -k` is held to 1 through 50, as MCP and remote stores
+  already were: `-k 0` returns one hit instead of "no matches", and `-k 500`
+  returns at most 50 (#309).
 - Two threads asking for the same model file while it downloads no longer fail
   with "Lock acquisition failed": the second waits for the first and reads the
   cached file (#341).
