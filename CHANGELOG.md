@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Filenames such as `dockerfiles.md`, `dockerfile_test.go` and
   `dockerfile-lint.yml` resolve to Markdown, Go and YAML instead of Dockerfile.
   Dockerfile variants still match when a dot precedes the suffix (#292).
+- An empty or blank query is refused instead of searched. `semlith search`,
+  `semlith brief` and `semlith symbol` exit with an error, and MCP
+  `semlith_search` and `semlith_brief` answer with `isError`; neither writes a
+  ledger row (#308).
 - `semlith search -k` is held to 1 through 50, as MCP and remote stores
   already were: `-k 0` returns one hit instead of "no matches", and `-k 500`
   returns at most 50 (#309).

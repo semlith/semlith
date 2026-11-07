@@ -213,6 +213,51 @@ fn an_unimplemented_meta_version_is_refused_with_the_list() {
     assert!(supported.contains(&"2026-07-28"), "{refused}");
 }
 
+/// An empty or blank query is refused before anything is searched or counted:
+/// it used to return ranked hits for nothing and write a ledger row. Needs no
+/// model, since the refusal comes before the first embed.
+#[test]
+fn an_empty_query_is_refused_at_the_cli_and_over_mcp() {
+    let store = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        &["search", ""][..],
+        &["search", "   "],
+        &["brief", ""],
+        &["symbol", ""],
+        &["symbol", "Fleet", " "],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("SEMLITH_HOME", home.path().join(".semlith"))
+            .arg("--store")
+            .arg(store.path())
+            .args(args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} succeeded");
+        assert!(stderr.contains("is empty"), "{args:?}: {stderr}");
+    }
+
+    let mut server = Server::open(&[store.path()]);
+    server.handshake();
+    for (tool, arguments) in [
+        ("semlith_search", json!({ "query": "" })),
+        ("semlith_search", json!({ "query": "  ", "exact": true })),
+        ("semlith_brief", json!({ "question": " " })),
+    ] {
+        let refused = server.tool_value(tool, arguments.clone());
+        assert_eq!(
+            refused["result"]["isError"], true,
+            "{tool} {arguments}: {refused}"
+        );
+        let text = refused["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("is empty"), "{tool}: {text}");
+    }
+}
+
 // ---------------------------------------------------------------- T03
 
 /// "Is this file even indexed" is a different question from "does the corpus

@@ -196,6 +196,11 @@ though routes are not covered.
 
 ### Unreleased
 
+- **CLI:** `semlith search`, `semlith brief` and `semlith symbol` refuse an
+  empty or blank query, question or name with exit code 2, where they used to
+  search it.
+- **MCP:** a `query` or `question` argument that is empty after trimming is
+  answered with `isError: true` and is not counted in the ledger.
 - **CLI:** `semlith search -k` is held to 1 through 50, the range MCP and
   remote stores already took. `-k 0` returns one hit and `-k 500` at most 50; a
   script that asked for more than 50 gets 50.
