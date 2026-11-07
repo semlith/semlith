@@ -249,7 +249,7 @@ enum Command {
     Search {
         query: String,
 
-        /// Number of results.
+        /// Number of results, 1 to 50.
         #[arg(long, short, default_value_t = 8)]
         k: usize,
 
@@ -2059,6 +2059,9 @@ fn run() -> Result<()> {
             // Built before any store is opened, so an unknown language name
             // fails immediately rather than after a model load.
             let filter = Filter::new(&path, &ext, &lang)?;
+            // Held to the range MCP and remote stores take, so `-k 0` is one
+            // hit rather than a "no matches" that reads as an empty corpus.
+            let k = k.clamp(1, 50);
             // Remote stores join a search the way they join MCP's: every one
             // when no `--store` narrowed it, else the ones named. A machine
             // that never connected one reads exactly as it always did.
@@ -2161,7 +2164,7 @@ fn run() -> Result<()> {
                     &targets,
                     &semlith::cloud::Query {
                         query: &query,
-                        k: k.clamp(1, 50),
+                        k,
                         path: &path,
                         ext: &ext,
                         lang: &lang,
