@@ -84,6 +84,18 @@ pub struct Event {
     pub tool_input: ToolInput,
 }
 
+/// The part of an event `PostToolUse` needs. Unknown fields are ignored, so
+/// any `tool_input` parses.
+#[derive(Deserialize)]
+struct PostEvent {
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    hook_event_name: String,
+    #[serde(default)]
+    tool_name: String,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct ToolInput {
     #[serde(default)]
@@ -589,18 +601,22 @@ fn answer(decision: &Decision) -> Option<String> {
 /// Every failure is silence and exit 0: this runs inside another program's
 /// tool call.
 pub fn run(input: &str, mode: Mode, client: &str) -> String {
-    let Ok(event) = serde_json::from_str::<Event>(input) else {
-        return String::new();
-    };
-    // `PostToolUse` on a semlith tool: the session has used semlith.
-    if event.hook_event_name == "PostToolUse" {
-        if event.tool_name.contains("semlith") {
-            let mut state = load(&event.session_id);
+    // `PostToolUse` on a semlith tool: the session has used semlith. Read
+    // without `tool_input`, whose shape is the semlith tool's own (`path` is
+    // an array there) and need not fit `ToolInput` (#302).
+    if let Ok(post) = serde_json::from_str::<PostEvent>(input)
+        && post.hook_event_name == "PostToolUse"
+    {
+        if post.tool_name.contains("semlith") {
+            let mut state = load(&post.session_id);
             state.used = true;
-            save(&event.session_id, &state);
+            save(&post.session_id, &state);
         }
         return String::new();
     }
+    let Ok(event) = serde_json::from_str::<Event>(input) else {
+        return String::new();
+    };
     let state = load(&event.session_id);
     let (decision, refund) = decide(&event, mode, &state, covered);
     // A document is refused only when the store really holds its text: a file

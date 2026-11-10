@@ -330,6 +330,53 @@ fn the_hook_writes_nothing_outside_the_redirected_home() {
     );
 }
 
+/// `PostToolUse` on a semlith tool marks the session as using semlith, whatever
+/// the tool's arguments look like. Six tools send `path` as an array, which
+/// once failed the whole parse, so the mark never landed (#302). Needs no
+/// index, so it is not ignored.
+#[test]
+fn a_semlith_call_with_a_path_array_marks_the_session() {
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let store_home = dir.path().join(".semlith");
+    let post = |session: &str, tool: &str| {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .arg("hook")
+            .env("HOME", dir.path())
+            .env("SEMLITH_HOME", &store_home)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("running semlith");
+        let event = json!({
+            "session_id": session,
+            "hook_event_name": "PostToolUse",
+            "tool_name": tool,
+            "tool_input": { "query": "where is hold", "path": ["src/**", "!src/gen/**"] },
+        });
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(event.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().expect("semlith finished");
+        assert!(out.status.success(), "the hook failed: {}", said(&out));
+        std::fs::read_to_string(store_home.join("hook").join(session)).unwrap_or_default()
+    };
+
+    let state = post("post-semlith", "mcp__semlith__semlith_search");
+    let state: Value = serde_json::from_str(&state)
+        .unwrap_or_else(|_| panic!("no session state written: {state:?}"));
+    assert_eq!(state["used"], true, "{state}");
+
+    assert!(
+        post("post-other", "Grep").is_empty(),
+        "a tool that isn't semlith's must not mark the session"
+    );
+}
+
 /// The real `~/.semlith/hook-sessions`, which no test may add to.
 fn dirs_next_home() -> PathBuf {
     std::env::var_os("HOME")
