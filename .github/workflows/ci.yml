@@ -194,14 +194,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: shellcheck
-        run: shellcheck install.sh .github/changes.sh .github/changes-test.sh .github/verify-tag.sh .github/verify-tag-test.sh
+        run: shellcheck install.sh .github/changes.sh .github/changes-test.sh .github/verify-tag.sh .github/verify-tag-test.sh .github/labels.sh .github/labels-test.sh .github/contributors.sh .github/contributors-test.sh
 
       # The two scripts that decide what CI runs and what a release signs,
       # each over a scratch repository.
-      - name: changes.sh and verify-tag.sh self-tests
+      - name: changes.sh, verify-tag.sh, labels.sh and contributors.sh self-tests
         run: |
           bash .github/changes-test.sh
           bash .github/verify-tag-test.sh
+          bash .github/labels-test.sh
+          bash .github/contributors-test.sh
 
       # The drive's one retry rule: only a request the browser never sent
       # (net::ERR_NO_BUFFER_SPACE) earns a second attempt at a check.
@@ -539,3 +541,54 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"
+
+  # The owner's own pull requests, approved by github-actions once every job
+  # above passed or was skipped: branch-ruleset needs one approval, and GitHub
+  # refuses an author's approval of their own pull request. Only a same-repo,
+  # non-draft pull request opened by the owner qualifies; a fork's never does,
+  # and nobody else's is approved here (they are reviewed by hand). It holds
+  # only the workflow token, checks out nothing, and approves each green head
+  # once.
+  approve:
+    needs: [changes, check, audit, deny, secrets, msrv, scripts, gpu, cuda, lanes, release-suites, mixed-vectors, mixed-vectors-median]
+    if: >-
+      always()
+      && github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == 'semlith/semlith'
+      && github.event.pull_request.user.login == 'aakashpawar1999'
+      && !github.event.pull_request.draft
+      && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          done=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
+            --jq '[.[] | select(.user.login == "github-actions[bot]" and .state == "APPROVED" and .commit_id == env.HEAD_SHA)] | length' \
+            | awk '{n += $1} END {print n + 0}')
+          if [ "$done" -gt 0 ]; then
+            echo "github-actions already approved $HEAD_SHA"
+            exit 0
+          fi
+          # A repository that does not let Actions approve pull requests
+          # (Settings > Actions > General) refuses the review. That is a
+          # setting, not a failed build, so it is said and the check stays green.
+          if ! out=$(gh pr review "$PR" --repo "$REPO" --approve \
+            --body "Every ci job passed or was skipped on $HEAD_SHA: $RUN_URL" 2>&1); then
+            if grep -q 'not permitted to approve' <<<"$out"; then
+              echo "::warning::not approved: this repository does not allow GitHub Actions to approve pull requests"
+              exit 0
+            fi
+            echo "$out" >&2
+            exit 1
+          fi

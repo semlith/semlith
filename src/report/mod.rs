@@ -82,7 +82,7 @@ pub mod num {
         format!("{} ms", int((micros as f64 / 1000.0).round() as i64))
     }
 
-    /// `12.3 MB`, binary units, as the portal's `bytes`.
+    /// `12.3 MB`, binary units, as the portal's `bytes`. Negative counts print zero.
     pub fn bytes(value: i64) -> String {
         let units = ["B", "KB", "MB", "GB", "TB"];
         let mut size = value.max(0) as f64;
@@ -92,8 +92,17 @@ pub mod num {
             unit += 1;
         }
         if unit == 0 {
-            format!("{} B", int(size as i64))
+            format!("{} B", size as i64)
         } else {
+            // Rust rounds exact ties to even; JavaScript's toFixed(1) rounds up.
+            // Of the fractions that sit on a tie at one place, only .25 and .75
+            // are exact in binary. .75 already rounds up in both languages;
+            // .25 rounds down to even here, so it is nudged.
+            let size = if size.fract() == 0.25 {
+                size + 0.05
+            } else {
+                size
+            };
             format!("{size:.1} {}", units[unit])
         }
     }
@@ -2283,7 +2292,23 @@ mod tests {
         assert_eq!(num::times(325.27), "325.3×");
         assert_eq!(num::times(1234.0), "1,234.0×");
         assert_eq!(num::ms(67_400), "67 ms");
-        let app = include_str!("../portal/app.js");
+        for (value, expected) in [
+            (i64::MIN, "0 B"),
+            (-5, "0 B"),
+            (0, "0 B"),
+            (512, "512 B"),
+            (1000, "1000 B"),
+            (1023, "1023 B"),
+            (1024, "1.0 KB"),
+            (1280, "1.3 KB"),
+            (1536, "1.5 KB"),
+            (1792, "1.8 KB"),
+            (12_897_485, "12.3 MB"),
+            (10_995_171_253_341_388, "10000.0 TB"),
+        ] {
+            assert_eq!(num::bytes(value), expected, "{value} bytes");
+        }
+        let app = include_str!("../portal/app.js").replace("\r\n", "\n");
         assert!(
             app.contains("new Intl.NumberFormat(\"en-US\")"),
             "app.js left the one rule"
@@ -2291,6 +2316,21 @@ mod tests {
         assert!(
             app.contains("value < 10 && value > 0 ? value.toFixed(1) : Math.round(value)"),
             "app.js's pct no longer matches num::pct"
+        );
+        assert!(
+            app.contains(
+                r#"function bytes(value) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = Math.max(0, Number(value) || 0);
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${unit === 0 ? size : size.toFixed(1)} ${units[unit]}`;
+}"#
+            ),
+            "app.js's bytes no longer matches num::bytes"
         );
     }
 

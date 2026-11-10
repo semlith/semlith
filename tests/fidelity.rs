@@ -201,6 +201,21 @@ fn asking_for_fewer_results_never_reorders_or_rescores_the_first() {
     }
 }
 
+/// `-k` is held to 1..=50 on the command line, as MCP holds it. `-k 0` used to
+/// return nothing and print "no matches", which reads as an empty corpus.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn the_cli_holds_k_to_one_through_fifty() {
+    let scratch = Scratch::indexed("ripgrep");
+    let query = "how does ripgrep detect binary files";
+    let zero = hits(&scratch.on_store(&["search", "--json", "-k", "0", query]));
+    let one = hits(&scratch.on_store(&["search", "--json", "-k", "1", query]));
+    assert_eq!(zero, one, "-k 0 answers as -k 1");
+    assert_eq!(zero.len(), 1);
+    let many = hits(&scratch.on_store(&["search", "--json", "-k", "500", query]));
+    assert_eq!(many.len(), 50, "-k 500 is cut to 50");
+}
+
 // ------------------------------------------------------------------- G13
 
 /// A question about code is answered with code. flask's "register a

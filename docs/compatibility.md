@@ -194,6 +194,21 @@ Each entry lists what a script, an agent or a stored file could notice. A
 **break** is a change to a covered surface. Route changes are listed even
 though routes are not covered.
 
+### Unreleased
+
+- **CLI:** `semlith search`, `semlith brief` and `semlith symbol` refuse an
+  empty or blank query, question or name with exit code 2, where they used to
+  search it.
+- **MCP:** a `query` or `question` argument that is empty after trimming is
+  answered with `isError: true` and is not counted in the ledger.
+- **CLI:** `semlith search -k` is held to 1 through 50, the range MCP and
+  remote stores already took. `-k 0` returns one hit and `-k 500` at most 50; a
+  script that asked for more than 50 gets 50.
+- **CLI and MCP:** an `--ext` or `ext` value that is empty, `.`, a bare `!`, or
+  holds a glob character (`*`, `?`, `[`, `]`) is refused with an error. Pass
+  `rs` or `.rs`, and use `--path` for globs. Earlier releases turned `*.rs` into
+  `*/*.*.rs` and matched nothing. Thanks @ShahadatTest (#299).
+
 ### 0.13.0
 
 - **Added:** `key show`, `key rotate`, `start --no-mcp-http`; the `/mcp`
@@ -728,11 +743,21 @@ From 0.37.0-rc.7:
 |---|---|
 | Portal | The Limits card's CPU cap stepper moves in steps of 5 % instead of 10, snapping a value set off that grid onto it. No CLI, API, `settings.json` or library change. |
 
-### Unreleased
+### 0.51.2
+
+The credential scan's rules move to version 5, so every store rescans once on
+its next run, embedding nothing again. `FORMAT_VERSION` does not move. No CLI
+command or flag, MCP tool or schema, route, registry or `settings.json` key
+changes. Rolled back to 0.51.1, a store keeps rules version 5, which 0.51.1
+reads as current, so a file 0.51.2 refused stays out; `semlith scan` lists it.
 
 | Surface | Change |
 |---|---|
-| `--ext` / `ext` | An empty value, `.`, a bare `!`, or a value with glob characters (`*`, `?`, `[`, `]`) is refused with an error. Pass `rs` or `.rs`; use `--path` for globs. Earlier releases turned `*.rs` into `*/*.*.rs` and matched nothing silently. |
+| Secret scan | A connection string's password spelled in letters only (`postgres://app:<24 mixed-case letters>@…`) is refused like any other password; 0.51.1 read it as a camelCase name. Placeholders (`${…}`, `<…>`, `password`, `changeme`) stay dummies, and the generic rule still reads a camelCase value assigned to a name as a name. |
+| Accelerator lanes | A lane that is switched off is never `failed`: a failure arriving for it is logged and the lane reads `idle`. `accel::remove` lets the lane's worker go and leaves it `idle`. Turning a lane off clears a worker's `unavailable` as it clears `failed`. A lane whose pack was removed can be turned on again, which fetches the pack. |
+| `GET /api/accel`, `semlith accel status` | Same fields. A lane removed while its worker ran reads `idle`, not `failed` with the pack's manifest error. |
+| Portal | Settings › Performance: a lane whose pack is not installed is never locked as failed; its row reads `off — needs a … download` and its switch asks to download. |
+| Display | Report byte counts match the portal, with no grouping below 1024 bytes (`1000 B`) and positive rounding ties rounded up (`1280` bytes prints `1.3 KB`). The portal clamps negative byte counts to `0 B`, as reports already did. Thanks @codekongdev (#301). |
 
 ### 0.51.0
 

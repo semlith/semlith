@@ -964,6 +964,15 @@ fn call_tool(
             "isError": true,
         }));
     }
+    // A blank query or question is searched as nothing and still counted, so
+    // it is refused here, before any store is asked or any row is written.
+    let args = params.get("arguments");
+    for key in ["query", "question"] {
+        let given = args.and_then(|a| a.get(key)).and_then(Value::as_str);
+        if given.is_some_and(|s| s.trim().is_empty()) {
+            return Ok(tool_error(&format!("{key} is empty; give it some text")));
+        }
+    }
     // One registry read. Nobody who never connected a remote store goes any
     // further than this, so their answers are exactly what they were.
     let remotes = crate::cloud::remote_stores();

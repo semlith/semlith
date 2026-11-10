@@ -4550,6 +4550,41 @@ def _(d):
         fail("cancelling the %s confirmation turned it on anyway" % label)
 
 
+@finding("8.7b", "a pack lane whose files were removed can be switched on again, and asks to download them")
+def _(d):
+    """0.51.2: after Remove, the Neural Engine's switch stayed disabled with a
+    stale "failed — reading .../manifest.json", and the only way back was the
+    CLI. A lane that is off is never failed, and Remove leaves it idle, so its
+    switch stays enabled and turning it on asks to download the pack. The
+    dialog is cancelled, so nothing is fetched."""
+    lanes = d.api("/api/accel").get("lanes") or []
+    candidate = next((l for l in lanes if l.get("download_bytes") and not l.get("enabled")
+                      and (l.get("status") or {}).get("state") != "unavailable"), None)
+    if candidate is None:
+        skip("no pack lane here is switched off and can run on this machine")
+    lane, label = candidate["lane"], candidate.get("label") or candidate["lane"]
+    d.api_result("/api/accel", method="POST", body={"lane": lane, "action": "remove"})
+    after = next(l for l in d.api("/api/accel")["lanes"] if l["lane"] == lane)
+    state = (after.get("status") or {}).get("state")
+    if state == "failed":
+        fail("after Remove the %s lane reads failed: %r" % (label, after.get("status")))
+    if after.get("installed"):
+        fail("after Remove /api/accel still says the %s pack is installed" % label)
+    d.open_view("settings", fresh=True)
+    switch = '#main .lane-row button[aria-label="%s lane"]' % label
+    d.wait_for("!!document.querySelector(%s)" % json.dumps(switch), what="the %s lane's switch" % label)
+    if d.eval("document.querySelector(%s).disabled" % json.dumps(switch)):
+        fail("after Remove the %s lane's switch is disabled: %r"
+             % (label, d.eval("document.querySelector(%s).dataset.tip" % json.dumps(switch))))
+    d.click(switch)
+    d.wait_for("!!document.querySelector(%s)" % json.dumps(MODAL),
+               what="the download dialog when %s is turned on after Remove" % label)
+    said = d.modal_text()
+    d.modal_press("Cancel")
+    if "Download and turn on" not in said or not re.search(r"\d+(\.\d)? (MB|GB|KB)", said):
+        fail("turning %s on after Remove did not offer the download with its size: %r" % (label, said[:300]))
+
+
 @finding("8.8", "the Privacy page lists every download, where from, its size, when, and whether it is here")
 def _(d):
     downloads = d.api("/api/privacy").get("downloads") or []

@@ -472,6 +472,15 @@ impl Pinned {
         if let Some(path) = self.cache.repo(self.repo.clone()).get(file) {
             return Ok(path);
         }
+        // One fetch at a time in this process. hf-hub's file lock gives up
+        // after five seconds, so a second thread asking for a file the first
+        // is still downloading failed with "Lock acquisition failed"; held
+        // here, it waits and then finds the file cached.
+        static FETCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = FETCH.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(path) = self.cache.repo(self.repo.clone()).get(file) {
+            return Ok(path);
+        }
         let url = self.api.repo(self.repo.clone()).url(file);
         crate::add::note_outbound("model", &url);
         let watch = Watch::default();
