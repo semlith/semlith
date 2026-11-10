@@ -346,6 +346,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_portal_and_prefer_agree_on_prose_languages() {
+        let app = include_str!("portal/app.js");
+        let code_langs = app
+            .split_once("function codeLangs() {")
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .expect("app.js must define codeLangs")
+            .0;
+        let prose = code_langs
+            .split_once('!')
+            .and_then(|(_, rest)| rest.split_once(".includes("))
+            .expect("codeLangs must exclude its prose list")
+            .0;
+        let mut portal_prose: Vec<&str> = serde_json::from_str(prose.trim())
+            .expect("codeLangs must use a literal array of prose language names");
+        let mut prose = super::PROSE.to_vec();
+        portal_prose.sort_unstable();
+        prose.sort_unstable();
+        assert_eq!(
+            portal_prose, prose,
+            "app.js's codeLangs prose list no longer matches filter::PROSE"
+        );
+    }
+
     use super::*;
 
     fn s(items: &[&str]) -> Vec<String> {
