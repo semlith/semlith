@@ -1825,3 +1825,110 @@ fn a_dialog_child_keeps_its_height_so_the_dialog_scrolls() {
         "style.css lost `.modal > * {{ flex-shrink: 0; }}`"
     );
 }
+
+/// The attributes an element is built with: the `{ … }` options object that
+/// `call` opens, minus anything nested inside it (a child element, a callback
+/// body), so a child's `aria-label` cannot name the element instead.
+fn own_attributes(call: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in call.chars() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            if depth == 1 {
+                out.push(c);
+            }
+            continue;
+        }
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            '"' | '\'' | '`' => {
+                quote = Some(c);
+                if depth == 1 {
+                    out.push(c);
+                }
+            }
+            _ => {
+                if depth == 1 {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The value of `key` when `attrs` sets it to a non-empty string or template
+/// literal.
+fn literal_value<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
+    let rest = &attrs[attrs.find(key)? + key.len()..];
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+    let quote = rest.chars().next().filter(|c| *c == '"' || *c == '`')?;
+    let rest = &rest[1..];
+    let value = &rest[..rest.find(quote)?];
+    (!value.trim().is_empty()).then_some(value)
+}
+
+/// Every `el("input", …)` in app.js names itself to assistive tech, or is
+/// hidden from it, and the wizard's New store button is named on its own (it
+/// is icon-only at narrow widths). A placeholder is not a name: it goes as soon
+/// as the user types, so the wizard's path and URL fields were unnamed while
+/// they held text.
+#[test]
+fn every_input_the_portal_builds_has_an_accessible_name() {
+    // Inputs built any other way would escape the scan below.
+    assert!(
+        !APP_JS.contains("createElement(\"input\")") && !APP_JS.contains("<input"),
+        "app.js builds an input without el(\"input\", …), which this test does not check"
+    );
+
+    let mut offenders = Vec::new();
+    let mut found = 0;
+    for (at, _) in APP_JS.match_indices("el(\"input\"") {
+        found += 1;
+        let line = APP_JS[..at].matches('\n').count() + 1;
+        let after = &APP_JS[at + "el(\"input\"".len()..];
+        let attrs = match after.trim_start().strip_prefix(',') {
+            Some(opts) if opts.trim_start().starts_with('{') => own_attributes(opts),
+            _ => String::new(),
+        };
+        let named = literal_value(&attrs, "\"aria-label\"").is_some()
+            || literal_value(&attrs, "\"aria-hidden\"") == Some("true");
+        if !named {
+            offenders.push(format!("app.js:{line}"));
+        }
+    }
+    assert!(found > 0, "found no el(\"input\", …) in app.js");
+    assert!(
+        offenders.is_empty(),
+        "these inputs have no aria-label or aria-hidden:\n  {}",
+        offenders.join("\n  ")
+    );
+
+    let new_store = APP_JS
+        .lines()
+        .find(|l| l.contains("text: \"New store\""))
+        .unwrap_or("");
+    let button = new_store
+        .find("btn({")
+        .map(|i| own_attributes(&new_store[i + "btn".len()..]))
+        .unwrap_or_default();
+    assert!(
+        literal_value(&button, "\"aria-label\"") == Some("New store"),
+        "the New store button has no aria-label of its own"
+    );
+}

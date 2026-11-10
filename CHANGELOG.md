@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The wizard's path and web address fields have accessible names (`Folder
+  path`, `Web address`), so they stay labelled once the user has typed, and
+  the top-bar New store button keeps its name when its text is hidden at narrow
+  widths (#328).
 - Filenames such as `dockerfiles.md`, `dockerfile_test.go` and
   `dockerfile-lint.yml` resolve to Markdown, Go and YAML instead of Dockerfile.
   Dockerfile variants still match when a dot precedes the suffix (#292).

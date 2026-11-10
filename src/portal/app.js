@@ -2205,7 +2205,7 @@ function buildShell() {
       el("span", { class: "t hide-sm", text: "Ask the index a question" }),
       el("span", { class: "kbd hide-sm", text: "/" }),
     ),
-    btn({ class: "btn primary", onclick: () => openWizard() }, icon(I.plus, 14, { w: 2.2 }), el("span", { class: "hide-sm", text: "New store" })),
+    btn({ class: "btn primary", "aria-label": "New store", onclick: () => openWizard() }, icon(I.plus, 14, { w: 2.2 }), el("span", { class: "hide-sm", text: "New store" })),
     el("div", { class: "hide-xs" }, themeControl()),
   );
   const navGroups = NAV.map(([label, ids]) =>
@@ -3366,6 +3366,7 @@ function wizardScreen() {
     const input = el("input", {
       value: w.pathDraft,
       placeholder: "~/work/api — Enter adds it, several lines add several",
+      "aria-label": "Folder path",
       spellcheck: "false",
       "data-keep": "wz-path",
       oninput: (e) => {
@@ -3456,6 +3457,7 @@ function wizardScreen() {
     const input = el("input", {
       value: w.urlDraft,
       placeholder: "A web address: a page, a PDF or a file on GitHub",
+      "aria-label": "Web address",
       spellcheck: "false",
       "data-keep": "wz-url",
       oninput: (e) => {
