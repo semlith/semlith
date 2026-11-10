@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A regression test keeps the portal's prose language list aligned with
+  `filter::PROSE`, so the code chip and the `prefer` hint cannot drift (#297).
 - **Dependencies.** cliclack 0.5.7, rusqlite 0.41.1, tree-sitter-clojure-orchard
   0.2.9, tree-sitter-powershell 0.26.6, tree-sitter-scala 0.26.4,
   ts-parser-perl 2.0.4 and ureq 3.5.1 (Dependabot #337), with
