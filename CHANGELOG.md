@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Two threads asking for the same model file while it downloads no longer fail
   with "Lock acquisition failed": the second waits for the first and reads the
   cached file (#341).
+- The PostToolUse hook marks a session as using semlith after any semlith
+  call. A call with a `path` filter used to fail the event's parse, so `gate`
+  kept refusing raw lookups and `soft` kept nudging after the agent had
+  already switched to semlith (#302).
 
 ## [0.51.2] - 2026-11-04
 
