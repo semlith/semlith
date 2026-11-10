@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Two threads asking for the same model file while it downloads no longer fail
   with "Lock acquisition failed": the second waits for the first and reads the
   cached file (#341).
+- `--ext '*.rs'`, `--ext ''`, `--ext .` and a bare `--ext !` are refused with
+  an error that points to `--path` for globs, where they used to match nothing.
+  Thanks @ShahadatTest (#299, #293).
 
 ## [0.51.2] - 2026-11-04
 

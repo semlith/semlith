@@ -204,6 +204,10 @@ though routes are not covered.
 - **CLI:** `semlith search -k` is held to 1 through 50, the range MCP and
   remote stores already took. `-k 0` returns one hit and `-k 500` at most 50; a
   script that asked for more than 50 gets 50.
+- **CLI and MCP:** an `--ext` or `ext` value that is empty, `.`, a bare `!`, or
+  holds a glob character (`*`, `?`, `[`, `]`) is refused with an error. Pass
+  `rs` or `.rs`, and use `--path` for globs. Earlier releases turned `*.rs` into
+  `*/*.*.rs` and matched nothing. Thanks @ShahadatTest (#299).
 
 ### 0.13.0
 

@@ -260,7 +260,7 @@ enum Command {
         #[arg(long, short)]
         path: Vec<String>,
 
-        /// Only search files with this extension. Repeatable; a leading `!` excludes.
+        /// Only search files with this extension (`rs` or `.rs`, not a glob; use `--path` for globs). Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         ext: Vec<String>,
 
@@ -315,7 +315,7 @@ enum Command {
         #[arg(long, short)]
         path: Vec<String>,
 
-        /// Only look at files with this extension. Repeatable; a leading `!` excludes.
+        /// Only look at files with this extension (`rs` or `.rs`, not a glob; use `--path` for globs). Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         ext: Vec<String>,
 
@@ -758,7 +758,7 @@ enum Command {
         #[arg(long, short)]
         path: Vec<String>,
 
-        /// Only files with this extension. Repeatable; a leading `!` excludes.
+        /// Only files with this extension (`rs` or `.rs`, not a glob; use `--path` for globs). Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         ext: Vec<String>,
 
@@ -796,7 +796,7 @@ enum Command {
         #[arg(long, short)]
         path: Vec<String>,
 
-        /// Only files with this extension. Repeatable; a leading `!` excludes.
+        /// Only files with this extension (`rs` or `.rs`, not a glob; use `--path` for globs). Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         ext: Vec<String>,
 
@@ -845,7 +845,7 @@ enum Command {
         #[arg(long, short)]
         path: Vec<String>,
 
-        /// Only files with this extension. Repeatable; a leading `!` excludes.
+        /// Only files with this extension (`rs` or `.rs`, not a glob; use `--path` for globs). Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         ext: Vec<String>,
 
