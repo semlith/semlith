@@ -3,8 +3,10 @@
 # ever having been on the branch CI gates.
 version: 2
 updates:
+  # fuzz/ has its own lockfile. Left out, it drifted to a libsqlite3-sys with
+  # an advisory and turned `cargo audit` red on every PR.
   - package-ecosystem: cargo
-    directory: "/"
+    directories: ["/", "/fuzz"]
     target-branch: develop
     schedule:
       interval: weekly
