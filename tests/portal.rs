@@ -1932,3 +1932,21 @@ fn every_input_the_portal_builds_has_an_accessible_name() {
         "the New store button has no aria-label of its own"
     );
 }
+
+#[test]
+fn slash_does_nothing_while_a_dialog_is_open() {
+    // The handler is the one listening for "/" on window; the dialog is a
+    // .modal-scrim appended to body, so the guard must check the document.
+    let start = APP_JS
+        .find("if (e.key !== \"/\"")
+        .expect("the / shortcut handler is in app.js");
+    let end = start
+        + APP_JS[start..]
+            .find("e.preventDefault();")
+            .expect("the handler calls preventDefault");
+    let guard = &APP_JS[start..end];
+    assert!(
+        guard.contains("document.querySelector(\".modal-scrim\")"),
+        "the / shortcut does not return while a .modal-scrim is open:\n  {guard}"
+    );
+}

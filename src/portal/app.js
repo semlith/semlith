@@ -10558,7 +10558,8 @@ async function boot() {
       return;
     }
     if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey || (e.target && e.target.matches && e.target.matches("input, textarea, select, [contenteditable]"))) return;
-    if (state.screen !== "app") return;
+    // A dialog answers for the page under it, so "/" must not leave the page.
+    if (state.screen !== "app" || document.querySelector(".modal-scrim")) return;
     e.preventDefault();
     if (state.route.page === "search") shell.main.querySelector('[data-keep="sr-q"]')?.focus();
     else go("search");

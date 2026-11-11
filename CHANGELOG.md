@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Pressing `/` with a dialog open (a confirm or the folder picker) no longer
+  navigates to Search behind it.
+
 ### Changed
 
 - A regression test keeps the portal's prose language list aligned with
