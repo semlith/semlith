@@ -478,7 +478,10 @@ async function copy(text, word) {
     if (pressed && pressed.focus) pressed.focus();
   }
   if (copied) toast(word || "Copied");
-  else toast(`Copy failed — select this and copy it by hand: ${text}`, true);
+  // The toast is one line and clears itself after about five seconds, so only
+  // short single-line text is shown for the user to copy by hand.
+  else if (text.length <= 120 && !text.includes("\n")) toast(`Copy failed — select this and copy it by hand: ${text}`, true);
+  else toast("Copy failed, the browser blocked the clipboard", true);
 }
 
 function download(name, data, type) {
