@@ -457,21 +457,28 @@ function stillness() {
 }
 
 async function copy(text, word) {
+  const pressed = document.activeElement;
+  let copied = false;
   try {
     await navigator.clipboard.writeText(text);
+    copied = true;
   } catch (_) {
     const area = el("textarea", { class: "offscreen" });
     area.value = text;
     document.body.append(area);
     area.select();
+    // execCommand reports a refused copy by returning false, not by throwing.
     try {
-      document.execCommand("copy");
+      copied = document.execCommand("copy") === true;
     } catch (__) {
       /* nothing else to try */
     }
     area.remove();
+    // Selecting and removing the textarea leaves focus on nothing.
+    if (pressed && pressed.focus) pressed.focus();
   }
-  toast(word || "Copied");
+  if (copied) toast(word || "Copied");
+  else toast(`Copy failed — select this and copy it by hand: ${text}`, true);
 }
 
 function download(name, data, type) {
