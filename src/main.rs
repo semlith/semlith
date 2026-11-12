@@ -1581,17 +1581,30 @@ fn run() -> Result<()> {
         }
 
         Command::Models => {
+            let mut models: Vec<_> = TextEmbedding::list_supported_models()
+                .into_iter()
+                .map(|info| (info.model.to_string(), info))
+                .collect();
+            models.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            let name_width = models
+                .iter()
+                .map(|(name, _)| name.chars().count())
+                .max()
+                .unwrap_or(0)
+                .max(embed::GRANITE_NAME.chars().count())
+                .max(44);
+
             // The default is listed first and separately: it is not one of
             // fastembed's built-ins, so it never appears in their list.
             println!(
-                "{:<44} {:>5} dim  default. IBM Granite R2 small, int8, English",
+                "{:<name_width$} {:>5} dim  default. IBM Granite R2 small, int8, English",
                 embed::GRANITE_NAME,
                 384
             );
-            for info in TextEmbedding::list_supported_models() {
+            for (name, info) in models {
                 println!(
-                    "{:<44} {:>5} dim  {}",
-                    info.model, info.dim, info.description
+                    "{name:<name_width$} {:>5} dim  {}",
+                    info.dim, info.description
                 );
             }
         }

@@ -91,7 +91,8 @@ should be free to improve.
 - **Portal parity exemptions.** Every CLI command and MCP tool has a portal
   surface except those argued in `tests/portal.rs`. `semlith models` and
   `/api/models` have none: no page lists every model a store could be built
-  with. `semlith models` prints the full list and `/api/models` answers.
+  with. `semlith models` prints the default first and the built-in models in
+  name order, with aligned dimensions. `/api/models` answers with the full list.
 
 ## The honest version of the promise
 
