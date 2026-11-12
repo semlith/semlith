@@ -7,11 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- Pressing `/` with a dialog open (a confirm or the folder picker) no longer
-  navigates to Search behind it.
-
 ### Changed
 
 - A regression test keeps the portal's prose language list aligned with
@@ -29,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pressing `/` with a dialog open (a confirm or the folder picker) no longer
+  navigates to Search behind it (#323). Thanks @jay23606 (#355).
 - A portal copy button that the browser refuses now says "Copy failed" and shows
   the text to copy by hand, instead of "Copied"; focus returns to the pressed
   button (#326). Thanks @jay23606 (#354).
