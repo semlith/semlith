@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A regression test keeps the portal's prose language list aligned with
   `filter::PROSE`, so the code chip and the `prefer` hint cannot drift (#297).
+- The portal cadence test freezes the clock before it runs `until`, which
+  read `Date.now()` a second time and could say "in under a minute" for a
+  schedule 60 s out when a second ticked in between.
+- The watcher measurement keeps the watcher's feed and prints it when a burst
+  of saves costs more than one index rewrite, so the intermittent macOS
+  failure names the batches behind the extra write.
 - **Dependencies.** cliclack 0.5.7, rusqlite 0.41.1, tree-sitter-clojure-orchard
   0.2.9, tree-sitter-powershell 0.26.6, tree-sitter-scala 0.26.4,
   ts-parser-perl 2.0.4 and ureq 3.5.1 (Dependabot #337), with

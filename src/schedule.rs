@@ -765,8 +765,12 @@ mod tests {
         };
         let cadences = &app[app.find("const CADENCES = [").unwrap()..];
         let cadences = &cadences[..cadences.find("];").unwrap() + 2];
+        // The clock is frozen first. `until` reads `Date.now()` itself, so a
+        // second that ticked between `now` and the call read 59 s and said
+        // "in under a minute" (a windows-latest failure on the 0.51.2 merge).
         let script = format!(
-            "{cadences}\n{}\n{}\nconst now = Math.floor(Date.now() / 1000);\n\
+            "Date.now = (t => () => t)(Date.now());\n\
+             {cadences}\n{}\n{}\nconst now = Math.floor(Date.now() / 1000);\n\
              console.log([everyWord(60), everyWord(90), everyWord(7200), everyWord(86400), \
              until(now + 30), until(now + 60)].join('|'));",
             grab("everyWord"),

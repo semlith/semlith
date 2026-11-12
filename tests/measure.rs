@@ -91,6 +91,9 @@ fn measure_the_watcher() {
     let _ = reader.search("fermentation and backoff", 3).unwrap();
 
     let query = "single owner freed when it goes out of scope";
+    // Where the feed stood before the edit, so a failed burst prints the
+    // latency edit's batches and its own, and nothing from the catch-up.
+    let feed_mark = watcher.feed().len();
     let started = Instant::now();
     fs::write(
         corpus.path().join("ownership.md"),
@@ -142,7 +145,9 @@ fn measure_the_watcher() {
     );
     assert!(
         writes <= 1,
-        "a burst inside one debounce window cost {writes} index rewrites"
+        "a burst inside one debounce window cost {writes} index rewrites; \
+         the watcher's feed from the latency edit on:\n{}",
+        watcher.feed().get(feed_mark..).unwrap_or_default()
     );
 
     // --- memory across many events ---------------------------------------
@@ -1242,20 +1247,27 @@ struct Watcher {
 
 impl Watcher {
     fn start(store: &Path, corpus: &Path) -> Self {
+        let feed = fs::File::create(store.join("watch-feed.log")).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_semlith"))
             .arg("--store")
             .arg(store)
             .arg("watch")
             .arg(corpus)
-            .arg("--quiet")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(feed.try_clone().unwrap()))
+            .stderr(Stdio::from(feed))
             .spawn()
             .unwrap();
         Self {
             child,
             store: store.to_path_buf(),
         }
+    }
+
+    /// The watcher's feed, kept in the store directory (never the watched
+    /// corpus, where writing it would be an event of its own). A failed burst
+    /// prints it, so the batches that cost the extra rewrite are named.
+    fn feed(&self) -> String {
+        fs::read_to_string(self.store.join("watch-feed.log")).unwrap_or_default()
     }
 
     /// The catch-up pass is over once the model is loaded and nothing more is
