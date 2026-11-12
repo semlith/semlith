@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A portal copy button that the browser refuses now says "Copy failed" and shows
+  the text to copy by hand, instead of "Copied"; focus returns to the pressed
+  button (#326). Thanks @jay23606 (#354).
 - The wizard's path and web address fields have accessible names (`Folder
   path`, `Web address`), so they stay labelled once the user has typed, and
   the top-bar New store button keeps its name when its text is hidden at narrow
