@@ -53,9 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call. A call with a `path` filter used to fail the event's parse, so `gate`
   kept refusing raw lookups and `soft` kept nudging after the agent had
   already switched to semlith (#302).
-- `semlith models` aligns model dimensions and lists built-in models by name
-  after the default, so repeated output is easy to compare.
-  Thanks @Golden007-prog (#317).
+- `semlith models` aligns the dimension column and lists the built-in models
+  by name after the default, so two runs print the same output (#317).
+  Thanks @Golden007-prog (#357).
 
 ## [0.51.2] - 2026-11-04
 
