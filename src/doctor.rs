@@ -550,6 +550,37 @@ fn shell_quote(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentfiles::State;
+
+    /// A stale rules block alone is a stale client, and its `run:` line names
+    /// the flag that rewrites it and the file, not the plain setup that will not.
+    #[test]
+    fn a_stale_rules_block_gets_a_run_line_that_names_the_file() {
+        let file = Path::new("/home/u/.claude/CLAUDE.md");
+        let line = stale_repair(State::Present, State::Present, State::Stale, Some(file))
+            .expect("a stale rules block has no repair line");
+        assert!(
+            line.contains("--register-all") && line.contains("/home/u/.claude/CLAUDE.md"),
+            "rules repair line: {line}"
+        );
+        assert_eq!(
+            stale_repair(State::Present, State::Present, State::Present, Some(file)),
+            None
+        );
+    }
+
+    /// A stale rules block beside a stale skill or hook gets one line that
+    /// covers all three, since `--register-all` also rewrites the skill and hook.
+    #[test]
+    fn a_stale_rules_block_with_a_stale_skill_says_the_line_covers_both() {
+        let file = Path::new("/home/u/.claude/CLAUDE.md");
+        let line = stale_repair(State::Stale, State::Present, State::Stale, Some(file))
+            .expect("a stale rules block has no repair line");
+        assert!(
+            line.contains("--register-all") && line.contains("skill link and steering hook"),
+            "combined repair line: {line}"
+        );
+    }
 
     /// Windows: an npm CLI is a `.cmd` shim, and setup must spawn the shim
     /// rather than a bare name that `Command` would only try as `.exe`.
@@ -848,6 +879,49 @@ fn rules_state_for(client: &crate::clients::Client) -> crate::agentfiles::State 
         .find(|(name, _, _)| name == &client.name)
         .map(|(_, _, state)| state)
         .unwrap_or(crate::agentfiles::State::Paste)
+}
+
+/// The path of this client's rules file, if semlith knows one.
+fn rules_file_for(client: &crate::clients::Client) -> Option<PathBuf> {
+    crate::agentfiles::rules_state()
+        .into_iter()
+        .find(|(name, _, _)| name == &client.name)
+        .and_then(|(_, path, _)| path)
+}
+
+/// The `run:` line for a client with something stale.
+///
+/// A stale rules block is rewritten only by `semlith setup --register-all`: plain
+/// setup leaves prose files alone (`setup::step_rules`), so the line names the
+/// flag and the file it will rewrite. `--register-all` also runs the skill and
+/// hook steps, so the same line covers a stale skill or hook beside it.
+fn stale_repair(
+    skill: crate::agentfiles::State,
+    hook: crate::agentfiles::State,
+    rules: crate::agentfiles::State,
+    rules_file: Option<&Path>,
+) -> Option<String> {
+    use crate::agentfiles::State::Stale;
+    if rules == Stale {
+        let file = rules_file
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let also = if [skill, hook].contains(&Stale) {
+            " and the skill link and steering hook"
+        } else {
+            ""
+        };
+        return Some(format!(
+            "semlith setup --register-all  # rewrites the semlith rule block in {file}{also}"
+        ));
+    }
+    if [skill, hook].contains(&Stale) {
+        return Some(
+            "semlith setup  # rewrites the semlith skill link and steering hook for this binary"
+                .to_string(),
+        );
+    }
+    None
 }
 
 /// A registration that named a bare command, and what it was rewritten to.
@@ -1155,8 +1229,12 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
             // had just said was not there. Most people have two or three of
             // the twelve; a report that offered a remedy for the other
             // twenty-four is a report nobody reads twice.
-            let (skill, hook) = (skill_state_for(client), hook_state_for(client));
-            let stale = [skill, hook].contains(&crate::agentfiles::State::Stale);
+            let (skill, hook, rules) = (
+                skill_state_for(client),
+                hook_state_for(client),
+                rules_state_for(client),
+            );
+            let stale = [skill, hook, rules].contains(&crate::agentfiles::State::Stale);
             let repair = if note.is_some() || !in_use {
                 None
             } else if disabled_here {
@@ -1199,7 +1277,7 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
                 // Stale, not absent: an absent hook or skill may be a
                 // `--no-hooks` the user chose, and a row that nags about a
                 // choice teaches people to ignore the column.
-                Some("semlith setup  # rewrites the semlith skill link and steering hook for this binary".to_string())
+                stale_repair(skill, hook, rules, rules_file_for(client).as_deref())
             } else {
                 None
             };

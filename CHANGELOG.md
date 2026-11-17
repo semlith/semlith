@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `semlith doctor` gives a client with a stale rules block a `run:` line,
+  `semlith setup --register-all`, which rewrites that block, and names the file
+  it rewrites. The line was missing, so "rule stale" came with no remedy (#319).
+
 ### Changed
 
 - A regression test keeps the portal's prose language list aligned with
