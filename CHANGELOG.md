@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A portal page whose data request fails on first load shows the error with a
+  Retry button, instead of its empty state ("Nothing recorded yet", a store
+  "that doesn't exist", "Nothing waits for you"). The Review tab does the same
+  (#321).
+
 ### Changed
 
 - A regression test keeps the portal's prose language list aligned with

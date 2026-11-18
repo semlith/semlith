@@ -1656,6 +1656,13 @@ function loadMany(keys, force) {
   return Promise.all(keys.map((k) => load(k, force).catch((e) => ({ __error: e }))));
 }
 
+// The error of a key that answered with one and has no data to draw from. A
+// page shows it, rather than the empty state a missing answer would look like.
+function loadFailure(data, keys, results) {
+  const i = keys.findIndex((k, n) => data[k] === undefined && results[n] && results[n].__error);
+  return i < 0 ? null : results[i].__error;
+}
+
 const cached = (keys) => keys.every((k) => data[k] !== undefined);
 
 /** Refetch and repaint whatever on screen reads these. */
@@ -2116,12 +2123,19 @@ async function render() {
   if (!cached(needs)) {
     fill(shell.main);
     pageLoader = openLoader(false, shell.main);
-    await loadMany(needs);
+    const results = await loadMany(needs);
     if (pageLoader) {
       pageLoader();
       pageLoader = null;
     }
     if (mine !== renderGen) return;
+    const failed = loadFailure(data, needs, results);
+    if (failed) {
+      // Nothing to draw: the page says why, and Retry asks the route again.
+      current = { node: null, live: [], onData: null };
+      fill(shell.main, el("div", { class: "page" }, errorBox(`This page could not load: ${failed.message}`), btn({ class: "btn", onclick: () => render() }, "Retry")));
+      return;
+    }
   } else {
     // Shown at once from the cache, and brought up to date behind it.
     const stale = needs.filter((k) => Date.now() - (loadedAt[k] || 0) > 4000);
@@ -6259,9 +6273,13 @@ function sdReview(s, holder) {
   if (!(data.refused?.stores || []).some((x) => x.store === s.name) && !sdReview.asked[s.name]) {
     sdReview.asked[s.name] = true;
     loadMany(["refused", "decisions"], true)
-      .catch(() => {})
+      .then((r) => (sdReview.failed[s.name] = loadFailure(data, ["refused", "decisions"], r)))
       .finally(() => current.view === VIEWS.store && repaint());
     return el("div", { class: "stack" }, el("div", { class: "empty lg row gap10 review-loading", role: "status" }, el("span", { class: "spinner" }), "Reading what waits for you…"));
+  }
+  // The read failed with an error: say so, rather than "Nothing waits for you".
+  if (sdReview.failed[s.name] && !(data.refused?.stores || []).some((x) => x.store === s.name)) {
+    return el("div", { class: "stack" }, errorBox(`This could not load: ${sdReview.failed[s.name].message}`), btn({ class: "btn", onclick: () => { delete sdReview.asked[s.name]; delete sdReview.failed[s.name]; repaint(); } }, "Retry"));
   }
   const entry = decisionsOf(s.name);
   const rowsAll = entry.rows || [];
@@ -6452,6 +6470,7 @@ sdReview.sel = {};
 sdReview.risk = {};
 sdReview.bulk = {};
 sdReview.asked = {};
+sdReview.failed = {};
 
 /** A refusal row as a Decisions-table row, for a daemon that sends no table. */
 function decisionFromRow(r) {
