@@ -69,6 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `semlith models` aligns the dimension column and lists the built-in models
   by name after the default, so two runs print the same output (#317).
   Thanks @Golden007-prog (#357).
+- `semlith doctor` gives a client with a stale rules block a `run:` line,
+  `semlith setup --register-all`, which rewrites that block, and names the file
+  it rewrites. The line was missing, so "rule stale" came with no remedy (#319).
+  Thanks @jay23606 (#361).
 
 ## [0.51.2] - 2026-11-04
 

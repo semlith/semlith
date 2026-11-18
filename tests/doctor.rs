@@ -214,6 +214,45 @@ fn a_project_scope_registration_is_reported_with_the_command_that_fixes_it() {
     );
 }
 
+/// A stale rules block is reported as stale with the command that rewrites it,
+/// naming the file, so "rule stale" never comes with no remedy.
+#[test]
+fn a_stale_rules_block_is_reported_with_a_run_line_naming_its_file() {
+    let machine = Machine::new();
+    machine.install("codex");
+    let codex_dir = machine.home.join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        format!(
+            "[mcp_servers.semlith]\ncommand = \"{}\"\nargs = [\"mcp\"]\n",
+            machine.installed.display()
+        ),
+    )
+    .unwrap();
+    let rules = codex_dir.join("AGENTS.md");
+    std::fs::write(
+        &rules,
+        "# Mine\n\n<!-- >>> semlith >>> -->\nold text\n<!-- <<< semlith <<< -->\n",
+    )
+    .unwrap();
+
+    let run = machine.doctor(&["--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&run.stdout).expect("--json emits JSON");
+    let codex = report["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "OpenAI Codex")
+        .expect("Codex is reported");
+
+    let repair = codex["repair"].as_str().unwrap_or_default();
+    assert!(
+        repair.contains("--register-all") && repair.contains(&*rules.display().to_string()),
+        "a stale rules block got no run line that names its file: {codex}"
+    );
+}
+
 /// `--fix` narrows what it can and says what it changed, and a second run has
 /// nothing left to do.
 #[test]
