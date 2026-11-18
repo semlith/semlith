@@ -83,12 +83,10 @@ jobs:
           # and GLIBC stayed at 2.39, which was the binary. 22.04 is glibc 2.35.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            runtime: onnxruntime-linux-x64-1.24.4
-            runtime_sha: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
+            runtime: linux-x64
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            runtime: onnxruntime-linux-aarch64-1.24.4
-            runtime_sha: 866109a9248d057671a039b9d725be4bd86888e3754140e6701ec621be9d4d7e
+            runtime: linux-arm64
           - os: macos-latest
             target: aarch64-apple-darwin
           # No Intel macOS build: ONNX Runtime stopped publishing osx-x86_64
@@ -122,25 +120,20 @@ jobs:
           fi
         shell: bash
 
-      # Microsoft's own release of ONNX Runtime, verified against the checksum
-      # GitHub publishes with it. This is the library the binary loads at start,
-      # so it is fetched by digest rather than by name.
+      # Microsoft's own build of ONNX Runtime 1.24.4, from its NuGet package
+      # and verified by digest. This is the library the binary loads at start,
+      # so it is fetched by digest rather than by name. One package carries both
+      # Linux architectures as `runtimes/<rid>/native/libonnxruntime.so`. It
+      # came from the GitHub release until that stopped answering in November
+      # 2026; the package is built from the same commit.
       - name: ONNX Runtime
         if: matrix.runtime != ''
         run: |
-          url="https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/${{ matrix.runtime }}.tgz"
-          curl -fsSL -o runtime.tgz "$url"
-          echo "${{ matrix.runtime_sha }}  runtime.tgz" | sha256sum -c -
-          tar xzf runtime.tgz
+          url="https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.24.4/microsoft.ml.onnxruntime.1.24.4.nupkg"
+          curl -fsSL -o runtime.nupkg "$url"
+          echo "4b978d5065b85e7004b6c6f60ca494bd978fbe6836cbf0a0b52d82b61ab99638  runtime.nupkg" | sha256sum -c -
           mkdir -p runtime
-          cp "${{ matrix.runtime }}/lib/libonnxruntime.so"* runtime/
-          # The loader opens `libonnxruntime.so`; the release carries it as
-          # `libonnxruntime.so.1.24.4` with that name as a symlink, and a
-          # symlink does not survive a tarball the way a file does.
-          if [ ! -f runtime/libonnxruntime.so ] || [ -L runtime/libonnxruntime.so ]; then
-            rm -f runtime/libonnxruntime.so
-            cp "${{ matrix.runtime }}/lib/libonnxruntime.so.1.24.4" runtime/libonnxruntime.so
-          fi
+          unzip -j runtime.nupkg "runtimes/${{ matrix.runtime }}/native/libonnxruntime.so" -d runtime
           ls -l runtime/
 
       # A binary that needs OpenSSL or OpenBLAS installed is not a binary you
