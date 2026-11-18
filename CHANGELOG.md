@@ -30,8 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The portal Files page's text chip includes `.tsv`, `.htm` and `.markdown`
-  files (#296).
 - Pressing `/` with a dialog open (a confirm or the folder picker) no longer
   navigates to Search behind it (#323). Thanks @jay23606 (#355).
 - A portal copy button that the browser refuses now says "Copy failed" and shows
@@ -44,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Filenames such as `dockerfiles.md`, `dockerfile_test.go` and
   `dockerfile-lint.yml` resolve to Markdown, Go and YAML instead of Dockerfile.
   Dockerfile variants still match when a dot precedes the suffix (#292).
+- The portal Files page's text chip includes `.tsv`, `.htm` and `.markdown`
+  files (#296). Thanks @emreocell (#365).
 - An empty or blank query is refused instead of searched. `semlith search`,
   `semlith brief` and `semlith symbol` exit with an error, and MCP
   `semlith_search` and `semlith_brief` answer with `isError`; neither writes a
