@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The light theme's muted text meets WCAG AA (4.5:1) on the card footer, note,
+  table header and count backgrounds: `--muted` is darker, and green text uses
+  `--green-ink` instead of `--green`, which was 3.47:1 on white (#331).
 - Pressing `/` with a dialog open (a confirm or the folder picker) no longer
   navigates to Search behind it (#323). Thanks @jay23606 (#355).
 - A portal copy button that the browser refuses now says "Copy failed" and shows

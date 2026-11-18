@@ -147,6 +147,65 @@ mod tests {
         }
     }
 
+    /// WCAG relative luminance of a `#rrggbb` colour.
+    fn luminance(hex: &str) -> f64 {
+        let channel = |at: usize| {
+            let c = u8::from_str_radix(&hex[at..at + 2], 16).unwrap() as f64 / 255.0;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5)
+    }
+
+    fn contrast(a: &str, b: &str) -> f64 {
+        let (x, y) = (luminance(a), luminance(b));
+        let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// The custom properties in the light `:root` block, as name to value.
+    fn light_tokens(css: &str) -> std::collections::HashMap<String, String> {
+        let start = css
+            .find(":root {")
+            .expect("style.css has a light :root block");
+        let body = &css[start..];
+        let body = &body[..body.find('}').expect("the :root block closes")];
+        body.lines()
+            .filter_map(|line| line.trim().strip_prefix("--"))
+            .filter_map(|decl| decl.split_once(':'))
+            .map(|(name, value)| {
+                let value = value.trim().trim_end_matches(';').trim();
+                (format!("--{name}"), value.to_string())
+            })
+            .collect()
+    }
+
+    /// Muted and green text sit on the panel, soft, page and chip backgrounds
+    /// (card footers, table headers, count badges), so each is checked on all
+    /// four. White alone is not enough: `--chip` is the darkest of them.
+    #[test]
+    fn light_theme_text_passes_aa_on_every_background_it_sits_on() {
+        let tokens = light_tokens(include_str!("style.css"));
+        let token = |name: &str| {
+            tokens
+                .get(name)
+                .unwrap_or_else(|| panic!("style.css has no {name}"))
+                .clone()
+        };
+        for ink in ["--muted", "--green-ink"] {
+            for bg in ["--panel", "--soft", "--bg", "--chip"] {
+                let ratio = contrast(&token(ink), &token(bg));
+                assert!(
+                    ratio >= 4.5,
+                    "{ink} on {bg} is {ratio:.2}:1, below the 4.5:1 AA minimum"
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_asset_the_page_references_is_served() {
         let html = String::from_utf8_lossy(INDEX);
