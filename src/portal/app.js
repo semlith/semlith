@@ -6995,8 +6995,8 @@ VIEWS.search = {
                     { class: "dial" },
                     el("span", { class: "eyebrow", text: "RESULTS" }),
                     String(sr.k),
-                    btn({ class: "pm", "aria-label": "Fewer results", onclick: () => ((sr.k = Math.max(1, sr.k - 1)), repaint()) }, "−"),
-                    btn({ class: "pm", "aria-label": "More results", onclick: () => ((sr.k = Math.min(50, sr.k + 1)), repaint()) }, "+"),
+                    btn({ class: "pm", "aria-label": "Fewer results", onclick: () => ((sr.k = Math.max(1, sr.k - 1)), repaint(), sr.query && runSearch()) }, "−"),
+                    btn({ class: "pm", "aria-label": "More results", onclick: () => ((sr.k = Math.min(50, sr.k + 1)), repaint(), sr.query && runSearch()) }, "+"),
                   )
                 : null,
               sr.mode !== "exact"

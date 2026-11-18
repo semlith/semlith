@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Pressing `/` with a dialog open (a confirm or the folder picker) no longer
   navigates to Search behind it (#323). Thanks @jay23606 (#355).
+- The Search page's RESULTS − and + buttons search again when there is a
+  query, as LEAN TO and BUDGET do, so the page no longer shows the previous
+  hit count next to the new number (#324).
 - A portal copy button that the browser refuses now says "Copy failed" and shows
   the text to copy by hand, instead of "Copied"; focus returns to the pressed
   button (#326). Thanks @jay23606 (#354).
