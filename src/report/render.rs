@@ -954,7 +954,7 @@ mod tests {
     fn the_stylesheet_is_the_portals_tokens() {
         let light = tokens(":root");
         let dark = tokens(":root[data-theme=\"dark\"]");
-        assert!(light.contains("--muted:#64778a;"), "{light}");
+        assert!(light.contains("--muted:#5c7083;"), "{light}");
         assert!(light.contains("--code-dim:"), "{light}");
         assert!(dark.contains("--panel:#161f27;"), "{dark}");
         for token in TOKENS {
