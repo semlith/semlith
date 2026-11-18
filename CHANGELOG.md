@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path`, `Web address`), so they stay labelled once the user has typed, and
   the top-bar New store button keeps its name when its text is hidden at narrow
   widths (#328).
+- The light theme's muted text meets WCAG AA (4.5:1) on the card footer, note,
+  table header and count backgrounds: `--muted` is darker, and green text uses
+  `--green-ink` instead of `--green`, which was 3.47:1 on white (#331).
+  Thanks @jay23606 (#362).
 - Filenames such as `dockerfiles.md`, `dockerfile_test.go` and
   `dockerfile-lint.yml` resolve to Markdown, Go and YAML instead of Dockerfile.
   Dockerfile variants still match when a dot precedes the suffix (#292).

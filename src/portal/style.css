@@ -73,8 +73,9 @@
   --ink: #1e2a35;
   --ink-2: #3a4d5e;
   /* v6 draws #6B7F90, which is 4.14:1 on white and fails AA at the 11-13px
-   * sizes this page uses for secondary text. This is the nearest that passes. */
-  --muted: #64778a;
+   * sizes this page uses for secondary text. Muted text also sits on --soft,
+   * --bg and --chip, so this is the nearest value that clears 4.5:1 on --chip. */
+  --muted: #5c7083;
   --accent: #f0a43c;
   --accent-ink: #1e2a35;
   --accent-edge: #c97f14;
@@ -5023,7 +5024,7 @@ button.gl-row:hover,
   min-width: 0;
 }
 .lang-cell .ok {
-  color: var(--green);
+  color: var(--green-ink);
   font-size: 12px;
 }
 .lang-cell .n {
@@ -5578,7 +5579,7 @@ td.c-why {
 }
 /* A lane check's answer, in the row of the lane it is about. */
 .ok-ink {
-  color: var(--green);
+  color: var(--green-ink);
 }
 .red-ink {
   color: var(--red);
