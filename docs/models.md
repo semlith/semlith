@@ -96,14 +96,14 @@ x86_64 Linux only. Pack `1.24.4-cu12.8`, recorded in `src/cuda.rs` as
 `PACK_VERSION` and `PARTS`, with `PACK_BYTES` asserted against the sum of the
 sizes in `tests/cuda.rs`. It is downloaded only after CUDA is turned on (`semlith
 accel on cuda` or the switch on the Machine limits card), and the size is stated
-before the download starts: 1 891 522 804 bytes (1.89 GB) when the system
+before the download starts: 1 891 623 173 bytes (1.89 GB) when the system
 supplies none of the libraries. A library the system already has, at the pinned
 version or a newer one in the same major version, is used from the system and
 its wheel is not fetched. Parts are listed in load order.
 
 | Part | Version | Source | SHA-256 | Bytes | Supplies |
 | --- | --- | --- | --- | --- | --- |
-| ONNX Runtime GPU build | 1.24.4 | [GitHub release](https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-gpu-1.24.4.tgz) | `c5f804ff5d239b436fa59e9f2fb288a39f7eb9552f6a636c8b71e792e91a8808` | 205 429 115 | `libonnxruntime.so.1.24.4`, `libonnxruntime_providers_shared.so`, `libonnxruntime_providers_cuda.so` |
+| ONNX Runtime GPU build | 1.24.4 | [NuGet package](https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.gpu.linux/1.24.4/microsoft.ml.onnxruntime.gpu.linux.1.24.4.nupkg) | `06540847b4f83cc5fd92562263122659452cf62783e9a1477b6000b2d947b542` | 205 529 484 | `libonnxruntime.so`, `libonnxruntime_providers_shared.so`, `libonnxruntime_providers_cuda.so` |
 | `nvidia-cuda-runtime-cu12` | 12.8.90 | [PyPI wheel](https://files.pythonhosted.org/packages/0d/9b/a997b638fcd068ad6e4d53b8551a7d30fe8b404d6f1804abf1df69838932/nvidia_cuda_runtime_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl) | `adade8dcbd0edf427b7204d480d6066d33902cab2a4707dcfc48a2d0fd44ab90` | 954 765 | `libcudart.so.12` |
 | `nvidia-nvjitlink-cu12` | 12.8.93 | [PyPI wheel](https://files.pythonhosted.org/packages/f6/74/86a07f1d0f42998ca31312f998bd3b9a7eff7f52378f4f270c8679c77fb9/nvidia_nvjitlink_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl) | `81ff63371a7ebd6e6451970684f916be2eab07321b73c9d244dc2b4da7f73b88` | 39 254 836 | `libnvJitLink.so.12` |
 | `nvidia-cublas-cu12` | 12.8.4.1 | [PyPI wheel](https://files.pythonhosted.org/packages/dc/61/e24b560ab2e2eaeb3c839129175fb330dfcfc29e5203196e5541a4c44682/nvidia_cublas_cu12-12.8.4.1-py3-none-manylinux_2_27_x86_64.whl) | `8ac4e771d5a348c551b2a426eda6193c19aa630236b418086020df5ba9667142` | 594 346 921 | `libcublasLt.so.12`, `libcublas.so.12` |
@@ -119,7 +119,8 @@ a card on an older driver is reported with that minimum and not used. On
 Windows, an NVIDIA card is used through WebGPU on D3D12.
 
 **Licences.** ONNX Runtime is Microsoft's MIT-licensed release, downloaded from
-its GitHub release. NVIDIA's libraries never pass through semlith: your machine
+its NuGet package, `Microsoft.ML.OnnxRuntime.Gpu.Linux` (the GitHub release it
+used to come from stopped answering in November 2026). NVIDIA's libraries never pass through semlith: your machine
 downloads each wheel from `files.pythonhosted.org`, where NVIDIA publishes it —
 the same bytes from the same place `pip install nvidia-cudnn-cu12` would fetch —
 and semlith never hosts, mirrors or ships a copy. Your use of the libraries is

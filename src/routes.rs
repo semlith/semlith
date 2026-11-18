@@ -2408,7 +2408,7 @@ fn downloads(cache: &Path, stores: &[(String, PathBuf)]) -> Value {
         },
         {
             "what": format!("the CUDA pack {}", crate::cuda::PACK_VERSION),
-            "source": "github.com (ONNX Runtime GPU) and files.pythonhosted.org (NVIDIA's CUDA wheels)",
+            "source": "api.nuget.org (ONNX Runtime GPU) and files.pythonhosted.org (NVIDIA's CUDA wheels)",
             "bytes": crate::cuda::PACK_BYTES,
             "when": "only after CUDA is turned on, on Linux",
             "cached": crate::cuda::pack_installed(cache).is_some(),

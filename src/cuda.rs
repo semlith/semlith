@@ -30,7 +30,10 @@
 //! the licence each wheel carries ("NVIDIA Proprietary Software"), the terms a
 //! pip install of the same wheel accepts. That text is kept beside the
 //! libraries, in `licences/`, when the wheel carries it. ONNX Runtime is
-//! Microsoft's MIT-licensed release, fetched from its GitHub release.
+//! Microsoft's MIT-licensed release, fetched from its NuGet package
+//! (`Microsoft.ML.OnnxRuntime.Gpu.Linux` on `api.nuget.org`). It used to come
+//! from the GitHub release, which stopped answering in November 2026; the
+//! package holds the same 1.24.4 libraries, built from the same commit.
 
 use anyhow::{Context, Result, bail};
 use std::io::{Read, Write};
@@ -68,12 +71,8 @@ impl Part {
     }
 }
 
-/// The ONNX Runtime core, as the release archive names it. It is placed as
-/// `libonnxruntime.so`, the name the Linux release already gives its CPU core.
-const CORE: &str = "libonnxruntime.so.1.24.4";
-
-/// The pack. Digests and sizes are the ones GitHub's release API and PyPI's
-/// JSON API list for these exact files. The NVIDIA versions are the CUDA 12.8
+/// The pack. Digests and sizes are the ones NuGet serves and PyPI's JSON API
+/// lists for these exact files. The NVIDIA versions are the CUDA 12.8
 /// set PyTorch 2.8's cu128 wheels pin, which is what ONNX Runtime's own
 /// `onnxruntime-gpu[cuda,cudnn]` extras resolve to in practice. The order is
 /// the load order: each library comes after everything it needs, so the
@@ -81,14 +80,16 @@ const CORE: &str = "libonnxruntime.so.1.24.4";
 /// own `preload_dylibs` uses, with nvJitLink ahead of cuFFT 11.3, which needs
 /// it.
 pub const PARTS: &[Part] = &[
+    // The name stays the one the GitHub archive had, so a fetch that finished
+    // this part before the move is not made to fetch it again.
     Part {
         name: "onnxruntime-linux-x64-gpu",
         version: "1.24.4",
-        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-linux-x64-gpu-1.24.4.tgz",
-        sha256: "c5f804ff5d239b436fa59e9f2fb288a39f7eb9552f6a636c8b71e792e91a8808",
-        size: 205_429_115,
+        url: "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.gpu.linux/1.24.4/microsoft.ml.onnxruntime.gpu.linux.1.24.4.nupkg",
+        sha256: "06540847b4f83cc5fd92562263122659452cf62783e9a1477b6000b2d947b542",
+        size: 205_529_484,
         libs: &[
-            CORE,
+            "libonnxruntime.so",
             "libonnxruntime_providers_shared.so",
             "libonnxruntime_providers_cuda.so",
         ],
@@ -166,7 +167,7 @@ pub const PARTS: &[Part] = &[
 /// Every byte [`fetch_pack`] downloads when the system supplies none of the
 /// CUDA libraries, stated before the download starts: 1.89 GB. Asserted
 /// against [`PARTS`] in `tests/cuda.rs`.
-pub const PACK_BYTES: u64 = 1_891_522_804;
+pub const PACK_BYTES: u64 = 1_891_623_173;
 
 /// Why the CUDA lane cannot run on this platform, when it cannot.
 pub fn unavailable_here() -> Option<String> {
@@ -448,11 +449,7 @@ pub fn fetch_pack(cache: &Path, progress: &mut dyn FnMut(u8)) -> Result<PathBuf>
     };
     for part in todo {
         let archive = download(part, &dir, &mut report)?;
-        if archive.extension().is_some_and(|ext| ext == "tgz") {
-            untar_libs(&archive, &lib, part.libs)?;
-        } else {
-            unzip_libs(&archive, &dir, part)?;
-        }
+        unzip_libs(&archive, &dir, part)?;
         let _ = std::fs::remove_file(&archive);
         crate::home::write_private(&done(part), part.version.as_bytes())?;
     }
@@ -553,8 +550,10 @@ fn copy_hashing(
         .collect())
 }
 
-/// The named libraries out of a verified wheel's `nvidia/<package>/lib/`, and
-/// its licence text into `licences/`.
+/// The named libraries out of a verified archive, and its licence text into
+/// `licences/`. A wheel keeps its libraries in `nvidia/<package>/lib/` and its
+/// licence in `.dist-info/`; Microsoft's NuGet package keeps them in
+/// `runtimes/linux-x64/native/` and a top-level `LICENSE`.
 fn unzip_libs(wheel: &Path, dir: &Path, part: &Part) -> Result<()> {
     let file = std::fs::File::open(wheel)?;
     let mut archive =
@@ -564,10 +563,14 @@ fn unzip_libs(wheel: &Path, dir: &Path, part: &Part) -> Result<()> {
         let mut entry = archive.by_index(i)?;
         let name = entry.name()?.into_owned();
         let base = name.rsplit('/').next().unwrap_or_default();
-        let target = if name.starts_with("nvidia/") && part.libs.contains(&base) {
+        let lib_dir = name.starts_with("nvidia/") || name.starts_with("runtimes/linux-x64/native/");
+        let licence = (name.contains(".dist-info/")
+            && base.to_ascii_lowercase().starts_with("license"))
+            || name == "LICENSE";
+        let target = if lib_dir && part.libs.contains(&base) {
             placed += 1;
             dir.join("lib").join(base)
-        } else if name.contains(".dist-info/") && base.to_ascii_lowercase().starts_with("license") {
+        } else if licence {
             let licences = dir.join("licences");
             std::fs::create_dir_all(&licences)?;
             licences.join(format!("{}.txt", part.name))
@@ -583,56 +586,6 @@ fn unzip_libs(wheel: &Path, dir: &Path, part: &Part) -> Result<()> {
             "{} held {placed} of the {} libraries semlith expects in it",
             part.file_name(),
             part.libs.len()
-        );
-    }
-    Ok(())
-}
-
-/// The named libraries out of a verified `.tgz`, wherever they sit in it.
-/// Enough of tar for Microsoft's release archive: 512-byte headers, each
-/// followed by its file padded to 512; only regular files are taken, so its
-/// `libonnxruntime.so` symlinks are skipped and the core is placed under that
-/// name instead.
-fn untar_libs(tgz: &Path, lib: &Path, wanted: &[&str]) -> Result<()> {
-    let file = std::fs::File::open(tgz)?;
-    let mut reader = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
-    let mut header = [0u8; 512];
-    let mut placed = 0;
-    loop {
-        match reader.read_exact(&mut header) {
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            other => other.context("reading the ONNX Runtime archive")?,
-        }
-        if header.iter().all(|b| *b == 0) {
-            break;
-        }
-        let field = |range: std::ops::Range<usize>| {
-            let bytes = &header[range];
-            let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-            String::from_utf8_lossy(&bytes[..end]).trim().to_string()
-        };
-        let name = field(0..100);
-        let size = u64::from_str_radix(&field(124..136), 8)
-            .context("a tar header in the ONNX Runtime archive has no readable size")?;
-        let base = name.rsplit('/').next().unwrap_or_default();
-        let mut entry = (&mut reader).take(size.div_ceil(512) * 512);
-        if matches!(header[156], b'0' | 0) && wanted.contains(&base) {
-            let target = lib.join(if base == CORE {
-                "libonnxruntime.so"
-            } else {
-                base
-            });
-            let mut out = std::fs::File::create(&target)
-                .with_context(|| format!("writing {}", target.display()))?;
-            std::io::copy(&mut (&mut entry).take(size), &mut out)?;
-            placed += 1;
-        }
-        std::io::copy(&mut entry, &mut std::io::sink())?;
-    }
-    if placed != wanted.len() {
-        bail!(
-            "the ONNX Runtime archive held {placed} of the {} libraries semlith expects in it",
-            wanted.len()
         );
     }
     Ok(())
