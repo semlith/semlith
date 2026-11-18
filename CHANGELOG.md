@@ -55,6 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Two threads asking for the same model file while it downloads no longer fail
   with "Lock acquisition failed": the second waits for the first and reads the
   cached file (#341).
+- Turning CUDA on works again. Microsoft's GitHub repository for ONNX Runtime
+  started answering 404 in November 2026, so the pack's ONNX Runtime part could
+  not be fetched. It now comes from Microsoft's NuGet package
+  `Microsoft.ML.OnnxRuntime.Gpu.Linux` 1.24.4, the same libraries built from the
+  same commit, pinned by digest. The Linux release build takes its
+  `libonnxruntime.so` from the `Microsoft.ML.OnnxRuntime` package the same way.
+  A pack already installed is kept as it is.
 - `--ext '*.rs'`, `--ext ''`, `--ext .` and a bare `--ext !` are refused with
   an error that points to `--path` for globs, where they used to match nothing.
   Thanks @ShahadatTest (#299, #293).
