@@ -410,6 +410,9 @@ over the size cap, generated folder, `.gitignore`, `.semlithignore`, not indexed
 yet). A folder past 1 000 entries lists the first thousand and counts the rest.
 This is what `semlith files --tree` and `semlith_files {tree: true}` return.
 
+The **text** type includes tab-separated values (`.tsv`), HTML (`.html` and
+`.htm`) and Markdown (`.md` and `.markdown`) alongside other plain-text formats.
+
 Selected rows can be copied as paths, re-indexed or **Forgotten** (chunks, vectors
 and edges dropped; the file is untouched and comes back when it next changes, if
 watched).

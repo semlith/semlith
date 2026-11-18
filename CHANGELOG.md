@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Filenames such as `dockerfiles.md`, `dockerfile_test.go` and
   `dockerfile-lint.yml` resolve to Markdown, Go and YAML instead of Dockerfile.
   Dockerfile variants still match when a dot precedes the suffix (#292).
+- The portal Files page's text chip includes `.tsv`, `.htm` and `.markdown`
+  files (#296). Thanks @emreocell (#365).
 - An empty or blank query is refused instead of searched. `semlith search`,
   `semlith brief` and `semlith symbol` exit with an error, and MCP
   `semlith_search` and `semlith_brief` answer with `isError`; neither writes a
