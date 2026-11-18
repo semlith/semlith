@@ -1775,6 +1775,43 @@ fn encoded_word(s: &str) -> Option<(String, &str)> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_portal_type_chips_cover_reader_extensions() {
+        let reader_exts = include_str!("portal/app.js")
+            .split_once("const READER_EXTS = {")
+            .and_then(|(_, rest)| rest.split_once("\n};"))
+            .expect("app.js must define READER_EXTS")
+            .0;
+        let extensions = |chip: &str| {
+            let array = reader_exts
+                .split_once(&format!("{chip}:"))
+                .expect("READER_EXTS must contain each reader list")
+                .1
+                .trim_start();
+            let end = array.find(']').expect("the reader list must be an array");
+            serde_json::from_str::<Vec<&str>>(&array[..=end])
+                .expect("reader extensions must be literal arrays")
+        };
+        let text = extensions("text");
+        let office = extensions("office");
+        let image = extensions("image");
+
+        for ext in ["tsv", "htm", "markdown"] {
+            assert!(text.contains(&ext), "the text chip leaves out .{ext}");
+        }
+        for ext in HANDLED {
+            if !crate::chunk::MARKUP.contains(ext) {
+                assert!(
+                    office.contains(ext) || text.contains(ext),
+                    "the office and text chips leave out .{ext}"
+                );
+            }
+        }
+        for ext in crate::image::EXTENSIONS {
+            assert!(image.contains(&ext), "the image chip leaves out .{ext}");
+        }
+    }
+
     /// The property the whole HTML path rests on: what comes out is the page's
     /// text, and it is still on the line the source put it on.
     #[test]

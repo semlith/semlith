@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The portal Files page's text chip includes `.tsv`, `.htm` and `.markdown`
+  files (#296).
 - Pressing `/` with a dialog open (a confirm or the folder picker) no longer
   navigates to Search behind it (#323). Thanks @jay23606 (#355).
 - A portal copy button that the browser refuses now says "Copy failed" and shows

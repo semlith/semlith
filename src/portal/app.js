@@ -6102,7 +6102,7 @@ const READER_EXTS = {
   pdf: ["pdf"],
   office: ["docx", "xlsx", "pptx", "odt", "ods", "odp", "rtf", "epub", "eml", "mbox"],
   image: ["png", "jpg", "jpeg", "gif", "webp"],
-  text: ["md", "txt", "rst", "csv", "json", "yaml", "yml", "toml", "html", "xml", "ipynb"],
+  text: ["md", "markdown", "txt", "rst", "csv", "tsv", "json", "yaml", "yml", "toml", "html", "htm", "xml", "ipynb"],
 };
 
 function relTo(s, path) {
