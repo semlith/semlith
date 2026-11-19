@@ -86,6 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `semlith setup --register-all`, which rewrites that block, and names the file
   it rewrites. The line was missing, so "rule stale" came with no remedy (#319).
   Thanks @jay23606 (#361).
+- `semlith doctor` pads the client column to the longest client name, so
+  "ChatGPT desktop (the Codex app)" no longer runs into its state and every
+  row's state starts at the same column (#318). Thanks @emreocell (#367).
 - Counts in the portal read "1 file", "1 day", "1 chunk" and "2 refunds"
   instead of "1 files", "1 days" and "2 refund", and `plural()` compares the
   number it prints, so 1.2 days is "1 day". The Reading time figure shows

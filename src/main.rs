@@ -5058,6 +5058,13 @@ fn print_doctor(
     applied: &[anyhow::Result<semlith::doctor::Applied>],
 ) {
     println!("{}Clients{}", bold(), reset());
+    // Padded to the longest name, not a fixed width: "ChatGPT desktop (the
+    // Codex app)" is longer than any fixed column and ran into its state.
+    let name_width = clients
+        .iter()
+        .map(|c| c.name.chars().count())
+        .max()
+        .unwrap_or(0);
     for client in clients {
         // "Not installed" is only an answer for a client that has a CLI to be
         // installed. For a client semlith reaches by writing a file, the
@@ -5089,7 +5096,7 @@ fn print_doctor(
                 _ => "installed, not registered".to_string(),
             },
         };
-        println!("  {:<28} {state}", client.name);
+        println!("  {:<name_width$} {state}", client.name);
         if let Some(note) = &client.note {
             println!("      {note}");
         }
