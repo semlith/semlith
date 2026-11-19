@@ -299,7 +299,8 @@ function post(path, body) {
 
 const NUM = new Intl.NumberFormat("en-US");
 const n = (value) => NUM.format(Math.round(Number(value) || 0));
-const plural = (count, one, many) => `${n(count)} ${count === 1 ? one : many || `${one}s`}`;
+// Compares the rounded count, the one `n` prints, so 1.2 days reads "1 day".
+const plural = (count, one, many) => `${n(count)} ${Math.round(Number(count) || 0) === 1 ? one : many || `${one}s`}`;
 
 function pct(part, whole, digits) {
   if (!whole) return "0%";
@@ -1858,7 +1859,7 @@ function phaseLabel(phase, detail, lane) {
 /** The current phase's sentence. The engine says the drain's count once, as
  * the phase starts; the run's live backlog is what is still embedding now. */
 function liveDetail(run) {
-  return run.phase === "drain" && run.backlog != null ? `${n(run.backlog)} chunks still embedding` : run.phase_detail;
+  return run.phase === "drain" && run.backlog != null ? `${plural(run.backlog, "chunk")} still embedding` : run.phase_detail;
 }
 
 /** What a run is doing now, in one line: the phase and its sentence. An
@@ -2354,7 +2355,7 @@ function paintChrome() {
     const host = node.parentElement;
     host.setAttribute(
       "data-tip-rows",
-      id === "stores" && badges.stores ? (reviewN ? `to review::${badges.stores} files` : `status::${plural(errN, "store")} in error`) : id === "agents" && badges.agents ? "status::no agent registered yet" : "",
+      id === "stores" && badges.stores ? (reviewN ? `to review::${plural(badges.stores, "file")}` : `status::${plural(errN, "store")} in error`) : id === "agents" && badges.agents ? "status::no agent registered yet" : "",
     );
   }
   const run = activeRun();
@@ -3669,7 +3670,7 @@ function wizardScreen() {
         el("div", { class: "row base" }, el("span", { class: "card-t grow", text: `Scanning ${plural(w.sources.filter((s) => s.type !== "url").length, "source")}` }), el("span", { class: "mono t-b", text: `${Math.floor(p)}%` })),
         (() => {
           const b = bar(p, "h8");
-          b.setAttribute("data-tip", `Scan · stage ${Math.min(shown + 1, SCAN_STAGES.length)} of ${SCAN_STAGES.length}${total ? ` · ${n(scanned)} of ${n(total)} files` : ""} · ${Math.floor(p)} %`);
+          b.setAttribute("data-tip", `Scan · stage ${Math.min(shown + 1, SCAN_STAGES.length)} of ${SCAN_STAGES.length}${total ? ` · ${n(scanned)} of ${plural(total, "file")}` : ""} · ${Math.floor(p)}%`);
           b.setAttribute("data-tip-rows", stages.map((s) => `${s[0]}::${s[1] ? "done" : s[2] ? s[3] : "waiting"}`).join("||"));
           return b;
         })(),
@@ -4206,7 +4207,7 @@ function wizardScreen() {
             "div",
             { class: "done-banner" },
             el("span", { class: "ic" }, icon(I.check, 17, { w: 2.6 })),
-            el("div", { class: "col gap2 grow" }, el("span", { class: "t", text: `${name} is ready` }), el("span", { class: "l", text: `${plural(files, "file")} indexed · ${n(chunks)} chunks${s && s.disk ? ` · ${bytes(s.disk.total)}` : ""}${w.watchAfter ? " · watching for changes" : ""}` })),
+            el("div", { class: "col gap2 grow" }, el("span", { class: "t", text: `${name} is ready` }), el("span", { class: "l", text: `${plural(files, "file")} indexed · ${plural(chunks, "chunk")}${s && s.disk ? ` · ${bytes(s.disk.total)}` : ""}${w.watchAfter ? " · watching for changes" : ""}` })),
           ),
       el(
         "div",
@@ -4374,7 +4375,7 @@ function wizardScreen() {
         ? ["INDEX", step < 3 ? "not started" : "after the scan", false, true]
         : [
             "INDEX",
-            R.length ? (live ? `${Math.floor(runPct(live))}% · ${live.status}` : `${n(R.reduce((a, r) => a + (r.indexed || 0), 0))} files · ready`) : step >= 4 ? `${n(P.embed + P.accepted)} files${estimate(P) ? ` · ${spellAbout(Math.max(60000, estimate(P).ms))}` : ""}` : "not started",
+            R.length ? (live ? `${Math.floor(runPct(live))}% · ${live.status}` : `${plural(R.reduce((a, r) => a + (r.indexed || 0), 0), "file")} · ready`) : step >= 4 ? `${plural(P.embed + P.accepted, "file")}${estimate(P) ? ` · ${spellAbout(Math.max(60000, estimate(P).ms))}` : ""}` : "not started",
             R.length && !live,
             !R.length && step < 4,
           ],
@@ -4641,11 +4642,11 @@ function logParts(ev) {
     submitted: ev.ahead ? `waiting — ${plural(ev.ahead, "run")} ahead of this one` : "submitted",
     queued: ev.ahead ? `waiting for ${ev.store}'s writer — ${plural(ev.ahead, "job")} ahead` : "waiting for the store's writer",
     started: "walking the tree and hashing what it finds",
-    slice: `${n(ev.remaining)} paths left; giving the watcher a turn`,
+    slice: `${plural(ev.remaining, "path")} left; giving the watcher a turn`,
     paused: "held between files — the writer is still this run's",
     resumed: "carrying on",
     error: ev.error || "failed",
-    done: ev.dequeued ? "removed from the queue before it started; nothing was indexed" : ev.stopped ? "stopped — everything this run embedded was undone" : `${n(ev.indexed)} indexed, ${n(ev.unchanged)} unchanged, ${n(ev.skipped)} skipped, ${n(ev.removed)} removed, ${n(ev.chunks)} chunks`,
+    done: ev.dequeued ? "removed from the queue before it started; nothing was indexed" : ev.stopped ? "stopped — everything this run embedded was undone" : `${n(ev.indexed)} indexed, ${n(ev.unchanged)} unchanged, ${n(ev.skipped)} skipped, ${n(ev.removed)} removed, ${plural(ev.chunks, "chunk")}`,
   }[ev.event];
   return [when, ev.event || "", text || ev.text || "", ev.event === "error" ? "bad" : ev.event === "done" ? "ok" : "info"];
 }
@@ -4792,8 +4793,8 @@ function runStatusLine(r) {
 /** What the run's own bar measures, with its numbers. */
 function runBarTip(r) {
   const p = Math.floor(runPct(r));
-  const what = r.expected_chunks ? `${n(r.chunks || 0)} of ${n(r.expected_chunks)} chunks embedded` : r.total ? `${n(r.scanned || 0)} of ${n(r.total)} files read` : "starting";
-  return `${r.store} · index run · ${what} · ${p} %`;
+  const what = r.expected_chunks ? `${n(r.chunks || 0)} of ${plural(r.expected_chunks, "chunk")} embedded` : r.total ? `${n(r.scanned || 0)} of ${plural(r.total, "file")} read` : "starting";
+  return `${r.store} · index run · ${what} · ${p}%`;
 }
 
 /** The Pipeline panel: four lanes in a fixed order and shape — Read, Chunk,
@@ -4810,7 +4811,7 @@ function pipeline(r, startStep) {
       "div",
       { class: `pipe-row${opts && opts.sub ? " sub" : ""}`, "data-lane": key, hidden: opts && opts.hide ? true : null },
       el("span", { class: "pipe-k", text: label }),
-      whole === null ? el("span", { class: "pipe-bar none" }) : bar(v, "h6 pipe-bar", `${label} · ${n(part)} of ${n(whole)} ${unit} · ${Math.floor(v)} %`),
+      whole === null ? el("span", { class: "pipe-bar none" }) : bar(v, "h6 pipe-bar", `${label} · ${n(part)} of ${n(whole)} ${unit} · ${Math.floor(v)}%`),
       el("span", { class: "pipe-v", text, "data-tip": text }),
     );
   };
@@ -4824,8 +4825,8 @@ function pipeline(r, startStep) {
   return el(
     "div",
     { class: "pipe", role: "tabpanel", "aria-label": "Pipeline" },
-    lane("read", "Read", r.scanned || 0, r.total || 0, "files", r.total ? `${n(r.scanned)} / ${n(r.total)} files` : "counting files…"),
-    lane("chunk", "Chunk", r.rows || 0, exp, "chunks made", `${n(r.rows || 0)} chunks made`),
+    lane("read", "Read", r.scanned || 0, r.total || 0, "files", r.total ? `${n(r.scanned)} / ${plural(r.total, "file")}` : "counting files…"),
+    lane("chunk", "Chunk", r.rows || 0, exp, "chunks made", `${plural(r.rows || 0, "chunk")} made`),
     lane("embed", "Embed", r.chunks || 0, exp, "chunks", exp ? `${n(r.chunks || 0)} / ${n(exp)}` : n(r.chunks || 0)),
     lane("images", "images", r.images || 0, r.images_total || 0, "images", `${n(r.images || 0)} / ${n(r.images_total || 0)}`, { sub: true, hide: !r.images_total }),
     write,
@@ -5230,7 +5231,7 @@ VIEWS.home = {
       "div",
       { class: "q4" },
       kpi("Stores", String(stores.length), running.length ? `${plural(running.length, "run")} going now` : reviewing.length ? `${plural(reviewing.length, "store")} ${reviewing.length === 1 ? "needs" : "need"} a review` : stores.length ? "all fresh and watched" : "none yet", { onclick: () => go("stores") }),
-      kpi("Files indexed", n(files), `${n(chunks)} chunks`, { onclick: () => go("stores") }),
+      kpi("Files indexed", n(files), plural(chunks, "chunk"), { onclick: () => go("stores") }),
       kpi("Agents connected", String(connectedCount()), connectedCount() ? (lastQuery ? `${lastQuery.client} asked ${ago(lastQuery.at)}` : "waiting for a first query") : registered.length ? `${plural(registered.length, "client")} registered · none talking now` : `${plural(found.length, "client")} found on this machine`, { onclick: () => go("agents") }),
       kpi("Fewer tokens", ledger.ratio ? `${ledger.ratio.toFixed(1)}×` : "—", ledger.ratio ? `than reading those files whole · coverage ${ledger.coverage}% · ${ledger.tier}` : "counted once an agent asks something", { onclick: () => go("ledger") }),
     );
@@ -5260,7 +5261,7 @@ VIEWS.home = {
             : el("div", { class: "empty" }, "No store yet. ", lnk("Create one", () => openWizard({}))),
         ),
       ),
-      el("div", { class: "card-foot", text: `${plural(all.length, "store")} · ${n(files)} files · ${n(chunks)} chunks${disk ? ` · ${bytes(disk)} on disk` : ""}` }),
+      el("div", { class: "card-foot", text: `${plural(all.length, "store")} · ${plural(files, "file")} · ${plural(chunks, "chunk")}${disk ? ` · ${bytes(disk)} on disk` : ""}` }),
     );
 
     const rowsList = (ledger.rows || []).slice(0, 6);
@@ -5499,7 +5500,7 @@ function storesList() {
         { label: "Kind" },
       ),
       el("span", { class: "spacer" }),
-      el("span", { class: "t-mono-sm", text: `${n(files)} files · ${n(chunks)} chunks` }),
+      el("span", { class: "t-mono-sm", text: `${plural(files, "file")} · ${plural(chunks, "chunk")}` }),
     ),
     el(
       "div",
@@ -5618,6 +5619,8 @@ function insideIndex() {
   const top = langList.slice(0, 8);
   const pages = Math.round(words / 500);
   const minutes = words / 250;
+  // Minutes under an hour: "0 hours" says nothing about a small store.
+  const reading = minutes > 1440 ? plural(minutes / 1440, "day") : minutes >= 60 ? plural(minutes / 60, "hour") : plural(minutes, "minute");
   const kinds = {};
   for (const c of corpus) for (const k of c.kinds || []) {
     const cur = (kinds[k.name] = kinds[k.name] || { count: 0, units: 0, unit: k.unit });
@@ -5655,7 +5658,7 @@ function insideIndex() {
   return el(
     "div",
     { class: "stack" },
-    el("div", { class: "muted t-sm", text: `Measured from the stores themselves, again after every change, not estimated — ${plural(corpus.length, "store")}, ${n(files)} files.` }),
+    el("div", { class: "muted t-sm", text: `Measured from the stores themselves, again after every change, not estimated — ${plural(corpus.length, "store")}, ${plural(files, "file")}.` }),
     measuring.length ? el("div", { class: "notice" }, el("span", { class: "sub", text: `Measuring ${measuring.map((m) => m.store).join(", ")} — the figures appear here when it is done.` })) : null,
     errs.length ? el("div", { class: "notice red" }, el("span", { class: "sub", text: `${errs.map((e) => e.store).join(", ")} could not be measured: ${errs[0].error}` })) : null,
     insideSources(),
@@ -5665,7 +5668,7 @@ function insideIndex() {
       kpi("Lines of code", n(lines), "counted, comments and blanks separated out"),
       kpi("Words indexed", n(words), "code, prose, slides, sheets and notebooks"),
       kpi("If it were printed", `${n(pages)} pp`, median ? `a stack of A4 you can search in ${(median / 1000).toFixed(1)} s` : "at 500 words a page"),
-      kpi("Reading time", minutes > 1440 ? `${n(minutes / 1440)} days` : `${n(minutes / 60)} hours`, "non-stop at 250 words a minute"),
+      kpi("Reading time", reading, "non-stop at 250 words a minute"),
     ),
     el(
       "div",
@@ -5673,7 +5676,7 @@ function insideIndex() {
       el(
         "div",
         { class: "card pad span2" },
-        el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "Language mix, by line" }), meta(`${n(lines)} lines · ${plural(langList.length, "language")}`)),
+        el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "Language mix, by line" }), meta(`${plural(lines, "line")} · ${plural(langList.length, "language")}`)),
         el(
           "div",
           { class: "segbar" },
@@ -5707,8 +5710,8 @@ function insideIndex() {
         ["Average line", lines ? `${Math.round(chars / lines)} chars` : "—"],
         ["Comment lines", pct(comment, lines)],
         ["Blank lines", pct(blank, lines)],
-        ["Deepest path", `${Math.max(0, ...corpus.map((c) => c.deepest_path || 0))} folders`],
-        ["Longest file", longest ? `${n(longest.lines)} lines` : "—"],
+        ["Deepest path", plural(Math.max(0, ...corpus.map((c) => c.deepest_path || 0)), "folder")],
+        ["Longest file", longest ? plural(longest.lines, "line") : "—"],
       ]),
       factCard("Time in the corpus", [
         ["First read", fmtDay(first)],
@@ -5899,7 +5902,7 @@ function sdOverview(s) {
     el(
       "div",
       { class: "q4" },
-      kpi("Files", n(s.files || 0), s.files ? `read by ${plural(s.readers || readers.length, "reader")} · ${n(s.lines || 0)} lines` : "nothing yet"),
+      kpi("Files", n(s.files || 0), s.files ? `read by ${plural(s.readers || readers.length, "reader")} · ${plural(s.lines || 0, "line")}` : "nothing yet"),
       kpi("Chunks", n(s.chunks || 0), s.chunks ? "searchable on this machine" : "nothing indexed yet"),
       kpi("On disk", s.disk ? bytes(s.disk.total) : "—", reclaimable(s) ? `${bytes(reclaimable(s))} reclaimable` : "nothing to reclaim"),
       kpi("Saved for agents", v && v.total ? `${short(v.net_tokens)} tokens` : "—", v && v.total ? `coverage ${v.coverage}% · ${v.tier}` : "counted once an agent asks"),
@@ -6181,7 +6184,7 @@ function filesTree(s) {
     const items = [];
     for (const d of entry?.dirs || []) items.push(folder(where, under(d.name), d.name, plural(d.files, "file"), level));
     for (const f of entry?.files || []) {
-      const row = el("div", { class: "tree-row", title: `${where.root}/${under(f.name)}` }, el("span", { class: "c" }), el("span", { class: "grow", text: f.name }), el("span", { class: "m", text: f.lines ? `${n(f.lines)} lines · ${plural(f.symbols || 0, "symbol")}` : plural(f.chunks || 0, "chunk") }));
+      const row = el("div", { class: "tree-row", title: `${where.root}/${under(f.name)}` }, el("span", { class: "c" }), el("span", { class: "grow", text: f.name }), el("span", { class: "m", text: f.lines ? `${plural(f.lines, "line")} · ${plural(f.symbols || 0, "symbol")}` : plural(f.chunks || 0, "chunk") }));
       row.style.paddingLeft = `${14 + level * 20}px`;
       items.push(row);
     }
@@ -6614,7 +6617,7 @@ function historyLog(s, logFile) {
       fill(
         foot,
         st.error ? el("span", { class: "muted t-xs", text: st.error }) : null,
-        st.loading ? el("span", { class: "muted t-xs", text: `Reading the log… ${n(st.lines.length)} lines so far` }) : st.more ? lnk(`Load more · ${n(st.lines.length)} lines read`, load) : el("span", { class: "muted t-xs", text: `${plural(st.lines.length, "line")} · the whole log` }),
+        st.loading ? el("span", { class: "muted t-xs", text: `Reading the log… ${plural(st.lines.length, "line")} so far` }) : st.more ? lnk(`Load more · ${plural(st.lines.length, "line")} read`, load) : el("span", { class: "muted t-xs", text: `${plural(st.lines.length, "line")} · the whole log` }),
       ),
   });
   view.classList.add("tall");
@@ -6716,7 +6719,7 @@ function runLine(h) {
   // claiming a time it did not measure.
   const took = ms ? ` · took ${spellTook(ms)}` : h.finished || h.finished_at ? " · took under a second" : "";
   const indexed = h.indexed ?? h.files_indexed ?? (typeof h.files === "number" ? h.files : 0);
-  return `${n(indexed)} indexed · ${n(h.chunks || 0)} chunks${took}`;
+  return `${n(indexed)} indexed · ${plural(h.chunks || 0, "chunk")}${took}`;
 }
 
 function stagesText(st) {
@@ -6934,7 +6937,7 @@ VIEWS.search = {
     );
     const scopeItems = () => [
       { label: "All stores", hint: plural(liveStores().length, "store"), checked: !sr.store, onclick: () => ((sr.store = ""), repaint(), sr.query && runSearch()) },
-      ...liveStores().map((s) => ({ label: s.name, hint: s.files ? `${n(s.files)} files` : "empty", checked: sr.store === s.name, onclick: () => ((sr.store = s.name), (sr.prefer = s.lean || sr.prefer), repaint(), sr.query && runSearch()) })),
+      ...liveStores().map((s) => ({ label: s.name, hint: s.files ? plural(s.files, "file") : "empty", checked: sr.store === s.name, onclick: () => ((sr.store = s.name), (sr.prefer = s.lean || sr.prefer), repaint(), sr.query && runSearch()) })),
       ...remoteStores().map((r) => ({ label: r.name, hint: r.badge, checked: sr.store === r.name, onclick: () => ((sr.store = r.name), repaint(), sr.query && runSearch()) })),
     ];
     setTimeout(() => input.focus(), 0);
@@ -7543,7 +7546,7 @@ VIEWS.graph = {
     const root = el("div", { class: "col fillpage grow min0" });
     root.style.height = "100%";
     const picker = btn(
-      { class: "btn", "aria-haspopup": "menu", "data-tip": "The graph shows one store at a time", onclick: () => menu.open(picker, stores.map((s) => ({ label: s.name, hint: `${n(s.files)} files`, checked: gr.store === s.name, onclick: () => ((gr.store = s.name), (gr.sel = ""), (gr.data = null), (gr.sym = null), (gr.map = null), (gr.br.out = null), (gr.pt.out = null), repaint()) })), { width: 220 }) },
+      { class: "btn", "aria-haspopup": "menu", "data-tip": "The graph shows one store at a time", onclick: () => menu.open(picker, stores.map((s) => ({ label: s.name, hint: plural(s.files, "file"), checked: gr.store === s.name, onclick: () => ((gr.store = s.name), (gr.sel = ""), (gr.data = null), (gr.sym = null), (gr.map = null), (gr.br.out = null), (gr.pt.out = null), repaint()) })), { width: 220 }) },
       el("span", { class: "muted", text: "in" }),
       el("span", { class: "mono t-m", text: gr.store || "no store" }),
       icon(I.chevDown, 12, { w: 2 }),
@@ -8962,7 +8965,7 @@ VIEWS.ledger = {
         kpi("Queries recorded", n(L.queries), `${plural(L.clients || 0, "client")}${lastRow ? ` · last ${ago(lastRow.at)}` : ""}${L.human?.queries ? ` · ${n(L.human.queries)} by hand, not counted` : ""}`),
         kpi("Fewer tokens", L.ratio ? `${L.ratio.toFixed(1)}×` : "—", L.ratio ? `than reading those files whole · coverage ${L.coverage}% · ${L.tier}` : "counted once an agent asks", { accent: !!L.ratio }),
         kpi("Net tokens not read", n(L.net_tokens), "whole-file less excerpt, rows with a hit"),
-        kpi("Zero-hit", `${zeroShare.toFixed(0)}%`, `${n(L.zero_hit)} queries the corpus could not answer`),
+        kpi("Zero-hit", `${zeroShare.toFixed(0)}%`, `${plural(L.zero_hit, "query", "queries")} the corpus could not answer`),
       ),
     );
     const whole = L.whole_file_tokens || 0;
@@ -8998,7 +9001,7 @@ VIEWS.ledger = {
           el("div", { class: "row base" }, el("span", { class: "card-t grow", text: "By client" }), el("span", { class: "t-mono-sm", text: "MCP, HTTP and CLI" })),
           byClient.length
             ? byClient.slice(0, 7).map(([k, v]) => {
-                const b = bar((v / maxClient) * 100, lg.filter === k ? "accent" : "", `${k} · ${n(v)} queries · ${pct(v, L.queries)} of all`);
+                const b = bar((v / maxClient) * 100, lg.filter === k ? "accent" : "", `${k} · ${plural(v, "query", "queries")} · ${pct(v, L.queries)} of all`);
                 return btn(
                   { class: `bar-row${lg.filter === k ? " on" : ""}`, "data-tip": k, "data-tip-rows": rows([["queries", n(v)], ["share", pct(v, L.queries)], ["click", lg.filter === k ? "clear the filter" : "filter the tables"]]), onclick: () => ((lg.filter = lg.filter === k ? null : k), repaint()) },
                   el("span", { class: "k ell", text: k }),
@@ -9257,7 +9260,7 @@ function ledgerReplay() {
           { class: "row base nowrap t-mono" },
           el("span", { class: "t-m", text: String(s.id).slice(0, 12) }),
           el("span", { class: "muted grow ell", text: `${plural(s.answers, "answer")} · ${s.project}` }),
-          el("span", { class: "muted", text: [s.refund && `${s.refund} refund`, s.miss && `${s.miss} miss`, s.sufficed && `${s.sufficed} sufficed`].filter(Boolean).join(" · ") }),
+          el("span", { class: "muted", text: [s.refund && plural(s.refund, "refund"), s.miss && plural(s.miss, "miss", "misses"), s.sufficed && `${s.sufficed} sufficed`].filter(Boolean).join(" · ") }),
         ),
         (s.recent || []).slice(-6).map((a) =>
           el(
@@ -9623,7 +9626,7 @@ async function removeSchedule(id) {
 async function updatePrices() {
   const ok = await ask({ title: "Update the price table?", body: `One request to ${data.prices?.url || "models.dev"}, made now because you asked. ${data.privacy?.airgap?.on || data.privacy?.airgap === true ? "Airgap is on, so it will be refused." : "Nothing else is sent."}`, ok: "Update" });
   if (!ok) return;
-  const out = await act(() => post("/api/prices", { update: true }), (o) => `Prices updated · ${o.models} models`);
+  const out = await act(() => post("/api/prices", { update: true }), (o) => `Prices updated · ${plural(o.models, "model")}`);
   if (out) await loadMany(["prices", "privacy"], true), repaint();
 }
 
@@ -10291,7 +10294,7 @@ function cloudOrgCard(o, C) {
       ? el(
           "div",
           { class: "card-b col gap6" },
-          missing.map((s) => el("div", { class: "row gap8" }, el("span", { class: "t-m t13", text: `${o.org}/${s.name}` }), pill("not connected here", "amber", { dot: false, sm: true }), el("span", { class: "muted t-xs grow", text: `${s.state || "—"} · ${n(s.files || 0)} files · ${n(s.chunks || 0)} chunks` }))),
+          missing.map((s) => el("div", { class: "row gap8" }, el("span", { class: "t-m t13", text: `${o.org}/${s.name}` }), pill("not connected here", "amber", { dot: false, sm: true }), el("span", { class: "muted t-xs grow", text: `${s.state || "—"} · ${plural(s.files || 0, "file")} · ${plural(s.chunks || 0, "chunk")}` }))),
           el("div", { class: "row" }, btn({ class: "btn sm", onclick: () => connectCloud(o) }, "Sync new stores")),
         )
       : null,
@@ -10310,7 +10313,7 @@ function remoteStoreBlock(r, s, answeredBy) {
   return el(
     "div",
     { class: "card-b col gap6" },
-    el("div", { class: "row gap8" }, el("span", { class: "t-m t13", text: r.name }), pill(r.badge, "blue", { dot: false, sm: true }), el("span", { class: "muted t-xs grow", text: s ? `${s.state} · ${n(s.files || 0)} files · ${n(s.chunks || 0)} chunks` : answeredBy ? `${answeredBy} no longer offers this store: deleted, renamed, or out of this token's reach` : "not in the host's answer yet" })),
+    el("div", { class: "row gap8" }, el("span", { class: "t-m t13", text: r.name }), pill(r.badge, "blue", { dot: false, sm: true }), el("span", { class: "muted t-xs grow", text: s ? `${s.state} · ${plural(s.files || 0, "file")} · ${plural(s.chunks || 0, "chunk")}` : answeredBy ? `${answeredBy} no longer offers this store: deleted, renamed, or out of this token's reach` : "not in the host's answer yet" })),
     (s?.sources || []).map((src) =>
       el(
         "div",
@@ -10481,7 +10484,7 @@ function seAbout() {
           "div",
           { class: "card pad" },
           el("span", { class: "card-t", text: "Prices" }),
-          el("span", { class: "muted t-sm pretty", text: `${n(prices.models)} models priced, from ${prices.source || "the built-in table"}${prices.fetched ? ` (${prices.fetched})` : ""}. Savings in Reports and the Ledger are priced from this table.` }),
+          el("span", { class: "muted t-sm pretty", text: `${plural(prices.models, "model")} priced, from ${prices.source || "the built-in table"}${prices.fetched ? ` (${prices.fetched})` : ""}. Savings in Reports and the Ledger are priced from this table.` }),
           btn({ class: "btn sm", onclick: updatePrices }, "Update prices"),
         ),
         el("div", { class: "card pad dashed" }, el("span", { class: "card-t", text: "First-run screen" }), el("span", { class: "muted t-sm", text: "See the welcome and the machine checks again. Nothing is deleted." }), btn({ class: "btn sm dark", onclick: () => go("welcome") }, "Open the first-run screen")),
