@@ -178,6 +178,50 @@ fn every_client_is_reported_and_none_is_left_without_a_route_in() {
     }
 }
 
+/// The state column starts in one place for every client, including the one
+/// whose name is longer than any fixed column ("ChatGPT desktop (the Codex
+/// app)"), which used to run straight into its state.
+#[test]
+fn every_client_row_starts_its_state_at_the_same_column() {
+    let machine = Machine::new();
+    let json = machine.doctor(&["--json"]);
+    let report: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("--json emits JSON");
+    let names: Vec<&str> = report["clients"]
+        .as_array()
+        .expect("clients")
+        .iter()
+        .map(|c| c["name"].as_str().expect("a client name"))
+        .collect();
+    let width = names.iter().map(|n| n.chars().count()).max().unwrap();
+
+    let said = Machine::said(&machine.doctor(&[]));
+    for name in names {
+        // The row whose name field, cut at the longest name, is this name.
+        let row = said
+            .lines()
+            .find(|line| {
+                line.starts_with("  ")
+                    && !line.starts_with("   ")
+                    && line
+                        .chars()
+                        .skip(2)
+                        .take(width)
+                        .collect::<String>()
+                        .trim_end()
+                        == name
+            })
+            .unwrap_or_else(|| panic!("no row for {name}:\n{said}"));
+        let gap: String = row.chars().skip(2 + width).take(1).collect();
+        let state: String = row.chars().skip(2 + width + 1).collect();
+        assert!(
+            gap == " " && !state.starts_with(' ') && !state.is_empty(),
+            "{name}'s state does not start at column {}:\n{row}",
+            2 + width + 1
+        );
+    }
+}
+
 /// A registration that reaches one project only is the defect this release
 /// exists to end, so it is reported as one and the command that fixes it is
 /// printed.

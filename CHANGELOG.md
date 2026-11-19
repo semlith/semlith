@@ -86,6 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `semlith setup --register-all`, which rewrites that block, and names the file
   it rewrites. The line was missing, so "rule stale" came with no remedy (#319).
   Thanks @jay23606 (#361).
+- `semlith doctor` pads the client column to the longest client name, so
+  "ChatGPT desktop (the Codex app)" no longer runs into its state and every
+  row's state starts at the same column (#318). Thanks @emreocell (#367).
 
 ## [0.51.2] - 2026-11-04
 
