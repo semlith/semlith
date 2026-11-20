@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `semlith languages --json` prints the language list as JSON, with each
+  language's `name`, `extensions`, `filenames` and `graph` (#294).
+
 ### Changed
 
 - A regression test keeps the portal's prose language list aligned with

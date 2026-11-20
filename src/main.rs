@@ -690,8 +690,13 @@ enum Command {
     /// List available embedding models.
     Models,
 
-    /// List the language names `--lang` accepts, and their extensions.
-    Languages,
+    /// List the language names `--lang` accepts, with their extensions and
+    /// filenames.
+    Languages {
+        /// Print `{"languages": [{name, extensions, filenames, graph}]}`.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Print what agents retrieved from this store, newest first. Needs no
     /// key: recording and this dump are free on every tier.
@@ -3068,7 +3073,27 @@ fn run() -> Result<()> {
             }
         }
 
-        Command::Languages => {
+        Command::Languages { json } => {
+            if json {
+                // The portal's `/api/languages` shape, plus the graph column
+                // the text output prints.
+                let out: Vec<serde_json::Value> = semlith::filter::LANGUAGES
+                    .iter()
+                    .map(|entry| {
+                        serde_json::json!({
+                            "name": entry.name,
+                            "extensions": entry.extensions,
+                            "filenames": entry.filenames,
+                            "graph": semlith::graph::has_graph(entry.name),
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "languages": out }))?
+                );
+                return Ok(());
+            }
             for entry in semlith::filter::LANGUAGES {
                 // Extensions print with their dot and filenames without one,
                 // which is the difference a reader has to see: `.mk` is an
