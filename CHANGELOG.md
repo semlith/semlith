@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alongside the main one.
 - **Dependencies.** The fuzz crate moves to zip 9.4.1 and ureq 3.5.1, matching
   the main crate (Dependabot #349, #350).
+- **Dependencies.** url 2.5.9 in both lockfiles, for RUSTSEC-2026-0592 (a stack
+  overflow in `Url::origin()` on nested `blob:` URLs). The fuzz crate's lockfile
+  moves to rusqlite 0.43.0, matching the main crate (Dependabot #371, #376).
 
 ### Fixed
 
