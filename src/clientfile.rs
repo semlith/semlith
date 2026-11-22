@@ -672,6 +672,119 @@ mod tests {
 
     const ENTRY: &str = r#"{"mcpServers":{"semlith":{"command":"semlith","args":["mcp"]}}}"#;
 
+    fn client_for_path(path: &Path, format: &str, text: &str) -> Client {
+        Client {
+            name: "test client".into(),
+            note: String::new(),
+            group: "editor".into(),
+            stanzas: vec![stanza(format, text, &path.to_string_lossy())],
+        }
+    }
+
+    #[test]
+    fn unregistering_a_registered_json_file_keeps_sibling_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let before = r#"{"theme":"dark","mcpServers":{"other":{"command":"other"}}}"#;
+        std::fs::write(&path, before).unwrap();
+        let client = client_for_path(&path, "json", ENTRY);
+        let registration = client.config_files().next().unwrap().clone();
+
+        write_one(&registration, &path).unwrap();
+        let changed = unregister_files(&client).unwrap();
+
+        assert_eq!(changed, vec![path.clone()]);
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(after["mcpServers"].get("semlith").is_none());
+        assert_eq!(after["mcpServers"]["other"]["command"], "other");
+        assert_eq!(after["theme"], "dark");
+    }
+
+    #[test]
+    fn unregistering_a_malformed_json_file_leaves_its_bytes_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let before = br#"{"mcpServers":{"semlith": "#;
+        std::fs::write(&path, before).unwrap();
+        let client = client_for_path(&path, "json", ENTRY);
+
+        let error = unregister_files(&client).unwrap_err();
+
+        assert!(error.to_string().contains("not valid JSON"), "{error:#}");
+        assert_eq!(std::fs::read(&path).unwrap().as_slice(), before.as_slice());
+        let mut backup = path.as_os_str().to_os_string();
+        backup.push(BACKUP);
+        assert!(!PathBuf::from(backup).exists());
+    }
+
+    #[test]
+    fn unregistering_an_existing_yaml_file_requires_manual_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client.yaml");
+        let before = b"mcp:\n  semlith:\n    command: semlith\n  other:\n    command: other\n";
+        std::fs::write(&path, before).unwrap();
+        let client = client_for_path(&path, "yaml", "mcp:\n  semlith:\n    command: semlith\n");
+
+        let error = unregister_files(&client).unwrap_err();
+
+        assert!(error.to_string().contains("by hand"), "{error:#}");
+        assert_eq!(std::fs::read(&path).unwrap().as_slice(), before.as_slice());
+        let mut backup = path.as_os_str().to_os_string();
+        backup.push(BACKUP);
+        assert!(!PathBuf::from(backup).exists());
+    }
+
+    #[test]
+    fn unregistering_a_file_without_semlith_leaves_it_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let before = br#"{"theme":"dark","mcpServers":{"other":{"command":"other"}}}"#;
+        std::fs::write(&path, before).unwrap();
+        let client = client_for_path(&path, "json", ENTRY);
+
+        let changed = unregister_files(&client).unwrap();
+
+        assert!(changed.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap().as_slice(), before.as_slice());
+        let mut backup = path.as_os_str().to_os_string();
+        backup.push(BACKUP);
+        assert!(!PathBuf::from(backup).exists());
+    }
+
+    #[test]
+    fn unregistering_backs_up_once_and_preserves_the_first_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let before =
+            br#"{"mcpServers":{"semlith":{"command":"semlith"},"other":{"command":"other"}}}"#;
+        std::fs::write(&path, before).unwrap();
+        let client = client_for_path(&path, "json", ENTRY);
+        let mut backup = path.as_os_str().to_os_string();
+        backup.push(BACKUP);
+        let backup = PathBuf::from(backup);
+
+        assert_eq!(unregister_files(&client).unwrap(), vec![path.clone()]);
+        assert_eq!(
+            std::fs::read(&backup).unwrap().as_slice(),
+            before.as_slice()
+        );
+
+        let registration = client.config_files().next().unwrap().clone();
+        write_one(&registration, &path).unwrap();
+        assert_eq!(unregister_files(&client).unwrap(), vec![path.clone()]);
+
+        assert_eq!(
+            std::fs::read(&backup).unwrap().as_slice(),
+            before.as_slice(),
+            "a later change replaced the original recovery copy"
+        );
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(after["mcpServers"].get("semlith").is_none());
+        assert_eq!(after["mcpServers"]["other"]["command"], "other");
+    }
+
     #[test]
     fn a_merge_keeps_every_key_it_did_not_come_to_change() {
         let dir = tempfile::tempdir().unwrap();
