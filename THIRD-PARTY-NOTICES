@@ -197,7 +197,7 @@ tree-sitter-zig 1.1.2
     Licence: MIT
     Source:  https://github.com/tree-sitter-grammars/tree-sitter-zig
 
-ts-parser-perl 2.0.5
+ts-parser-perl 2.1.0
     Licence: MIT
     Source:  https://github.com/tree-sitter-perl/tree-sitter-perl
 
