@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A regression test keeps the portal's prose language list aligned with
   `filter::PROSE`, so the code chip and the `prefer` hint cannot drift (#297).
+- `clientfile::unregister_files` has direct tests: a JSON round trip that keeps
+  sibling servers, a malformed or YAML file left byte for byte as it was, a file
+  without semlith left alone, and a first backup that a later change does not
+  overwrite (#315). Thanks @Aaqibhafeezkhan (#377).
 - The portal cadence test freezes the clock before it runs `until`, which
   read `Date.now()` a second time and could say "in under a minute" for a
   schedule 60 s out when a second ticked in between.
