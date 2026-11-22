@@ -197,6 +197,9 @@ though routes are not covered.
 
 ### Unreleased
 
+- **CLI:** `semlith languages --json` prints `{"languages": [{name, extensions,
+  filenames, graph}]}`, with `graph` a boolean. Output without the flag is
+  unchanged.
 - **CLI:** `semlith search`, `semlith brief` and `semlith symbol` refuse an
   empty or blank query, question or name with exit code 2, where they used to
   search it.
