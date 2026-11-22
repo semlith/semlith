@@ -141,7 +141,7 @@ tree-sitter-powershell 0.26.6
     Licence: MIT
     Source:  https://github.com/airbus-cert/tree-sitter-powershell
 
-tree-sitter-proto 0.6.0
+tree-sitter-proto 0.6.1
     Licence: MIT
     Source:  https://github.com/coder3101/tree-sitter-proto
 
@@ -161,7 +161,7 @@ tree-sitter-rust 0.24.2
     Licence: MIT
     Source:  https://github.com/tree-sitter/tree-sitter-rust
 
-tree-sitter-scala 0.26.11
+tree-sitter-scala 0.26.13
     Licence: MIT
     Source:  https://github.com/tree-sitter/tree-sitter-scala
 
