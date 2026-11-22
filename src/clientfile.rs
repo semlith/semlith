@@ -724,11 +724,7 @@ mod tests {
         let path = dir.path().join("client.yaml");
         let before = b"mcp:\n  semlith:\n    command: semlith\n  other:\n    command: other\n";
         std::fs::write(&path, before).unwrap();
-        let client = client_for_path(
-            &path,
-            "yaml",
-            "mcp:\n  semlith:\n    command: semlith\n",
-        );
+        let client = client_for_path(&path, "yaml", "mcp:\n  semlith:\n    command: semlith\n");
 
         let error = unregister_files(&client).unwrap_err();
 
@@ -760,7 +756,8 @@ mod tests {
     fn unregistering_backs_up_once_and_preserves_the_first_backup() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mcp.json");
-        let before = br#"{"mcpServers":{"semlith":{"command":"semlith"},"other":{"command":"other"}}}"#;
+        let before =
+            br#"{"mcpServers":{"semlith":{"command":"semlith"},"other":{"command":"other"}}}"#;
         std::fs::write(&path, before).unwrap();
         let client = client_for_path(&path, "json", ENTRY);
         let mut backup = path.as_os_str().to_os_string();
@@ -768,7 +765,10 @@ mod tests {
         let backup = PathBuf::from(backup);
 
         assert_eq!(unregister_files(&client).unwrap(), vec![path.clone()]);
-        assert_eq!(std::fs::read(&backup).unwrap().as_slice(), before.as_slice());
+        assert_eq!(
+            std::fs::read(&backup).unwrap().as_slice(),
+            before.as_slice()
+        );
 
         let registration = client.config_files().next().unwrap().clone();
         write_one(&registration, &path).unwrap();
