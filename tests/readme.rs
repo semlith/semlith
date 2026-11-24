@@ -322,6 +322,7 @@ fn the_readme_first_screen_is_the_header_and_the_screenshot() {
         "platform",
         "mcp",
         "license",
+        "semlith/semlith MCP server",
     ] {
         let found = at(&format!("[![{badge}]"));
         assert!(

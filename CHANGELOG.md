@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The README carries the Glama score badge, linking Semlith's listing on
+  Glama's MCP server directory.
 - `semlith languages --json` prints the language list as JSON, with each
   language's `name`, `extensions`, `filenames` and `graph` (#294). Thanks
   @jay23606 (#369).

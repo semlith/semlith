@@ -15,6 +15,7 @@
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#install)
 [![mcp](https://img.shields.io/badge/MCP-server-6E56CF.svg)](https://modelcontextprotocol.io)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![semlith/semlith MCP server](https://glama.ai/mcp/servers/semlith/semlith/badges/score.svg)](https://glama.ai/mcp/servers/semlith/semlith)
 
 [Website](https://semlith.com) · [Install](#install) · [Quick start](#quick-start) ·
 [Agents](#use-it-from-an-agent) · [Portal](#the-portal) · [Benchmarks](#benchmarks) · [Docs](#documentation)
