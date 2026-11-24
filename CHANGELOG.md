@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The README carries the Glama score badge, linking Semlith's listing on
+  Glama's MCP server directory.
 - `semlith languages --json` prints the language list as JSON, with each
   language's `name`, `extensions`, `filenames` and `graph` (#294). Thanks
   @jay23606 (#369).
@@ -32,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ts-parser-perl 2.0.4 and ureq 3.5.1 (Dependabot #337), with
   `THIRD-PARTY-NOTICES` regenerated for the four grammars.
 - **Dependencies.** zip 9.4.1 (Dependabot #338, #348).
+- **Dependencies.** cookie 0.18.3 in both the main and fuzz lockfiles, for
+  RUSTSEC-2026-0594 (private cookie nonces could repeat in processes that
+  fork).
 - **Dependencies.** The fuzz crate's lockfile moves to libsqlite3-sys 0.39.1
   (RUSTSEC-2026-0459), and Dependabot now keeps `fuzz/Cargo.lock` current
   alongside the main one.
