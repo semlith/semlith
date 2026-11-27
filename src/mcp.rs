@@ -21,7 +21,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 /// The MCP revisions this server implements, newest first.
@@ -953,10 +953,21 @@ fn call_tool(
     params: &Value,
     session: &Session,
 ) -> Result<Value, Fail> {
+    let Some(name) = params
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+    else {
+        return Err((-32602, "missing tool name".into(), None));
+    };
+    static KNOWN_TOOLS: LazyLock<Vec<String>> = LazyLock::new(tool_names);
+    if !KNOWN_TOOLS.iter().any(|known| known == name) {
+        return Err((-32602, format!("unknown tool: {name}"), None));
+    }
+
     // The scope is checked against the call, not the listing: a client can
     // call a tool it was never shown, and before 0.40.0 that was the whole of
     // what kept a read agent from writing.
-    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     if !session.writes && !READ_TOOLS.contains(&name) {
         crate::ledger::refusal(stores, &session.who(), name);
         return Ok(json!({
@@ -3028,6 +3039,36 @@ pub fn tool_list_tokens() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_tool_names_are_invalid_before_scope_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(crate::Semlith::open(dir.path(), None).unwrap());
+        let mut fleet = Fleet::open(&[dir.path().to_path_buf()]).unwrap();
+        let errors = [json!({ "name": "semlith_nope" }), json!({})];
+
+        let mut session = Session::new("scope-test");
+        for writes in [false, true] {
+            session.writes = writes;
+            for params in &errors {
+                let request =
+                    json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params });
+                let reply = answer(&mut fleet, None, &request, &mut session).unwrap();
+                assert_eq!(reply["error"]["code"], -32602, "{reply}");
+                let expected = params["name"].as_str().unwrap_or("tool name");
+                assert!(
+                    reply["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains(expected),
+                    "{reply}"
+                );
+            }
+        }
+
+        let (_, store) = fleet.each().next().unwrap();
+        assert!(crate::store::retrievals(store.db(), 10).unwrap().is_empty());
+    }
 
     /// A session served over HTTP or by an embedder is labelled by the host it
     /// was handed, never by the ancestry of the process serving it: a daemon
