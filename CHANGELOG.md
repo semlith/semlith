@@ -49,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - An unknown or missing MCP tool name returns an invalid-parameters error for
-  both key scopes (#303).
+  both key scopes (#303). Thanks @Daytonrad (#380).
 - Pressing `/` with a dialog open (a confirm or the folder picker) no longer
   navigates to Search behind it (#323). Thanks @jay23606 (#355).
 - The Search page's RESULTS − and + buttons search again when there is a
