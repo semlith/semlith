@@ -88,7 +88,7 @@ tree-sitter-c = "0.24.2"
 # Thirty-eight are MIT and two are Apache-2.0; `THIRD-PARTY-NOTICES` lists them
 # and `tests/licences.rs` refuses a non-permissive one.
 tree-sitter-bash = "0.25.1"
-tree-sitter-c-sharp = "0.23.5"
+tree-sitter-c-sharp = "0.24.0"
 tree-sitter-clojure-orchard = "0.2.8"
 tree-sitter-containerfile = "0.9.2"
 tree-sitter-cpp = "0.23.4"
